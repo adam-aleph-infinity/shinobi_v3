@@ -364,6 +364,39 @@ def _save_result(call_dir: Path, filename: str, content: str, meta: dict) -> Pat
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
+@router.get("/tx-stats")
+def tx_stats():
+    """Return transcription counts per agent/customer pair.
+
+    Response: {"Agent/Customer": {"transcribed": N, "total": M}, ...}
+    A call counts as transcribed if it has smoothed.txt or voted.txt.
+    """
+    agents_dir = settings.agents_dir
+    result: dict[str, dict] = {}
+    if not agents_dir.exists():
+        return result
+    for agent_dir in agents_dir.iterdir():
+        if not agent_dir.is_dir() or agent_dir.name.startswith(("_", ".")):
+            continue
+        for cust_dir in agent_dir.iterdir():
+            if not cust_dir.is_dir() or cust_dir.name.startswith("."):
+                continue
+            total = transcribed = 0
+            for call_dir in cust_dir.iterdir():
+                if not call_dir.is_dir() or call_dir.name.startswith("."):
+                    continue
+                total += 1
+                llm = call_dir / "transcribed" / "llm_final"
+                if (llm / "smoothed.txt").exists() or (llm / "voted.txt").exists():
+                    transcribed += 1
+            if total > 0:
+                result[f"{agent_dir.name}/{cust_dir.name}"] = {
+                    "transcribed": transcribed,
+                    "total": total,
+                }
+    return result
+
+
 @router.get("/pairs")
 def list_pairs():
     """List all agent/customer pairs that have at least one call with transcribed data."""

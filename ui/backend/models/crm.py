@@ -16,6 +16,7 @@ class CRMPair(SQLModel, table=True):
     net_deposits: Optional[float] = Field(default=None)       # total_net_deposits from CRM API
     total_deposits: Optional[float] = Field(default=None)
     total_withdrawals: Optional[float] = Field(default=None)
+    ftd_at: Optional[str] = Field(default=None)               # first-time deposit datetime (ISO str)
     last_synced_at: Optional[datetime] = Field(default=None)
 
 

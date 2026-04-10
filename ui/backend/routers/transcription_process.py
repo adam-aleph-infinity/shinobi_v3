@@ -47,6 +47,20 @@ class SmoothRequest(BaseModel):
     model: str = "gpt-5.4"          # LLM to use for smoothing
 
 
+class PairSpec(BaseModel):
+    crm_url: str
+    account_id: str
+    agent: str
+    customer: str
+
+
+class BatchPairsRequest(BaseModel):
+    pairs: List[PairSpec]
+    smooth_model: str = "gpt-5.4"
+    speaker_a: str = "SPEAKER_00"
+    speaker_b: str = "SPEAKER_01"
+
+
 # ── Job creation ───────────────────────────────────────────────────────────────
 
 @router.post("/jobs")
@@ -78,6 +92,81 @@ async def create_transcription_job(req: CreateJobRequest, db: Session = Depends(
     loop = asyncio.get_running_loop()
     job_runner.submit_job(job, loop)
     return {"job_id": job.id, "status": job.status}
+
+
+# ── Batch transcription for multiple agent/customer pairs ─────────────────────
+
+@router.post("/batch-for-pairs")
+async def batch_transcribe_pairs(req: BatchPairsRequest, db: Session = Depends(get_session)):
+    """Queue ElevenLabs transcription jobs for all untranscribed calls across selected pairs.
+
+    For each pair: fetches calls (lazy-loads from CRM if needed), skips calls that
+    already have smoothed.txt or voted.txt, and submits a job for each remaining call.
+    Up to 8 pairs are processed concurrently.
+    """
+    from ui.backend.services.crm_service import get_calls as _get_calls
+
+    loop = asyncio.get_running_loop()
+    submitted = 0
+    skipped = 0
+    job_ids: list[str] = []
+
+    # Process pairs with limited concurrency (CRM fetch can be slow on first access)
+    sem = asyncio.Semaphore(8)
+
+    async def _process_pair(spec: PairSpec):
+        nonlocal submitted, skipped
+        async with sem:
+            calls = await loop.run_in_executor(
+                None,
+                lambda: _get_calls(
+                    account_id=spec.account_id,
+                    crm_url=spec.crm_url,
+                    agent=spec.agent,
+                    customer=spec.customer,
+                ),
+            )
+            for c in calls:
+                record_path = c.get("record_path", "")
+                call_id = str(c.get("call_id", ""))
+                if not record_path or not call_id:
+                    skipped += 1
+                    continue
+                # Skip already transcribed
+                llm_dir = (
+                    settings.agents_dir / spec.agent / spec.customer
+                    / call_id / "transcribed" / "llm_final"
+                )
+                if (llm_dir / "smoothed.txt").exists() or (llm_dir / "voted.txt").exists():
+                    skipped += 1
+                    continue
+                extra = {
+                    "crm_url": spec.crm_url,
+                    "account_id": spec.account_id,
+                    "agent": spec.agent,
+                    "customer": spec.customer,
+                    "record_path": record_path,
+                    "smooth_model": req.smooth_model,
+                }
+                job = Job(
+                    id=str(uuid.uuid4()),
+                    audio_path=record_path,
+                    pair_slug=f"{spec.agent}/{spec.customer}",
+                    call_id=call_id,
+                    speaker_a=req.speaker_a,
+                    speaker_b=req.speaker_b,
+                    status=JobStatus.pending,
+                    extra_config=json.dumps(extra),
+                )
+                db.add(job)
+                db.commit()
+                db.refresh(job)
+                job_runner.submit_job(job, loop)
+                job_ids.append(job.id)
+                submitted += 1
+
+    await asyncio.gather(*[_process_pair(p) for p in req.pairs])
+    return {"submitted": submitted, "skipped": skipped, "job_ids": job_ids}
 
 
 # ── Job listing / status ───────────────────────────────────────────────────────

@@ -7,6 +7,11 @@ export interface AgentCustomerPair {
   call_count: number;
   total_duration: number;
   net_deposits?: number | null;
+  ftd_at?: string | null;
+}
+
+export interface TxStats {
+  [pairSlug: string]: { transcribed: number; total: number };
 }
 
 export interface CallRecord {

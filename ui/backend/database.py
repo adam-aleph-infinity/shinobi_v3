@@ -8,8 +8,23 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
 
+def _migrate():
+    """Apply incremental schema migrations (idempotent)."""
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for ddl in [
+            "ALTER TABLE crm_pair ADD COLUMN ftd_at TEXT",
+        ]:
+            try:
+                conn.execute(text(ddl))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
+
 def create_db():
     SQLModel.metadata.create_all(engine)
+    _migrate()
 
 
 def get_session():

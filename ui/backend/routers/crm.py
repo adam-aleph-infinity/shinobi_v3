@@ -26,10 +26,16 @@ def get_pairs(
     sort: str = Query("agent"),       # agent|customer|crm|calls|duration|deposits
     dir: str = Query("asc"),          # asc|desc
     min_calls: int = Query(0),
-    min_duration: float = Query(0.0), # hours
-    min_deposits: float = Query(0.0), # net deposits minimum
+    min_duration: float = Query(0.0),  # hours
+    min_deposits: float = Query(0.0),  # net deposits minimum (per customer)
+    max_deposits: float = Query(0.0),  # net deposits maximum (per customer)
+    min_agent_deposits: float = Query(0.0),  # min total net dep across all agent's customers
+    max_agent_deposits: float = Query(0.0),  # max total net dep across all agent's customers
+    ftd_after: str = Query(""),        # ISO date string, e.g. "2025-01-01"
+    ftd_before: str = Query(""),       # ISO date string, e.g. "2025-12-31"
     db: Session = Depends(get_session),
 ):
+    from sqlalchemy import func as sa_func, select as sa_select
     try:
         stmt = select(CRMPair)
         if crm:
@@ -47,6 +53,25 @@ def get_pairs(
             stmt = stmt.where(CRMPair.total_duration_s >= int(min_duration * 3600))
         if min_deposits:
             stmt = stmt.where(CRMPair.net_deposits >= min_deposits)
+        if max_deposits:
+            stmt = stmt.where(CRMPair.net_deposits <= max_deposits)
+        if ftd_after:
+            stmt = stmt.where(CRMPair.ftd_at >= ftd_after)
+        if ftd_before:
+            stmt = stmt.where(CRMPair.ftd_at <= ftd_before)
+
+        # Per-agent aggregate deposit filter via subquery
+        if min_agent_deposits or max_agent_deposits:
+            agent_nd = (
+                sa_select(CRMPair.agent, sa_func.sum(CRMPair.net_deposits).label("total_nd"))
+                .group_by(CRMPair.agent)
+                .subquery()
+            )
+            stmt = stmt.join(agent_nd, CRMPair.agent == agent_nd.c.agent)
+            if min_agent_deposits:
+                stmt = stmt.where(agent_nd.c.total_nd >= min_agent_deposits)
+            if max_agent_deposits:
+                stmt = stmt.where(agent_nd.c.total_nd <= max_agent_deposits)
 
         col_map = {
             "agent":    CRMPair.agent,
@@ -70,6 +95,7 @@ def get_pairs(
                 "call_count": p.call_count,
                 "total_duration": p.total_duration_s,
                 "net_deposits": p.net_deposits,
+                "ftd_at": p.ftd_at,
             }
             for p in pairs
         ]

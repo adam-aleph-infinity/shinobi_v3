@@ -163,6 +163,7 @@ def seed_db(pairs: list[dict], session, replace_crm_urls: set[str] | None = None
             net_deposits=float(p.get("net_deposits") or 0),
             total_deposits=float(p.get("total_deposits") or 0),
             total_withdrawals=float(p.get("total_withdrawals") or 0),
+            ftd_at=p.get("ftd_at") or None,
             last_synced_at=now,
         )
         session.add(row)
