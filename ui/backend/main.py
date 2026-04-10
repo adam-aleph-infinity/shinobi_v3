@@ -1,0 +1,215 @@
+import sys
+from pathlib import Path
+
+# Ensure shinobi_v3 root is on path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# Load .env so pipeline threads can read OPENAI_API_KEY, GEMINI_API_KEY, etc.
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from ui.backend.config import settings
+from ui.backend.database import create_db
+from ui.backend.models.crm import CRMPair, CRMCall          # noqa: F401 — registers tables
+from ui.backend.models.call_marker import CallMarker        # noqa: F401 — registers table
+from ui.backend.models.comparison_file import ComparisonFile  # noqa: F401 — registers table
+from ui.backend.routers import crm, audio, jobs, personas, logs, workspace, persona_agents
+from ui.backend.routers import transcription_process, final_transcript
+from ui.backend.routers.agent_stats import router as agent_stats_router
+from ui.backend.routers.sync import router as sync_router
+from ui.backend.routers.agent_comparison import router as agent_comparison_router
+from ui.backend.routers.full_persona_agent import router as full_persona_agent_router
+from ui.backend.services import log_buffer
+
+app = FastAPI(title="Shinobi V3 API", version="1.0.0")
+
+_cors_origins = list({settings.frontend_origin, "http://localhost:3000", "http://localhost:3001"})
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routers ────────────────────────────────────────────────────────────────────
+app.include_router(crm.router)
+app.include_router(audio.router)
+app.include_router(jobs.router)
+app.include_router(personas.router)
+app.include_router(logs.router)
+app.include_router(workspace.router)
+app.include_router(transcription_process.router)
+app.include_router(final_transcript.router)
+app.include_router(persona_agents.router)
+app.include_router(agent_stats_router)
+app.include_router(sync_router)
+app.include_router(agent_comparison_router)
+app.include_router(full_persona_agent_router)
+
+
+@app.on_event("startup")
+async def on_startup():
+    import asyncio
+    import shutil
+    from datetime import datetime
+    from sqlalchemy import text
+    from sqlmodel import Session, select
+    from ui.backend.database import engine, DB_PATH
+    from ui.backend.models.job import Job, JobStatus
+    from ui.backend.models.crm import CRMPair
+    from ui.backend.services import job_runner
+
+    # One-time migration: copy old DB to new canonical location
+    old_db = settings.data_dir / "shinobi_ui.db"
+    if not DB_PATH.exists() and old_db.exists():
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_db, DB_PATH)
+        print(f"[startup] Migrated DB: {old_db} → {DB_PATH}")
+
+    create_db()  # creates any missing tables
+
+    # Safe migrations — add new columns if they don't exist yet
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE job ADD COLUMN batch_id TEXT",
+            "ALTER TABLE persona ADD COLUMN temperature REAL NOT NULL DEFAULT 0.3",
+            "ALTER TABLE persona ADD COLUMN script_path TEXT",
+            "ALTER TABLE persona ADD COLUMN persona_agent_id TEXT",
+            "ALTER TABLE persona ADD COLUMN sections_json TEXT",
+            "ALTER TABLE persona ADD COLUMN score_json TEXT",
+            "ALTER TABLE comparison_file ADD COLUMN file_type TEXT NOT NULL DEFAULT 'transcript'",
+        ]:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
+    # Backfill persona_agent_id for existing personas that don't have it yet
+    async def _backfill_persona_agent_id():
+        import json as _json
+        from ui.backend.config import settings as _settings
+        presets_dir = _settings.ui_data_dir / "_persona_presets"
+        if not presets_dir.exists():
+            return
+        presets_data = []
+        for f in sorted(presets_dir.glob("*.json")):
+            try:
+                presets_data.append(_json.loads(f.read_text()))
+            except Exception:
+                continue
+        if not presets_data:
+            return
+        with Session(engine) as db:
+            from ui.backend.models.persona import Persona as _Persona
+            orphans = db.exec(
+                select(_Persona).where(_Persona.persona_agent_id == None)  # noqa: E711
+            ).all()
+            if not orphans:
+                return
+            updated = 0
+            for p in orphans:
+                for preset in presets_data:
+                    sp = preset.get("system_prompt", "")
+                    if sp and (p.prompt_used or "").startswith(sp):
+                        p.persona_agent_id = preset["name"]
+                        db.add(p)
+                        updated += 1
+                        break
+            if updated:
+                db.commit()
+                print(f"[startup] Backfilled persona_agent_id for {updated} personas")
+
+    asyncio.create_task(_backfill_persona_agent_id())
+
+    # Normalize section headings in old personas
+    async def _normalize_old_personas():
+        import asyncio as _aio
+        from ui.backend.routers.personas import _smart_normalize_sections
+        from ui.backend.models.persona import Persona as _Persona
+        with Session(engine) as db:
+            candidates = db.exec(
+                select(_Persona).where(_Persona.content_md != None)  # noqa: E711
+            ).all()
+            needs_norm = [
+                p for p in candidates
+                if p.content_md and not any(
+                    line.startswith("##") or line.startswith("# ")
+                    for line in p.content_md.split("\n")
+                )
+            ]
+        if not needs_norm:
+            return
+        print(f"[startup] Normalizing {len(needs_norm)} persona(s) with no ## headers…")
+        _loop = _aio.get_running_loop()
+        updated = 0
+        for p in needs_norm:
+            try:
+                normalized = await _loop.run_in_executor(
+                    None, _smart_normalize_sections, p.content_md
+                )
+                if normalized != p.content_md:
+                    with Session(engine) as db:
+                        fresh = db.get(_Persona, p.id)
+                        if fresh:
+                            fresh.content_md = normalized
+                            db.add(fresh)
+                            db.commit()
+                    updated += 1
+                    print(f"[startup] Normalized {p.id[:8]} ({p.agent})")
+            except Exception as e:
+                print(f"[startup] Normalize failed for {p.id[:8]}: {e}")
+        print(f"[startup] Section normalization complete — {updated}/{len(needs_norm)} updated")
+
+    asyncio.create_task(_normalize_old_personas())
+
+    log_buffer.install()
+
+    # Seed crm_pair in background — only when DB is empty
+    async def _seed_crm_bg():
+        from sqlalchemy import func
+        from ui.backend.services.crm_service import _load_local, seed_db
+        loop = asyncio.get_running_loop()
+        with Session(engine) as db:
+            existing = db.exec(select(func.count(CRMPair.id))).one()
+        if existing > 0:
+            print(f"[startup] DB already has {existing} CRM pairs — skipping cache seed")
+            return
+        raw = await loop.run_in_executor(None, _load_local)
+        if raw:
+            def _do():
+                with Session(engine) as db:
+                    return seed_db(raw, db)
+            n = await loop.run_in_executor(None, _do)
+            print(f"[startup] Seeded {n} CRM pairs into DB from JSON cache")
+
+    asyncio.create_task(_seed_crm_bg())
+
+    # Re-queue orphaned jobs from previous server runs
+    loop = asyncio.get_running_loop()
+    with Session(engine) as db:
+        stale = db.exec(
+            select(Job).where(Job.status.in_([JobStatus.running, JobStatus.pending]))
+        ).all()
+        for job in stale:
+            if job.status == JobStatus.running:
+                job.status = JobStatus.pending
+                job.pct = 0
+                job.stage = 0
+                job.message = ""
+                db.add(job)
+                print(f"[startup] Reset running→pending: {job.id[:8]} ({job.call_id})")
+        db.commit()
+        pending = db.exec(select(Job).where(Job.status == JobStatus.pending)).all()
+        for job in pending:
+            job_runner.submit_job(job, loop)
+            print(f"[startup] Re-queued pending job {job.id[:8]} ({job.call_id})")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": "1.0.0"}

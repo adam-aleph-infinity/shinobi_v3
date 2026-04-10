@@ -1,0 +1,20 @@
+# LLM providers
+openai>=1.55.0
+anthropic>=0.50.0
+google-generativeai>=0.8.3
+
+# Transcription
+elevenlabs>=1.50.3
+
+# AWS
+boto3>=1.34.0
+
+# Audio processing (for smoothing helpers only — no local transcription)
+librosa>=0.10.2
+soundfile>=0.12.1
+scipy>=1.11.0
+numpy>=1.24.0
+
+# Utilities
+python-dotenv>=1.0.1
+requests>=2.31.0
