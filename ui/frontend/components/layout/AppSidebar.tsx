@@ -23,7 +23,7 @@ const navItems: NavItem[] = [
   { href: "/personas",          icon: FileText,  label: "Personas" },
   { href: "/agent-comparison",  icon: BarChart3, label: "Compare Agents" },
   { href: "/agent-dashboard",   icon: BarChart3, label: "Agent Dashboard" },
-  { href: "/transcription",     icon: FileText,  label: "Transcription" },
+  { href: "/calls",             icon: FileText,  label: "Calls" },
 ];
 
 function BackendStatus() {
@@ -66,7 +66,7 @@ export default function AppSidebar({ onToggle, extraFooter }: {
   const pathname = usePathname();
 
   const isActive = (href: string) =>
-    href === "/personas" || href === "/transcription"
+    href === "/personas" || href === "/calls"
       ? pathname === href
       : pathname.startsWith(href);
 

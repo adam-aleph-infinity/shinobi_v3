@@ -183,6 +183,7 @@ def get_calls(
                 "call_id": cid,
                 "date": c.get("started_at", c.get("date", "")),
                 "duration": c.get("duration_s", c.get("duration", 0)),
+                "record_path": c.get("record_path", ""),
             })
         return result
     except Exception as e:
