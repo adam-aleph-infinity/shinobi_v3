@@ -55,7 +55,7 @@ export default function CallsPage() {
     selectedCustomer
       ? `/api/crm/calls/${selectedCustomer.account_id}?crm_url=${encodeURIComponent(selectedCustomer.crm_url)}&agent=${encodeURIComponent(selectedAgent)}`
       : null,
-    fetcher
+    (url: string) => fetch(url, { signal: AbortSignal.timeout(60000) }).then(r => r.json()),
   );
 
   const { data: txCalls, mutate: mutateTx } = useSWR<TxCall[]>(
@@ -220,8 +220,10 @@ export default function CallsPage() {
             </div>
           )}
           {selectedCustomer && !crmCalls && (
-            <div className="flex items-center gap-2 p-4 text-xs text-gray-500">
-              <Loader2 className="w-3 h-3 animate-spin" /> Loading calls…
+            <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Loading calls…</span>
+              <span className="text-gray-700 text-[10px]">First load fetches from CRM</span>
             </div>
           )}
           {calls.map(call => {

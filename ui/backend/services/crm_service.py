@@ -246,7 +246,8 @@ def get_calls_local(crm_url: str, agent: str, customer: str) -> list[dict]:
 
 
 def get_calls(account_id: str, crm_url: str, agent: str = "", customer: str = "") -> list[dict]:
-    """Load calls from DB (preferred) or local calls.json. Returns [] if neither is populated."""
+    """Load calls from DB (preferred) or local calls.json.
+    If neither has data, auto-fetches from the CRM API (lazy-load on first access)."""
     # Try DB first — populated by sync_crm_calls.py
     try:
         from sqlmodel import Session, select
@@ -284,8 +285,20 @@ def get_calls(account_id: str, crm_url: str, agent: str = "", customer: str = ""
             ]
     except Exception as e:
         print(f"[crm_service] DB read failed, falling back to calls.json: {e}")
-    # Fallback: calls.json on disk
-    return get_calls_local(crm_url, agent, customer)
+
+    # Try calls.json on disk
+    local = get_calls_local(crm_url, agent, customer)
+    if local:
+        return local
+
+    # Neither DB nor local file has data — auto-fetch from CRM (lazy-load)
+    if crm_url and account_id:
+        print(f"[crm_service] No local calls for {agent}/{customer} — fetching from CRM")
+        result = refresh_calls(account_id, crm_url, agent, customer)
+        if result["count"] > 0:
+            return get_calls_local(crm_url, agent, customer)
+
+    return []
 
 
 def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str = "") -> dict:
