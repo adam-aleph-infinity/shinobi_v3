@@ -16,9 +16,15 @@ if [[ ! -f "$ROOT/.env.crm" ]]; then
 fi
 
 # Python venv
+PYTHON=$(command -v python3.11 || command -v python3.12 || command -v python3 || true)
+if [[ -z "$PYTHON" ]]; then
+  echo "✗ No Python 3 found — install via: brew install python@3.12"
+  exit 1
+fi
+
 if [[ ! -f "$ROOT/.venv/bin/uvicorn" ]]; then
-  echo "▶ Creating venv..."
-  python3.11 -m venv "$ROOT/.venv"
+  echo "▶ Creating venv ($($PYTHON --version))..."
+  "$PYTHON" -m venv "$ROOT/.venv"
   source "$ROOT/.venv/bin/activate"
   pip install -r "$ROOT/requirements.txt" -q
 else
