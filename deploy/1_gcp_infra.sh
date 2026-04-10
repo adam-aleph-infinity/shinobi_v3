@@ -5,13 +5,7 @@ PROJECT_ID="shinobi-v2-prod"
 ZONE="us-central1-a"
 REGION="us-central1"
 VM_NAME="shinobi-vm"
-DOMAIN="${1:-}"   # pass domain as first arg: bash 1_gcp_infra.sh app.yourdomain.com
-
-if [[ -z "$DOMAIN" ]]; then
-  echo "Usage: bash deploy/1_gcp_infra.sh <your-domain>"
-  echo "Example: bash deploy/1_gcp_infra.sh app.shinobisales.com"
-  exit 1
-fi
+DOMAIN="${1:-shinobi.prod.aleph-infinity.com}"
 
 echo "▶ Setting project..."
 gcloud config set project $PROJECT_ID
