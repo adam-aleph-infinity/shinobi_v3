@@ -53,7 +53,7 @@ export default function CallsPage() {
 
   const { data: crmCalls } = useSWR<CRMCall[]>(
     selectedCustomer
-      ? `/api/crm/calls/${selectedCustomer.account_id}?crm_url=${encodeURIComponent(selectedCustomer.crm_url)}&agent=${encodeURIComponent(selectedAgent)}`
+      ? `/api/crm/calls/${selectedCustomer.account_id}?crm_url=${encodeURIComponent(selectedCustomer.crm_url)}&agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer.customer)}`
       : null,
     (url: string) => fetch(url, { signal: AbortSignal.timeout(60000) }).then(r => r.json()),
   );
