@@ -63,6 +63,12 @@ def _apply_aliases(pairs: list[dict], aliases: dict[str, str]) -> list[dict]:
             row["total_calls"] = int(row.get("total_calls") or 0) + int(p.get("total_calls") or 0)
             row["recorded_calls"] = int(row.get("recorded_calls") or 0) + int(p.get("recorded_calls") or 0)
             row["total_duration_s"] = int(row.get("total_duration_s") or 0) + int(p.get("total_duration_s") or 0)
+            # Deposit figures represent the same money — take the non-zero value if primary is $0
+            for dep_field in ("net_deposits", "total_deposits", "total_withdrawals", "ftd"):
+                primary_val = float(row.get(dep_field) or 0)
+                alias_val = float(p.get(dep_field) or 0)
+                if primary_val == 0 and alias_val != 0:
+                    row[dep_field] = alias_val
             # Use the earlier ftd_at
             if p.get("ftd_at") and (not row.get("ftd_at") or str(p["ftd_at"]) < str(row["ftd_at"])):
                 row["ftd_at"] = p["ftd_at"]
@@ -252,7 +258,15 @@ def get_calls(account_id: str, crm_url: str, agent: str = "", customer: str = ""
                 CRMCall.account_id == str(account_id),
             )
             if agent:
-                stmt = stmt.where(CRMCall.agent == agent)
+                # Include calls stored under alias names (e.g. Ron Silver-re10 → Ron Silver)
+                aliases = _load_aliases()
+                alias_names = [a for a, p in aliases.items() if p == agent]
+                agent_names = [agent] + alias_names
+                if len(agent_names) == 1:
+                    stmt = stmt.where(CRMCall.agent == agent)
+                else:
+                    from sqlalchemy import or_
+                    stmt = stmt.where(or_(*[CRMCall.agent == n for n in agent_names]))
             rows = db.exec(stmt.order_by(CRMCall.started_at)).all()
         if rows:
             return [
@@ -260,7 +274,7 @@ def get_calls(account_id: str, crm_url: str, agent: str = "", customer: str = ""
                     "call_id":          r.call_id,
                     "account_id":       r.account_id,
                     "customer":         r.customer,
-                    "agent":            r.agent,
+                    "agent":            agent or r.agent,  # normalize alias to primary name
                     "duration_s":       r.audio_duration_s if r.audio_duration_s is not None else r.duration_s,
                     "started_at":       r.started_at,
                     "record_path":      r.record_path,
