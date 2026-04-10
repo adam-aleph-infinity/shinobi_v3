@@ -165,6 +165,57 @@ async def on_startup():
 
     asyncio.create_task(_normalize_old_personas())
 
+    # Merge alias agent rows in crm_pair table (e.g. Ron Silver-re10 → Ron Silver)
+    async def _merge_alias_pairs():
+        from ui.backend.services.crm_service import _load_aliases
+        from ui.backend.models.crm import CRMPair
+        from sqlalchemy import text
+        aliases = _load_aliases()
+        if not aliases:
+            return
+        with Session(engine) as db:
+            for alias_name, primary_name in aliases.items():
+                alias_rows = db.exec(select(CRMPair).where(CRMPair.agent == alias_name)).all()
+                if not alias_rows:
+                    continue
+                merged = 0
+                for alias_row in alias_rows:
+                    primary_id = f"{alias_row.crm_url}::{alias_row.account_id}::{primary_name}"
+                    primary_row = db.get(CRMPair, primary_id)
+                    if primary_row:
+                        primary_row.call_count = (primary_row.call_count or 0) + (alias_row.call_count or 0)
+                        primary_row.total_duration_s = (primary_row.total_duration_s or 0) + (alias_row.total_duration_s or 0)
+                        # Take non-zero deposit values from alias if primary has $0
+                        for field in ("net_deposits", "total_deposits", "total_withdrawals"):
+                            pv = float(getattr(primary_row, field) or 0)
+                            av = float(getattr(alias_row, field) or 0)
+                            if pv == 0 and av != 0:
+                                setattr(primary_row, field, av)
+                        db.add(primary_row)
+                    else:
+                        # No primary row — rename alias row to primary
+                        new_row = CRMPair(
+                            id=primary_id,
+                            crm_url=alias_row.crm_url,
+                            account_id=alias_row.account_id,
+                            agent=primary_name,
+                            customer=alias_row.customer,
+                            call_count=alias_row.call_count,
+                            total_duration_s=alias_row.total_duration_s,
+                            net_deposits=alias_row.net_deposits,
+                            total_deposits=alias_row.total_deposits,
+                            total_withdrawals=alias_row.total_withdrawals,
+                            last_synced_at=alias_row.last_synced_at,
+                        )
+                        db.add(new_row)
+                    db.delete(alias_row)
+                    merged += 1
+                db.commit()
+                if merged:
+                    print(f"[startup] Merged {merged} alias rows: {alias_name} → {primary_name}")
+
+    asyncio.create_task(_merge_alias_pairs())
+
     log_buffer.install()
 
     # Seed crm_pair in background — only when DB is empty

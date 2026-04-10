@@ -3,8 +3,7 @@ import { useState } from "react";
 import useSWR from "swr";
 import { AgentCustomerPair } from "@/lib/types";
 import { formatDuration } from "@/lib/utils";
-import { RefreshCw, Search, ExternalLink, Loader2, ChevronUp, ChevronDown, ChevronsUpDown, X } from "lucide-react";
-import Link from "next/link";
+import { RefreshCw, Search, Loader2, ChevronUp, ChevronDown, ChevronsUpDown, X } from "lucide-react";
 import { refreshCache } from "@/lib/api";
 
 const API = "/api";
@@ -170,17 +169,16 @@ export default function CRMPage() {
               <ThBtn col="calls"    label="Calls"    align="right" />
               <ThBtn col="duration" label="Duration" align="right" />
               <ThBtn col="deposits" label="Net Dep."  align="right" />
-              <th className="px-4 py-3" />
             </tr>
           </thead>
           <tbody>
             {isLoading && (
-              <tr><td colSpan={7} className="text-center py-12 text-gray-500">
+              <tr><td colSpan={6} className="text-center py-12 text-gray-500">
                 <Loader2 className="w-4 h-4 animate-spin inline mr-2" />Loading…
               </td></tr>
             )}
             {error && (
-              <tr><td colSpan={7} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
+              <tr><td colSpan={6} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
             )}
             {!isLoading && pairs?.map((pair) => (
               <tr key={pair.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
@@ -200,18 +198,10 @@ export default function CRMPage() {
                     </span>
                   ) : <span className="text-gray-600">—</span>}
                 </td>
-                <td className="px-4 py-3 text-right">
-                  <Link
-                    href={`/audio?crm=${encodeURIComponent(pair.crm_url)}&account=${pair.account_id}&agent=${encodeURIComponent(pair.agent)}&customer=${encodeURIComponent(pair.customer)}`}
-                    className="flex items-center gap-1 text-indigo-400 hover:text-indigo-300 text-xs ml-auto w-fit"
-                  >
-                    Open <ExternalLink className="w-3 h-3" />
-                  </Link>
-                </td>
               </tr>
             ))}
             {!isLoading && pairs?.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-12 text-gray-500">No pairs found</td></tr>
+              <tr><td colSpan={6} className="text-center py-12 text-gray-500">No pairs found</td></tr>
             )}
           </tbody>
         </table>
