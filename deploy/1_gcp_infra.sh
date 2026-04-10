@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_ID="shinobi-v2-prod"
 ZONE="us-central1-a"
 REGION="us-central1"
-VM_NAME="shinobi-vm"
+VM_NAME="shinobi-v3-vm"
 DOMAIN="${1:-shinobi.prod.aleph-infinity.com}"
 
 echo "▶ Setting project..."
@@ -39,40 +39,40 @@ gcloud compute firewall-rules create allow-iap-ssh \
   --target-tags iap-ssh || true
 
 echo "▶ Reserving static IP..."
-gcloud compute addresses create shinobi-ip --global || true
+gcloud compute addresses create shinobi-v3-ip --global || true
 
 echo "▶ Creating SSL certificate..."
-gcloud compute ssl-certificates create shinobi-cert \
+gcloud compute ssl-certificates create shinobi-v3-cert \
   --domains=$DOMAIN --global || true
 
 echo "▶ Creating instance group..."
-gcloud compute instance-groups unmanaged create shinobi-group --zone=$ZONE || true
-gcloud compute instance-groups unmanaged add-instances shinobi-group \
+gcloud compute instance-groups unmanaged create shinobi-v3-group --zone=$ZONE || true
+gcloud compute instance-groups unmanaged add-instances shinobi-v3-group \
   --instances=$VM_NAME --zone=$ZONE || true
 
 echo "▶ Creating named port..."
-gcloud compute instance-groups unmanaged set-named-ports shinobi-group \
+gcloud compute instance-groups unmanaged set-named-ports shinobi-v3-group \
   --named-ports=http:80 --zone=$ZONE
 
 echo "▶ Creating health check..."
-gcloud compute health-checks create http shinobi-health \
+gcloud compute health-checks create http shinobi-v3-health \
   --request-path=/api/health --port=80 || true
 
 echo "▶ Creating backend service..."
-gcloud compute backend-services create shinobi-backend-svc \
-  --protocol=HTTP --port-name=http --health-checks=shinobi-health --global || true
-gcloud compute backend-services add-backend shinobi-backend-svc \
-  --instance-group=shinobi-group \
+gcloud compute backend-services create shinobi-v3-backend-svc \
+  --protocol=HTTP --port-name=http --health-checks=shinobi-v3-health --global || true
+gcloud compute backend-services add-backend shinobi-v3-backend-svc \
+  --instance-group=shinobi-v3-group \
   --instance-group-zone=$ZONE --global || true
 
 echo "▶ Creating URL map + HTTPS proxy + forwarding rule..."
-gcloud compute url-maps create shinobi-map \
-  --default-service=shinobi-backend-svc || true
-gcloud compute target-https-proxies create shinobi-https-proxy \
-  --url-map=shinobi-map --ssl-certificates=shinobi-cert || true
-IP=$(gcloud compute addresses describe shinobi-ip --global --format='value(address)')
-gcloud compute forwarding-rules create shinobi-https-rule \
-  --address=$IP --global --target-https-proxy=shinobi-https-proxy --ports=443 || true
+gcloud compute url-maps create shinobi-v3-map \
+  --default-service=shinobi-v3-backend-svc || true
+gcloud compute target-https-proxies create shinobi-v3-https-proxy \
+  --url-map=shinobi-v3-map --ssl-certificates=shinobi-v3-cert || true
+IP=$(gcloud compute addresses describe shinobi-v3-ip --global --format='value(address)')
+gcloud compute forwarding-rules create shinobi-v3-https-rule \
+  --address=$IP --global --target-https-proxy=shinobi-v3-https-proxy --ports=443 || true
 
 echo ""
 echo "✓ Infrastructure ready."

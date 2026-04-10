@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run this script ON THE VM after SSHing in via IAP.
-# gcloud compute ssh --tunnel-through-iap shinobi-vm --zone=us-central1-a
+# gcloud compute ssh --tunnel-through-iap shinobi-v3-vm --zone=us-central1-a
 set -euo pipefail
 
 APP_DIR="/home/$USER/shinobi_v3"
@@ -128,7 +128,7 @@ echo ""
 echo "✓ VM setup complete."
 echo ""
 echo "Now upload secrets from your Mac:"
-echo "  gcloud compute scp .env .env.crm shinobi-vm:~/shinobi_v3/ --tunnel-through-iap --zone=us-central1-a"
+echo "  gcloud compute scp .env .env.crm shinobi-v3-vm:~/shinobi_v3/ --tunnel-through-iap --zone=us-central1-a"
 echo ""
 echo "Then verify:"
 echo "  sudo systemctl status shinobi-backend"
