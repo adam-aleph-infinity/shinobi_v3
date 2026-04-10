@@ -1,11 +1,11 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from typing import Optional
 
 from ui.backend.database import get_session
 from ui.backend.models.crm import CRMPair
-from ui.backend.services import crm_service, audio_service
+from ui.backend.services import crm_service
 
 router = APIRouter(prefix="/crm", tags=["crm"])
 
@@ -15,13 +15,6 @@ class AuthRequest(BaseModel):
     email: str
     password: str
 
-
-class DownloadRequest(BaseModel):
-    crm_url: str
-    agent: str
-    customer: str
-    account_id: str
-    call_ids: Optional[list[str]] = None
 
 
 @router.get("/pairs")
@@ -183,7 +176,6 @@ def get_calls(
 ):
     try:
         calls = crm_service.get_calls(account_id=account_id, crm_url=crm_url, agent=agent, customer=customer)
-        local = audio_service.list_local_audio(crm_url=crm_url, agent=agent, customer=customer)
         result = []
         for c in calls:
             cid = str(c.get("call_id", c.get("id", "")))
@@ -191,21 +183,10 @@ def get_calls(
                 "call_id": cid,
                 "date": c.get("started_at", c.get("date", "")),
                 "duration": c.get("duration_s", c.get("duration", 0)),
-                "downloaded": cid in local,
-                "local_path": local.get(cid, {}).get("path"),
             })
         return result
     except Exception as e:
         raise HTTPException(500, str(e))
-
-
-@router.post("/download")
-def download_audio(req: DownloadRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(
-        audio_service.download_calls,
-        req.crm_url, req.agent, req.customer, req.account_id, req.call_ids,
-    )
-    return {"ok": True, "status": "download started in background"}
 
 
 @router.post("/calls/{account_id}/refresh")

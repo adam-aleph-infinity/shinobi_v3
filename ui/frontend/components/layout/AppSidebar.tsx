@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
-  Users, Mic2, FileText, BarChart3, Terminal,
+  Users, FileText, BarChart3, Terminal,
   FolderOpen, Bot, PanelLeftClose,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
@@ -23,9 +23,7 @@ const navItems: NavItem[] = [
   { href: "/personas",          icon: FileText,  label: "Personas" },
   { href: "/agent-comparison",  icon: BarChart3, label: "Compare Agents" },
   { href: "/agent-dashboard",   icon: BarChart3, label: "Agent Dashboard" },
-  { href: "/audio",             icon: Mic2,      label: "Audio Library" },
   { href: "/transcription",     icon: FileText,  label: "Transcription" },
-  { href: "/persona-agents",    icon: Bot,       label: "Persona Agents" },
 ];
 
 function BackendStatus() {

@@ -12,7 +12,6 @@ from sqlmodel import Session, select
 from ui.backend.database import get_session
 from ui.backend.models.job import Job, JobStatus
 from ui.backend.services import job_runner
-from ui.backend.services.audio_service import get_call_meta
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -84,11 +83,7 @@ def list_jobs(pair_slug: Optional[str] = None, db: Session = Depends(get_session
     jobs = db.exec(stmt).all()
     result = []
     for j in jobs:
-        d = j.model_dump()
-        meta = get_call_meta(j.pair_slug, j.call_id)
-        d["duration_s"] = meta.get("duration_s")
-        d["started_at"] = meta.get("started_at")
-        result.append(d)
+        result.append(j.model_dump())
     return result
 
 

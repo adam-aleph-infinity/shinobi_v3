@@ -16,7 +16,7 @@ from ui.backend.database import create_db
 from ui.backend.models.crm import CRMPair, CRMCall          # noqa: F401 — registers tables
 from ui.backend.models.call_marker import CallMarker        # noqa: F401 — registers table
 from ui.backend.models.comparison_file import ComparisonFile  # noqa: F401 — registers table
-from ui.backend.routers import crm, audio, jobs, personas, logs, workspace, persona_agents
+from ui.backend.routers import crm, jobs, personas, logs, workspace
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
 from ui.backend.routers.sync import router as sync_router
@@ -37,14 +37,12 @@ app.add_middleware(
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 app.include_router(crm.router)
-app.include_router(audio.router)
 app.include_router(jobs.router)
 app.include_router(personas.router)
 app.include_router(logs.router)
 app.include_router(workspace.router)
 app.include_router(transcription_process.router)
 app.include_router(final_transcript.router)
-app.include_router(persona_agents.router)
 app.include_router(agent_stats_router)
 app.include_router(sync_router)
 app.include_router(agent_comparison_router)
