@@ -109,8 +109,9 @@ def _run_sync(q: queue.Queue) -> None:
                 except Exception:
                     pass
 
-            # Build lookup: (crm_url, account_id) → (agent, customer)
-            pair_lookup: dict[tuple[str, int], tuple[str, str]] = {}
+            # Build lookup: (crm_url, account_id) → list of (agent, customer)
+            # Multiple agents can share the same account_id — store all of them
+            pair_lookup: dict[tuple[str, int], list[tuple[str, str]]] = {}
             crm_agents: dict[str, list[str]] = {}
             for row in cache:
                 crm = row.get("crm", "")
@@ -120,7 +121,10 @@ def _run_sync(q: queue.Queue) -> None:
                 except (ValueError, TypeError):
                     continue
                 if crm and ag:
-                    pair_lookup[(crm, acc_id)] = (ag, row.get("customer", ""))
+                    key = (crm, acc_id)
+                    if key not in pair_lookup:
+                        pair_lookup[key] = []
+                    pair_lookup[key].append((ag, row.get("customer", "")))
                     if crm not in crm_agents:
                         crm_agents[crm] = []
                     if ag not in crm_agents[crm]:
@@ -173,38 +177,40 @@ def _run_sync(q: queue.Queue) -> None:
                             if nd is None and td is None and tw is None:
                                 continue  # no deposit data (missing session cookie?)
 
-                            agent_name, customer_name = pair_lookup.get(
-                                (crm_url, acc_id_int), ("", "")
-                            )
-                            if not agent_name or not customer_name:
+                            agent_pairs = pair_lookup.get((crm_url, acc_id_int), [])
+                            if not agent_pairs:
                                 continue
 
-                            pair_dir = settings.agents_dir / agent_name / customer_name
-                            if not pair_dir.exists():
-                                pair_dir.mkdir(parents=True, exist_ok=True)
+                            # Write deposit data to crm_info.json for EVERY agent on this account
+                            for agent_name, customer_name in agent_pairs:
+                                if not agent_name or not customer_name:
+                                    continue
+                                pair_dir = settings.agents_dir / agent_name / customer_name
+                                if not pair_dir.exists():
+                                    pair_dir.mkdir(parents=True, exist_ok=True)
 
-                            crm_info_path = pair_dir / "crm_info.json"
-                            existing: dict = {}
-                            if crm_info_path.exists():
-                                try:
-                                    existing = json.loads(crm_info_path.read_text())
-                                except Exception:
-                                    pass
+                                crm_info_path = pair_dir / "crm_info.json"
+                                existing: dict = {}
+                                if crm_info_path.exists():
+                                    try:
+                                        existing = json.loads(crm_info_path.read_text())
+                                    except Exception:
+                                        pass
 
-                            changed = False
-                            if nd is not None:
-                                existing["net_deposits"] = nd
-                                changed = True
-                            if td is not None:
-                                existing["total_deposits"] = td
-                                changed = True
-                            if tw is not None:
-                                existing["total_withdrawals"] = tw
-                                changed = True
-                            if changed:
-                                existing["last_synced_at"] = now_str
-                                crm_info_path.write_text(json.dumps(existing, indent=2))
-                                n += 1
+                                changed = False
+                                if nd is not None:
+                                    existing["net_deposits"] = nd
+                                    changed = True
+                                if td is not None:
+                                    existing["total_deposits"] = td
+                                    changed = True
+                                if tw is not None:
+                                    existing["total_withdrawals"] = tw
+                                    changed = True
+                                if changed:
+                                    existing["last_synced_at"] = now_str
+                                    crm_info_path.write_text(json.dumps(existing, indent=2))
+                                    n += 1
 
                     dep_updated += n
                     _emit(q, 2, f"{host} — {n} crm_info.json files updated")
