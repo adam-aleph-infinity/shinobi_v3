@@ -28,7 +28,6 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip -q
 pip install -r requirements.txt -q
-pip install -r ui/backend/requirements.txt -q
 
 echo "▶ Create data directories..."
 mkdir -p ui/data/agents

@@ -30,7 +30,6 @@ gcloud compute ssh $VM_NAME \
     echo '▶ Install Python deps...'
     source .venv/bin/activate
     pip install -r requirements.txt -q
-    pip install -r ui/backend/requirements.txt -q
 
     echo '▶ Build frontend...'
     cd ui/frontend
