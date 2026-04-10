@@ -256,6 +256,23 @@ def _run_sync(q: queue.Queue) -> None:
             except Exception:
                 pass
 
+            # Build call-count fallback from all_crm_agents_customers.json
+            # Key: (crm, agent, customer) → {total_calls, recorded_calls, total_duration_s}
+            call_fallback: dict[tuple[str, str, str], dict] = {}
+            cache_path = settings.ui_data_dir / "all_crm_agents_customers.json"
+            if cache_path.exists():
+                try:
+                    for row in json.loads(cache_path.read_text()):
+                        key = (row.get("crm", ""), row.get("agent", ""), row.get("customer", ""))
+                        if all(key):
+                            call_fallback[key] = {
+                                "total_calls":      int(row.get("total_calls") or 0),
+                                "recorded_calls":   int(row.get("recorded_calls") or 0),
+                                "total_duration_s": int(row.get("total_duration_s") or 0),
+                            }
+                except Exception:
+                    pass
+
             # Collect alias agents: agent_aliases.json + also_callers in manifests
             alias_agents_full: set[str] = set(alias_agents)
             agents_dir: Path = settings.agents_dir
@@ -303,7 +320,7 @@ def _run_sync(q: queue.Queue) -> None:
                             except Exception:
                                 pass
 
-                        # calls.json — call counts + duration
+                        # calls.json — individual call records (written on demand)
                         calls: list[dict] = []
                         calls_path = customer_dir / "calls.json"
                         if calls_path.exists():
@@ -312,8 +329,16 @@ def _run_sync(q: queue.Queue) -> None:
                             except Exception:
                                 pass
 
-                        recorded = sum(1 for c in calls if c.get("record_path"))
-                        total_dur = sum(int(c.get("duration_s") or 0) for c in calls)
+                        if calls:
+                            recorded  = sum(1 for c in calls if c.get("record_path"))
+                            total_dur = sum(int(c.get("duration_s") or 0) for c in calls)
+                            total_calls_count = len(calls)
+                        else:
+                            # Fall back to aggregated counts from all_crm_agents_customers.json
+                            _fb_calls = call_fallback.get((_crm_url := m.get("crm", ""), agent_dir.name, customer_dir.name), {})
+                            total_calls_count = _fb_calls.get("total_calls", 0)
+                            recorded          = _fb_calls.get("recorded_calls", 0)
+                            total_dur         = _fb_calls.get("total_duration_s", 0)
 
                         # Count downloaded audio + smoothed transcripts
                         call_dirs = [
@@ -347,7 +372,7 @@ def _run_sync(q: queue.Queue) -> None:
                             "agent":             _agent,
                             "account_id":        m.get("account_id"),
                             "customer":          customer_dir.name,
-                            "total_calls":       len(calls),
+                            "total_calls":       total_calls_count,
                             "recorded_calls":    recorded,
                             "total_duration_s":  total_dur,
                             "downloaded_calls":  downloaded,
