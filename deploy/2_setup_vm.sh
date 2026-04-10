@@ -8,15 +8,16 @@ REPO_URL="https://github.com/adam-aleph-infinity/shinobi_v3.git"
 BRANCH="main"
 
 echo "▶ System packages..."
+export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y \
+sudo -E apt-get install -y \
   python3.11 python3.11-venv python3-pip \
   nginx git curl ffmpeg screen build-essential \
   libsndfile1 libffi-dev libssl-dev
 
 echo "▶ Node.js 20..."
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
+sudo -E apt-get install -y nodejs
 
 echo "▶ Clone repo..."
 git clone --branch $BRANCH $REPO_URL $APP_DIR
