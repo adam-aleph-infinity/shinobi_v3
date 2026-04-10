@@ -22,8 +22,8 @@ gcloud compute instances create $VM_NAME \
   --machine-type=e2-standard-4 \
   --image-family=ubuntu-2204-lts \
   --image-project=ubuntu-os-cloud \
-  --boot-disk-size=300GB \
-  --boot-disk-type=pd-ssd \
+  --boot-disk-size=100GB \
+  --boot-disk-type=pd-balanced \
   --tags=http-server,https-server,iap-ssh \
   --no-address
 
