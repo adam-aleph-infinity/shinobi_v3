@@ -49,11 +49,13 @@ class LLMClient:
         max_tokens: Optional[int] = None,
     ):
         if self.provider == "openai":
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-            }
+            # Reasoning models (o-series and gpt-5.x) reject temperature — omit it entirely.
+            # Passing temperature=0 to these models causes a misleading 400 "invalid JSON body" error.
+            _REASONING_PREFIXES = ("o1", "o2", "o3", "o4", "gpt-5")
+            skip_temp = any(model.lower().startswith(p) for p in _REASONING_PREFIXES)
+            kwargs = {"model": model, "messages": messages}
+            if not skip_temp:
+                kwargs["temperature"] = temperature
             if max_tokens is not None:
                 kwargs["max_completion_tokens"] = max_tokens
             return self.client.chat.completions.create(**kwargs)

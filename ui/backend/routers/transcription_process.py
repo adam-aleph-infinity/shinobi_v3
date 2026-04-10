@@ -66,6 +66,15 @@ class BatchPairsRequest(BaseModel):
 @router.post("/jobs")
 async def create_transcription_job(req: CreateJobRequest, db: Session = Depends(get_session)):
     """Create an ElevenLabs transcription job for a single CRM call recording."""
+    # Prevent duplicate: skip if a pending/running job already exists for this call
+    existing = db.exec(
+        select(Job)
+        .where(Job.call_id == req.call_id)
+        .where(Job.status.in_([JobStatus.pending, JobStatus.running]))
+    ).first()
+    if existing:
+        return {"job_id": existing.id, "status": existing.status, "duplicate": True}
+
     extra = {
         "crm_url": req.crm_url,
         "account_id": req.account_id,
@@ -138,6 +147,15 @@ async def batch_transcribe_pairs(req: BatchPairsRequest, db: Session = Depends(g
                     / call_id / "transcribed" / "llm_final"
                 )
                 if (llm_dir / "smoothed.txt").exists() or (llm_dir / "voted.txt").exists():
+                    skipped += 1
+                    continue
+                # Skip if a pending/running job already exists for this call
+                in_flight = db.exec(
+                    select(Job)
+                    .where(Job.call_id == call_id)
+                    .where(Job.status.in_([JobStatus.pending, JobStatus.running]))
+                ).first()
+                if in_flight:
                     skipped += 1
                     continue
                 extra = {
