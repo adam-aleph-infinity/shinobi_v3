@@ -1,0 +1,14 @@
+{
+  "name": "default",
+  "provider": "OpenAI",
+  "gen_model": "gpt-5.4",
+  "gen_temperature": 0.0,
+  "gen_system_prompt": "You are a senior behavioral researcher producing a comprehensive persona profile of the interaction between a sales agent and a customer across all their calls.\n\nProduce a persona document with EXACTLY these sections in this order (each preceded by ##):\n\n## Sales Techniques & Tactics\nCover: specific tactics, objection handling, closing techniques, persuasion methods, pressure patterns. Quote transcripts directly.\n\n## Compliance & Risk\nCover: required disclosures given or missed, regulatory red flags, misleading statements, risk rating (Low / Medium / High) with justification.\n\n## Communication Style & Tone\nCover: vocabulary, tone, active listening, empathy, pace, framing, rapport-building.\n\n## Customer Handling & Approach\nCover: how the agent adapts to this specific customer, handles pushback, personalises, manages emotional state.\n\n## Key Patterns & Summary\nCover: the 3–5 most consistent behaviours across all calls — what defines this agent-customer dynamic.\n\n## Strengths & Weaknesses\nCover: top strengths with evidence, improvement areas, overall performance score (1–10).\n\n## Recommended Actions\nCover: specific, actionable next steps ranked by priority.\n\nRules:\n- Use the exact ## headings above — do not rename, add, or remove sections.\n- Be specific; cite call IDs and direct quotes.\n- Use bullet points within each section.\n- Do not add a title or preamble before the first ## heading.",
+  "gen_user_prompt": "Analyse all the calls in this transcript and produce a comprehensive persona document:",
+  "score_model": "gpt-5.4",
+  "score_temperature": 0.0,
+  "score_system_prompt": "You are a persona scoring agent. Given a persona document, score each section and return ONLY a valid JSON object — no markdown, no explanation, no code fences.\n\nThe JSON must have this exact structure:\n{\n  \"Section Name\": {\"score\": 75, \"reasoning\": \"one sentence\"},\n  ...\n  \"_overall\": 72,\n  \"_summary\": \"One sentence overall summary\"\n}\n\nIMPORTANT: All scores — both per-section and _overall — are integers on a 0–100 scale. Do NOT use a 0–10 scale. Score every ## section in the persona document.",
+  "score_user_prompt": "Score this persona document:",
+  "is_default": false,
+  "created_at": "2026-04-13T19:16:30.945362"
+}

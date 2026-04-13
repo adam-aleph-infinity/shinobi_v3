@@ -257,7 +257,7 @@ function TempSelector({ value, onChange }: { value: number; onChange: (v: number
   );
 }
 
-// ── Analyzer preset panel ─────────────────────────────────────────────────────
+// ── Persona Agent panel ───────────────────────────────────────────────────────
 
 function providerFor(model: string): string {
   if (model.startsWith("claude-")) return "Anthropic";
@@ -266,33 +266,40 @@ function providerFor(model: string): string {
   return "OpenAI";
 }
 
-function AnalyzerPresetPanel({
+function PersonaAgentPanel({
+  name, onNameChange, onNameEdit,
   genModel, genTemp, genSystem, genPrompt,
   scoreModel, scoreTemp, scoreSystem, scorePrompt,
   onLoad,
   children,
 }: {
+  name: string; onNameChange: (v: string) => void; onNameEdit: () => void;
   genModel: string; genTemp: number; genSystem: string; genPrompt: string;
   scoreModel: string; scoreTemp: number; scoreSystem: string; scorePrompt: string;
   onLoad: (p: AnalyzerPreset) => void;
   children: React.ReactNode;
 }) {
-  const [presets, setPresets] = useState<AnalyzerPreset[]>([]);
-  const [name, setName] = useState("");
-  const [open, setOpen] = useState(false);
+  const [agents, setAgents] = useState<AnalyzerPreset[]>([]);
+  const [showList, setShowList] = useState(false);
+  const [loadedFrom, setLoadedFrom] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     const r = await fetch(`${API}/full-persona-agent/presets/analyzer`);
-    if (r.ok) setPresets(await r.json());
+    if (r.ok) setAgents(await r.json());
   }, []);
   useEffect(() => { reload(); }, [reload]);
 
+  // Auto-suggest name based on provider when no name set
+  const autoSuggest = `${providerFor(genModel)} Analyzer`;
+  const isAutoSuggested = !name;
+
   const save = async () => {
-    if (!name.trim()) return;
+    const saveName = (name.trim() || autoSuggest).trim();
+    if (!saveName) return;
     await fetch(`${API}/full-persona-agent/presets/analyzer`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: name.trim(),
+        name: saveName,
         gen_model: genModel, gen_temperature: genTemp,
         gen_system_prompt: genSystem, gen_user_prompt: genPrompt,
         score_model: scoreModel, score_temperature: scoreTemp,
@@ -300,96 +307,116 @@ function AnalyzerPresetPanel({
         is_default: false,
       }),
     });
-    setName(""); reload();
+    onNameChange(saveName); onNameEdit();
+    setLoadedFrom(null);
+    reload();
   };
 
-  const genProvider  = providerFor(genModel);
+  const loadAgent = (p: AnalyzerPreset) => {
+    onLoad(p);
+    // Suggest a new name so editing creates a distinct agent (not overwriting original)
+    onNameChange(`${p.name} (copy)`);
+    onNameEdit();
+    setLoadedFrom(p.name);
+    setShowList(false);
+  };
+
+  const genProvider   = providerFor(genModel);
   const scoreProvider = providerFor(scoreModel);
-  const sameProvider = genProvider === scoreProvider;
+  const sameProvider  = genProvider === scoreProvider;
 
   return (
     <div className="border-2 border-indigo-900/50 rounded-2xl overflow-hidden">
-      {/* Preset header */}
-      <div className="bg-gray-900 px-4 pt-4 pb-3 space-y-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-indigo-300">Persona Analyzer Preset</h3>
-            <p className="text-[11px] text-gray-500 mt-0.5">
-              One preset that saves and restores both modules below
-            </p>
+      {/* Header */}
+      <div className="bg-gray-900 px-4 pt-4 pb-4 space-y-3">
+
+        <div>
+          <p className="text-xs font-semibold text-indigo-300 uppercase tracking-widest mb-0.5">Persona Agent</p>
+          <p className="text-[11px] text-gray-500">Name this analysis configuration — groups all personas it creates</p>
+        </div>
+
+        {/* Name input */}
+        <div>
+          <div className="flex gap-2">
+            <input
+              value={name}
+              onChange={e => { onNameChange(e.target.value); onNameEdit(); setLoadedFrom(null); }}
+              placeholder={autoSuggest}
+              onKeyDown={e => e.key === "Enter" && save()}
+              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+            <button
+              onClick={save}
+              className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors shrink-0"
+            >
+              <Save className="w-3.5 h-3.5" /> Save
+            </button>
+            <button
+              onClick={() => setShowList(v => !v)}
+              className="flex items-center gap-1 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-xs rounded-lg transition-colors shrink-0"
+              title="Browse saved agents"
+            >
+              {showList ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">{agents.length > 0 ? `${agents.length}` : "0"}</span>
+            </button>
           </div>
-          <button
-            onClick={() => setOpen(o => !o)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-colors shrink-0 mt-0.5"
-          >
-            {open ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            {presets.length > 0 ? `${presets.length} preset${presets.length > 1 ? "s" : ""}` : "No presets"}
-          </button>
+          <div className="mt-1 min-h-[16px]">
+            {isAutoSuggested && (
+              <p className="text-[11px] text-gray-600">Auto-suggested · type to override</p>
+            )}
+            {loadedFrom && (
+              <p className="text-[11px] text-amber-600">Loaded from <span className="text-amber-500">{loadedFrom}</span> · rename before saving to keep original</p>
+            )}
+          </div>
         </div>
 
-        {/* Current config summary */}
-        <div className="flex items-center gap-2 text-[11px] text-gray-500 flex-wrap">
-          <span className="text-indigo-400 font-medium">
-            {sameProvider ? genProvider : `${genProvider} / ${scoreProvider}`}
-          </span>
-          <span className="text-gray-700">·</span>
-          <span>Generator: <span className="text-gray-400">{genModel}</span> · <span className="font-mono">{genTemp.toFixed(2)}</span></span>
-          <span className="text-gray-700">·</span>
-          <span>Scorer: <span className="text-gray-400">{scoreModel}</span> · <span className="font-mono">{scoreTemp.toFixed(2)}</span></span>
-        </div>
-
-        {/* Preset list + save */}
-        {open && (
-          <div className="space-y-1.5 pt-1">
-            {presets.map(p => (
-              <div key={p.name} className="flex items-center gap-2 bg-gray-800/60 rounded px-2 py-1.5">
-                <button
-                  onClick={() => { onLoad(p); setOpen(false); }}
-                  className="flex-1 text-left min-w-0"
-                >
-                  <span className="text-xs text-gray-200 hover:text-white font-medium">
+        {/* Saved agents list */}
+        {showList && (
+          <div className="border border-gray-700 rounded-lg overflow-hidden">
+            {agents.length === 0 && (
+              <p className="text-xs text-gray-600 px-3 py-2">No saved persona agents yet</p>
+            )}
+            {agents.map(p => (
+              <div key={p.name} className="flex items-center gap-1.5 px-3 py-2 hover:bg-gray-800/60 border-b border-gray-800/50 last:border-0">
+                <button onClick={() => loadAgent(p)} className="flex-1 text-left min-w-0 group">
+                  <span className="text-xs font-medium text-gray-200 group-hover:text-white">
                     {p.is_default && <span className="text-yellow-400 mr-1">★</span>}{p.name}
                   </span>
                   <span className="text-[10px] text-gray-600 ml-2">
-                    {p.provider} · {p.gen_model} / {p.score_model}
+                    {p.provider} · {p.gen_model} / {p.score_model} · {p.gen_temperature.toFixed(2)} / {p.score_temperature.toFixed(2)}
                   </span>
                 </button>
                 <button
                   onClick={async () => { await fetch(`${API}/full-persona-agent/presets/analyzer/${encodeURIComponent(p.name)}/default`, { method: "PATCH" }); reload(); }}
-                  className="text-gray-600 hover:text-yellow-400 shrink-0" title="Set as default"
+                  className="text-gray-600 hover:text-yellow-400 shrink-0 p-1" title="Set as default"
                 ><Check className="w-3 h-3" /></button>
                 <button
-                  onClick={async () => { await fetch(`${API}/full-persona-agent/presets/analyzer/${encodeURIComponent(p.name)}`, { method: "DELETE" }); reload(); }}
-                  className="text-gray-600 hover:text-red-400 shrink-0" title="Delete"
+                  onClick={async () => { await fetch(`${API}/full-persona-agent/presets/analyzer/${encodeURIComponent(p.name)}`, { method: "DELETE" }); if (loadedFrom === p.name) setLoadedFrom(null); reload(); }}
+                  className="text-gray-600 hover:text-red-400 shrink-0 p-1" title="Delete"
                 ><Trash2 className="w-3 h-3" /></button>
               </div>
             ))}
-            <div className="flex gap-1.5 pt-1">
-              <input
-                value={name} onChange={e => setName(e.target.value)}
-                placeholder="New preset name…"
-                onKeyDown={e => e.key === "Enter" && save()}
-                className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
-              />
-              <button
-                onClick={save} disabled={!name.trim()}
-                className="flex items-center gap-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs rounded transition-colors"
-              >
-                <Save className="w-3 h-3" /> Save
-              </button>
-            </div>
           </div>
         )}
+
+        {/* Config summary */}
+        <div className="flex items-center gap-2 text-[11px] text-gray-600 flex-wrap pt-0.5">
+          <span className="text-indigo-400/70 font-medium">{sameProvider ? genProvider : `${genProvider} / ${scoreProvider}`}</span>
+          <span>·</span>
+          <span>Generator: {genModel} · {genTemp.toFixed(2)}</span>
+          <span>·</span>
+          <span>Scorer: {scoreModel} · {scoreTemp.toFixed(2)}</span>
+        </div>
       </div>
 
-      {/* Divider with label */}
+      {/* Divider */}
       <div className="flex items-center gap-2 bg-indigo-950/30 px-4 py-1.5 border-t border-b border-indigo-900/40">
         <div className="flex-1 h-px bg-indigo-900/40" />
-        <span className="text-[10px] font-semibold text-indigo-700 uppercase tracking-widest">Includes</span>
+        <span className="text-[10px] font-semibold text-indigo-800 uppercase tracking-widest">Includes</span>
         <div className="flex-1 h-px bg-indigo-900/40" />
       </div>
 
-      {/* The two sub-modules */}
+      {/* Sub-modules */}
       <div className="bg-gray-950/30 p-4">
         {children}
       </div>
@@ -616,7 +643,10 @@ export default function FullPersonaAgentPage() {
   const [genTemp, setGenTemp] = useState(0.0);
   const [genSystem, setGenSystem] = useState(DEFAULT_GEN_SYSTEM);
   const [genPrompt, setGenPrompt] = useState(DEFAULT_GEN_PROMPT);
+
+  // Persona agent name (single name for the whole preset)
   const [presetName, setPresetName] = useState("");
+  const [presetNameEdited, setPresetNameEdited] = useState(false);
 
   // Scorer config
   const [scoreModel, setScoreModel] = useState("gpt-5.4");
@@ -1024,8 +1054,9 @@ export default function FullPersonaAgentPage() {
           )}
         </div>
 
-        {/* Persona Analyzer Preset — wraps both config modules */}
-        <AnalyzerPresetPanel
+        {/* Persona Agent — wraps both config modules */}
+        <PersonaAgentPanel
+          name={presetName} onNameChange={setPresetName} onNameEdit={() => setPresetNameEdited(true)}
           genModel={genModel} genTemp={genTemp} genSystem={genSystem} genPrompt={genPrompt}
           scoreModel={scoreModel} scoreTemp={scoreTemp} scoreSystem={scoreSystem} scorePrompt={scorePrompt}
           onLoad={p => {
@@ -1033,7 +1064,6 @@ export default function FullPersonaAgentPage() {
             setGenSystem(p.gen_system_prompt); setGenPrompt(p.gen_user_prompt);
             setScoreModel(p.score_model); setScoreTemp(p.score_temperature);
             setScoreSystem(p.score_system_prompt); setScorePrompt(p.score_user_prompt);
-            setPresetName(p.name);
           }}
         >
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1044,7 +1074,7 @@ export default function FullPersonaAgentPage() {
               model={scoreModel} onModel={setScoreModel} temperature={scoreTemp} onTemp={setScoreTemp}
               systemPrompt={scoreSystem} onSystem={setScoreSystem} userPrompt={scorePrompt} onUser={setScorePrompt} />
           </div>
-        </AnalyzerPresetPanel>
+        </PersonaAgentPanel>
 
         {/* Cached file IDs */}
         {Object.keys(fileIds).length > 0 && (
