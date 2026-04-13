@@ -283,7 +283,11 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange }: {
     es.onopen = () => setConnErr(null);
 
     es.onerror = () => {
-      setConnErr(`Cannot connect to ${url} — is the backend running?`);
+      // For a finished/failed job the stream closes after "done" — don't show an error.
+      // Only show the error banner if we never received a successful message yet.
+      if (!batch.length && lines.length === 0) {
+        setConnErr(`Cannot connect to ${url} — is the backend running?`);
+      }
     };
 
     es.onmessage = (e) => {
@@ -297,11 +301,18 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange }: {
           const text = (data.message as string || "").trim();
           if (!text) return;
           line = { ts: new Date().toISOString().slice(11, 19), text, level: classifyLine(text) };
+          batch.push(line);
+          if (!timer) timer = setTimeout(flush, 80);
+          // Close once the job signals done — prevents EventSource auto-reconnect loop
+          if (data.done) {
+            flush();
+            es.close();
+          }
         } else {
           line = { ts: data.ts || "", text: data.text || "", level: data.level || "info", job_id: data.job_id };
+          batch.push(line);
+          if (!timer) timer = setTimeout(flush, 80);
         }
-        batch.push(line);
-        if (!timer) timer = setTimeout(flush, 80);
       } catch { /* ignore */ }
     };
 
