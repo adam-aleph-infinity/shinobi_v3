@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings,
+  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -26,6 +26,7 @@ const navItems: NavItem[] = [
   { href: "/agent-comparison",  icon: BarChart3, label: "Compare Agents" },
   { href: "/agent-dashboard",   icon: BarChart3, label: "Agent Dashboard" },
   { href: "/calls",             icon: FileText,  label: "Calls" },
+  { href: "/notes",             icon: StickyNote, label: "Notes" },
 ];
 
 function BackendStatus() {
@@ -68,7 +69,7 @@ export default function AppSidebar({ onToggle, extraFooter }: {
   const pathname = usePathname();
 
   const isActive = (href: string) =>
-    href === "/personas" || href === "/calls"
+    href === "/personas" || href === "/calls" || href === "/notes"
       ? pathname === href
       : pathname.startsWith(href);
 

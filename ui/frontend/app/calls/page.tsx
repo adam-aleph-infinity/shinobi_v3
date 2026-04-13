@@ -1,9 +1,11 @@
 "use client";
 import { useState, useEffect } from "react";
 import useSWR from "swr";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Users, Search, Loader2, FileText, CheckCircle2,
-  Circle, ChevronRight, Mic2,
+  Circle, ChevronRight, Mic2, StickyNote, Trash2, X, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
@@ -12,6 +14,152 @@ import { DragHandle } from "@/components/shared/DragHandle";
 import { useResize } from "@/lib/useResize";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
+
+// ── Note types ────────────────────────────────────────────────────────────────
+
+interface Note {
+  id: string;
+  agent: string;
+  customer: string;
+  call_id: string;
+  persona_agent_id?: string;
+  content_md: string;
+  score_json?: Record<string, any>;
+  model: string;
+  temperature: number;
+  created_at: string;
+}
+
+// ── Notes panel ───────────────────────────────────────────────────────────────
+
+function NotesPanel({ agent, customer, callId }: { agent: string; customer: string; callId: string }) {
+  const { data: notes, mutate } = useSWR<Note[]>(
+    agent && customer && callId
+      ? `/api/notes?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`
+      : null,
+    fetcher,
+    { refreshInterval: 5000 },
+  );
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggle = (id: string) =>
+    setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const deleteNote = async (id: string) => {
+    await fetch(`/api/notes/${id}`, { method: "DELETE" });
+    mutate();
+  };
+
+  if (!callId) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-gray-600 gap-2">
+        <StickyNote className="w-8 h-8 opacity-20" />
+        <p className="text-xs">Select a call to view notes</p>
+      </div>
+    );
+  }
+
+  if (!notes) {
+    return (
+      <div className="flex items-center justify-center h-full gap-2 text-gray-600">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        <span className="text-xs">Loading notes…</span>
+      </div>
+    );
+  }
+
+  if (notes.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-gray-600 gap-2">
+        <StickyNote className="w-8 h-8 opacity-20" />
+        <p className="text-xs text-center">No notes for this call yet.<br />Use the Notes page to generate them.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-y-auto p-3 space-y-3">
+      {notes.map(note => {
+        const isExpanded = expanded.has(note.id);
+        const overall = note.score_json?._overall;
+        const summary = note.score_json?._summary;
+        return (
+          <div key={note.id} className="border border-gray-700 rounded-xl overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center gap-2 px-3 py-2 bg-gray-900 border-b border-gray-800">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  {overall !== undefined && (
+                    <span className={cn("text-xs font-bold shrink-0",
+                      overall >= 70 ? "text-emerald-400" : overall >= 40 ? "text-amber-400" : "text-red-400"
+                    )}>{overall}/100</span>
+                  )}
+                  {note.persona_agent_id && (
+                    <span className="text-[10px] text-indigo-400 truncate">{note.persona_agent_id}</span>
+                  )}
+                </div>
+                {summary && (
+                  <p className="text-[10px] text-gray-500 truncate mt-0.5">{summary}</p>
+                )}
+                <p className="text-[9px] text-gray-700 mt-0.5">
+                  {note.model} · {new Date(note.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </p>
+              </div>
+              <button onClick={() => toggle(note.id)}
+                className="text-gray-600 hover:text-white p-1 transition-colors shrink-0">
+                {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+              <button onClick={() => deleteNote(note.id)}
+                className="text-gray-700 hover:text-red-400 p-1 transition-colors shrink-0">
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            {isExpanded && (
+              <div className="p-3 bg-gray-950/60">
+                <div className="prose prose-invert prose-sm max-w-none text-xs">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      h2: ({ children }) => <h2 className="text-xs font-semibold text-indigo-300 mt-3 mb-1 border-b border-gray-800 pb-0.5">{children}</h2>,
+                      h3: ({ children }) => <h3 className="text-xs font-semibold text-gray-300 mt-2 mb-0.5">{children}</h3>,
+                      p:  ({ children }) => <p className="text-gray-400 mb-1 leading-relaxed text-[11px]">{children}</p>,
+                      ul: ({ children }) => <ul className="list-disc list-inside text-gray-400 mb-1 space-y-0 pl-2 text-[11px]">{children}</ul>,
+                      li: ({ children }) => <li className="text-gray-400">{children}</li>,
+                      strong: ({ children }) => <strong className="text-white font-medium">{children}</strong>,
+                    }}
+                  >
+                    {note.content_md}
+                  </ReactMarkdown>
+                </div>
+
+                {/* Per-section scores */}
+                {note.score_json && Object.keys(note.score_json).some(k => !k.startsWith("_")) && (
+                  <div className="mt-3 pt-2 border-t border-gray-800 space-y-1">
+                    {Object.entries(note.score_json)
+                      .filter(([k]) => !k.startsWith("_"))
+                      .map(([section, val]: [string, any]) => (
+                        <div key={section} className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-500 flex-1 truncate">{section}</span>
+                          <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden shrink-0">
+                            <div className={cn("h-full rounded-full",
+                              val.score >= 70 ? "bg-emerald-500" : val.score >= 40 ? "bg-amber-500" : "bg-red-500"
+                            )} style={{ width: `${val.score}%` }} />
+                          </div>
+                          <span className="text-[10px] font-mono text-gray-400 w-8 text-right shrink-0">{val.score}</span>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 interface Agent    { agent: string; count: number; }
 interface Customer { customer: string; account_id: string; crm_url: string; call_count: number; }
@@ -52,6 +200,8 @@ export default function CallsPage() {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
+  const [showNotes, setShowNotes]               = useState(false);
+  const [notesW, notesDrag]                     = useResize(320, 200, 560);
 
   // Restore persisted state after mount (avoid SSR/hydration mismatch)
   useEffect(() => {
@@ -278,52 +428,92 @@ export default function CallsPage() {
 
       <DragHandle onMouseDown={callsDrag} />
 
-      {/* Panel 4 — Transcript viewer */}
-      <div className="flex-1 min-w-0 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col">
-        <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
-          <FileText className="w-3.5 h-3.5 text-teal-400" />
-          <span className="text-xs font-semibold text-white flex-1">
-            {selectedCallId ? selectedCallId : "Transcript"}
-          </span>
-          {selectedCallData && (
-            <div className="flex items-center gap-2 text-[10px] text-gray-500">
-              {selectedCallData.duration > 0 && <span className="text-teal-400">{formatDuration(selectedCallData.duration)}</span>}
-              {selectedCallData.date && <span>{formatDate(selectedCallData.date)}</span>}
+      {/* Panel 4 — Transcript viewer + optional Notes panel */}
+      <div className="flex-1 min-w-0 flex">
+        {/* Transcript */}
+        <div className="flex-1 min-w-0 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col">
+          <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+            <FileText className="w-3.5 h-3.5 text-teal-400" />
+            <span className="text-xs font-semibold text-white flex-1">
+              {selectedCallId ? selectedCallId : "Transcript"}
+            </span>
+            {selectedCallData && (
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                {selectedCallData.duration > 0 && <span className="text-teal-400">{formatDuration(selectedCallData.duration)}</span>}
+                {selectedCallData.date && <span>{formatDate(selectedCallData.date)}</span>}
+              </div>
+            )}
+            {/* Notes toggle */}
+            <button
+              onClick={() => setShowNotes(n => !n)}
+              title="Toggle notes panel"
+              className={cn(
+                "flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors shrink-0",
+                showNotes
+                  ? "bg-indigo-600 text-white"
+                  : "bg-gray-800 text-gray-500 hover:text-white hover:bg-gray-700"
+              )}
+            >
+              <StickyNote className="w-3 h-3" />
+              <span>Notes</span>
+            </button>
+          </div>
+
+          {!selectedCallId ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-gray-600 gap-2">
+              <FileText className="w-10 h-10 opacity-20" />
+              <p className="text-sm">Select a call</p>
+            </div>
+          ) : transcriptLoading ? (
+            <div className="flex-1 flex items-center justify-center gap-2 text-gray-500 text-sm">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading transcript…
+            </div>
+          ) : transcript ? (
+            <div className="flex-1 min-h-0 p-4 overflow-auto">
+              <div className="h-full bg-gray-950 border border-gray-800 rounded-lg p-3 overflow-auto">
+                <TranscriptViewer content={transcript} format="txt" className="h-full" />
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-600">
+              <Circle className="w-10 h-10 opacity-20" />
+              <p className="text-sm">No transcript yet</p>
+              {selectedCallData?.record_path && (
+                <button
+                  onClick={handleTranscribe}
+                  disabled={transcribing}
+                  className="flex items-center gap-2 px-4 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                >
+                  {transcribing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic2 className="w-4 h-4" />}
+                  {transcribing ? "Starting…" : "Transcribe"}
+                </button>
+              )}
+              {transcribeError && <p className="text-xs text-red-400 max-w-xs text-center">{transcribeError}</p>}
             </div>
           )}
         </div>
 
-        {!selectedCallId ? (
-          <div className="flex-1 flex flex-col items-center justify-center text-gray-600 gap-2">
-            <FileText className="w-10 h-10 opacity-20" />
-            <p className="text-sm">Select a call</p>
-          </div>
-        ) : transcriptLoading ? (
-          <div className="flex-1 flex items-center justify-center gap-2 text-gray-500 text-sm">
-            <Loader2 className="w-4 h-4 animate-spin" /> Loading transcript…
-          </div>
-        ) : transcript ? (
-          <div className="flex-1 min-h-0 p-4 overflow-auto">
-            <div className="h-full bg-gray-950 border border-gray-800 rounded-lg p-3 overflow-auto">
-              <TranscriptViewer content={transcript} format="txt" className="h-full" />
+        {/* Notes side panel */}
+        {showNotes && (
+          <>
+            <DragHandle onMouseDown={notesDrag} />
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col shrink-0" style={{ width: notesW }}>
+              <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <StickyNote className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="text-xs font-semibold text-white flex-1">Notes</span>
+                <button onClick={() => setShowNotes(false)} className="text-gray-600 hover:text-white transition-colors">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0">
+                <NotesPanel
+                  agent={selectedAgent}
+                  customer={selectedCustomer?.customer ?? ""}
+                  callId={selectedCallId}
+                />
+              </div>
             </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-600">
-            <Circle className="w-10 h-10 opacity-20" />
-            <p className="text-sm">No transcript yet</p>
-            {selectedCallData?.record_path && (
-              <button
-                onClick={handleTranscribe}
-                disabled={transcribing}
-                className="flex items-center gap-2 px-4 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
-              >
-                {transcribing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic2 className="w-4 h-4" />}
-                {transcribing ? "Starting…" : "Transcribe"}
-              </button>
-            )}
-            {transcribeError && <p className="text-xs text-red-400 max-w-xs text-center">{transcribeError}</p>}
-          </div>
+          </>
         )}
       </div>
     </div>

@@ -16,6 +16,7 @@ from ui.backend.database import create_db
 from ui.backend.models.crm import CRMPair, CRMCall          # noqa: F401 — registers tables
 from ui.backend.models.call_marker import CallMarker        # noqa: F401 — registers table
 from ui.backend.models.comparison_file import ComparisonFile  # noqa: F401 — registers table
+from ui.backend.models.note import Note                     # noqa: F401 — registers table
 from ui.backend.routers import crm, jobs, personas, logs, workspace
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
@@ -23,6 +24,7 @@ from ui.backend.routers.sync import router as sync_router
 from ui.backend.routers.agent_comparison import router as agent_comparison_router
 from ui.backend.routers.full_persona_agent import router as full_persona_agent_router
 from ui.backend.routers.persona_agents import router as persona_agents_router
+from ui.backend.routers.notes import router as notes_router
 from ui.backend.services import log_buffer
 
 app = FastAPI(title="Shinobi V3 API", version="1.0.0")
@@ -49,6 +51,7 @@ app.include_router(sync_router)
 app.include_router(agent_comparison_router)
 app.include_router(full_persona_agent_router)
 app.include_router(persona_agents_router)
+app.include_router(notes_router)
 
 
 @app.on_event("startup")
