@@ -7,7 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, select, or_
 
 from ui.backend.database import get_session
 from ui.backend.models.job import Job, JobStatus
@@ -20,6 +20,10 @@ ALL_ENGINES = [
     "elevenlabs_original", "elevenlabs_enhanced", "elevenlabs_converted",
     "openai_gpt4o", "openai_diarize", "gemini", "mlx_whisper",
 ]
+
+
+class WorkerConfig(BaseModel):
+    max_workers: int
 
 
 class TranscribeRequest(BaseModel):
@@ -87,6 +91,22 @@ def list_jobs(pair_slug: Optional[str] = None, db: Session = Depends(get_session
     return result
 
 
+@router.get("/stats")
+def worker_stats():
+    """System CPU and memory stats for the workers panel."""
+    try:
+        import psutil
+        executor = job_runner._executor
+        active = len([t for t in executor._threads if t.is_alive()]) if hasattr(executor, "_threads") else None
+        return {
+            "cpu_pct": psutil.cpu_percent(),
+            "mem_pct": psutil.virtual_memory().percent,
+            "active_workers": active,
+        }
+    except Exception:
+        return {"cpu_pct": None, "mem_pct": None, "active_workers": None}
+
+
 @router.get("/{job_id}")
 def get_job(job_id: str, db: Session = Depends(get_session)):
     job = db.get(Job, job_id)
@@ -105,8 +125,20 @@ async def stream_job(job_id: str, db: Session = Depends(get_session)):
 
     async def event_generator():
         if stream is None:
-            # In-memory stream gone (server restarted or job finished) — replay
-            # from the global log buffer, then send final done event.
+            # In-memory stream gone (server restarted) — try disk log first,
+            # then fall back to the global log buffer.
+            from ui.backend.services.job_runner import _JOB_LOG_DIR
+            log_path = _JOB_LOG_DIR / f"{job_id}.json"
+            if log_path.exists():
+                try:
+                    history = json.loads(log_path.read_text())
+                    for event in history:
+                        yield f"data: {json.dumps(event)}\n\n"
+                        if event.get("done"):
+                            return
+                except Exception:
+                    pass
+            # Fallback: global log buffer
             from ui.backend.services import log_buffer as _lb
             buffered = _lb.get_by_job(job.id)
             for line in buffered:
@@ -143,6 +175,32 @@ async def stream_job(job_id: str, db: Session = Depends(get_session)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.delete("/history")
+def clear_history(db: Session = Depends(get_session)):
+    """Delete all completed and failed jobs."""
+    to_delete = db.exec(
+        select(Job).where(or_(Job.status == JobStatus.complete, Job.status == JobStatus.failed))
+    ).all()
+    count = len(to_delete)
+    for j in to_delete:
+        db.delete(j)
+    db.commit()
+    return {"deleted": count}
+
+
+@router.get("/config")
+def get_config():
+    """Return current worker pool configuration."""
+    return {"max_workers": job_runner.get_max_workers()}
+
+
+@router.put("/config")
+def update_config(body: WorkerConfig):
+    """Update the worker pool size."""
+    job_runner.set_max_workers(body.max_workers)
+    return {"max_workers": job_runner.get_max_workers()}
 
 
 @router.delete("/{job_id}")

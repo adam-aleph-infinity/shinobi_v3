@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose,
+  FolderOpen, Bot, PanelLeftClose, Settings,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -111,6 +111,7 @@ export default function AppSidebar({ onToggle, extraFooter }: {
           {([
             { href: "/logs",      icon: Terminal,   label: "Logs" },
             { href: "/workspace", icon: FolderOpen, label: "Workspace" },
+            { href: "/settings",  icon: Settings,   label: "Settings" },
           ] as NavItem[]).map(({ href, icon: Icon, label }) => (
             <Link
               key={href}

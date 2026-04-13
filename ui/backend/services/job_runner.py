@@ -16,7 +16,33 @@ from sqlmodel import Session
 from ui.backend.database import engine
 from ui.backend.models.job import Job, JobStatus
 
-_executor = ThreadPoolExecutor(max_workers=4)
+_max_workers = 10
+_executor = ThreadPoolExecutor(max_workers=_max_workers)
+
+
+def get_max_workers() -> int:
+    return _max_workers
+
+
+def set_max_workers(n: int):
+    """Resize the worker pool. Takes effect for jobs submitted after this call."""
+    global _executor, _max_workers
+    n = max(1, min(64, n))
+    if n != _max_workers:
+        _max_workers = n
+        _executor = ThreadPoolExecutor(max_workers=n)
+
+# Persist job log history to disk so logs survive server restarts
+from ui.backend.config import settings as _settings
+_JOB_LOG_DIR = _settings.ui_data_dir / "job_logs"
+_JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_job_log(job_id: str, history: list) -> None:
+    try:
+        (_JOB_LOG_DIR / f"{job_id}.json").write_text(json.dumps(history))
+    except Exception:
+        pass
 
 
 @dataclass
@@ -312,6 +338,10 @@ def _run_job(
 
     finally:
         _broadcast(job_id, {"stage": 3, "pct": 100, "message": "done", "done": True}, loop)
+        # Persist to disk so logs are available after server restart
+        stream = _streams.get(job_id)
+        if stream:
+            _save_job_log(job_id, stream.history)
 
 
 def submit_job(job: Job, loop: asyncio.AbstractEventLoop) -> str:

@@ -9,6 +9,13 @@ from ui.backend.services import log_buffer
 router = APIRouter(prefix="/logs", tags=["logs"])
 
 
+@router.delete("/buffer")
+def clear_buffer():
+    """Clear the in-memory log buffer."""
+    log_buffer.clear()
+    return {"cleared": True}
+
+
 @router.get("/recent")
 def get_recent(n: int = 300):
     return [{"ts": l.ts, "text": l.text, "level": l.level, "job_id": l.job_id} for l in log_buffer.get_recent(n)]

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
-from ui.backend.database import get_session
+from ui.backend.database import engine, get_session
 from ui.backend.models.job import Job, JobStatus
 from ui.backend.services import job_runner
 
@@ -66,10 +66,12 @@ class BatchPairsRequest(BaseModel):
 @router.post("/jobs")
 async def create_transcription_job(req: CreateJobRequest, db: Session = Depends(get_session)):
     """Create an ElevenLabs transcription job for a single CRM call recording."""
-    # Prevent duplicate: skip if a pending/running job already exists for this call
+    # Prevent duplicate: skip if a pending/running job already exists for this exact pair+call
+    pair_slug_check = f"{req.agent}/{req.customer}"
     existing = db.exec(
         select(Job)
         .where(Job.call_id == req.call_id)
+        .where(Job.pair_slug == pair_slug_check)
         .where(Job.status.in_([JobStatus.pending, JobStatus.running]))
     ).first()
     if existing:
@@ -106,12 +108,12 @@ async def create_transcription_job(req: CreateJobRequest, db: Session = Depends(
 # ── Batch transcription for multiple agent/customer pairs ─────────────────────
 
 @router.post("/batch-for-pairs")
-async def batch_transcribe_pairs(req: BatchPairsRequest, db: Session = Depends(get_session)):
+async def batch_transcribe_pairs(req: BatchPairsRequest):
     """Queue ElevenLabs transcription jobs for all untranscribed calls across selected pairs.
 
     For each pair: fetches calls (lazy-loads from CRM if needed), skips calls that
     already have smoothed.txt or voted.txt, and submits a job for each remaining call.
-    Up to 8 pairs are processed concurrently.
+    Up to 8 pairs are processed concurrently. All jobs share a batch_id for UI grouping.
     """
     from ui.backend.services.crm_service import get_calls as _get_calls
 
@@ -119,6 +121,8 @@ async def batch_transcribe_pairs(req: BatchPairsRequest, db: Session = Depends(g
     submitted = 0
     skipped = 0
     job_ids: list[str] = []
+    # One batch_id groups all jobs from this request in the UI queue
+    batch_id = str(uuid.uuid4())
 
     # Process pairs with limited concurrency (CRM fetch can be slow on first access)
     sem = asyncio.Semaphore(8)
@@ -126,62 +130,73 @@ async def batch_transcribe_pairs(req: BatchPairsRequest, db: Session = Depends(g
     async def _process_pair(spec: PairSpec):
         nonlocal submitted, skipped
         async with sem:
-            calls = await loop.run_in_executor(
-                None,
-                lambda: _get_calls(
-                    account_id=spec.account_id,
-                    crm_url=spec.crm_url,
-                    agent=spec.agent,
-                    customer=spec.customer,
-                ),
-            )
-            for c in calls:
-                record_path = c.get("record_path", "")
-                call_id = str(c.get("call_id", ""))
-                if not record_path or not call_id:
-                    skipped += 1
-                    continue
-                # Skip already transcribed
-                llm_dir = (
-                    settings.agents_dir / spec.agent / spec.customer
-                    / call_id / "transcribed" / "llm_final"
+            try:
+                calls = await loop.run_in_executor(
+                    None,
+                    lambda: _get_calls(
+                        account_id=spec.account_id,
+                        crm_url=spec.crm_url,
+                        agent=spec.agent,
+                        customer=spec.customer,
+                    ),
                 )
-                if (llm_dir / "smoothed.txt").exists() or (llm_dir / "voted.txt").exists():
-                    skipped += 1
-                    continue
-                # Skip if a pending/running job already exists for this call
-                in_flight = db.exec(
-                    select(Job)
-                    .where(Job.call_id == call_id)
-                    .where(Job.status.in_([JobStatus.pending, JobStatus.running]))
-                ).first()
-                if in_flight:
-                    skipped += 1
-                    continue
-                extra = {
-                    "crm_url": spec.crm_url,
-                    "account_id": spec.account_id,
-                    "agent": spec.agent,
-                    "customer": spec.customer,
-                    "record_path": record_path,
-                    "smooth_model": req.smooth_model,
-                }
-                job = Job(
-                    id=str(uuid.uuid4()),
-                    audio_path=record_path,
-                    pair_slug=f"{spec.agent}/{spec.customer}",
-                    call_id=call_id,
-                    speaker_a=req.speaker_a,
-                    speaker_b=req.speaker_b,
-                    status=JobStatus.pending,
-                    extra_config=json.dumps(extra),
-                )
-                db.add(job)
-                db.commit()
-                db.refresh(job)
-                job_runner.submit_job(job, loop)
-                job_ids.append(job.id)
-                submitted += 1
+                pair_slug = f"{spec.agent}/{spec.customer}"
+                # Each pair gets its own session to avoid shared-session state issues
+                with Session(engine) as pair_db:
+                    for c in calls:
+                        record_path = c.get("record_path", "")
+                        call_id = str(c.get("call_id", ""))
+                        if not record_path or not call_id:
+                            skipped += 1
+                            continue
+                        # Skip already transcribed
+                        llm_dir = (
+                            settings.agents_dir / spec.agent / spec.customer
+                            / call_id / "transcribed" / "llm_final"
+                        )
+                        if (llm_dir / "smoothed.txt").exists() or (llm_dir / "voted.txt").exists():
+                            skipped += 1
+                            continue
+                        # Skip if a pending/running job exists for this exact pair+call.
+                        # Must include pair_slug — different agents can share the same
+                        # account's call IDs, so checking call_id alone would cause
+                        # pair B's calls to be skipped by pair A's jobs.
+                        in_flight = pair_db.exec(
+                            select(Job)
+                            .where(Job.call_id == call_id)
+                            .where(Job.pair_slug == pair_slug)
+                            .where(Job.status.in_([JobStatus.pending, JobStatus.running]))
+                        ).first()
+                        if in_flight:
+                            skipped += 1
+                            continue
+                        extra = {
+                            "crm_url": spec.crm_url,
+                            "account_id": spec.account_id,
+                            "agent": spec.agent,
+                            "customer": spec.customer,
+                            "record_path": record_path,
+                            "smooth_model": req.smooth_model,
+                        }
+                        job = Job(
+                            id=str(uuid.uuid4()),
+                            audio_path=record_path,
+                            pair_slug=pair_slug,
+                            call_id=call_id,
+                            speaker_a=req.speaker_a,
+                            speaker_b=req.speaker_b,
+                            status=JobStatus.pending,
+                            extra_config=json.dumps(extra),
+                            batch_id=batch_id,
+                        )
+                        pair_db.add(job)
+                        pair_db.commit()
+                        pair_db.refresh(job)
+                        job_runner.submit_job(job, loop)
+                        job_ids.append(job.id)
+                        submitted += 1
+            except Exception as exc:
+                print(f"[batch-for-pairs] Error processing {spec.agent}/{spec.customer}: {exc}")
 
     await asyncio.gather(*[_process_pair(p) for p in req.pairs])
     return {"submitted": submitted, "skipped": skipped, "job_ids": job_ids}

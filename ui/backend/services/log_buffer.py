@@ -76,6 +76,16 @@ def emit(text: str):
             pass
 
 
+def clear():
+    """Clear the in-memory log buffer. Thread-safe.
+
+    Does NOT reset the sequence counter so existing SSE subscribers continue
+    receiving new lines after the buffer is cleared without missing anything.
+    """
+    with _lock:
+        _buffer.clear()
+
+
 def get_recent(n: int = 200) -> list[LogLine]:
     return list(_buffer)[-n:]
 

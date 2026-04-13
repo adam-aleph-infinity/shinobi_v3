@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import useSWR from "swr";
 import { AgentCustomerPair, TxStats } from "@/lib/types";
 import { formatDuration } from "@/lib/utils";
@@ -12,7 +12,7 @@ import { refreshCache } from "@/lib/api";
 const API = "/api";
 const fetcher = (url: string) => fetch(`${API}${url}`).then(r => r.json());
 
-type SortKey = "agent" | "customer" | "crm" | "calls" | "duration" | "deposits";
+type SortKey = "agent" | "customer" | "crm" | "calls" | "duration" | "deposits" | "tx";
 type SortDir = "asc" | "desc";
 
 function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
@@ -47,6 +47,7 @@ export default function CRMPage() {
   const [crmFilter, setCrmFilter]           = useState("");
   const [minCalls, setMinCalls]             = useState("");
   const [minDuration, setMinDuration]       = useState("");
+  const [minTx, setMinTx]                   = useState("");
   const [minDeposits, setMinDeposits]       = useState("");
   const [maxDeposits, setMaxDeposits]       = useState("");
   const [minAgentDep, setMinAgentDep]       = useState("");
@@ -70,7 +71,10 @@ export default function CRMPage() {
   const { data: allPairs } = useSWR<AgentCustomerPair[]>(`/crm/pairs?sort=agent&dir=asc`, fetcher);
   const crms = allPairs ? Array.from(new Set(allPairs.map(p => p.crm_url))).sort() : [];
 
-  const params = new URLSearchParams({ sort: sortKey, dir: sortDir });
+  // "tx" is sorted client-side from txStats; use a stable server sort as base
+  const serverSortKey = sortKey === "tx" ? "agent" : sortKey;
+  const serverSortDir = sortKey === "tx" ? "asc"   : sortDir;
+  const params = new URLSearchParams({ sort: serverSortKey, dir: serverSortDir });
   if (agentFilter)    params.set("agent",               agentFilter);
   if (customerFilter) params.set("customer",            customerFilter);
   if (crmFilter)      params.set("crm",                 crmFilter);
@@ -89,12 +93,12 @@ export default function CRMPage() {
 
   const { data: txStats } = useSWR<TxStats>(`/final-transcript/tx-stats`, fetcher, { refreshInterval: 30000 });
 
-  const hasFilter = !!(agentFilter || customerFilter || crmFilter || minCalls || minDuration ||
+  const hasFilter = !!(agentFilter || customerFilter || crmFilter || minCalls || minDuration || minTx ||
     minDeposits || maxDeposits || minAgentDep || maxAgentDep || ftdAfter || ftdBefore);
 
   function clearFilters() {
     setAgentFilter(""); setCustomerFilter(""); setCrmFilter("");
-    setMinCalls(""); setMinDuration(""); setMinDeposits(""); setMaxDeposits("");
+    setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
     setMinAgentDep(""); setMaxAgentDep(""); setFtdAfter(""); setFtdBefore("");
   }
 
@@ -103,8 +107,29 @@ export default function CRMPage() {
     else { setSortKey(col); setSortDir("asc"); }
   }
 
+  // ── Client-side Tx sort + filter (txStats is fetched separately) ──────────
+  const displayPairs = useMemo(() => {
+    let result = pairs ?? [];
+    if (minTx) {
+      const threshold = parseInt(minTx, 10) || 0;
+      result = result.filter(p => {
+        const slug = `${p.agent}/${p.customer}`;
+        const tx = txStats?.[slug];
+        return tx ? tx.transcribed >= threshold : false;
+      });
+    }
+    if (sortKey === "tx" && txStats) {
+      result = [...result].sort((a, b) => {
+        const aTx = txStats[`${a.agent}/${a.customer}`]?.transcribed ?? 0;
+        const bTx = txStats[`${b.agent}/${b.customer}`]?.transcribed ?? 0;
+        return sortDir === "asc" ? aTx - bTx : bTx - aTx;
+      });
+    }
+    return result;
+  }, [pairs, txStats, sortKey, sortDir, minTx]); // eslint-disable-line
+
   // ── Selection helpers ──────────────────────────────────────────────────────
-  const visibleIds  = (pairs ?? []).map(p => p.id);
+  const visibleIds  = displayPairs.map(p => p.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
   const someSelected = selectedIds.size > 0;
 
@@ -206,6 +231,7 @@ export default function CRMPage() {
         </select>
         <FilterInput label="Min calls…"  value={minCalls}    onChange={setMinCalls}    type="number" />
         <FilterInput label="Min hours…"  value={minDuration} onChange={setMinDuration} type="number" step="0.5" />
+        <FilterInput label="Min Tx…"     value={minTx}       onChange={setMinTx}       type="number" />
         {hasFilter && (
           <button onClick={clearFilters} className="flex items-center gap-1 px-2.5 py-2 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded-lg transition-colors">
             <X className="w-3 h-3" /> Clear
@@ -268,7 +294,7 @@ export default function CRMPage() {
                   <ThBtn col="customer" label="Customer" />
                   <ThBtn col="crm"      label="CRM" />
                   <ThBtn col="calls"    label="Calls"    align="right" />
-                  <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Tx</th>
+                  <ThBtn col="tx" label="Tx" align="right" />
                   <ThBtn col="duration" label="Duration" align="right" />
                   <ThBtn col="deposits" label="Net Dep."  align="right" />
                   <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">FTD</th>
@@ -283,7 +309,7 @@ export default function CRMPage() {
                 {error && (
                   <tr><td colSpan={9} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
                 )}
-                {!isLoading && pairs?.map((pair) => {
+                {!isLoading && displayPairs.map((pair) => {
                   const isSelected = selectedIds.has(pair.id);
                   const slug = `${pair.agent}/${pair.customer}`;
                   const tx = txStats?.[slug];
@@ -323,11 +349,11 @@ export default function CRMPage() {
                           </span>
                         ) : <span className="text-gray-600">—</span>}
                       </td>
-                      <td className="px-3 py-3 text-right text-gray-500 text-xs">{fmtDate(pair.ftd_at)}</td>
+                      <td className="px-3 py-3 text-right text-gray-300 text-xs">{fmtDate(pair.ftd_at)}</td>
                     </tr>
                   );
                 })}
-                {!isLoading && pairs?.length === 0 && (
+                {!isLoading && displayPairs.length === 0 && (
                   <tr><td colSpan={9} className="text-center py-12 text-gray-500">No pairs found</td></tr>
                 )}
               </tbody>
@@ -338,7 +364,7 @@ export default function CRMPage() {
           <div className="px-4 py-2 border-t border-gray-800 flex items-center gap-3 shrink-0">
             <span className="text-xs text-gray-500 flex-1">
               {pairs && allPairs
-                ? `${pairs.length}${hasFilter ? ` of ${allPairs.length}` : ""} pair${pairs.length !== 1 ? "s" : ""}`
+                ? `${displayPairs.length}${hasFilter ? ` of ${allPairs.length}` : ""} pair${displayPairs.length !== 1 ? "s" : ""}`
                 : ""}
               {someSelected && ` · ${selectedIds.size} selected`}
             </span>
