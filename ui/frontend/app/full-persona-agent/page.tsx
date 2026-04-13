@@ -75,7 +75,6 @@ interface AgentStat {
   customers_with_data: number;
   total_calls: number;
   total_transcripts: number;
-  total_landmarks: number;
   net_deposits: number;
 }
 
@@ -83,7 +82,6 @@ interface CustomerStat {
   customer: string;
   total_calls: number;
   transcripts: number;
-  landmarks: number;
   net_deposits: number;
 }
 
@@ -813,13 +811,7 @@ export default function FullPersonaAgentPage() {
 
   // Sort customers: most transcripts first
   const sortedCustomers = [...customerStats]
-    .sort((a, b) => {
-      const sa = (a.transcripts > 0 ? 2 : 0) + (a.landmarks > 0 ? 1 : 0);
-      const sb = (b.transcripts > 0 ? 2 : 0) + (b.landmarks > 0 ? 1 : 0);
-      if (sb !== sa) return sb - sa;
-      if (b.transcripts !== a.transcripts) return b.transcripts - a.transcripts;
-      return 0;
-    })
+    .sort((a, b) => b.transcripts - a.transcripts)
     .filter(s => !search || s.customer.toLowerCase().includes(search.toLowerCase()));
 
   // Quick run
@@ -828,7 +820,7 @@ export default function FullPersonaAgentPage() {
     try {
       const r = await fetch(`${API}/full-persona-agent/quick-run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent, customer: cust, smooth_model: "gpt-5.4", run_landmarks: false, force: false }),
+        body: JSON.stringify({ agent, customer: cust, smooth_model: "gpt-5.4", force: false }),
       });
       const d = await r.json();
       setQuickRunId(d.run_id);

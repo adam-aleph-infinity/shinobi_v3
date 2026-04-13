@@ -663,15 +663,13 @@ def agent_stats_fpa():
         if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
             continue
         customer_dirs = [d for d in agent_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
-        total_calls = total_transcripts = total_landmarks = customers_with_data = 0
+        total_calls = total_transcripts = customers_with_data = 0
         for cust_dir in customer_dirs:
             call_dirs = [d for d in cust_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
             for call_dir in call_dirs:
                 total_calls += 1
                 if (call_dir / "transcribed" / "llm_final" / "smoothed.txt").exists():
                     total_transcripts += 1
-                if (call_dir / "transcribed" / "llm_final" / "landmarks.json").exists():
-                    total_landmarks += 1
             if any((d / "transcribed" / "llm_final" / "smoothed.txt").exists() for d in call_dirs):
                 customers_with_data += 1
         results.append({
@@ -680,7 +678,6 @@ def agent_stats_fpa():
             "customers_with_data": customers_with_data,
             "total_calls": total_calls,
             "total_transcripts": total_transcripts,
-            "total_landmarks": total_landmarks,
             "net_deposits": net_dep_by_agent.get(agent_dir.name, 0.0),
         })
     # Sort: agents with workable data first, then by net deposits desc
@@ -698,7 +695,7 @@ def list_customers(agent: str = Query(...)):
 
 @router.get("/customer-stats")
 def customer_stats_fpa(agent: str = Query(...)):
-    """Per-customer transcript/landmark counts + net deposits from CRM DB."""
+    """Per-customer transcript counts + net deposits from CRM DB."""
     from sqlalchemy import text as _text
     from ui.backend.database import engine
     from sqlmodel import Session as _S
@@ -727,12 +724,10 @@ def customer_stats_fpa(agent: str = Query(...)):
         call_dirs = [d for d in cust_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
         total = len(call_dirs)
         transcripts = sum(1 for d in call_dirs if (d / "transcribed" / "llm_final" / "smoothed.txt").exists())
-        landmarks = sum(1 for d in call_dirs if (d / "transcribed" / "llm_final" / "landmarks.json").exists())
         results.append({
             "customer": cust_dir.name,
             "total_calls": total,
             "transcripts": transcripts,
-            "landmarks": landmarks,
             "net_deposits": net_dep_map.get(cust_dir.name, 0.0),
         })
     return results
@@ -779,7 +774,6 @@ class FPAQuickRunRequest(BaseModel):
     agent: str
     customer: str
     smooth_model: str = "gpt-5.4"
-    run_landmarks: bool = False
     force: bool = False
 
 
@@ -790,7 +784,6 @@ def fpa_quick_run(req: FPAQuickRunRequest, background_tasks: BackgroundTasks):
         QuickRunRequest(
             pairs=[{"agent": req.agent, "customer": req.customer}],
             smooth_model=req.smooth_model,
-            run_landmarks=req.run_landmarks,
             force=req.force,
         ),
         background_tasks,

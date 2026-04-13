@@ -7,7 +7,7 @@ import useSWR from "swr";
 import { cn } from "@/lib/utils";
 import {
   Upload, Trash2, Send, Loader2, CheckCircle2, AlertCircle, RefreshCw,
-  ChevronDown, ChevronUp, Bookmark, Star, X, Search, Play, FileText, Map, Wand2,
+  ChevronDown, ChevronUp, Bookmark, Star, X, Search, Play, FileText, Wand2,
   ArrowUpDown, ArrowUp, ArrowDown,
 } from "lucide-react";
 
@@ -150,24 +150,16 @@ const SMOOTH_MODELS = [
   { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
 ];
 
-const LANDMARK_MODELS = [
-  { value: "grok-4.20-0309-non-reasoning", label: "Grok 4.20 Fast" },
-  { value: "gpt-4.1",                      label: "GPT-4.1" },
-  { value: "gpt-5.4",                      label: "GPT-5.4" },
-];
-
 interface PairStatus {
   total: number;
   transcripts: number;
-  landmarks: number;
-  calls: { call_id: string; has_transcript: boolean; has_landmarks: boolean }[];
+  calls: { call_id: string; has_transcript: boolean }[];
 }
 
 interface UploadedPair {
   agent: string;
   customer: string;
   transcript?: { xai_file_id: string; filename: string; uploaded_at: string };
-  landmarks?: { xai_file_id: string; filename: string; uploaded_at: string };
 }
 
 interface ComparisonPreset {
@@ -185,14 +177,12 @@ interface AgentStat {
   customers_with_data: number;
   total_calls: number;
   total_transcripts: number;
-  total_landmarks: number;
 }
 
 interface CustomerStat {
   customer: string;
   total_calls: number;
   transcripts: number;
-  landmarks: number;
 }
 
 // ── Stat pill ───────────────────────────────────────────────────────────────
@@ -220,9 +210,7 @@ function AgentSlot({
   toggleCustomer,
   pairStatuses,
   uploadedMap,
-  onPrepare,
   onUpload,
-  preparing,
   uploading,
   forceUpload,
   agentStats,
@@ -238,9 +226,7 @@ function AgentSlot({
   toggleCustomer: (c: string) => void;
   pairStatuses: Record<string, PairStatus | null>;
   uploadedMap: Record<string, UploadedPair>;
-  onPrepare: (agent: string, customer: string) => void;
   onUpload: (agent: string, customer: string) => void;
-  preparing: Set<string>;
   uploading: Set<string>;
   forceUpload: boolean;
   agentStats: AgentStat[];
@@ -258,15 +244,9 @@ function AgentSlot({
     .sort((a, b) => {
       const sa = custStatMap[a];
       const sb = custStatMap[b];
-      const scoreA = sa ? (sa.transcripts > 0 ? 1 : 0) + (sa.landmarks > 0 ? 1 : 0) : 0;
-      const scoreB = sb ? (sb.transcripts > 0 ? 1 : 0) + (sb.landmarks > 0 ? 1 : 0) : 0;
-      if (scoreB !== scoreA) return scoreB - scoreA;
       const tA = sa?.transcripts ?? 0;
       const tB = sb?.transcripts ?? 0;
-      if (tB !== tA) return tB - tA;
-      const lA = sa?.landmarks ?? 0;
-      const lB = sb?.landmarks ?? 0;
-      return lB - lA;
+      return tB - tA;
     });
 
   return (
@@ -285,7 +265,7 @@ function AgentSlot({
           const hasGrok = uploadedAgents.has(a);
           const grokTag = hasGrok ? " ✦ Grok" : "";
           const label = s
-            ? `${a}${grokTag}  (${s.customers} customers · ${s.total_transcripts}/${s.total_calls} transcripts · ${s.total_landmarks}/${s.total_calls} landmarks)`
+            ? `${a}${grokTag}  (${s.customers} customers · ${s.total_transcripts}/${s.total_calls} transcripts)`
             : `${a}${grokTag}`;
           return <option key={a} value={a}>{label}</option>;
         })}
@@ -296,7 +276,6 @@ function AgentSlot({
         <div className="flex items-center gap-3 px-1 mb-2 mt-0.5">
           <span className="text-xs text-gray-600">{agentStat.customers} customers</span>
           <StatPill value={agentStat.total_transcripts} total={agentStat.total_calls} label="Transcripts" icon={FileText} />
-          <StatPill value={agentStat.total_landmarks} total={agentStat.total_calls} label="Landmarks" icon={Map} />
           {agentStat.customers_with_data > 0 && (
             <span className="text-xs text-gray-600 ml-auto">{agentStat.customers_with_data} with data</span>
           )}
@@ -327,18 +306,12 @@ function AgentSlot({
           const cStat = custStatMap[c];
           const uploaded = uploadedMap[key];
           const isSelected = selected.includes(c);
-          const isPrep = preparing.has(key);
           const isUpl = uploading.has(key);
 
           // Prefer live pairStatus if loaded, fall back to customerStats
           const totalCalls = status?.total ?? cStat?.total_calls ?? 0;
           const numT = status?.transcripts ?? cStat?.transcripts ?? 0;
-          const numL = status?.landmarks ?? cStat?.landmarks ?? 0;
-
-          const allT = totalCalls > 0 && numT === totalCalls;
-          const allL = totalCalls > 0 && numL === totalCalls;
-          const missingL = numT > 0 && numL < numT;
-          const hasUpload = uploaded?.transcript || uploaded?.landmarks;
+          const hasUpload = !!uploaded?.transcript;
 
           return (
             <div
@@ -364,7 +337,6 @@ function AgentSlot({
                     {totalCalls > 0 && (
                       <div className="flex items-center gap-2 flex-shrink-0">
                         <StatPill value={numT} total={totalCalls} label="Transcripts" icon={FileText} />
-                        <StatPill value={numL} total={totalCalls} label="Landmarks" icon={Map} />
                       </div>
                     )}
                     {totalCalls === 0 && (
@@ -374,17 +346,6 @@ function AgentSlot({
 
                   {/* Actions (only shown when relevant) */}
                   <div className="mt-1.5 space-y-1.5">
-                      {/* Annotate missing landmarks */}
-                      {missingL && (
-                        <button
-                          onClick={e => { e.stopPropagation(); onPrepare(agent, c); }}
-                          disabled={isPrep}
-                          className="flex items-center gap-1.5 text-xs px-2 py-1 rounded bg-amber-800/40 border border-amber-600/40 text-amber-300 hover:bg-amber-800/60 disabled:opacity-50 transition-colors"
-                        >
-                          {isPrep ? <Loader2 className="w-3 h-3 animate-spin" /> : <Map className="w-3 h-3" />}
-                          {isPrep ? "Running…" : `Annotate ${numT - numL} missing`}
-                        </button>
-                      )}
                       {totalCalls > 0 && numT === 0 && (
                         <p className="text-xs text-red-400/60">No transcripts — use Quick Run or Pipeline</p>
                       )}
@@ -396,12 +357,6 @@ function AgentSlot({
                             <div className="flex items-center gap-1.5 text-xs text-emerald-400">
                               <FileText className="w-3 h-3 flex-shrink-0" />
                               <span className="font-mono truncate max-w-[130px]">{uploaded.transcript.xai_file_id}</span>
-                            </div>
-                          )}
-                          {uploaded.landmarks && (
-                            <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-                              <Map className="w-3 h-3 flex-shrink-0" />
-                              <span className="font-mono truncate max-w-[130px]">{uploaded.landmarks.xai_file_id}</span>
                             </div>
                           )}
                           <button
@@ -453,17 +408,12 @@ export default function AgentComparisonPage() {
   const { data: customerStats2 = [] } = useSWR<CustomerStat[]>(agent2 ? `/api/agent-comparison/customer-stats?agent=${encodeURIComponent(agent2)}` : null, fetcher);
 
   const [pairStatuses, setPairStatuses] = useState<Record<string, PairStatus | null>>({});
-  const [preparing, setPreparing] = useState<Set<string>>(new Set());
   const [uploading, setUploading] = useState<Set<string>>(new Set());
 
   // Quick Run state
   const [showQuickRun, setShowQuickRun] = useState(false);
   const [smoothModel, setSmoothModel] = useState("gpt-5.4");
-  const [landmarksModel, setLandmarksModel] = useState("grok-4.20-0309-non-reasoning");
-  const [landmarksPrompt, setLandmarksPrompt] = useState("");
-  const [runLandmarks, setRunLandmarks] = useState(true);
   const [forceQuick, setForceQuick] = useState(false);
-  const [forceLandmarks, setForceLandmarks] = useState(false);
   const [quickRunId, setQuickRunId] = useState<string | null>(null);
   const [quickRunStatus, setQuickRunStatus] = useState<{ done: number; total: number; current: string; errors: string[]; complete: boolean } | null>(null);
   const [runningQuick, setRunningQuick] = useState(false);
@@ -571,26 +521,6 @@ export default function AgentComparisonPage() {
     ...selected2.filter(Boolean).map(c => ({ agent: agent2, customer: c })),
   ].filter(p => p.agent);
 
-  // ── Prepare (landmarks only) ───────────────────────────────────────────────
-
-  const handlePrepare = async (agent: string, customer: string) => {
-    const key = `${agent}||${customer}`;
-    setPreparing(prev => new Set(prev).add(key));
-    try {
-      await fetch("/api/agent-comparison/prepare", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent, customer, model: landmarksModel, extra_prompt: landmarksPrompt }),
-      });
-      setTimeout(() => {
-        fetchStatus(agent, customer);
-        setPreparing(prev => { const s = new Set(prev); s.delete(key); return s; });
-      }, 8000);
-    } catch {
-      setPreparing(prev => { const s = new Set(prev); s.delete(key); return s; });
-    }
-  };
-
   // ── Quick Run ──────────────────────────────────────────────────────────────
 
   const handleQuickRun = async () => {
@@ -604,11 +534,7 @@ export default function AgentComparisonPage() {
         body: JSON.stringify({
           pairs: selectedPairs,
           smooth_model: smoothModel,
-          run_landmarks: runLandmarks,
-          landmarks_model: landmarksModel,
-          landmarks_prompt: landmarksPrompt,
           force: forceQuick,
-          force_landmarks: forceLandmarks,
         }),
       });
       const data = await r.json();
@@ -765,16 +691,16 @@ export default function AgentComparisonPage() {
               agent={agent1} setAgent={a => { setAgent1(a); setSelected1([]); autoSelected1.current = false; }}
               customers={customers1} selected={selected1} toggleCustomer={toggle1}
               pairStatuses={pairStatuses} uploadedMap={uploadedMap}
-              onPrepare={handlePrepare} onUpload={handleUpload}
-              preparing={preparing} uploading={uploading} forceUpload={forceUpload}
+              onUpload={handleUpload}
+              uploading={uploading} forceUpload={forceUpload}
               agentStats={agentStats} customerStats={customerStats1} uploadedAgents={uploadedAgents}
             />
             <AgentSlot slotLabel="AGENT 2" agents={sortedAgents}
               agent={agent2} setAgent={a => { setAgent2(a); setSelected2([]); autoSelected2.current = false; }}
               customers={customers2} selected={selected2} toggleCustomer={toggle2}
               pairStatuses={pairStatuses} uploadedMap={uploadedMap}
-              onPrepare={handlePrepare} onUpload={handleUpload}
-              preparing={preparing} uploading={uploading} forceUpload={forceUpload}
+              onUpload={handleUpload}
+              uploading={uploading} forceUpload={forceUpload}
               agentStats={agentStats} customerStats={customerStats2} uploadedAgents={uploadedAgents}
             />
           </div>
@@ -790,7 +716,7 @@ export default function AgentComparisonPage() {
               <div className="flex items-center gap-3">
                 <h2 className="text-xs font-semibold text-gray-400 tracking-widest">STEP 2 — QUICK RUN</h2>
                 <span className="text-xs text-gray-600">
-                  EL transcription + smooth + landmarks for {selectedPairs.length} pair{selectedPairs.length > 1 ? "s" : ""}
+                  EL transcription + smooth for {selectedPairs.length} pair{selectedPairs.length > 1 ? "s" : ""}
                 </span>
               </div>
               {showQuickRun ? <ChevronUp className="w-4 h-4 text-gray-500" /> : <ChevronDown className="w-4 h-4 text-gray-500" />}
@@ -807,39 +733,14 @@ export default function AgentComparisonPage() {
                       {SMOOTH_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                     </select>
                   </div>
-                  <div className="min-w-40">
-                    <label className="block text-xs text-gray-500 mb-1">Landmarks model</label>
-                    <select value={landmarksModel} onChange={e => setLandmarksModel(e.target.value)}
-                      className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
-                      {LANDMARK_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-                    </select>
-                  </div>
-                  <div className="flex-1 min-w-48">
-                    <label className="block text-xs text-gray-500 mb-1">Landmarks extra prompt (optional)</label>
-                    <input value={landmarksPrompt} onChange={e => setLandmarksPrompt(e.target.value)}
-                      placeholder="e.g. Focus on deposit discussions"
-                      className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500" />
-                  </div>
                 </div>
 
                 <div className="flex flex-wrap gap-3 items-center">
-                  <label className={cn("flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer text-xs transition-colors",
-                    runLandmarks ? "border-indigo-600/50 bg-indigo-900/20 text-indigo-300" : "border-gray-700 text-gray-500")}>
-                    <input type="checkbox" checked={runLandmarks} onChange={e => setRunLandmarks(e.target.checked)}
-                      className="rounded border-gray-600 accent-indigo-500" />
-                    Run landmarks
-                  </label>
                   <label className={cn("flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer text-xs transition-colors",
                     forceQuick ? "border-amber-600/50 bg-amber-900/20 text-amber-300" : "border-gray-700 text-gray-500")}>
                     <input type="checkbox" checked={forceQuick} onChange={e => setForceQuick(e.target.checked)}
                       className="rounded border-gray-600 accent-amber-500" />
                     Force re-transcribe
-                  </label>
-                  <label className={cn("flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer text-xs transition-colors",
-                    forceLandmarks ? "border-amber-600/50 bg-amber-900/20 text-amber-300" : "border-gray-700 text-gray-500")}>
-                    <input type="checkbox" checked={forceLandmarks} onChange={e => setForceLandmarks(e.target.checked)}
-                      className="rounded border-gray-600 accent-amber-500" />
-                    Force re-annotate
                   </label>
 
                   <button
@@ -932,13 +833,6 @@ export default function AgentComparisonPage() {
                             <FileText className="w-3 h-3 flex-shrink-0" />
                             <span className="text-gray-500">transcript</span>
                             <span className="font-mono truncate">{uploaded.transcript.xai_file_id}</span>
-                          </div>
-                        )}
-                        {uploaded.landmarks && (
-                          <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-                            <Map className="w-3 h-3 flex-shrink-0" />
-                            <span className="text-gray-500">landmarks</span>
-                            <span className="font-mono truncate">{uploaded.landmarks.xai_file_id}</span>
                           </div>
                         )}
                       </div>

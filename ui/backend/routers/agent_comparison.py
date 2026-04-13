@@ -1,4 +1,4 @@
-"""Agent Comparison — quick-run pipeline, merge transcripts/landmarks, upload to xAI, query Grok."""
+"""Agent Comparison — quick-run pipeline, merge transcripts, upload to xAI, query Grok."""
 import json
 import os
 import re
@@ -227,53 +227,6 @@ def _build_and_save_merged_transcript(
     return content
 
 
-def _build_landmarks_content(agent: str, customer: str) -> Optional[str]:
-    """Merge all landmarks.json files for the pair into one formatted text block."""
-    pair_dir = settings.agents_dir / agent / customer
-    if not pair_dir.exists():
-        return None
-
-    calls_meta = _load_calls_meta(pair_dir)
-    call_dirs = sorted([d for d in pair_dir.iterdir() if d.is_dir() and not d.name.startswith("_")])
-
-    blocks: list[str] = []
-    for call_dir in call_dirs:
-        landmarks_path = call_dir / "transcribed" / "llm_final" / "landmarks.json"
-        if not landmarks_path.exists():
-            continue
-        try:
-            markers = json.loads(landmarks_path.read_text(encoding="utf-8"))
-            if not markers:
-                continue
-            header = _call_header(call_dir.name, calls_meta.get(call_dir.name, {}))
-            lines = [f"{'─' * 60}", header, f"{'─' * 60}"]
-            for m in markers:
-                ts = m.get("timestamp_label", "")
-                emoji = m.get("emoji", "")
-                label = m.get("label", "")
-                desc = m.get("description", "")
-                mtype = m.get("marker_type", "")
-                lines.append(f"  [{ts}]  {emoji} [{mtype.upper()}]  {label}  —  {desc}")
-            blocks.append("\n".join(lines))
-        except Exception:
-            pass
-
-    if not blocks:
-        return None
-
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    header = (
-        f"{'═' * 60}\n"
-        f"MERGED LANDMARKS / JOURNEY MARKERS\n"
-        f"Agent:    {agent}\n"
-        f"Customer: {customer}\n"
-        f"Calls:    {len(blocks)}\n"
-        f"Generated: {now}\n"
-        f"{'═' * 60}\n\n"
-    )
-    return header + "\n\n".join(blocks)
-
-
 def _load_calls_meta(pair_dir: Path) -> dict[str, dict]:
     calls_meta: dict[str, dict] = {}
     calls_json = pair_dir / "calls.json"
@@ -302,7 +255,7 @@ def list_agents():
 
 @router.get("/agent-stats")
 def agent_stats():
-    """Return aggregate transcript/landmark counts for every agent."""
+    """Return aggregate transcript counts for every agent."""
     agents_dir = settings.agents_dir
     if not agents_dir.exists():
         return []
@@ -315,7 +268,6 @@ def agent_stats():
         customer_dirs = [d for d in agent_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
         total_calls = 0
         total_transcripts = 0
-        total_landmarks = 0
         customers_with_data = 0
         for cust_dir in customer_dirs:
             call_dirs = [d for d in cust_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
@@ -323,8 +275,6 @@ def agent_stats():
                 total_calls += 1
                 if (call_dir / "transcribed" / "llm_final" / "smoothed.txt").exists():
                     total_transcripts += 1
-                if (call_dir / "transcribed" / "llm_final" / "landmarks.json").exists():
-                    total_landmarks += 1
             if any((d / "transcribed" / "llm_final" / "smoothed.txt").exists()
                    for d in call_dirs):
                 customers_with_data += 1
@@ -335,14 +285,13 @@ def agent_stats():
             "customers_with_data": customers_with_data,
             "total_calls": total_calls,
             "total_transcripts": total_transcripts,
-            "total_landmarks": total_landmarks,
         })
     return results
 
 
 @router.get("/customer-stats")
 def customer_stats(agent: str = Query(...)):
-    """Return per-customer transcript/landmark counts for a given agent."""
+    """Return per-customer transcript counts for a given agent."""
     agent_dir = settings.agents_dir / agent
     if not agent_dir.exists():
         return []
@@ -353,12 +302,10 @@ def customer_stats(agent: str = Query(...)):
         call_dirs = [d for d in cust_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
         total = len(call_dirs)
         transcripts = sum(1 for d in call_dirs if (d / "transcribed" / "llm_final" / "smoothed.txt").exists())
-        landmarks = sum(1 for d in call_dirs if (d / "transcribed" / "llm_final" / "landmarks.json").exists())
         results.append({
             "customer": cust_dir.name,
             "total_calls": total,
             "transcripts": transcripts,
-            "landmarks": landmarks,
         })
     return results
 
@@ -375,94 +322,33 @@ def list_customers(agent: str = Query(...)):
 def get_status(agent: str = Query(...), customer: str = Query(...)):
     pair_dir = settings.agents_dir / agent / customer
     if not pair_dir.exists():
-        return {"total": 0, "transcripts": 0, "landmarks": 0, "calls": []}
+        return {"total": 0, "transcripts": 0, "calls": []}
 
     calls_meta = _load_calls_meta(pair_dir)
     call_dirs = sorted([d for d in pair_dir.iterdir() if d.is_dir() and not d.name.startswith("_")])
 
-    calls_info, transcript_count, landmark_count = [], 0, 0
+    calls_info, transcript_count = [], 0
     for call_dir in call_dirs:
         has_t = (call_dir / "transcribed" / "llm_final" / "smoothed.txt").exists()
-        has_l = (call_dir / "transcribed" / "llm_final" / "landmarks.json").exists()
         if has_t:
             transcript_count += 1
-        if has_l:
-            landmark_count += 1
         meta = calls_meta.get(call_dir.name, {})
         calls_info.append({
             "call_id": call_dir.name,
             "has_transcript": has_t,
-            "has_landmarks": has_l,
             "started_at": meta.get("started_at", ""),
             "duration_s": meta.get("duration_s", 0),
         })
 
-    return {"total": len(calls_info), "transcripts": transcript_count, "landmarks": landmark_count, "calls": calls_info}
+    return {"total": len(calls_info), "transcripts": transcript_count, "calls": calls_info}
 
 
-# ── Prepare (landmark annotation only) ────────────────────────────────────────
-
-class PrepareRequest(BaseModel):
-    agent: str
-    customer: str
-    model: str = "grok-4.20-0309-non-reasoning"
-    extra_prompt: str = ""
-    force: bool = False
-
-
-@router.post("/prepare")
-def prepare_pair(req: PrepareRequest, background_tasks: BackgroundTasks):
-    pair_dir = settings.agents_dir / req.agent / req.customer
-    if not pair_dir.exists():
-        raise HTTPException(404, "Agent/customer pair not found")
-
-    call_dirs = [d for d in sorted(pair_dir.iterdir()) if d.is_dir() and not d.name.startswith("_")]
-    targets = []
-    for call_dir in call_dirs:
-        smoothed = call_dir / "transcribed" / "llm_final" / "smoothed.txt"
-        landmarks = call_dir / "transcribed" / "llm_final" / "landmarks.json"
-        if smoothed.exists() and (not landmarks.exists() or req.force):
-            targets.append((call_dir.name, smoothed))
-
-    if not targets:
-        return {"ok": True, "queued": 0, "msg": "No calls need landmark annotation"}
-
-    run_id = str(uuid.uuid4())[:8]
-
-    def _run_bg():
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from ui.backend.database import engine
-        from ui.backend.routers.deep_dive import _annotate_call
-        from sqlmodel import Session as _Session
-
-        def _one(item):
-            call_id, smoothed = item
-            with _Session(engine) as db:
-                return _annotate_call(smoothed, req.agent, req.customer, call_id, req.model, run_id, db, req.extra_prompt or None)
-
-        total = 0
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            for fut in as_completed({pool.submit(_one, t): t for t in targets}):
-                try:
-                    total += fut.result()
-                except Exception as e:
-                    print(f"[agent_comparison] prepare worker: {e}")
-        print(f"[agent_comparison] prepare {run_id}: {total} markers for {len(targets)} calls")
-
-    background_tasks.add_task(_run_bg)
-    return {"ok": True, "run_id": run_id, "queued": len(targets)}
-
-
-# ── Quick Run (full EL → smooth → landmarks for all selected pairs) ────────────
+# ── Quick Run (full EL → smooth for all selected pairs) ───────────────────────
 
 class QuickRunRequest(BaseModel):
     pairs: list[dict]               # [{agent, customer}]
     smooth_model: str = "gpt-5.4"
-    run_landmarks: bool = True
-    landmarks_model: str = "grok-4.20-0309-non-reasoning"
-    landmarks_prompt: str = ""
     force: bool = False             # re-run EL transcription + smooth
-    force_landmarks: bool = False   # re-run landmark annotation
 
 
 @router.post("/quick-run")
@@ -478,9 +364,6 @@ def quick_run_pairs(req: QuickRunRequest, background_tasks: BackgroundTasks):
 
     def _run():
         from ui.backend.routers.quick import _transcribe_call, _smooth_call, _s3_presigned_url
-        from ui.backend.routers.deep_dive import _annotate_call
-        from ui.backend.database import engine
-        from sqlmodel import Session as _Session
 
         for pair in req.pairs:
             agent = pair.get("agent", "")
@@ -516,20 +399,17 @@ def quick_run_pairs(req: QuickRunRequest, background_tasks: BackgroundTasks):
                 _quick_run_status[run_id]["done"] += 1
                 continue
 
-            dd_run_id = str(uuid.uuid4())[:8]
-
             for call in calls:
                 call_id = str(call.get("call_id", ""))
                 record_path = call.get("record_path", "")
                 if not call_id:
                     continue
 
-                call_dir    = pair_dir / call_id
-                source_dir  = call_dir / "transcribed" / "source_1"
-                el_json     = source_dir / "elevenlabs" / "original.json"
-                llm_dir     = call_dir / "transcribed" / "llm_final"
-                smoothed    = llm_dir / "smoothed.txt"
-                landmarks   = llm_dir / "landmarks.json"
+                call_dir   = pair_dir / call_id
+                source_dir = call_dir / "transcribed" / "source_1"
+                el_json    = source_dir / "elevenlabs" / "original.json"
+                llm_dir    = call_dir / "transcribed" / "llm_final"
+                smoothed   = llm_dir / "smoothed.txt"
 
                 # Step 1 — EL transcription
                 if not el_json.exists() or req.force:
@@ -551,18 +431,6 @@ def quick_run_pairs(req: QuickRunRequest, background_tasks: BackgroundTasks):
                     except Exception as e:
                         print(f"[quick_run] smooth {call_id}: {e}")
 
-                # Step 3 — Landmarks
-                if req.run_landmarks and smoothed.exists() and (not landmarks.exists() or req.force_landmarks):
-                    try:
-                        with _Session(engine) as db:
-                            _annotate_call(
-                                smoothed, agent, customer, call_id,
-                                req.landmarks_model, dd_run_id, db,
-                                req.landmarks_prompt or None,
-                            )
-                    except Exception as e:
-                        print(f"[quick_run] landmarks {call_id}: {e}")
-
             _quick_run_status[run_id]["done"] += 1
 
         _quick_run_status[run_id]["current"] = ""
@@ -581,7 +449,7 @@ def quick_run_status(run_id: str = Query(...)):
     return status
 
 
-# ── Upload (two files per pair: transcript + landmarks) ────────────────────────
+# ── Upload (transcript per pair) ──────────────────────────────────────────────
 
 class UploadRequest(BaseModel):
     agent: str
@@ -640,24 +508,8 @@ def upload_pair(req: UploadRequest, db: Session = Depends(get_session)):
         ))
         result["transcript"] = {"xai_file_id": xai_id_t, "filename": filename_t}
 
-    # Upload landmarks file
-    landmarks_content = _build_landmarks_content(req.agent, req.customer)
-    if landmarks_content:
-        filename_l = f"{safe_a}__{safe_c}__landmarks.txt"
-        xai_id_l = _upload_file_to_xai(landmarks_content, filename_l, api_key)
-        db.add(ComparisonFile(
-            id=str(uuid.uuid4()),
-            agent=req.agent,
-            customer=req.customer,
-            file_type="landmarks",
-            xai_file_id=xai_id_l,
-            filename=filename_l,
-            uploaded_at=now,
-        ))
-        result["landmarks"] = {"xai_file_id": xai_id_l, "filename": filename_l}
-
-    if not transcript_content and not landmarks_content:
-        raise HTTPException(400, "No transcript or landmark data found for this pair")
+    if not transcript_content:
+        raise HTTPException(400, "No transcript data found for this pair")
 
     db.commit()
     return result
@@ -737,11 +589,9 @@ def query_comparison(req: QueryRequest, db: Session = Depends(get_session)):
             )
         ).all()
         if rows:
-            # Add both transcript and landmarks files, transcripts first
-            for ft in ("transcript", "landmarks"):
-                for r in rows:
-                    if r.file_type == ft:
-                        file_ids.append(r.xai_file_id)
+            for r in rows:
+                if r.file_type == "transcript":
+                    file_ids.append(r.xai_file_id)
         else:
             missing.append(f"{agent} / {customer}")
 
