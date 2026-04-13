@@ -74,8 +74,6 @@ function SystemNotesPanel({ notes }: { notes: string }) {
     const result: { title: string; body: string }[] = [];
     let cur: { title: string; lines: string[] } | null = null;
     for (const line of lines) {
-      const m = line.match(/^#+\s+System Note\s*[–-]\s*(.+)$/i)
-               ?? line.match(/^---\s*$/) && null;
       if (line.match(/^#+\s+System Note\s*[–-]\s*/i)) {
         if (cur) result.push({ title: cur.title, body: cur.lines.join("\n").trim() });
         const title = line.replace(/^#+\s+System Note\s*[–-]\s*/i, "").trim();
