@@ -84,9 +84,9 @@ interface PersonaScores {
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
 function slotChartKey(p: Persona, idx: number): string {
-  const base = p.label
-    ? p.label.split("·")[0].trim().slice(0, 18)
-    : p.agent.split(" ").slice(0, 2).join(" ");
+  // Use customer name as the differentiator (all compared personas share the same agent/preset).
+  // Fall back to agent name if customer is absent.
+  const base = (p.customer || p.agent).slice(0, 20);
   return `${base} (${idx + 1})`;
 }
 
@@ -521,10 +521,10 @@ export default function ComparisonPage() {
                               {typeLabel(p.type)}
                             </span>
                             <div className="flex-1 min-w-0">
-                              <p className="text-xs text-white truncate">{p.label ?? p.agent}</p>
+                              <p className="text-xs text-white truncate">{p.agent}</p>
                               <p className="text-[10px] text-gray-500 truncate">
+                                {p.customer && <span className="text-gray-400">{p.customer} · </span>}
                                 {p.model.split("/").pop()} · {fmtDate(p.created_at)}
-                                {p.customer ? ` · ${p.customer}` : ""}
                                 {p.version > 1 ? ` · v${p.version}` : ""}
                               </p>
                             </div>
