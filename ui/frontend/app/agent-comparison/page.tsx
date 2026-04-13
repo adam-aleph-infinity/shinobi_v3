@@ -425,7 +425,6 @@ export default function AgentComparisonPage() {
   const [queryModel, setQueryModel] = useState("grok-4.20-0309-reasoning");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [userPrompt, setUserPrompt] = useState("");
-  const [temperature, setTemperature] = useState(0.0);
   const [querying, setQuerying] = useState(false);
   const [response, setResponse] = useState("");
   const [displayResponse, setDisplayResponse] = useState("");  // may be reformatted
@@ -597,7 +596,7 @@ export default function AgentComparisonPage() {
       const r = await fetch("/api/agent-comparison/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairs: pairsWithFiles, system_prompt: systemPrompt, user_prompt: userPrompt, model: queryModel, temperature }),
+        body: JSON.stringify({ pairs: pairsWithFiles, system_prompt: systemPrompt, user_prompt: userPrompt, model: queryModel, temperature: 0 }),
       });
       const text = await r.text();
       let data: any;
@@ -620,7 +619,7 @@ export default function AgentComparisonPage() {
       await fetch("/api/agent-comparison/presets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: presetName, model: queryModel, system_prompt: systemPrompt, user_prompt: userPrompt, temperature }),
+        body: JSON.stringify({ name: presetName, model: queryModel, system_prompt: systemPrompt, user_prompt: userPrompt, temperature: 0 }),
       });
       await mutatePresets();
       setPresetName("");
@@ -860,17 +859,6 @@ export default function AgentComparisonPage() {
                 className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
                 {GROK_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
-            </div>
-
-            {/* Temperature */}
-            <div className="w-32">
-              <label className="block text-xs text-gray-500 mb-1">Temperature — {temperature.toFixed(1)}</label>
-              <input
-                type="range" min={0} max={1} step={0.1}
-                value={temperature}
-                onChange={e => setTemperature(parseFloat(e.target.value))}
-                className="w-full accent-indigo-500"
-              />
             </div>
 
             {/* Presets */}

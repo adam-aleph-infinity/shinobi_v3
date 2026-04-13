@@ -55,7 +55,8 @@ class LLMClient:
             skip_temp = any(model.lower().startswith(p) for p in _REASONING_PREFIXES)
             kwargs = {"model": model, "messages": messages}
             if not skip_temp:
-                kwargs["temperature"] = temperature
+                kwargs["temperature"] = 0
+                kwargs["seed"] = 12345
             if max_tokens is not None:
                 kwargs["max_completion_tokens"] = max_tokens
             return self.client.chat.completions.create(**kwargs)

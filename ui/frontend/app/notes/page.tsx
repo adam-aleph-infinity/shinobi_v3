@@ -96,38 +96,17 @@ function providerFor(model: string) {
   return "OpenAI";
 }
 
-// ── Temperature selector ─────────────────────────────────────────────────────
-
-const TEMP_OPTIONS = [0, 0.25, 0.5, 0.75] as const;
-
-function TempSelector({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="flex gap-1">
-      {TEMP_OPTIONS.map(t => (
-        <button key={t} type="button" onClick={() => onChange(t)}
-          className={cn("flex-1 py-1.5 rounded text-xs font-mono transition-colors",
-            Math.abs(value - t) < 0.001
-              ? "bg-indigo-600 text-white font-semibold"
-              : "bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700"
-          )}>
-          {t.toFixed(2)}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 // ── Notes Agent panel ─────────────────────────────────────────────────────────
 // Single-purpose agent — its own preset storage at /api/notes/agents
 
 function NotesAgentPanel({
   name, onNameChange,
-  model, temp, system, prompt,
-  onModel, onTemp, onSystem, onPrompt,
+  model, system, prompt,
+  onModel, onSystem, onPrompt,
 }: {
   name: string; onNameChange: (v: string) => void;
-  model: string; temp: number; system: string; prompt: string;
-  onModel: (v: string) => void; onTemp: (v: number) => void;
+  model: string; system: string; prompt: string;
+  onModel: (v: string) => void;
   onSystem: (v: string) => void; onPrompt: (v: string) => void;
 }) {
   const [agents, setAgents] = useState<NotesAgent[]>([]);
@@ -149,14 +128,13 @@ function NotesAgentPanel({
     const changed =
       model !== loadedSnapshot.model ||
       system !== loadedSnapshot.system_prompt ||
-      prompt !== loadedSnapshot.user_prompt ||
-      Math.abs(temp - loadedSnapshot.temperature) > 0.001;
+      prompt !== loadedSnapshot.user_prompt;
     if (changed) {
       onNameChange(`${loadedSnapshot.name} (copy)`);
       setLoadedFrom(null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, temp, system, prompt]);
+  }, [model, system, prompt]);
 
   const autoSuggest = `${providerFor(model)} Notes Agent`;
 
@@ -166,7 +144,7 @@ function NotesAgentPanel({
     await fetch(`${API}/notes/agents`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: saveName, model, temperature: temp,
+        name: saveName, model, temperature: 0,
         system_prompt: system, user_prompt: prompt,
         is_default: false,
       }),
@@ -177,7 +155,7 @@ function NotesAgentPanel({
   };
 
   const loadAgent = (p: NotesAgent) => {
-    onModel(p.model); onTemp(p.temperature);
+    onModel(p.model);
     onSystem(p.system_prompt); onPrompt(p.user_prompt);
     onNameChange(p.name);
     setLoadedFrom(p.name);
@@ -234,9 +212,7 @@ function NotesAgentPanel({
                   <span className="text-xs font-medium text-gray-200 group-hover:text-white">
                     {p.is_default && <span className="text-yellow-400 mr-1">★</span>}{p.name}
                   </span>
-                  <span className="text-[10px] text-gray-600 ml-2">
-                    {p.model} · {p.temperature.toFixed(2)}
-                  </span>
+                  <span className="text-[10px] text-gray-600 ml-2">{p.model}</span>
                 </button>
                 <button
                   onClick={async () => {
@@ -265,7 +241,7 @@ function NotesAgentPanel({
           className="w-full flex items-center gap-2 text-[11px] text-gray-600 hover:text-gray-400 transition-colors pt-0.5">
           <span className="text-indigo-400/70 font-medium">{providerFor(model)}</span>
           <span>·</span>
-          <span>{model} · {temp.toFixed(2)}</span>
+          <span>{model}</span>
           <span className="ml-auto">{configOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}</span>
         </button>
       </div>
@@ -279,10 +255,6 @@ function NotesAgentPanel({
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500">
               {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
-          </div>
-          <div>
-            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Temperature</label>
-            <TempSelector value={temp} onChange={onTemp} />
           </div>
           <div>
             <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">System Prompt</label>
@@ -342,7 +314,6 @@ export default function NotesPage() {
   // Notes agent config
   const [agentName, setAgentName] = useState("");
   const [model, setModel]         = useState("gpt-5.4");
-  const [temp, setTemp]           = useState(0);
   const [system, setSystem]       = useState(DEFAULT_SYSTEM);
   const [prompt, setPrompt]       = useState(DEFAULT_PROMPT);
 
@@ -393,7 +364,7 @@ export default function NotesPage() {
         const def = presets.find(p => p.is_default) ?? presets[0];
         if (def) {
           setAgentName(def.name);
-          setModel(def.model); setTemp(def.temperature);
+          setModel(def.model);
           setSystem(def.system_prompt); setPrompt(def.user_prompt);
         }
       })
@@ -489,7 +460,7 @@ export default function NotesPage() {
               call_id:        call.call_id,
               notes_agent_id: agentName.trim() || undefined,
               model,
-              temperature:    temp,
+              temperature:    0,
               system_prompt:  system,
               user_prompt:    prompt,
             }),
@@ -691,8 +662,8 @@ export default function NotesPage() {
         {/* Notes Agent panel */}
         <NotesAgentPanel
           name={agentName} onNameChange={setAgentName}
-          model={model} temp={temp} system={system} prompt={prompt}
-          onModel={setModel} onTemp={setTemp} onSystem={setSystem} onPrompt={setPrompt}
+          model={model} system={system} prompt={prompt}
+          onModel={setModel} onSystem={setSystem} onPrompt={setPrompt}
         />
 
         {/* Run section */}

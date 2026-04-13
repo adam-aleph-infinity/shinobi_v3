@@ -229,32 +229,6 @@ const MD: any = {
   td:   ({ children }: any) => <td>{children}</td>,
 };
 
-// ── Temperature selector (4 fixed steps: 0, 0.25, 0.5, 0.75) ─────────────────
-
-const TEMP_OPTIONS = [0, 0.25, 0.5, 0.75] as const;
-
-function TempSelector({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="flex gap-1">
-      {TEMP_OPTIONS.map(t => (
-        <button
-          key={t}
-          type="button"
-          onClick={() => onChange(t)}
-          className={cn(
-            "flex-1 py-1.5 rounded text-xs font-mono transition-colors",
-            Math.abs(value - t) < 0.001
-              ? "bg-indigo-600 text-white font-semibold"
-              : "bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700"
-          )}
-        >
-          {t.toFixed(2)}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 // ── Persona Agent panel ───────────────────────────────────────────────────────
 
 function providerFor(model: string): string {
@@ -266,14 +240,14 @@ function providerFor(model: string): string {
 
 function PersonaAgentPanel({
   name, onNameChange, onNameEdit,
-  genModel, genTemp, genSystem, genPrompt,
-  scoreModel, scoreTemp, scoreSystem, scorePrompt,
+  genModel, genSystem, genPrompt,
+  scoreModel, scoreSystem, scorePrompt,
   onLoad,
   children,
 }: {
   name: string; onNameChange: (v: string) => void; onNameEdit: () => void;
-  genModel: string; genTemp: number; genSystem: string; genPrompt: string;
-  scoreModel: string; scoreTemp: number; scoreSystem: string; scorePrompt: string;
+  genModel: string; genSystem: string; genPrompt: string;
+  scoreModel: string; scoreSystem: string; scorePrompt: string;
   onLoad: (p: AnalyzerPreset) => void;
   children: React.ReactNode;
 }) {
@@ -301,15 +275,13 @@ function PersonaAgentPanel({
       genPrompt  !== loadedSnapshot.gen_user_prompt   ||
       scoreModel !== loadedSnapshot.score_model  ||
       scoreSystem !== loadedSnapshot.score_system_prompt ||
-      scorePrompt !== loadedSnapshot.score_user_prompt  ||
-      Math.abs(genTemp   - loadedSnapshot.gen_temperature)   > 0.001 ||
-      Math.abs(scoreTemp - loadedSnapshot.score_temperature) > 0.001;
+      scorePrompt !== loadedSnapshot.score_user_prompt;
     if (changed) {
       onNameChange(`${loadedSnapshot.name} (copy)`);
       setLoadedFrom(null); // hide the "loaded from" hint — user is now diverging
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [genModel, genTemp, genSystem, genPrompt, scoreModel, scoreTemp, scoreSystem, scorePrompt]);
+  }, [genModel, genSystem, genPrompt, scoreModel, scoreSystem, scorePrompt]);
 
   // Auto-suggest name based on provider when no name set
   const autoSuggest = `${providerFor(genModel)} Analyzer`;
@@ -322,9 +294,9 @@ function PersonaAgentPanel({
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: saveName,
-        gen_model: genModel, gen_temperature: genTemp,
+        gen_model: genModel, gen_temperature: 0,
         gen_system_prompt: genSystem, gen_user_prompt: genPrompt,
-        score_model: scoreModel, score_temperature: scoreTemp,
+        score_model: scoreModel, score_temperature: 0,
         score_system_prompt: scoreSystem, score_user_prompt: scorePrompt,
         is_default: false,
       }),
@@ -407,7 +379,7 @@ function PersonaAgentPanel({
                     {p.is_default && <span className="text-yellow-400 mr-1">★</span>}{p.name}
                   </span>
                   <span className="text-[10px] text-gray-600 ml-2">
-                    {p.provider} · {p.gen_model} / {p.score_model} · {p.gen_temperature.toFixed(2)} / {p.score_temperature.toFixed(2)}
+                    {p.provider} · {p.gen_model} / {p.score_model}
                   </span>
                 </button>
                 <button
@@ -427,9 +399,9 @@ function PersonaAgentPanel({
         <div className="flex items-center gap-2 text-[11px] text-gray-600 flex-wrap pt-0.5">
           <span className="text-indigo-400/70 font-medium">{sameProvider ? genProvider : `${genProvider} / ${scoreProvider}`}</span>
           <span>·</span>
-          <span>Generator: {genModel} · {genTemp.toFixed(2)}</span>
+          <span>Generator: {genModel}</span>
           <span>·</span>
-          <span>Scorer: {scoreModel} · {scoreTemp.toFixed(2)}</span>
+          <span>Scorer: {scoreModel}</span>
         </div>
       </div>
 
@@ -450,10 +422,9 @@ function PersonaAgentPanel({
 
 // ── Config panel ───────────────────────────────────────────────────────────────
 
-function ConfigPanel({ title, color, model, onModel, temperature, onTemp, systemPrompt, onSystem, userPrompt, onUser }: {
+function ConfigPanel({ title, color, model, onModel, systemPrompt, onSystem, userPrompt, onUser }: {
   title: string; color: string;
   model: string; onModel: (v: string) => void;
-  temperature: number; onTemp: (v: number) => void;
   systemPrompt: string; onSystem: (v: string) => void;
   userPrompt: string; onUser: (v: string) => void;
 }) {
@@ -466,13 +437,6 @@ function ConfigPanel({ title, color, model, onModel, temperature, onTemp, system
           className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
           {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
-      </div>
-      <div>
-        <label className="block text-xs text-gray-500 mb-1">
-          Temperature · <span className="text-indigo-400 font-mono">{temperature.toFixed(2)}</span>
-          <span className="text-gray-600 ml-2 text-[10px]">{temperature === 0 ? "deterministic" : temperature <= 0.25 ? "focused" : temperature <= 0.5 ? "balanced" : "creative"}</span>
-        </label>
-        <TempSelector value={temperature} onChange={onTemp} />
       </div>
       <div>
         <label className="block text-xs text-gray-500 mb-1">System Prompt</label>
@@ -664,7 +628,6 @@ export default function FullPersonaAgentPage() {
 
   // Generator config
   const [genModel, setGenModel] = useState("gpt-5.4");
-  const [genTemp, setGenTemp] = useState(0.0);
   const [genSystem, setGenSystem] = useState(DEFAULT_GEN_SYSTEM);
   const [genPrompt, setGenPrompt] = useState(DEFAULT_GEN_PROMPT);
 
@@ -674,7 +637,6 @@ export default function FullPersonaAgentPage() {
 
   // Scorer config
   const [scoreModel, setScoreModel] = useState("gpt-5.4");
-  const [scoreTemp, setScoreTemp] = useState(0.0);
   const [scoreSystem, setScoreSystem] = useState(DEFAULT_SCORER_SYSTEM);
   const [scorePrompt, setScorePrompt] = useState(DEFAULT_SCORER_PROMPT);
 
@@ -761,11 +723,9 @@ export default function FullPersonaAgentPage() {
       const def = presets.find(p => p.is_default) ?? presets[0];
       if (def) {
         setGenModel(def.gen_model);
-        setGenTemp(def.gen_temperature);
         setGenSystem(def.gen_system_prompt);
         setGenPrompt(def.gen_user_prompt);
         setScoreModel(def.score_model);
-        setScoreTemp(def.score_temperature);
         setScoreSystem(def.score_system_prompt);
         setScorePrompt(def.score_user_prompt);
         setPresetName(def.name);
@@ -888,10 +848,10 @@ export default function FullPersonaAgentPage() {
     _upd({ running: true, progress: [], error: null, result: null });
     const body = {
       agent, customer, label,
-      generator_model: genModel, generator_temperature: genTemp,
+      generator_model: genModel, generator_temperature: 0,
       generator_system: genSystem, generator_prompt: genPrompt,
       generator_preset_name: presetName,
-      scorer_model: scoreModel, scorer_temperature: scoreTemp,
+      scorer_model: scoreModel, scorer_temperature: 0,
       scorer_system: scoreSystem, scorer_prompt: scorePrompt,
       use_file_upload: useFileUpload,
     };
@@ -1075,21 +1035,21 @@ export default function FullPersonaAgentPage() {
         {/* Persona Agent — wraps both config modules */}
         <PersonaAgentPanel
           name={presetName} onNameChange={setPresetName} onNameEdit={() => setPresetNameEdited(true)}
-          genModel={genModel} genTemp={genTemp} genSystem={genSystem} genPrompt={genPrompt}
-          scoreModel={scoreModel} scoreTemp={scoreTemp} scoreSystem={scoreSystem} scorePrompt={scorePrompt}
+          genModel={genModel} genSystem={genSystem} genPrompt={genPrompt}
+          scoreModel={scoreModel} scoreSystem={scoreSystem} scorePrompt={scorePrompt}
           onLoad={p => {
-            setGenModel(p.gen_model); setGenTemp(p.gen_temperature);
+            setGenModel(p.gen_model);
             setGenSystem(p.gen_system_prompt); setGenPrompt(p.gen_user_prompt);
-            setScoreModel(p.score_model); setScoreTemp(p.score_temperature);
+            setScoreModel(p.score_model);
             setScoreSystem(p.score_system_prompt); setScorePrompt(p.score_user_prompt);
           }}
         >
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <ConfigPanel title="Persona Generator" color="border-indigo-900/50"
-              model={genModel} onModel={setGenModel} temperature={genTemp} onTemp={setGenTemp}
+              model={genModel} onModel={setGenModel}
               systemPrompt={genSystem} onSystem={setGenSystem} userPrompt={genPrompt} onUser={setGenPrompt} />
             <ConfigPanel title="Persona Scorer" color="border-purple-900/50"
-              model={scoreModel} onModel={setScoreModel} temperature={scoreTemp} onTemp={setScoreTemp}
+              model={scoreModel} onModel={setScoreModel}
               systemPrompt={scoreSystem} onSystem={setScoreSystem} userPrompt={scorePrompt} onUser={setScorePrompt} />
           </div>
         </PersonaAgentPanel>
