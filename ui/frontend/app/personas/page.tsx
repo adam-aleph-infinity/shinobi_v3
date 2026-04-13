@@ -540,8 +540,8 @@ export default function PersonasPage() {
                     {persona.customer && (
                       <span className="text-sm text-gray-500">/ {persona.customer}</span>
                     )}
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-semibold ${TYPE_COLOR[persona.type] ?? TYPE_COLOR.agent_overall}`}>
-                      {persona.type.replace(/_/g, " ")}
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-semibold ${TYPE_COLOR[persona.type ?? "pair"] ?? TYPE_COLOR.agent_overall}`}>
+                      {(persona.type ?? "pair").replace(/_/g, " ")}
                     </span>
                     {persona.version > 1 && (
                       <span className="text-[10px] text-gray-600 bg-gray-800 px-1.5 py-0.5 rounded">v{persona.version}</span>
