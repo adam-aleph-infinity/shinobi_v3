@@ -248,19 +248,35 @@ def _upload_and_call_openai(
     print(f"[fpa/openai] payload → model={model} temp={temperature} file_id={file_id}")
     print(f"[fpa/openai] system (instructions): {system[:300]!r}")
     print(f"[fpa/openai] user_prompt: {user_prompt[:500]!r}")
-    response = client.responses.create(
-        model=model,
-        instructions=system,
-        input=[{
-            "role": "user",
-            "content": [
-                {"type": "input_file", "file_id": file_id},
-                {"type": "input_text", "text": user_prompt.strip()},
-            ],
-        }],
-        temperature=temperature,
-    )
-    return response.output_text
+    try:
+        response = client.responses.create(
+            model=model,
+            instructions=system,
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_file", "file_id": file_id},
+                    {"type": "input_text", "text": user_prompt.strip()},
+                ],
+            }],
+            temperature=temperature,
+        )
+        return response.output_text
+    except Exception as e:
+        err_str = str(e)
+        if "api.responses.write" in err_str or "401" in err_str or "insufficient permissions" in err_str.lower():
+            print(f"[fpa/openai] Responses API unavailable ({e}), falling back to chat completion with inline transcript")
+            full_user = f"{user_prompt.strip()}\n\n{transcript}"
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": full_user},
+                ],
+                temperature=temperature,
+            )
+            return resp.choices[0].message.content or ""
+        raise
 
 
 
