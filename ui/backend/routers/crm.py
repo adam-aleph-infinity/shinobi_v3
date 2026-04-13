@@ -58,7 +58,9 @@ def get_pairs(
         if ftd_after:
             stmt = stmt.where(CRMPair.ftd_at >= ftd_after)
         if ftd_before:
-            stmt = stmt.where(CRMPair.ftd_at <= ftd_before)
+            # ftd_at is stored as a full ISO datetime string (e.g. "2025-01-15T10:30:45Z")
+            # appending T23:59:59 ensures date-only input includes the full day
+            stmt = stmt.where(CRMPair.ftd_at <= ftd_before + "T23:59:59")
 
         # Per-agent aggregate deposit filter via subquery
         if min_agent_deposits or max_agent_deposits:

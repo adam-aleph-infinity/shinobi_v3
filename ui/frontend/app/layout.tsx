@@ -4,7 +4,7 @@ import SidebarLayout from "@/components/layout/SidebarLayout";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "Shinobi V2",
+  title: "Shinobi V3",
   description: "Call Intelligence Platform",
   icons: {
     icon: "/favicon.png",

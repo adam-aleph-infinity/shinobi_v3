@@ -174,6 +174,7 @@ def _run_sync(q: queue.Queue) -> None:
                             nd = acc.get("total_net_deposits")
                             td = acc.get("total_deposits")
                             tw = acc.get("total_withdrawals")
+                            ftd = acc.get("ftd_at")
                             if nd is None and td is None and tw is None:
                                 continue  # no deposit data (missing session cookie?)
 
@@ -206,6 +207,9 @@ def _run_sync(q: queue.Queue) -> None:
                                     changed = True
                                 if tw is not None:
                                     existing["total_withdrawals"] = tw
+                                    changed = True
+                                if ftd is not None:
+                                    existing["ftd_at"] = ftd
                                     changed = True
                                 if changed:
                                     existing["last_synced_at"] = now_str
@@ -440,6 +444,7 @@ def _run_sync(q: queue.Queue) -> None:
                     nd = p.get("net_deposits")
                     td = p.get("total_deposits")
                     tw = p.get("total_withdrawals")
+                    ftd_at = p.get("ftd_at")
 
                     if pair:
                         pair.call_count = call_count
@@ -450,6 +455,8 @@ def _run_sync(q: queue.Queue) -> None:
                             pair.total_deposits = td
                         if tw is not None:
                             pair.total_withdrawals = tw
+                        if ftd_at is not None:
+                            pair.ftd_at = ftd_at
                         pair.last_synced_at = now
                         db.add(pair)
                         db_updated += 1
@@ -465,6 +472,7 @@ def _run_sync(q: queue.Queue) -> None:
                             net_deposits=float(nd) if nd is not None else 0.0,
                             total_deposits=float(td) if td is not None else 0.0,
                             total_withdrawals=float(tw) if tw is not None else 0.0,
+                            ftd_at=ftd_at,
                             last_synced_at=now,
                         ))
                         db_created += 1

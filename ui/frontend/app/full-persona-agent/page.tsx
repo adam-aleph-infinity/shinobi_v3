@@ -498,6 +498,10 @@ export default function FullPersonaAgentPage() {
   // File upload toggle (default on — toggle disables to text-paste)
   const [useFileUpload, setUseFileUpload] = useState(true);
 
+  // Cached file IDs for the selected pair (provider → {file_id, content_hash, uploaded_at})
+  interface FileIdEntry { file_id: string; content_hash: string; uploaded_at: string; }
+  const [fileIds, setFileIds] = useState<Record<string, FileIdEntry>>({});
+
   // Run state — initialised from module-level store so navigation-away + back restores it
   const [running, setRunning] = useState(() => _astore.running);
   const [progress, setProgress] = useState<SSEProgress[]>(() => _astore.progress);
@@ -590,6 +594,15 @@ export default function FullPersonaAgentPage() {
     fetch(`${API}/full-persona-agent/customer-stats?agent=${encodeURIComponent(agent)}`)
       .then(r => r.json()).then(d => { setCustomerStats(d); setCustomer(""); });
   }, [agent]);
+
+  // Load cached file IDs when pair is fully selected
+  useEffect(() => {
+    if (!agent || !customer) { setFileIds({}); return; }
+    fetch(`${API}/full-persona-agent/file-ids?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}`)
+      .then(r => r.json())
+      .then(d => setFileIds(d && typeof d === "object" && !d.detail ? d : {}))
+      .catch(() => setFileIds({}));
+  }, [agent, customer]);
 
   const agentStat = agentStats.find(s => s.agent === agent);
   const customerStat = customerStats.find(s => s.customer === customer);
@@ -875,6 +888,22 @@ export default function FullPersonaAgentPage() {
             systemPrompt={scoreSystem} onSystem={setScoreSystem} userPrompt={scorePrompt} onUser={setScorePrompt}
             presetType="scorer" />
         </div>
+
+        {/* Cached file IDs */}
+        {Object.keys(fileIds).length > 0 && (
+          <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-3">
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Cached file uploads</p>
+            <div className="space-y-1">
+              {Object.entries(fileIds).map(([provider, entry]) => (
+                <div key={provider} className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-400 w-16 shrink-0 capitalize">{provider}</span>
+                  <code className="text-indigo-300 font-mono truncate flex-1">{entry.file_id}</code>
+                  <span className="text-gray-600 shrink-0">{entry.uploaded_at ? new Date(entry.uploaded_at).toLocaleDateString() : ""}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Analyze button + file upload toggle */}
         <div className="flex flex-col items-center gap-3">

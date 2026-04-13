@@ -704,6 +704,14 @@ def customer_stats_fpa(agent: str = Query(...)):
     return results
 
 
+@router.get("/file-ids")
+def get_file_ids(agent: str = Query(...), customer: str = Query(...)):
+    """Return cached file IDs for this pair (provider → {file_id, uploaded_at, content_hash})."""
+    pair_dir = settings.agents_dir / agent / customer
+    cache = _load_file_id_cache(pair_dir)
+    return cache
+
+
 @router.get("/transcript-info")
 def transcript_info(agent: str = Query(...), customer: str = Query(...)):
     pair_dir = settings.agents_dir / agent / customer
