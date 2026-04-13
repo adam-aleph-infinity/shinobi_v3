@@ -22,6 +22,7 @@ const navItems: NavItem[] = [
   { href: "/crm",               icon: Users,     label: "CRM Browser" },
   { href: "/full-persona-agent",icon: Bot,       label: "Full Persona Agent" },
   { href: "/personas",          icon: FileText,  label: "Personas" },
+  { href: "/comparison",        icon: BarChart3, label: "Compare Personas" },
   { href: "/agent-comparison",  icon: BarChart3, label: "Compare Agents" },
   { href: "/agent-dashboard",   icon: BarChart3, label: "Agent Dashboard" },
   { href: "/calls",             icon: FileText,  label: "Calls" },
