@@ -282,12 +282,36 @@ function PersonaAgentPanel({
   const [agents, setAgents] = useState<AnalyzerPreset[]>([]);
   const [showList, setShowList] = useState(false);
   const [loadedFrom, setLoadedFrom] = useState<string | null>(null);
+  // Snapshot of the config at the moment a preset was loaded, used to detect changes
+  const [loadedSnapshot, setLoadedSnapshot] = useState<AnalyzerPreset | null>(null);
+  // True only when the user manually typed in the name input (stops auto-rename)
+  const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
 
   const reload = useCallback(async () => {
     const r = await fetch(`${API}/full-persona-agent/presets/analyzer`);
     if (r.ok) setAgents(await r.json());
   }, []);
   useEffect(() => { reload(); }, [reload]);
+
+  // When any config field changes after a preset was loaded, and the user hasn't
+  // manually renamed it, auto-append " (copy)" to signal a new agent is forming.
+  useEffect(() => {
+    if (!loadedSnapshot || nameManuallyEdited) return;
+    const changed =
+      genModel   !== loadedSnapshot.gen_model   ||
+      genSystem  !== loadedSnapshot.gen_system_prompt ||
+      genPrompt  !== loadedSnapshot.gen_user_prompt   ||
+      scoreModel !== loadedSnapshot.score_model  ||
+      scoreSystem !== loadedSnapshot.score_system_prompt ||
+      scorePrompt !== loadedSnapshot.score_user_prompt  ||
+      Math.abs(genTemp   - loadedSnapshot.gen_temperature)   > 0.001 ||
+      Math.abs(scoreTemp - loadedSnapshot.score_temperature) > 0.001;
+    if (changed) {
+      onNameChange(`${loadedSnapshot.name} (copy)`);
+      setLoadedFrom(null); // hide the "loaded from" hint — user is now diverging
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [genModel, genTemp, genSystem, genPrompt, scoreModel, scoreTemp, scoreSystem, scorePrompt]);
 
   // Auto-suggest name based on provider when no name set
   const autoSuggest = `${providerFor(genModel)} Analyzer`;
@@ -308,16 +332,18 @@ function PersonaAgentPanel({
       }),
     });
     onNameChange(saveName); onNameEdit();
-    setLoadedFrom(null);
+    setLoadedFrom(null); setLoadedSnapshot(null); setNameManuallyEdited(false);
     reload();
   };
 
   const loadAgent = (p: AnalyzerPreset) => {
     onLoad(p);
-    // Suggest a new name so editing creates a distinct agent (not overwriting original)
-    onNameChange(`${p.name} (copy)`);
+    // Keep the original name — only rename to (copy) if config actually changes
+    onNameChange(p.name);
     onNameEdit();
     setLoadedFrom(p.name);
+    setLoadedSnapshot(p);
+    setNameManuallyEdited(false);
     setShowList(false);
   };
 
@@ -340,7 +366,7 @@ function PersonaAgentPanel({
           <div className="flex gap-2">
             <input
               value={name}
-              onChange={e => { onNameChange(e.target.value); onNameEdit(); setLoadedFrom(null); }}
+              onChange={e => { onNameChange(e.target.value); onNameEdit(); setNameManuallyEdited(true); setLoadedFrom(null); }}
               placeholder={autoSuggest}
               onKeyDown={e => e.key === "Enter" && save()}
               className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
@@ -365,7 +391,7 @@ function PersonaAgentPanel({
               <p className="text-[11px] text-gray-600">Auto-suggested · type to override</p>
             )}
             {loadedFrom && (
-              <p className="text-[11px] text-amber-600">Loaded from <span className="text-amber-500">{loadedFrom}</span> · rename before saving to keep original</p>
+              <p className="text-[11px] text-emerald-700">Loaded: <span className="text-emerald-600">{loadedFrom}</span> · change any setting to create a copy</p>
             )}
           </div>
         </div>
