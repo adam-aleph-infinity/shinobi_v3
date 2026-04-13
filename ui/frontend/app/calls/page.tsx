@@ -35,13 +35,12 @@ export default function CallsPage() {
   const [customersCollapsed, setCustomersCollapsed] = useState(false);
   const [callsCollapsed, setCallsCollapsed]       = useState(false);
 
-  const [selectedAgent, _setSelectedAgent]       = useState(() => _css("selectedAgent"));
-  const [selectedCustomer, _setSelectedCustomer] = useState<Customer | null>(() => {
-    try { const v = _css("selectedCustomer"); return v ? JSON.parse(v) : null; } catch { return null; }
-  });
-  const [selectedCallId, _setSelectedCallId]     = useState(() => _css("selectedCallId"));
-  const [agentSearch, _setAgentSearch]           = useState(() => _css("agentSearch"));
-  const [customerSearch, _setCustomerSearch]     = useState(() => _css("customerSearch"));
+  // Start from safe defaults to match SSR; restored from sessionStorage post-mount
+  const [selectedAgent, _setSelectedAgent]       = useState("");
+  const [selectedCustomer, _setSelectedCustomer] = useState<Customer | null>(null);
+  const [selectedCallId, _setSelectedCallId]     = useState("");
+  const [agentSearch, _setAgentSearch]           = useState("");
+  const [customerSearch, _setCustomerSearch]     = useState("");
 
   const setSelectedAgent   = (v: string)          => { _setSelectedAgent(v);   _cssSet("selectedAgent",   v); };
   const setSelectedCustomer = (v: Customer | null) => { _setSelectedCustomer(v); _cssSet("selectedCustomer", v ? JSON.stringify(v) : ""); };
@@ -53,6 +52,15 @@ export default function CallsPage() {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
+
+  // Restore persisted state after mount (avoid SSR/hydration mismatch)
+  useEffect(() => {
+    _setSelectedAgent(_css("selectedAgent"));
+    try { const v = _css("selectedCustomer"); if (v) _setSelectedCustomer(JSON.parse(v)); } catch {}
+    _setSelectedCallId(_css("selectedCallId"));
+    _setAgentSearch(_css("agentSearch"));
+    _setCustomerSearch(_css("customerSearch"));
+  }, []);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
   const { data: agents } = useSWR<Agent[]>("/api/crm/nav/agents", fetcher);

@@ -78,17 +78,15 @@ export default function PersonasPage() {
   const [listCollapsed, setListCollapsed]           = useState(false);
 
   // Preset filter (persisted)
-  const [filterPreset, _setFilterPreset] = useState<string | null>(() => _pss("filterPreset") || null);
+  const [filterPreset, _setFilterPreset] = useState<string | null>(null);
   const setFilterPreset = (v: string | null) => { _setFilterPreset(v); _pssSet("filterPreset", v ?? ""); };
 
-  // Nav state (persisted)
-  const [selectedAgent, _setSelectedAgent]       = useState<string | null>(() => _pss("selectedAgent") || null);
-  const [selectedCustomer, _setSelectedCustomer] = useState<string | null>(() => _pss("selectedCustomer") || null);
-  const [agentSearch, _setAgentSearch]           = useState(() => _pss("agentSearch"));
-  const [customerSearch, _setCustomerSearch]     = useState(() => _pss("customerSearch"));
-  const [typeFilter, _setTypeFilter]             = useState<"" | "agent_overall" | "pair" | "customer">(() =>
-    (_pss("typeFilter") as "" | "agent_overall" | "pair" | "customer") || ""
-  );
+  // Nav state (persisted) — start from safe defaults to match SSR; restored post-mount
+  const [selectedAgent, _setSelectedAgent]       = useState<string | null>(null);
+  const [selectedCustomer, _setSelectedCustomer] = useState<string | null>(null);
+  const [agentSearch, _setAgentSearch]           = useState("");
+  const [customerSearch, _setCustomerSearch]     = useState("");
+  const [typeFilter, _setTypeFilter]             = useState<"" | "agent_overall" | "pair" | "customer">("");
 
   const setSelectedAgent   = (v: string | null) => { _setSelectedAgent(v);   _pssSet("selectedAgent",   v ?? ""); };
   const setSelectedCustomer = (v: string | null) => { _setSelectedCustomer(v); _pssSet("selectedCustomer", v ?? ""); };
@@ -96,13 +94,23 @@ export default function PersonasPage() {
   const setCustomerSearch  = (v: string)         => { _setCustomerSearch(v);  _pssSet("customerSearch",  v); };
   const setTypeFilter      = (v: "" | "agent_overall" | "pair" | "customer") => { _setTypeFilter(v); _pssSet("typeFilter", v); };
 
-  // Selection / tabs (persisted)
-  const [selectedId, _setSelectedId] = useState<string | null>(() => _pss("selectedId") || null);
-  const [activeTab, _setActiveTab]   = useState<"content" | "transcripts" | "prompts" | "score">(() =>
-    (_pss("activeTab") as "content" | "transcripts" | "prompts" | "score") || "content"
-  );
+  // Selection / tabs (persisted) — start from safe defaults; restored post-mount
+  const [selectedId, _setSelectedId] = useState<string | null>(null);
+  const [activeTab, _setActiveTab]   = useState<"content" | "transcripts" | "prompts" | "score">("content");
   const setSelectedId = (v: string | null) => { _setSelectedId(v); _pssSet("selectedId", v ?? ""); };
   const setActiveTab  = (v: "content" | "transcripts" | "prompts" | "score") => { _setActiveTab(v); _pssSet("activeTab", v); };
+
+  // Restore persisted state after mount (avoid SSR/hydration mismatch)
+  useEffect(() => {
+    _setFilterPreset(_pss("filterPreset") || null);
+    _setSelectedAgent(_pss("selectedAgent") || null);
+    _setSelectedCustomer(_pss("selectedCustomer") || null);
+    _setAgentSearch(_pss("agentSearch"));
+    _setCustomerSearch(_pss("customerSearch"));
+    _setTypeFilter((_pss("typeFilter") as "" | "agent_overall" | "pair" | "customer") || "");
+    _setSelectedId(_pss("selectedId") || null);
+    _setActiveTab((_pss("activeTab") as "content" | "transcripts" | "prompts" | "score") || "content");
+  }, []);
 
 
   // Delete

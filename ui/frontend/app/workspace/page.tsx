@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import useSWR from "swr";
 import { formatDate } from "@/lib/utils";
 import {
@@ -99,8 +99,11 @@ function _wss(k: string) { try { return sessionStorage.getItem(`ws_${k}`) ?? "";
 function _wssSet(k: string, v: string) { try { sessionStorage.setItem(`ws_${k}`, v); } catch {} }
 
 export default function WorkspacePage() {
-  const [browsePath, _setBrowsePath] = useState(() => _wss("browsePath"));
+  // Start from safe default; restored from sessionStorage post-mount
+  const [browsePath, _setBrowsePath] = useState("");
   const setBrowsePath = (v: string) => { _setBrowsePath(v); _wssSet("browsePath", v); };
+
+  useEffect(() => { _setBrowsePath(_wss("browsePath")); }, []);
   const [preview, setPreview] = useState<{ path: string; content: string; format: string } | null>(null);
   const [playingPath, setPlayingPath] = useState<string | null>(null);
   const [audio, setAudio] = useState<HTMLAudioElement | null>(null);

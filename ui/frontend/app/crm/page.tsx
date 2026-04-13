@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import { AgentCustomerPair, TxStats } from "@/lib/types";
 import { formatDuration } from "@/lib/utils";
@@ -54,19 +54,19 @@ function FilterInput({ label, value, onChange, type = "text", step, placeholder 
 }
 
 export default function CRMPage() {
-  // ── Filters (persisted to sessionStorage) ─────────────────────────────────
-  const [agentFilter, _setAgentFilter]       = useState(() => ssLoad().agentFilter    ?? "");
-  const [customerFilter, _setCustomerFilter] = useState(() => ssLoad().customerFilter ?? "");
-  const [crmFilter, _setCrmFilter]           = useState(() => ssLoad().crmFilter      ?? "");
-  const [minCalls, _setMinCalls]             = useState(() => ssLoad().minCalls       ?? "");
-  const [minDuration, _setMinDuration]       = useState(() => ssLoad().minDuration    ?? "");
-  const [minTx, _setMinTx]                   = useState(() => ssLoad().minTx          ?? "");
-  const [minDeposits, _setMinDeposits]       = useState(() => ssLoad().minDeposits    ?? "");
-  const [maxDeposits, _setMaxDeposits]       = useState(() => ssLoad().maxDeposits    ?? "");
-  const [minAgentDep, _setMinAgentDep]       = useState(() => ssLoad().minAgentDep    ?? "");
-  const [maxAgentDep, _setMaxAgentDep]       = useState(() => ssLoad().maxAgentDep    ?? "");
-  const [ftdAfter, _setFtdAfter]             = useState(() => ssLoad().ftdAfter       ?? "");
-  const [ftdBefore, _setFtdBefore]           = useState(() => ssLoad().ftdBefore      ?? "");
+  // ── Filters (persisted to sessionStorage) — start from safe defaults; restored post-mount
+  const [agentFilter, _setAgentFilter]       = useState("");
+  const [customerFilter, _setCustomerFilter] = useState("");
+  const [crmFilter, _setCrmFilter]           = useState("");
+  const [minCalls, _setMinCalls]             = useState("");
+  const [minDuration, _setMinDuration]       = useState("");
+  const [minTx, _setMinTx]                   = useState("");
+  const [minDeposits, _setMinDeposits]       = useState("");
+  const [maxDeposits, _setMaxDeposits]       = useState("");
+  const [minAgentDep, _setMinAgentDep]       = useState("");
+  const [maxAgentDep, _setMaxAgentDep]       = useState("");
+  const [ftdAfter, _setFtdAfter]             = useState("");
+  const [ftdBefore, _setFtdBefore]           = useState("");
   const ftdAfterRef  = useRef<HTMLInputElement>(null);
   const ftdBeforeRef = useRef<HTMLInputElement>(null);
 
@@ -83,9 +83,28 @@ export default function CRMPage() {
   function setFtdAfter(v: string)       { _setFtdAfter(v);       ssSave({ ftdAfter: v }); }
   function setFtdBefore(v: string)      { _setFtdBefore(v);      ssSave({ ftdBefore: v }); }
 
-  // ── Sort / selection (persisted) ───────────────────────────────────────────
-  const [sortKey, _setSortKey] = useState<SortKey>(() => (ssLoad().sortKey as SortKey) || "agent");
-  const [sortDir, _setSortDir] = useState<SortDir>(() => (ssLoad().sortDir as SortDir) || "asc");
+  // ── Sort / selection (persisted) — start from safe defaults; restored post-mount
+  const [sortKey, _setSortKey] = useState<SortKey>("agent");
+  const [sortDir, _setSortDir] = useState<SortDir>("asc");
+
+  // Restore all persisted filter + sort state after mount
+  useEffect(() => {
+    const s = ssLoad();
+    if (s.agentFilter)    _setAgentFilter(s.agentFilter);
+    if (s.customerFilter) _setCustomerFilter(s.customerFilter);
+    if (s.crmFilter)      _setCrmFilter(s.crmFilter);
+    if (s.minCalls)       _setMinCalls(s.minCalls);
+    if (s.minDuration)    _setMinDuration(s.minDuration);
+    if (s.minTx)          _setMinTx(s.minTx);
+    if (s.minDeposits)    _setMinDeposits(s.minDeposits);
+    if (s.maxDeposits)    _setMaxDeposits(s.maxDeposits);
+    if (s.minAgentDep)    _setMinAgentDep(s.minAgentDep);
+    if (s.maxAgentDep)    _setMaxAgentDep(s.maxAgentDep);
+    if (s.ftdAfter)       _setFtdAfter(s.ftdAfter);
+    if (s.ftdBefore)      _setFtdBefore(s.ftdBefore);
+    if (s.sortKey)        _setSortKey(s.sortKey as SortKey);
+    if (s.sortDir)        _setSortDir(s.sortDir as SortDir);
+  }, []);
 
   function setSortKey(k: SortKey) { _setSortKey(k); ssSave({ sortKey: k }); }
   function setSortDir(d: SortDir) { _setSortDir(d); ssSave({ sortDir: d }); }

@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import useSWR from "swr";
 import { Users, Phone, Clock, DollarSign, BarChart3, ChevronRight, Loader2, Search } from "lucide-react";
 
@@ -47,11 +47,17 @@ function _dss(k: string) { try { return sessionStorage.getItem(`dash_${k}`) ?? "
 function _dssSet(k: string, v: string) { try { sessionStorage.setItem(`dash_${k}`, v); } catch {} }
 
 export default function AgentDashboardPage() {
-  const [selected, _setSelected] = useState<string | null>(() => _dss("selected") || null);
-  const [agentSearch, _setAgentSearch] = useState(() => _dss("agentSearch"));
+  // Start from safe defaults; restored from sessionStorage post-mount
+  const [selected, _setSelected] = useState<string | null>(null);
+  const [agentSearch, _setAgentSearch] = useState("");
 
   const setSelected    = (v: string | null) => { _setSelected(v);    _dssSet("selected",    v ?? ""); };
   const setAgentSearch = (v: string)        => { _setAgentSearch(v); _dssSet("agentSearch", v); };
+
+  useEffect(() => {
+    _setSelected(_dss("selected") || null);
+    _setAgentSearch(_dss("agentSearch"));
+  }, []);
 
   const { data: agents, isLoading } = useSWR<any[]>(`${API}/agent-stats`, fetcher);
   const { data: detail } = useSWR<any>(
