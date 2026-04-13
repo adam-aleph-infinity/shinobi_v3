@@ -442,6 +442,7 @@ OPTIONAL METADATA — include only if the corresponding content exists in the in
   "_strengths": ["<bullet text>", ...]   — array of strength bullet points from a Strengths section
   "_weaknesses": ["<bullet text>", ...]  — array of weakness bullet points from a Weaknesses section
   "_assessment": "<paragraph>"           — full Overall Assessment paragraph if present
+  "_system_notes": "<string>"            — the full raw markdown text of the "ADDITIONAL OUTPUT – SYSTEM NOTES" section if present (preserve it exactly as-is, including all per-call notes, compliance statuses, call summaries, next-call actions, and any global compliance summary at the end)
 
 Rules for SECTION SCORES:
 - Use the exact section name strings from the input as JSON keys

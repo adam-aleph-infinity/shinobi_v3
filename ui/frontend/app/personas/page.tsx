@@ -63,6 +63,124 @@ function parseTranscriptPath(p: string): ParsedTranscript {
 function _pss(k: string) { try { return sessionStorage.getItem(`personas_${k}`) ?? ""; } catch { return ""; } }
 function _pssSet(k: string, v: string) { try { sessionStorage.setItem(`personas_${k}`, v); } catch {} }
 
+// ── System Notes panel ───────────────────────────────────────────────────────
+
+function SystemNotesPanel({ notes }: { notes: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Split raw markdown into per-call blocks on "System Note – Call N" headings
+  const blocks = (() => {
+    const lines = notes.split("\n");
+    const result: { title: string; body: string }[] = [];
+    let cur: { title: string; lines: string[] } | null = null;
+    for (const line of lines) {
+      const m = line.match(/^#+\s+System Note\s*[–-]\s*(.+)$/i)
+               ?? line.match(/^---\s*$/) && null;
+      if (line.match(/^#+\s+System Note\s*[–-]\s*/i)) {
+        if (cur) result.push({ title: cur.title, body: cur.lines.join("\n").trim() });
+        const title = line.replace(/^#+\s+System Note\s*[–-]\s*/i, "").trim();
+        cur = { title, lines: [] };
+      } else if (line.match(/^#{1,3}\s+(GLOBAL COMPLIANCE SUMMARY)/i)) {
+        if (cur) result.push({ title: cur.title, body: cur.lines.join("\n").trim() });
+        cur = { title: "Global Compliance Summary", lines: [line] };
+      } else {
+        cur?.lines.push(line);
+      }
+    }
+    if (cur) result.push({ title: cur.title, body: cur.lines.join("\n").trim() });
+    return result.filter(b => b.body.trim());
+  })();
+
+  // If parsing found nothing meaningful, show raw text
+  if (blocks.length === 0) {
+    return (
+      <div className="pt-2 border-t border-gray-800">
+        <p className="text-[10px] font-semibold text-sky-400 uppercase tracking-wider mb-1">System Notes</p>
+        <pre className="text-[10px] text-gray-400 font-mono whitespace-pre-wrap leading-relaxed">{notes}</pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pt-2 border-t border-gray-800">
+      <button
+        onClick={() => setExpanded(v => !v)}
+        className="flex items-center justify-between w-full mb-2 group"
+      >
+        <p className="text-[10px] font-semibold text-sky-400 uppercase tracking-wider">
+          System Notes ({blocks.length} blocks)
+        </p>
+        <span className="text-[10px] text-gray-600 group-hover:text-gray-400 transition-colors">
+          {expanded ? "Collapse" : "Expand"}
+        </span>
+      </button>
+      {expanded && (
+        <div className="space-y-2">
+          {blocks.map((block, i) => (
+            <CallNoteBlock key={i} title={block.title} body={block.body} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallNoteBlock({ title, body }: { title: string; body: string }) {
+  const [open, setOpen] = useState(false);
+
+  // Parse COMPLIANT / VIOLATION lines out of body
+  const complianceLines = body.split("\n").filter(l =>
+    l.includes("[COMPLIANT]") || l.includes("[VIOLATION]")
+  );
+  const hasViolation = complianceLines.some(l => l.includes("[VIOLATION]"));
+  const allCompliant = complianceLines.length > 0 && !hasViolation;
+
+  const borderColor = allCompliant
+    ? "border-emerald-800/50"
+    : hasViolation
+    ? "border-red-900/50"
+    : "border-gray-800";
+
+  return (
+    <div className={`border rounded-lg overflow-hidden ${borderColor}`}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-3 py-1.5 bg-gray-800/30 hover:bg-gray-800/50 transition-colors text-left"
+      >
+        <span className="text-[10px] font-medium text-gray-300">{title}</span>
+        <div className="flex items-center gap-2 shrink-0 ml-2">
+          {complianceLines.length > 0 && (
+            <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${allCompliant ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400"}`}>
+              {complianceLines.filter(l => l.includes("[VIOLATION]")).length}V / {complianceLines.filter(l => l.includes("[COMPLIANT]")).length}C
+            </span>
+          )}
+          <span className="text-[10px] text-gray-600">{open ? "▲" : "▼"}</span>
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 py-2 space-y-1">
+          {body.split("\n").map((line, i) => {
+            if (line.includes("[COMPLIANT]")) {
+              return <p key={i} className="text-[10px] text-emerald-400 leading-relaxed">{line.trim()}</p>;
+            }
+            if (line.includes("[VIOLATION]")) {
+              return <p key={i} className="text-[10px] text-red-400 leading-relaxed">{line.trim()}</p>;
+            }
+            if (line.match(/^#{1,4}\s/)) {
+              return <p key={i} className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mt-2">{line.replace(/^#+\s+/, "")}</p>;
+            }
+            if (line.trim().startsWith("- ")) {
+              return <p key={i} className="text-[10px] text-gray-500 pl-2 leading-relaxed">• {line.trim().slice(2)}</p>;
+            }
+            if (line.trim() === "---" || line.trim() === "") return null;
+            return <p key={i} className="text-[10px] text-gray-500 leading-relaxed">{line}</p>;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function PersonasPage() {
@@ -753,6 +871,7 @@ export default function PersonasPage() {
                 const strengths = storedScoreData._strengths as string[] | undefined;
                 const weaknesses = storedScoreData._weaknesses as string[] | undefined;
                 const assessment = storedScoreData._assessment as string | undefined;
+                const systemNotes = storedScoreData._system_notes as string | undefined;
 
                 // Flatten scored sections → {SectionName: number, _overall, _summary, _reasoning}
                 const flattenScores = (raw: Record<string, any>) => {
@@ -898,6 +1017,11 @@ export default function PersonasPage() {
                                 </div>
                               )}
                             </div>
+                          )}
+
+                          {/* System Notes (per-call compliance notes) */}
+                          {systemNotes && (
+                            <SystemNotesPanel notes={systemNotes} />
                           )}
                         </div>
 
