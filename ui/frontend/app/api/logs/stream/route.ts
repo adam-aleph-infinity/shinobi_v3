@@ -1,15 +1,30 @@
+import http from "http";
+
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const upstream = await fetch("http://127.0.0.1:8000/logs/stream", {
-    // @ts-expect-error: Node 18+ fetch supports duplex
-    duplex: "half",
-  });
-  return new Response(upstream.body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "X-Accel-Buffering": "no",
-    },
+  return new Promise<Response>((resolve) => {
+    const req = http.get("http://127.0.0.1:8000/logs/stream", (upstream) => {
+      const readable = new ReadableStream({
+        start(controller) {
+          upstream.on("data", (chunk: Buffer) => controller.enqueue(chunk));
+          upstream.on("end", () => controller.close());
+          upstream.on("error", (e) => controller.error(e));
+        },
+        cancel() {
+          req.destroy();
+        },
+      });
+      resolve(
+        new Response(readable, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+          },
+        })
+      );
+    });
+    req.on("error", () => resolve(new Response(null, { status: 502 })));
   });
 }
