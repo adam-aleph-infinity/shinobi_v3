@@ -384,18 +384,20 @@ export default function NotesPage() {
       prev.size === calls.length ? new Set() : new Set(calls.map(c => c.call_id))
     );
 
-  // ── Run analysis ──────────────────────────────────────────────────────────
+  // ── Run analysis (parallel, up to CONCURRENCY simultaneous calls) ────────────
+  const CONCURRENCY = 10;
+
   const runAnalysis = async () => {
     if (!selectedAgent || !selectedCustomer || selectedCalls.size === 0) return;
     const ordered = calls.filter(c => selectedCalls.has(c.call_id));
 
     setRunning(true);
     abortRef.current = false;
-    setProgress(ordered.map(c => ({ call_id: c.call_id, status: "idle", msg: "Waiting…" })));
+    setProgress(ordered.map(c => ({ call_id: c.call_id, status: "idle", msg: "Queued…" })));
 
-    for (let i = 0; i < ordered.length; i++) {
-      if (abortRef.current) break;
-      const call = ordered[i];
+    // Build one async task per call, each closing over its own row index
+    const tasks = ordered.map((call, i) => async () => {
+      if (abortRef.current) return;
 
       const updateRow = (partial: Partial<CallProgress>) =>
         setProgress(prev => prev.map((r, idx) => idx === i ? { ...r, ...partial } : r));
@@ -404,7 +406,7 @@ export default function NotesPage() {
       if (!call.hasTranscript) {
         if (!call.record_path) {
           updateRow({ status: "error", error: "No audio file — cannot transcribe" });
-          continue;
+          return;
         }
         updateRow({ status: "transcribing", msg: "Starting transcription…" });
         try {
@@ -423,7 +425,7 @@ export default function NotesPage() {
           if (!res.ok) throw new Error(await res.text());
           const job = await res.json();
           const jobId = job.id ?? job.job_id;
-          updateRow({ msg: "Transcribing… (polling for completion)" });
+          updateRow({ msg: "Transcribing… (polling)" });
 
           let done = false;
           for (let attempt = 0; attempt < 300 && !abortRef.current; attempt++) {
@@ -441,13 +443,13 @@ export default function NotesPage() {
           updateRow({ msg: "Transcription complete" });
         } catch (e: any) {
           updateRow({ status: "error", error: e.message ?? "Transcription failed" });
-          continue;
+          return;
         }
       }
 
-      if (abortRef.current) break;
+      if (abortRef.current) return;
 
-      // Step B: run notes analysis
+      // Step B: run notes analysis via SSE
       updateRow({ status: "analyzing", msg: "Starting notes agent…" });
       try {
         await new Promise<void>((resolve, reject) => {
@@ -496,7 +498,17 @@ export default function NotesPage() {
       } catch (e: any) {
         updateRow({ status: "error", error: e.message ?? "Analysis failed" });
       }
+    });
+
+    // Run tasks with a concurrency pool — at most CONCURRENCY in-flight at once
+    const pool = new Set<Promise<void>>();
+    for (const task of tasks) {
+      if (abortRef.current) break;
+      const p: Promise<void> = task().finally(() => pool.delete(p));
+      pool.add(p);
+      if (pool.size >= CONCURRENCY) await Promise.race(pool);
     }
+    await Promise.all(pool);
 
     setRunning(false);
   };
