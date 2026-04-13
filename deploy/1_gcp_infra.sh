@@ -16,6 +16,15 @@ gcloud services enable compute.googleapis.com \
   certificatemanager.googleapis.com \
   secretmanager.googleapis.com
 
+echo "▶ Creating Cloud Router + NAT (outbound internet for the VM)..."
+gcloud compute routers create shinobi-v3-router \
+  --region=$REGION --network=default || true
+gcloud compute routers nats create shinobi-v3-nat \
+  --router=shinobi-v3-router \
+  --region=$REGION \
+  --auto-allocate-nat-external-ips \
+  --nat-all-subnet-ip-ranges || true
+
 echo "▶ Creating VM..."
 gcloud compute instances create $VM_NAME \
   --zone=$ZONE \
