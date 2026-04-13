@@ -4,6 +4,7 @@ import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
   FolderOpen, Bot, PanelLeftClose, Settings,
@@ -129,7 +130,7 @@ export default function AppSidebar({ onToggle, extraFooter }: {
           ))}
         </div>
         {extraFooter}
-        <p className="text-xs text-gray-700">© 2026 Shinobi · v1.0.0</p>
+        <p className="text-xs text-gray-700">© 2026 Shinobi · v{VERSION}</p>
       </div>
     </aside>
   );
