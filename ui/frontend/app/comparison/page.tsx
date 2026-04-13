@@ -87,7 +87,7 @@ function slotChartKey(p: Persona, idx: number): string {
   const base = p.label
     ? p.label.split("·")[0].trim().slice(0, 18)
     : p.agent.split(" ").slice(0, 2).join(" ");
-  return `${base} [${idx + 1}]`;
+  return `${base} (${idx + 1})`;
 }
 
 function fmtDate(s: string) {
@@ -247,7 +247,7 @@ export default function ComparisonPage() {
   const lockedPreset = useMemo(() => {
     if (!slots.length) return null;
     const first = (personas ?? []).find(p => p.id === slots[0]);
-    return first?.persona_agent_id ?? null;
+    return first?.persona_agent_id || "__untagged__";
   }, [slots, personas]);
 
   // The effective filter: locked preset takes priority over sidebar selection
