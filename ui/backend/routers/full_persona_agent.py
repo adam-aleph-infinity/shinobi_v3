@@ -24,6 +24,7 @@ router = APIRouter(prefix="/full-persona-agent", tags=["full-persona-agent"])
 
 GENERATOR_PRESETS_DIR = settings.ui_data_dir / "_fpa_generator_presets"
 SCORER_PRESETS_DIR    = settings.ui_data_dir / "_fpa_scorer_presets"
+ANALYZER_PRESETS_DIR  = settings.ui_data_dir / "_fpa_analyzer_presets"
 
 ALL_MODELS = [
     "gpt-5.4", "gpt-4.1", "gpt-4.1-mini",
@@ -978,6 +979,19 @@ class AgentPresetIn(BaseModel):
     is_default: bool = False
 
 
+class AnalyzerPresetIn(BaseModel):
+    name: str
+    gen_model: str = "gpt-5.4"
+    gen_temperature: float = 0.0
+    gen_system_prompt: str = ""
+    gen_user_prompt: str = ""
+    score_model: str = "gpt-5.4"
+    score_temperature: float = 0.0
+    score_system_prompt: str = ""
+    score_user_prompt: str = ""
+    is_default: bool = False
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^\w\s\-.]", "_", name.strip())
     return re.sub(r"\s+", "_", s).strip("_") or "preset"
@@ -998,6 +1012,97 @@ def _all_presets(preset_type: str) -> list[dict]:
             pass
     results.sort(key=lambda x: (0 if x.get("is_default") else 1))
     return results
+
+
+def _analyzer_provider(model: str) -> str:
+    if model.startswith("claude-"): return "Anthropic"
+    if model.startswith("gemini"):  return "Google"
+    if model.startswith("grok"):    return "xAI"
+    return "OpenAI"
+
+
+@router.get("/presets/analyzer")
+def list_analyzer_presets():
+    d = ANALYZER_PRESETS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    results = []
+    for f in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            results.append(json.loads(f.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    results.sort(key=lambda x: (0 if x.get("is_default") else 1))
+    return results
+
+
+@router.post("/presets/analyzer")
+def save_analyzer_preset(req: AnalyzerPresetIn):
+    if not req.name.strip():
+        raise HTTPException(400, "Name is required")
+    d = ANALYZER_PRESETS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    for f in d.glob("*.json"):
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("name") == req.name.strip():
+                f.unlink(); break
+        except Exception:
+            pass
+    path = d / (_slug(req.name.strip()) + ".json")
+    if path.exists():
+        path = d / f"{_slug(req.name.strip())}_{uuid.uuid4().hex[:6]}.json"
+    if req.is_default:
+        for f in d.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if data.get("is_default") and data.get("name") != req.name.strip():
+                    data["is_default"] = False
+                    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+    payload = {
+        "name": req.name.strip(),
+        "provider": _analyzer_provider(req.gen_model),
+        "gen_model": req.gen_model, "gen_temperature": req.gen_temperature,
+        "gen_system_prompt": req.gen_system_prompt, "gen_user_prompt": req.gen_user_prompt,
+        "score_model": req.score_model, "score_temperature": req.score_temperature,
+        "score_system_prompt": req.score_system_prompt, "score_user_prompt": req.score_user_prompt,
+        "is_default": req.is_default, "created_at": datetime.utcnow().isoformat(),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return payload
+
+
+@router.patch("/presets/analyzer/{preset_name:path}/default")
+def set_analyzer_default(preset_name: str):
+    d = ANALYZER_PRESETS_DIR
+    found = False
+    for f in d.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            is_target = data.get("name") == preset_name
+            if data.get("is_default") != is_target:
+                data["is_default"] = is_target
+                f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            if is_target:
+                found = True
+        except Exception:
+            pass
+    if not found:
+        raise HTTPException(404, "Preset not found")
+    return {"ok": True}
+
+
+@router.delete("/presets/analyzer/{preset_name:path}")
+def delete_analyzer_preset(preset_name: str):
+    d = ANALYZER_PRESETS_DIR
+    for f in d.glob("*.json"):
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("name") == preset_name:
+                f.unlink()
+                return {"ok": True}
+        except Exception:
+            pass
+    raise HTTPException(404, "Preset not found")
 
 
 @router.get("/presets/{preset_type}")
