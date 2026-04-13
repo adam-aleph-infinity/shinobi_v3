@@ -43,9 +43,15 @@ function TopicBar({ label, count, max }: { label: string; count: number; max: nu
   );
 }
 
+function _dss(k: string) { try { return sessionStorage.getItem(`dash_${k}`) ?? ""; } catch { return ""; } }
+function _dssSet(k: string, v: string) { try { sessionStorage.setItem(`dash_${k}`, v); } catch {} }
+
 export default function AgentDashboardPage() {
-  const [selected, setSelected] = useState<string | null>(null);
-  const [agentSearch, setAgentSearch] = useState("");
+  const [selected, _setSelected] = useState<string | null>(() => _dss("selected") || null);
+  const [agentSearch, _setAgentSearch] = useState(() => _dss("agentSearch"));
+
+  const setSelected    = (v: string | null) => { _setSelected(v);    _dssSet("selected",    v ?? ""); };
+  const setAgentSearch = (v: string)        => { _setAgentSearch(v); _dssSet("agentSearch", v); };
 
   const { data: agents, isLoading } = useSWR<any[]>(`${API}/agent-stats`, fetcher);
   const { data: detail } = useSWR<any>(

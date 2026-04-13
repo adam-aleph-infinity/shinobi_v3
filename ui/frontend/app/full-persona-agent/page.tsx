@@ -423,6 +423,39 @@ function CustomerCard({
   );
 }
 
+// ── Module-level analysis store ────────────────────────────────────────────────
+// The runAnalysis fetch-stream loop continues running after the component unmounts
+// (JS closures aren't tied to React lifecycle). We keep the live state here so that
+// when the user navigates back, the freshly mounted component can restore it and
+// continue receiving updates.
+
+interface _AStore {
+  running: boolean;
+  progress: SSEProgress[];
+  result: SSEDone | null;
+  error: string | null;
+}
+const _astore: _AStore = { running: false, progress: [], result: null, error: null };
+// Registered setters from the currently-mounted component (null when unmounted)
+let _setRunning_:   ((v: boolean) => void)             | null = null;
+let _setProgress_:  ((v: SSEProgress[]) => void)       | null = null;
+let _setResult_:    ((v: SSEDone | null) => void)      | null = null;
+let _setError_:     ((v: string | null) => void)       | null = null;
+let _setGenView_:   ((v: "rendered"|"raw"|"sections") => void) | null = null;
+
+function _astorePush(partial: Partial<_AStore>) {
+  Object.assign(_astore, partial);
+  if (partial.running !== undefined) _setRunning_?.(partial.running);
+  if (partial.progress !== undefined) _setProgress_?.(partial.progress);
+  if (partial.result   !== undefined) _setResult_?.(partial.result);
+  if (partial.error    !== undefined) _setError_?.(partial.error);
+}
+
+// sessionStorage helpers (FPA prefix)
+function _fpaSS(key: string): string { try { return sessionStorage.getItem(`fpa_${key}`) ?? ""; } catch { return ""; } }
+function _fpaSSSet(key: string, v: string) { try { sessionStorage.setItem(`fpa_${key}`, v); } catch {} }
+function _fpaSSClear(key: string) { try { sessionStorage.removeItem(`fpa_${key}`); } catch {} }
+
 // ── Main Page ──────────────────────────────────────────────────────────────────
 
 export default function FullPersonaAgentPage() {
@@ -433,14 +466,17 @@ export default function FullPersonaAgentPage() {
   const [agentStats, setAgentStats] = useState<AgentStat[]>([]);
   const [customerStats, setCustomerStats] = useState<CustomerStat[]>([]);
 
-  // Selection
-  const [agent, setAgent] = useState("");
-  const [customer, setCustomer] = useState("");
+  // Selection (persisted to sessionStorage)
+  const [agent, _setAgent] = useState(() => _fpaSS("agent"));
+  const [customer, _setCustomer] = useState(() => _fpaSS("customer"));
+  const setAgent = (v: string) => { _setAgent(v); _fpaSSSet("agent", v); };
+  const setCustomer = (v: string) => { _setCustomer(v); _fpaSSSet("customer", v); };
+
   const [label, setLabel] = useState("");
   const [labelEdited, setLabelEdited] = useState(false);
   const [search, setSearch] = useState("");
 
-  // Quick run
+  // Quick run (quickRunId persisted for resume-on-return)
   const [quickRunId, setQuickRunId] = useState<string | null>(null);
   const [quickRunDone, setQuickRunDone] = useState(false);
   const [quickRunning, setQuickRunning] = useState(false);
@@ -462,20 +498,66 @@ export default function FullPersonaAgentPage() {
   // File upload toggle (default on — toggle disables to text-paste)
   const [useFileUpload, setUseFileUpload] = useState(true);
 
-  // Run state
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState<SSEProgress[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<SSEDone | null>(null);
+  // Run state — initialised from module-level store so navigation-away + back restores it
+  const [running, setRunning] = useState(() => _astore.running);
+  const [progress, setProgress] = useState<SSEProgress[]>(() => _astore.progress);
+  const [error, setError] = useState<string | null>(() => _astore.error);
+  const [result, setResult] = useState<SSEDone | null>(() => _astore.result);
 
   // View mode toggles
-  const [genView, setGenView] = useState<"rendered" | "raw" | "sections">("rendered");
+  const [genView, setGenView] = useState<"rendered" | "raw" | "sections">(() =>
+    _astore.result?.sections?.length ? "sections" : "rendered"
+  );
   const [showScoreRaw, setShowScoreRaw] = useState(false);
 
   // Transcript modal
   const [showTx, setShowTx] = useState(false);
   const [txContent, setTxContent] = useState("");
   const [loadingTx, setLoadingTx] = useState(false);
+
+  // Register this component's setters so the background loop can push updates to it
+  useEffect(() => {
+    _setRunning_  = setRunning;
+    _setProgress_ = setProgress;
+    _setResult_   = setResult;
+    _setError_    = setError;
+    _setGenView_  = setGenView;
+    return () => {
+      _setRunning_ = null; _setProgress_ = null;
+      _setResult_  = null; _setError_    = null; _setGenView_ = null;
+    };
+  }, []); // setters are stable refs
+
+  // Resume quickRun polling if we navigated away mid-run
+  useEffect(() => {
+    const savedId = _fpaSS("quickRunId");
+    const savedAgent = _fpaSS("agent");
+    if (!savedId) return;
+    setQuickRunId(savedId);
+    fetch(`${API}/full-persona-agent/quick-run/status?run_id=${savedId}`)
+      .then(r => r.json())
+      .then(s => {
+        if (s.complete) {
+          _fpaSSClear("quickRunId");
+          setQuickRunDone(true);
+        } else {
+          setQuickRunning(true);
+          quickPollRef.current = setInterval(async () => {
+            const st = await fetch(`${API}/full-persona-agent/quick-run/status?run_id=${savedId}`).then(r => r.json());
+            if (st.complete) {
+              clearInterval(quickPollRef.current!);
+              setQuickRunning(false); setQuickRunDone(true);
+              _fpaSSClear("quickRunId");
+              if (savedAgent) {
+                fetch(`${API}/full-persona-agent/customer-stats?agent=${encodeURIComponent(savedAgent)}`)
+                  .then(r => r.json()).then(setCustomerStats);
+              }
+            }
+          }, 3000);
+        }
+      })
+      .catch(() => _fpaSSClear("quickRunId"));
+  }, []); // run once on mount
 
   // Load agents + stats; auto-apply default presets on mount
   useEffect(() => {
@@ -533,11 +615,13 @@ export default function FullPersonaAgentPage() {
       });
       const d = await r.json();
       setQuickRunId(d.run_id);
+      _fpaSSSet("quickRunId", d.run_id); // persist so we can resume if user navigates away
       quickPollRef.current = setInterval(async () => {
         const s = await fetch(`${API}/full-persona-agent/quick-run/status?run_id=${d.run_id}`).then(r => r.json());
         if (s.complete) {
           clearInterval(quickPollRef.current!);
           setQuickRunning(false); setQuickRunDone(true);
+          _fpaSSClear("quickRunId");
           fetch(`${API}/full-persona-agent/customer-stats?agent=${encodeURIComponent(agent)}`)
             .then(r => r.json()).then(setCustomerStats);
         }
@@ -582,7 +666,8 @@ export default function FullPersonaAgentPage() {
 
   const runAnalysis = async () => {
     if (!agent || !customer) return;
-    setRunning(true); setProgress([]); setError(null); setResult(null);
+    // Reset store + state together
+    _astorePush({ running: true, progress: [], error: null, result: null });
     const body = {
       agent, customer, label,
       generator_model: genModel, generator_temperature: genTemp,
@@ -612,19 +697,22 @@ export default function FullPersonaAgentPage() {
           if (!eventLine || !dataLine) continue;
           const event = eventLine.replace("event:", "").trim();
           const data = JSON.parse(dataLine.replace("data:", "").trim());
-          if (event === "progress") setProgress(p => [...p, data]);
-          else if (event === "error") { setError(data.msg); setRunning(false); return; }
-          else if (event === "done") {
-            setResult(data);
-            setRunning(false);
-            if (data.sections && data.sections.length > 0) setGenView("sections");
-            else setGenView("rendered");
+          if (event === "progress") {
+            // Write to store (survives unmount) AND push to currently-mounted component
+            _astorePush({ progress: [..._astore.progress, data] });
+          } else if (event === "error") {
+            _astorePush({ error: data.msg, running: false });
+            return;
+          } else if (event === "done") {
+            _astorePush({ result: data, running: false });
+            const view = data.sections?.length ? "sections" : "rendered";
+            _setGenView_?.(view);
             return;
           }
         }
       }
-    } catch (e: any) { setError(e.message || "Unknown error"); }
-    finally { setRunning(false); }
+    } catch (e: any) { _astorePush({ error: (e as Error).message || "Unknown error" }); }
+    finally { _astorePush({ running: false }); }
   };
 
   const canRun = !!(agent && customer && customerStat && customerStat.transcripts > 0 && !running);

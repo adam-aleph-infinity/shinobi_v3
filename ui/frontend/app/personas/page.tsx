@@ -59,6 +59,11 @@ function parseTranscriptPath(p: string): ParsedTranscript {
   return { callId, agent, customer, engine, subType, fileName, raw: p };
 }
 
+// ── sessionStorage helpers ────────────────────────────────────────────────────
+
+function _pss(k: string) { try { return sessionStorage.getItem(`personas_${k}`) ?? ""; } catch { return ""; } }
+function _pssSet(k: string, v: string) { try { sessionStorage.setItem(`personas_${k}`, v); } catch {} }
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function PersonasPage() {
@@ -73,19 +78,32 @@ export default function PersonasPage() {
   const [customersCollapsed, setCustomersCollapsed] = useState(false);
   const [listCollapsed, setListCollapsed]           = useState(false);
 
-  // Preset filter
-  const [filterPreset, setFilterPreset] = useState<string | null>(null);
+  // Preset filter (persisted)
+  const [filterPreset, _setFilterPreset] = useState<string | null>(() => _pss("filterPreset") || null);
+  const setFilterPreset = (v: string | null) => { _setFilterPreset(v); _pssSet("filterPreset", v ?? ""); };
 
-  // Nav state
-  const [selectedAgent, setSelectedAgent]       = useState<string | null>(null);
-  const [selectedCustomer, setSelectedCustomer] = useState<string | null>(null);
-  const [agentSearch, setAgentSearch]           = useState("");
-  const [customerSearch, setCustomerSearch]     = useState("");
-  const [typeFilter, setTypeFilter] = useState<"" | "agent_overall" | "pair" | "customer">("");
+  // Nav state (persisted)
+  const [selectedAgent, _setSelectedAgent]       = useState<string | null>(() => _pss("selectedAgent") || null);
+  const [selectedCustomer, _setSelectedCustomer] = useState<string | null>(() => _pss("selectedCustomer") || null);
+  const [agentSearch, _setAgentSearch]           = useState(() => _pss("agentSearch"));
+  const [customerSearch, _setCustomerSearch]     = useState(() => _pss("customerSearch"));
+  const [typeFilter, _setTypeFilter]             = useState<"" | "agent_overall" | "pair" | "customer">(() =>
+    (_pss("typeFilter") as "" | "agent_overall" | "pair" | "customer") || ""
+  );
 
-  // Selection / tabs
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"content" | "transcripts" | "prompts" | "score">("content");
+  const setSelectedAgent   = (v: string | null) => { _setSelectedAgent(v);   _pssSet("selectedAgent",   v ?? ""); };
+  const setSelectedCustomer = (v: string | null) => { _setSelectedCustomer(v); _pssSet("selectedCustomer", v ?? ""); };
+  const setAgentSearch     = (v: string)         => { _setAgentSearch(v);     _pssSet("agentSearch",     v); };
+  const setCustomerSearch  = (v: string)         => { _setCustomerSearch(v);  _pssSet("customerSearch",  v); };
+  const setTypeFilter      = (v: "" | "agent_overall" | "pair" | "customer") => { _setTypeFilter(v); _pssSet("typeFilter", v); };
+
+  // Selection / tabs (persisted)
+  const [selectedId, _setSelectedId] = useState<string | null>(() => _pss("selectedId") || null);
+  const [activeTab, _setActiveTab]   = useState<"content" | "transcripts" | "prompts" | "score">(() =>
+    (_pss("activeTab") as "content" | "transcripts" | "prompts" | "score") || "content"
+  );
+  const setSelectedId = (v: string | null) => { _setSelectedId(v); _pssSet("selectedId", v ?? ""); };
+  const setActiveTab  = (v: "content" | "transcripts" | "prompts" | "score") => { _setActiveTab(v); _pssSet("activeTab", v); };
 
 
   // Delete

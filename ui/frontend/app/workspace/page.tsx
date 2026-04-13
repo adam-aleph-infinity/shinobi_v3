@@ -95,8 +95,12 @@ function CallBadges({ entry }: { entry: Entry }) {
   );
 }
 
+function _wss(k: string) { try { return sessionStorage.getItem(`ws_${k}`) ?? ""; } catch { return ""; } }
+function _wssSet(k: string, v: string) { try { sessionStorage.setItem(`ws_${k}`, v); } catch {} }
+
 export default function WorkspacePage() {
-  const [browsePath, setBrowsePath] = useState("");
+  const [browsePath, _setBrowsePath] = useState(() => _wss("browsePath"));
+  const setBrowsePath = (v: string) => { _setBrowsePath(v); _wssSet("browsePath", v); };
   const [preview, setPreview] = useState<{ path: string; content: string; format: string } | null>(null);
   const [playingPath, setPlayingPath] = useState<string | null>(null);
   const [audio, setAudio] = useState<HTMLAudioElement | null>(null);

@@ -23,6 +23,9 @@ interface TxCall   {
   duration_s: number | null; started_at: string | null;
 }
 
+function _css(k: string) { try { return sessionStorage.getItem(`calls_${k}`) ?? ""; } catch { return ""; } }
+function _cssSet(k: string, v: string) { try { sessionStorage.setItem(`calls_${k}`, v); } catch {} }
+
 export default function CallsPage() {
   const [agentW, agentDrag]       = useResize(180, 120, 360);
   const [customerW, customerDrag] = useResize(180, 120, 360);
@@ -32,11 +35,19 @@ export default function CallsPage() {
   const [customersCollapsed, setCustomersCollapsed] = useState(false);
   const [callsCollapsed, setCallsCollapsed]       = useState(false);
 
-  const [selectedAgent, setSelectedAgent]       = useState("");
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
-  const [selectedCallId, setSelectedCallId]     = useState("");
-  const [agentSearch, setAgentSearch]           = useState("");
-  const [customerSearch, setCustomerSearch]     = useState("");
+  const [selectedAgent, _setSelectedAgent]       = useState(() => _css("selectedAgent"));
+  const [selectedCustomer, _setSelectedCustomer] = useState<Customer | null>(() => {
+    try { const v = _css("selectedCustomer"); return v ? JSON.parse(v) : null; } catch { return null; }
+  });
+  const [selectedCallId, _setSelectedCallId]     = useState(() => _css("selectedCallId"));
+  const [agentSearch, _setAgentSearch]           = useState(() => _css("agentSearch"));
+  const [customerSearch, _setCustomerSearch]     = useState(() => _css("customerSearch"));
+
+  const setSelectedAgent   = (v: string)          => { _setSelectedAgent(v);   _cssSet("selectedAgent",   v); };
+  const setSelectedCustomer = (v: Customer | null) => { _setSelectedCustomer(v); _cssSet("selectedCustomer", v ? JSON.stringify(v) : ""); };
+  const setSelectedCallId  = (v: string)          => { _setSelectedCallId(v);  _cssSet("selectedCallId",  v); };
+  const setAgentSearch     = (v: string)          => { _setAgentSearch(v);     _cssSet("agentSearch",     v); };
+  const setCustomerSearch  = (v: string)          => { _setCustomerSearch(v);  _cssSet("customerSearch",  v); };
 
   const [transcript, setTranscript]             = useState("");
   const [transcriptLoading, setTranscriptLoading] = useState(false);
