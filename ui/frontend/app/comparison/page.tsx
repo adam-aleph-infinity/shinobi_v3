@@ -240,17 +240,33 @@ export default function ComparisonPage() {
   const [showPicker, setShowPicker] = useState(false);
   const [filterPersonaAgent, setFilterPersonaAgent] = useState<string | null>(null);
 
-  const addSlot = (id: string) => {
-    if (!slots.includes(id)) setSlots(s => [...s, id]);
-  };
   const removeSlot = (idx: number) => setSlots(s => s.filter((_, i) => i !== idx));
 
-  // Personas filtered by selected persona-agent preset
+  // Once the first persona is added, lock to its persona_agent_id.
+  // This prevents comparing personas from different scoring rubrics.
+  const lockedPreset = useMemo(() => {
+    if (!slots.length) return null;
+    const first = (personas ?? []).find(p => p.id === slots[0]);
+    return first?.persona_agent_id ?? null;
+  }, [slots, personas]);
+
+  // The effective filter: locked preset takes priority over sidebar selection
+  const activeFilter = lockedPreset ?? filterPersonaAgent;
+
+  const addSlot = (id: string) => {
+    const persona = (personas ?? []).find(p => p.id === id);
+    if (!persona) return;
+    // Enforce same-preset constraint: block if locked preset doesn't match
+    if (lockedPreset && persona.persona_agent_id !== lockedPreset) return;
+    if (!slots.includes(id)) setSlots(s => [...s, id]);
+  };
+
+  // Personas filtered by active preset
   const filteredByPersonaAgent = useMemo(() => {
     const all = personas ?? [];
-    if (!filterPersonaAgent) return all;
-    return all.filter(p => p.persona_agent_id === filterPersonaAgent);
-  }, [personas, filterPersonaAgent]);
+    if (!activeFilter) return all;
+    return all.filter(p => p.persona_agent_id === activeFilter);
+  }, [personas, activeFilter]);
 
   // Personas matching search
   const browseable = useMemo(() => {
@@ -348,11 +364,13 @@ export default function ComparisonPage() {
           <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">Persona Agents</p>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5">
-          {/* All */}
+          {/* All — disabled while locked */}
           <button
-            onClick={() => { setFilterPersonaAgent(null); setShowPicker(true); }}
+            onClick={() => { if (!lockedPreset) { setFilterPersonaAgent(null); setShowPicker(true); } }}
+            disabled={!!lockedPreset}
             className={cn(
               "w-full text-left px-2 py-1.5 rounded text-xs border transition-colors",
+              lockedPreset ? "border-transparent text-gray-700 cursor-not-allowed" :
               filterPersonaAgent === null
                 ? "bg-indigo-600/20 border-indigo-500/30 text-white"
                 : "border-transparent text-gray-400 hover:bg-gray-800"
@@ -370,22 +388,27 @@ export default function ComparisonPage() {
               : "text-emerald-400";
             const count = paCounts[pa.name] ?? 0;
             const sections = Array.isArray(pa.sections) ? pa.sections.length : 0;
+            const isLocked = !!lockedPreset && lockedPreset !== pa.name;
+            const isActive = activeFilter === pa.name;
             return (
               <button
                 key={pa.id}
-                onClick={() => { setFilterPersonaAgent(pa.name); setShowPicker(true); }}
+                disabled={isLocked}
+                onClick={() => { if (!isLocked) { setFilterPersonaAgent(pa.name); setShowPicker(true); } }}
                 className={cn(
                   "w-full text-left px-2 py-1.5 rounded text-xs border transition-colors",
-                  filterPersonaAgent === pa.name
+                  isLocked ? "border-transparent text-gray-700 cursor-not-allowed opacity-40" :
+                  isActive
                     ? "bg-indigo-600/20 border-indigo-500/30 text-white"
                     : "border-transparent text-gray-400 hover:bg-gray-800"
                 )}
               >
                 <span className="flex items-center gap-1 min-w-0">
                   {pa.is_default && <span className="text-yellow-400 shrink-0">★</span>}
+                  {lockedPreset === pa.name && <span className="text-amber-400 shrink-0">🔒</span>}
                   <span className="truncate">{pa.name}</span>
                 </span>
-                <span className={cn("text-[10px] flex items-center gap-1.5 mt-0.5", typeColor)}>
+                <span className={cn("text-[10px] flex items-center gap-1.5 mt-0.5", isLocked ? "text-gray-700" : typeColor)}>
                   {pa.persona_type ? typeLabel(pa.persona_type) : ""}
                   <span className="text-gray-600">{count}p</span>
                   {sections > 0 && <span className="text-gray-600">{sections}§</span>}
@@ -440,19 +463,29 @@ export default function ComparisonPage() {
             )}
 
             {/* Empty hint */}
-            {filterPersonaAgent === null && slots.length === 0 && (
+            {!activeFilter && slots.length === 0 && (
               <p className="text-xs text-gray-600 italic">← Select a persona agent to browse</p>
             )}
 
+            {/* Lock badge */}
+            {lockedPreset && (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                  🔒 Locked to: {lockedPreset}
+                </span>
+                <span className="text-[10px] text-gray-600">Remove all personas to unlock</span>
+              </div>
+            )}
+
             {/* Browse toggle */}
-            {filterPersonaAgent !== null && (
+            {activeFilter !== null && (
               <button
                 onClick={() => setShowPicker(v => !v)}
                 className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
               >
                 {showPicker ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                 Browse {filteredByPersonaAgent.length} personas
-                {filterPersonaAgent && <span className="text-indigo-400 ml-1">({filterPersonaAgent})</span>}
+                {activeFilter && <span className="text-indigo-400 ml-1">({activeFilter})</span>}
               </button>
             )}
 
