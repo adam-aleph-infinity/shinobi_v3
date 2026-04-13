@@ -4,10 +4,13 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ui.backend.config import settings
+from ui.backend.database import get_session
+from ui.backend.models.persona import Persona as _Persona
 
 router = APIRouter(prefix="/persona-agents", tags=["persona-agents"])
 
@@ -64,8 +67,31 @@ class PersonaAgentPatch(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
-def list_agents():
-    return _load_all()
+def list_agents(db: Session = Depends(get_session)):
+    agents = _load_all()
+    # Collect persona_agent_id values that have at least 1 persona in the DB
+    active_ids: set[str] = set(
+        row[0]
+        for row in db.query(_Persona.persona_agent_id).distinct().all()
+        if row[0]
+    )
+    result = []
+    for agent in agents:
+        name = agent.get("name", "")
+        if name in active_ids:
+            result.append(agent)
+        else:
+            # Auto-delete the file — no personas are associated with this agent
+            agent_id = agent.get("id", "")
+            for f in _PA_DIR.glob("*.json"):
+                try:
+                    d = json.loads(f.read_text(encoding="utf-8"))
+                    if d.get("id") == agent_id:
+                        f.unlink()
+                        break
+                except Exception:
+                    pass
+    return result
 
 
 @router.post("")
