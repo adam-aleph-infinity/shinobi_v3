@@ -135,11 +135,13 @@ export default function PersonasPage() {
     () => getPersonas() as Promise<Persona[]>,
   );
 
-  const { data: personaAgents } = useSWR<{id: string; name: string; persona_type?: string; is_default?: boolean; sections?: unknown[]}[]>(
+  const { data: _personaAgentsRaw } = useSWR<{id: string; name: string; persona_type?: string; is_default?: boolean; sections?: unknown[]}[]>(
     "/all-persona-agents",
     () => fetch("/api/persona-agents").then(r => r.json()),
     { revalidateOnFocus: false },
   );
+  // Guard against non-array responses (e.g. 404 error objects)
+  const personaAgents = Array.isArray(_personaAgentsRaw) ? _personaAgentsRaw : undefined;
 
   const { data: persona } = useSWR<Persona>(
     selectedId ? `/personas/${selectedId}-${revalidateKey}` : null,

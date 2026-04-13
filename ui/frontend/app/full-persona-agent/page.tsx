@@ -664,10 +664,20 @@ export default function FullPersonaAgentPage() {
     } finally { setLoadingTx(false); }
   };
 
+  // Helper: update both the module-level store AND React state (via closure setters).
+  // Closure setters are used so this component always gets updates while mounted.
+  // Module setters (_setX_) are used so a remounted component also gets updates.
+  const _upd = (updates: Partial<_AStore>) => {
+    Object.assign(_astore, updates);
+    if ("running"  in updates) { setRunning(updates.running!);   _setRunning_?.(updates.running!);  }
+    if ("progress" in updates) { setProgress(updates.progress!); _setProgress_?.(updates.progress!); }
+    if ("result"   in updates) { setResult(updates.result!);     _setResult_?.(updates.result!);    }
+    if ("error"    in updates) { setError(updates.error!);       _setError_?.(updates.error!);      }
+  };
+
   const runAnalysis = async () => {
     if (!agent || !customer) return;
-    // Reset store + state together
-    _astorePush({ running: true, progress: [], error: null, result: null });
+    _upd({ running: true, progress: [], error: null, result: null });
     const body = {
       agent, customer, label,
       generator_model: genModel, generator_temperature: genTemp,
@@ -698,21 +708,20 @@ export default function FullPersonaAgentPage() {
           const event = eventLine.replace("event:", "").trim();
           const data = JSON.parse(dataLine.replace("data:", "").trim());
           if (event === "progress") {
-            // Write to store (survives unmount) AND push to currently-mounted component
-            _astorePush({ progress: [..._astore.progress, data] });
+            _upd({ progress: [..._astore.progress, data] });
           } else if (event === "error") {
-            _astorePush({ error: data.msg, running: false });
+            _upd({ error: data.msg, running: false });
             return;
           } else if (event === "done") {
-            _astorePush({ result: data, running: false });
+            _upd({ result: data, running: false });
             const view = data.sections?.length ? "sections" : "rendered";
-            _setGenView_?.(view);
+            setGenView(view); _setGenView_?.(view);
             return;
           }
         }
       }
-    } catch (e: any) { _astorePush({ error: (e as Error).message || "Unknown error" }); }
-    finally { _astorePush({ running: false }); }
+    } catch (e: any) { _upd({ error: (e as Error).message || "Unknown error" }); }
+    finally { _upd({ running: false }); }
   };
 
   const canRun = !!(agent && customer && customerStat && customerStat.transcripts > 0 && !running);
