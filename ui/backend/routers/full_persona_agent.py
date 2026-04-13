@@ -792,24 +792,30 @@ class AnalyzeRequest(BaseModel):
 async def analyze(req: AnalyzeRequest):
     loop = asyncio.get_event_loop()
 
+    _pair = f"{req.agent}/{req.customer}"
+
     async def stream():
         content_raw = ""   # raw generator output (for Show Raw)
         score_raw = ""     # raw scorer output (for Show Raw)
 
         # Step 1: build transcript
+        print(f"[FPA] {_pair}: building merged transcript")
         yield _sse("progress", {"step": 1, "total": 4, "msg": "Building merged transcript…"})
         transcript = await loop.run_in_executor(
             None, _build_and_save_merged_transcript, req.agent, req.customer, req.force_merge
         )
         if not transcript:
+            print(f"[FPA] {_pair}: ERROR — no transcript data found")
             yield _sse("error", {"msg": "No transcript data found for this pair. Run the pipeline first.", "content_raw": content_raw, "score_raw": score_raw})
             return
+        print(f"[FPA] {_pair}: transcript ready — {len(transcript):,} chars")
         yield _sse("progress", {"step": 1, "total": 4,
             "msg": f"Transcript ready — {len(transcript):,} chars across all calls"})
 
         # Step 2: persona generator
         pair_dir = settings.agents_dir / req.agent / req.customer
         upload_mode = req.use_file_upload
+        print(f"[FPA] {_pair}: running generator model={req.generator_model} file_upload={upload_mode}")
         yield _sse("progress", {"step": 2, "total": 4,
             "msg": f"Running Persona Generator ({req.generator_model}){' [file-upload]' if upload_mode else ''}…"})
         try:
@@ -828,12 +834,15 @@ async def analyze(req: AnalyzeRequest):
             content_raw = content_md
         except Exception as e:
             content_raw = str(e)
+            print(f"[FPA] {_pair}: ERROR — generator failed: {e}")
             yield _sse("error", {"msg": f"Persona Generator failed: {e}", "content_raw": content_raw, "score_raw": score_raw})
             return
+        print(f"[FPA] {_pair}: generator done — {len(content_md):,} chars")
         yield _sse("progress", {"step": 2, "total": 4,
             "msg": f"Persona generated — {len(content_md):,} chars"})
 
         # Step 3: persona scorer
+        print(f"[FPA] {_pair}: running scorer model={req.scorer_model} file_upload={upload_mode}")
         yield _sse("progress", {"step": 3, "total": 4,
             "msg": f"Running Persona Scorer ({req.scorer_model})…"})
         try:
@@ -870,11 +879,13 @@ async def analyze(req: AnalyzeRequest):
             print(f"[fpa/scorer] parsed score_json keys: {list(score_json.keys())}")
         except Exception as e:
             score_raw = str(e)
+            print(f"[FPA] {_pair}: ERROR — scorer failed: {e}")
             yield _sse("error", {"msg": f"Persona Scorer failed: {e}", "content_raw": content_raw, "score_raw": score_raw})
             return
         overall = score_json.get("_overall", 0)
+        print(f"[FPA] {_pair}: scorer done — overall {overall}/100")
         yield _sse("progress", {"step": 3, "total": 5,
-            "msg": f"Score complete — overall {overall}/10"})
+            "msg": f"Score complete — overall {overall}/100"})
 
         # Step 4: normalise outputs → structured sections + score JSON
         yield _sse("progress", {"step": 4, "total": 5, "msg": "Normalising outputs…"})
@@ -894,13 +905,16 @@ async def analyze(req: AnalyzeRequest):
                 score_json = norm_score
                 overall = score_json.get("_overall", overall)
         except Exception as e:
-            print(f"[fpa/normalise] error (non-fatal): {e}")
+            print(f"[FPA] {_pair}: normalise error (non-fatal): {e}")
         # Always preserve the raw scorer text so the UI can display it
         score_json["_raw_score_text"] = score_raw
+        scored_sections = sum(1 for k in score_json if not k.startswith("_"))
+        print(f"[FPA] {_pair}: normalised — {len(norm_sections)} sections, {scored_sections} scored")
         yield _sse("progress", {"step": 4, "total": 5,
-            "msg": f"Normalised — {len(norm_sections)} sections, {sum(1 for k in score_json if not k.startswith('_'))} scored sections"})
+            "msg": f"Normalised — {len(norm_sections)} sections, {scored_sections} scored sections"})
 
         # Step 5: save to DB
+        print(f"[FPA] {_pair}: saving persona to database")
         yield _sse("progress", {"step": 5, "total": 5, "msg": "Saving persona to database…"})
         try:
             from ui.backend.database import engine
@@ -918,9 +932,11 @@ async def analyze(req: AnalyzeRequest):
                     sections_json=norm_sections or None,
                 )
         except Exception as e:
+            print(f"[FPA] {_pair}: ERROR — save failed: {e}")
             yield _sse("error", {"msg": f"Save failed: {e}", "content_raw": content_raw, "score_raw": score_raw})
             return
 
+        print(f"[FPA] {_pair}: done — persona_id={persona_id} overall={overall}/100")
         yield _sse("done", {
             "persona_id": persona_id,
             "overall_score": overall,

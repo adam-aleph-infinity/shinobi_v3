@@ -42,7 +42,7 @@ def _classify(text: str) -> str:
     if any(x in t for x in ("STAGE", "PIPELINE", "✅", "🚀", "📡", "🎵", "📝", "📊")):
         return "stage"
     # LLM operations — vote, smooth, persona, session analysis
-    if any(t.startswith(p) for p in ("[VOTE]", "[SMOOTH]", "[LLM]", "[PERSONA]", "[SESSION", "[VOTE-BATCH]", "[SMOOTH-BATCH]", "[MERGE]")):
+    if any(t.startswith(p) for p in ("[VOTE]", "[SMOOTH]", "[LLM]", "[PERSONA]", "[SESSION", "[VOTE-BATCH]", "[SMOOTH-BATCH]", "[MERGE]", "[FPA]")):
         return "llm"
     return "info"
 

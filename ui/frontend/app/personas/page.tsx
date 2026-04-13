@@ -12,10 +12,9 @@ import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
 import {
   SectionCard, SectionNav, parsePersonaSections, MD,
 } from "@/components/personas/PersonaSections";
-import Link from "next/link";
 import {
   Brain, Users, User, Search, Loader2, Trash2,
-  FileText, ChevronRight, X, Sparkles, Plus, Bot,
+  FileText, ChevronRight, X, Sparkles,
   TrendingUp, TrendingDown, Minus, Download, Code, Eye, Pencil, Check,
 } from "lucide-react";
 import { PersonaSection } from "@/components/personas/SectionBuilder";
@@ -508,22 +507,6 @@ export default function PersonasPage() {
           <div className="flex items-center gap-1.5">
             <Brain className="w-4 h-4 text-violet-400" />
             <span className="text-sm font-semibold text-white">Personas</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/persona-agents"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white text-xs rounded-lg transition-colors border border-gray-700"
-            >
-              <Bot className="w-3.5 h-3.5" />
-              Persona Agents
-            </Link>
-            <Link
-              href="/personas/create"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-700 hover:bg-violet-600 text-white text-xs font-semibold rounded-lg transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Create Persona
-            </Link>
           </div>
         </div>
 
