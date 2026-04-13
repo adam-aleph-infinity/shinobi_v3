@@ -84,10 +84,7 @@ interface PersonaScores {
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
 function slotChartKey(p: Persona, idx: number): string {
-  // Use customer name as the differentiator (all compared personas share the same agent/preset).
-  // Fall back to agent name if customer is absent.
-  const base = (p.customer || p.agent).slice(0, 20);
-  return `${base} (${idx + 1})`;
+  return `${p.agent.slice(0, 20)} (${idx + 1})`;
 }
 
 function fmtDate(s: string) {
@@ -114,8 +111,9 @@ function ScoreTable({
           <tr className="border-b border-gray-800">
             <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Section</th>
             {personas.map((p, i) => (
-              <th key={p.id} className="px-4 py-2.5 text-center text-xs font-semibold" style={{ color: COLORS[i % 7] }}>
-                {chartKeys[i]}
+              <th key={p.id} className="px-4 py-2.5 text-center" style={{ color: COLORS[i % 7] }}>
+                <span className="block text-xs font-semibold">{chartKeys[i]}</span>
+                {p.customer && <span className="block text-[10px] font-normal text-gray-500">{p.customer}</span>}
               </th>
             ))}
           </tr>
@@ -446,14 +444,16 @@ export default function ComparisonPage() {
                       className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs"
                       style={{ borderColor: COLORS[i % 7] + "60", backgroundColor: COLORS[i % 7] + "10" }}
                     >
-                      <span className="font-medium text-white">{chartKeys[i]}</span>
-                      {p.customer && <span className="text-gray-400">{p.customer}</span>}
+                      <div className="flex flex-col min-w-0">
+                        <span className="font-medium text-white truncate">{chartKeys[i]}</span>
+                        {p.customer && <span className="text-[10px] text-gray-500 truncate">{p.customer}</span>}
+                      </div>
                       {sc && (
-                        <span className={cn("tabular-nums font-mono", scoreColor(sc._overall))}>
+                        <span className={cn("tabular-nums font-mono shrink-0", scoreColor(sc._overall))}>
                           {Math.round(sc._overall)}
                         </span>
                       )}
-                      <button onClick={() => removeSlot(i)} className="text-gray-600 hover:text-red-400 ml-1 transition-colors">
+                      <button onClick={() => removeSlot(i)} className="text-gray-600 hover:text-red-400 transition-colors shrink-0">
                         <X className="w-3 h-3" />
                       </button>
                     </div>
