@@ -385,7 +385,7 @@ export default function NotesPage() {
     );
 
   // ── Run analysis (parallel, up to CONCURRENCY simultaneous calls) ────────────
-  const CONCURRENCY = 10;
+  const CONCURRENCY = 50;
 
   const runAnalysis = async () => {
     if (!selectedAgent || !selectedCustomer || selectedCalls.size === 0) return;
