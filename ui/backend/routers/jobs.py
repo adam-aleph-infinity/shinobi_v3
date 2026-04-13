@@ -107,6 +107,32 @@ def worker_stats():
         return {"cpu_pct": None, "mem_pct": None, "active_workers": None}
 
 
+@router.delete("/history")
+def clear_history(db: Session = Depends(get_session)):
+    """Delete all completed and failed jobs."""
+    to_delete = db.exec(
+        select(Job).where(or_(Job.status == JobStatus.complete, Job.status == JobStatus.failed))
+    ).all()
+    count = len(to_delete)
+    for j in to_delete:
+        db.delete(j)
+    db.commit()
+    return {"deleted": count}
+
+
+@router.get("/config")
+def get_config():
+    """Return current worker pool configuration."""
+    return {"max_workers": job_runner.get_max_workers()}
+
+
+@router.put("/config")
+def update_config(body: WorkerConfig):
+    """Update the worker pool size."""
+    job_runner.set_max_workers(body.max_workers)
+    return {"max_workers": job_runner.get_max_workers()}
+
+
 @router.get("/{job_id}")
 def get_job(job_id: str, db: Session = Depends(get_session)):
     job = db.get(Job, job_id)
@@ -175,32 +201,6 @@ async def stream_job(job_id: str, db: Session = Depends(get_session)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@router.delete("/history")
-def clear_history(db: Session = Depends(get_session)):
-    """Delete all completed and failed jobs."""
-    to_delete = db.exec(
-        select(Job).where(or_(Job.status == JobStatus.complete, Job.status == JobStatus.failed))
-    ).all()
-    count = len(to_delete)
-    for j in to_delete:
-        db.delete(j)
-    db.commit()
-    return {"deleted": count}
-
-
-@router.get("/config")
-def get_config():
-    """Return current worker pool configuration."""
-    return {"max_workers": job_runner.get_max_workers()}
-
-
-@router.put("/config")
-def update_config(body: WorkerConfig):
-    """Update the worker pool size."""
-    job_runner.set_max_workers(body.max_workers)
-    return {"max_workers": job_runner.get_max_workers()}
 
 
 @router.delete("/{job_id}")

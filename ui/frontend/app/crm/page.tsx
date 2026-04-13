@@ -12,6 +12,19 @@ import { refreshCache } from "@/lib/api";
 const API = "/api";
 const fetcher = (url: string) => fetch(`${API}${url}`).then(r => r.json());
 
+// ── sessionStorage helpers ─────────────────────────────────────────────────────
+const SS_KEY = "crm_filters";
+
+function ssLoad(): Record<string, string> {
+  try { return JSON.parse(sessionStorage.getItem(SS_KEY) || "{}"); } catch { return {}; }
+}
+function ssSave(updates: Record<string, string>) {
+  try {
+    const current = ssLoad();
+    sessionStorage.setItem(SS_KEY, JSON.stringify({ ...current, ...updates }));
+  } catch { /* SSR/private */ }
+}
+
 type SortKey = "agent" | "customer" | "crm" | "calls" | "duration" | "deposits" | "tx";
 type SortDir = "asc" | "desc";
 
@@ -41,25 +54,41 @@ function FilterInput({ label, value, onChange, type = "text", step, placeholder 
 }
 
 export default function CRMPage() {
-  // ── Filters ────────────────────────────────────────────────────────────────
-  const [agentFilter, setAgentFilter]       = useState("");
-  const [customerFilter, setCustomerFilter] = useState("");
-  const [crmFilter, setCrmFilter]           = useState("");
-  const [minCalls, setMinCalls]             = useState("");
-  const [minDuration, setMinDuration]       = useState("");
-  const [minTx, setMinTx]                   = useState("");
-  const [minDeposits, setMinDeposits]       = useState("");
-  const [maxDeposits, setMaxDeposits]       = useState("");
-  const [minAgentDep, setMinAgentDep]       = useState("");
-  const [maxAgentDep, setMaxAgentDep]       = useState("");
-  const [ftdAfter, setFtdAfter]             = useState("");
-  const [ftdBefore, setFtdBefore]           = useState("");
+  // ── Filters (persisted to sessionStorage) ─────────────────────────────────
+  const [agentFilter, _setAgentFilter]       = useState(() => ssLoad().agentFilter    ?? "");
+  const [customerFilter, _setCustomerFilter] = useState(() => ssLoad().customerFilter ?? "");
+  const [crmFilter, _setCrmFilter]           = useState(() => ssLoad().crmFilter      ?? "");
+  const [minCalls, _setMinCalls]             = useState(() => ssLoad().minCalls       ?? "");
+  const [minDuration, _setMinDuration]       = useState(() => ssLoad().minDuration    ?? "");
+  const [minTx, _setMinTx]                   = useState(() => ssLoad().minTx          ?? "");
+  const [minDeposits, _setMinDeposits]       = useState(() => ssLoad().minDeposits    ?? "");
+  const [maxDeposits, _setMaxDeposits]       = useState(() => ssLoad().maxDeposits    ?? "");
+  const [minAgentDep, _setMinAgentDep]       = useState(() => ssLoad().minAgentDep    ?? "");
+  const [maxAgentDep, _setMaxAgentDep]       = useState(() => ssLoad().maxAgentDep    ?? "");
+  const [ftdAfter, _setFtdAfter]             = useState(() => ssLoad().ftdAfter       ?? "");
+  const [ftdBefore, _setFtdBefore]           = useState(() => ssLoad().ftdBefore      ?? "");
   const ftdAfterRef  = useRef<HTMLInputElement>(null);
   const ftdBeforeRef = useRef<HTMLInputElement>(null);
 
-  // ── Sort / selection ───────────────────────────────────────────────────────
-  const [sortKey, setSortKey]   = useState<SortKey>("agent");
-  const [sortDir, setSortDir]   = useState<SortDir>("asc");
+  function setAgentFilter(v: string)    { _setAgentFilter(v);    ssSave({ agentFilter: v }); }
+  function setCustomerFilter(v: string) { _setCustomerFilter(v); ssSave({ customerFilter: v }); }
+  function setCrmFilter(v: string)      { _setCrmFilter(v);      ssSave({ crmFilter: v }); }
+  function setMinCalls(v: string)       { _setMinCalls(v);       ssSave({ minCalls: v }); }
+  function setMinDuration(v: string)    { _setMinDuration(v);    ssSave({ minDuration: v }); }
+  function setMinTx(v: string)          { _setMinTx(v);          ssSave({ minTx: v }); }
+  function setMinDeposits(v: string)    { _setMinDeposits(v);    ssSave({ minDeposits: v }); }
+  function setMaxDeposits(v: string)    { _setMaxDeposits(v);    ssSave({ maxDeposits: v }); }
+  function setMinAgentDep(v: string)    { _setMinAgentDep(v);    ssSave({ minAgentDep: v }); }
+  function setMaxAgentDep(v: string)    { _setMaxAgentDep(v);    ssSave({ maxAgentDep: v }); }
+  function setFtdAfter(v: string)       { _setFtdAfter(v);       ssSave({ ftdAfter: v }); }
+  function setFtdBefore(v: string)      { _setFtdBefore(v);      ssSave({ ftdBefore: v }); }
+
+  // ── Sort / selection (persisted) ───────────────────────────────────────────
+  const [sortKey, _setSortKey] = useState<SortKey>(() => (ssLoad().sortKey as SortKey) || "agent");
+  const [sortDir, _setSortDir] = useState<SortDir>(() => (ssLoad().sortDir as SortDir) || "asc");
+
+  function setSortKey(k: SortKey) { _setSortKey(k); ssSave({ sortKey: k }); }
+  function setSortDir(d: SortDir) { _setSortDir(d); ssSave({ sortDir: d }); }
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // ── UI state ───────────────────────────────────────────────────────────────
@@ -103,7 +132,7 @@ export default function CRMPage() {
   }
 
   function toggleSort(col: SortKey) {
-    if (sortKey === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    if (sortKey === col) setSortDir(sortDir === "asc" ? "desc" : "asc");
     else { setSortKey(col); setSortDir("asc"); }
   }
 

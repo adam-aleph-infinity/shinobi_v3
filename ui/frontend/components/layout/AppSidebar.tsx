@@ -108,7 +108,7 @@ export default function AppSidebar({ onToggle, extraFooter }: {
       <div className="p-3 border-t border-gray-800 space-y-1.5">
         <BackendStatus />
         <SyncButton />
-        <div className="flex gap-1.5">
+        <div className="flex flex-col gap-0.5">
           {([
             { href: "/logs",      icon: Terminal,   label: "Logs" },
             { href: "/workspace", icon: FolderOpen, label: "Workspace" },
@@ -118,7 +118,7 @@ export default function AppSidebar({ onToggle, extraFooter }: {
               key={href}
               href={href}
               className={cn(
-                "flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-xs transition-colors",
+                "flex items-center gap-2 px-3 py-1.5 rounded-md text-xs transition-colors",
                 isActive(href)
                   ? "bg-indigo-600 text-white"
                   : "text-gray-500 hover:text-white hover:bg-gray-800"
