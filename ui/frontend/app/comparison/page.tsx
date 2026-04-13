@@ -158,7 +158,7 @@ function PersonaColumn({ persona, color, chartKey, scores }: {
   chartKey: string;
   scores?: PersonaScores;
 }) {
-  const sections = parsePersonaSections(persona.content_md);
+  const sections = parsePersonaSections(persona.content_md ?? "");
   const sectionScores: Record<string, number> = {};
   if (scores) {
     for (const [k, v] of Object.entries(scores)) {

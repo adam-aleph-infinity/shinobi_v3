@@ -58,6 +58,7 @@ export function getCategoryMeta(title: string) {
 export interface Section { title: string; content: string }
 
 export function parsePersonaSections(md: string): Section[] {
+  if (!md) return [];
   const lines = md.split("\n");
 
   // Does this persona use proper markdown headers?
