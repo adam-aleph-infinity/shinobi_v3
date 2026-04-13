@@ -22,9 +22,8 @@ interface Note {
   agent: string;
   customer: string;
   call_id: string;
-  persona_agent_id?: string;
+  notes_agent_id?: string;
   content_md: string;
-  score_json?: Record<string, any>;
   model: string;
   temperature: number;
   created_at: string;
@@ -81,27 +80,15 @@ function NotesPanel({ agent, customer, callId }: { agent: string; customer: stri
     <div className="h-full overflow-y-auto p-3 space-y-3">
       {notes.map(note => {
         const isExpanded = expanded.has(note.id);
-        const overall = note.score_json?._overall;
-        const summary = note.score_json?._summary;
         return (
           <div key={note.id} className="border border-gray-700 rounded-xl overflow-hidden">
             {/* Header */}
             <div className="flex items-center gap-2 px-3 py-2 bg-gray-900 border-b border-gray-800">
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  {overall !== undefined && (
-                    <span className={cn("text-xs font-bold shrink-0",
-                      overall >= 70 ? "text-emerald-400" : overall >= 40 ? "text-amber-400" : "text-red-400"
-                    )}>{overall}/100</span>
-                  )}
-                  {note.persona_agent_id && (
-                    <span className="text-[10px] text-indigo-400 truncate">{note.persona_agent_id}</span>
-                  )}
-                </div>
-                {summary && (
-                  <p className="text-[10px] text-gray-500 truncate mt-0.5">{summary}</p>
+                {note.notes_agent_id && (
+                  <p className="text-[10px] text-indigo-400 truncate font-medium">{note.notes_agent_id}</p>
                 )}
-                <p className="text-[9px] text-gray-700 mt-0.5">
+                <p className="text-[9px] text-gray-600 mt-0.5">
                   {note.model} · {new Date(note.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </p>
               </div>
@@ -134,24 +121,6 @@ function NotesPanel({ agent, customer, callId }: { agent: string; customer: stri
                   </ReactMarkdown>
                 </div>
 
-                {/* Per-section scores */}
-                {note.score_json && Object.keys(note.score_json).some(k => !k.startsWith("_")) && (
-                  <div className="mt-3 pt-2 border-t border-gray-800 space-y-1">
-                    {Object.entries(note.score_json)
-                      .filter(([k]) => !k.startsWith("_"))
-                      .map(([section, val]: [string, any]) => (
-                        <div key={section} className="flex items-center gap-2">
-                          <span className="text-[10px] text-gray-500 flex-1 truncate">{section}</span>
-                          <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden shrink-0">
-                            <div className={cn("h-full rounded-full",
-                              val.score >= 70 ? "bg-emerald-500" : val.score >= 40 ? "bg-amber-500" : "bg-red-500"
-                            )} style={{ width: `${val.score}%` }} />
-                          </div>
-                          <span className="text-[10px] font-mono text-gray-400 w-8 text-right shrink-0">{val.score}</span>
-                        </div>
-                      ))}
-                  </div>
-                )}
               </div>
             )}
           </div>
