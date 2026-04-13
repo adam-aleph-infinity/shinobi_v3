@@ -97,6 +97,7 @@ interface Preset {
 }
 
 interface SSEProgress { step: number; total: number; msg: string; }
+interface FileIdEntry { file_id: string; content_hash: string; uploaded_at: string; }
 interface SSEDone {
   persona_id: string;
   overall_score: number;
@@ -499,19 +500,17 @@ export default function FullPersonaAgentPage() {
   const [useFileUpload, setUseFileUpload] = useState(true);
 
   // Cached file IDs for the selected pair (provider → {file_id, content_hash, uploaded_at})
-  interface FileIdEntry { file_id: string; content_hash: string; uploaded_at: string; }
   const [fileIds, setFileIds] = useState<Record<string, FileIdEntry>>({});
 
-  // Run state — initialised from module-level store so navigation-away + back restores it
-  const [running, setRunning] = useState(() => _astore.running);
-  const [progress, setProgress] = useState<SSEProgress[]>(() => _astore.progress);
-  const [error, setError] = useState<string | null>(() => _astore.error);
-  const [result, setResult] = useState<SSEDone | null>(() => _astore.result);
+  // Run state — start from safe defaults to match SSR, then sync from _astore on mount
+  // (using _astore as a lazy initializer causes SSR/client hydration mismatch)
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<SSEProgress[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<SSEDone | null>(null);
 
   // View mode toggles
-  const [genView, setGenView] = useState<"rendered" | "raw" | "sections">(() =>
-    _astore.result?.sections?.length ? "sections" : "rendered"
-  );
+  const [genView, setGenView] = useState<"rendered" | "raw" | "sections">("rendered");
   const [showScoreRaw, setShowScoreRaw] = useState(false);
 
   // Transcript modal
@@ -519,13 +518,22 @@ export default function FullPersonaAgentPage() {
   const [txContent, setTxContent] = useState("");
   const [loadingTx, setLoadingTx] = useState(false);
 
-  // Register this component's setters so the background loop can push updates to it
+  // Register this component's setters so the background loop can push updates to it.
+  // Also sync from _astore here (post-hydration) to restore state from a previous run.
   useEffect(() => {
     _setRunning_  = setRunning;
     _setProgress_ = setProgress;
     _setResult_   = setResult;
     _setError_    = setError;
     _setGenView_  = setGenView;
+    // Restore live state from module store (survives navigation away + back)
+    if (_astore.running || _astore.progress.length || _astore.result || _astore.error) {
+      setRunning(_astore.running);
+      setProgress(_astore.progress);
+      setResult(_astore.result);
+      setError(_astore.error);
+      if (_astore.result?.sections?.length) setGenView("sections");
+    }
     return () => {
       _setRunning_ = null; _setProgress_ = null;
       _setResult_  = null; _setError_    = null; _setGenView_ = null;
