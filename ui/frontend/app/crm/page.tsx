@@ -1,11 +1,11 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import useSWR from "swr";
 import { AgentCustomerPair, TxStats } from "@/lib/types";
 import { formatDuration } from "@/lib/utils";
 import {
   RefreshCw, Search, Loader2, ChevronUp, ChevronDown, ChevronsUpDown,
-  X, Mic2, CheckSquare, Square, CheckCircle2,
+  X, Mic2, CheckSquare, Square, CheckCircle2, CalendarDays,
 } from "lucide-react";
 import { refreshCache } from "@/lib/api";
 
@@ -53,6 +53,8 @@ export default function CRMPage() {
   const [maxAgentDep, setMaxAgentDep]       = useState("");
   const [ftdAfter, setFtdAfter]             = useState("");
   const [ftdBefore, setFtdBefore]           = useState("");
+  const ftdAfterRef  = useRef<HTMLInputElement>(null);
+  const ftdBeforeRef = useRef<HTMLInputElement>(null);
 
   // ── Sort / selection ───────────────────────────────────────────────────────
   const [sortKey, setSortKey]   = useState<SortKey>("agent");
@@ -227,11 +229,23 @@ export default function CRMPage() {
         </div>
         <div className="flex items-center gap-1">
           <span className="text-[10px] text-gray-600 whitespace-nowrap">FTD:</span>
-          <input type="date" value={ftdAfter}  onChange={e => setFtdAfter(e.target.value)}
-            className="px-2 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500" />
+          <div className="relative flex items-center">
+            <input ref={ftdAfterRef} type="date" value={ftdAfter} onChange={e => setFtdAfter(e.target.value)}
+              className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]" />
+            <button onClick={() => ftdAfterRef.current?.showPicker()}
+              className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors">
+              <CalendarDays className="w-3.5 h-3.5" />
+            </button>
+          </div>
           <span className="text-[10px] text-gray-700">–</span>
-          <input type="date" value={ftdBefore} onChange={e => setFtdBefore(e.target.value)}
-            className="px-2 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500" />
+          <div className="relative flex items-center">
+            <input ref={ftdBeforeRef} type="date" value={ftdBefore} onChange={e => setFtdBefore(e.target.value)}
+              className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]" />
+            <button onClick={() => ftdBeforeRef.current?.showPicker()}
+              className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors">
+              <CalendarDays className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
