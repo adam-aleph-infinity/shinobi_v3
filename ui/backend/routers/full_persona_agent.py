@@ -213,43 +213,69 @@ def _upload_and_call_xai(
     return resp.json()["choices"][0]["message"]["content"]
 
 
+def _openai_scope_error(e: Exception) -> bool:
+    s = str(e)
+    return (
+        "insufficient permissions" in s.lower()
+        or "api.files.write" in s
+        or "api.responses.write" in s
+        or ("401" in s and "scope" in s.lower())
+    )
+
+
+def _openai_chat_fallback(client: "OpenAI", system: str, user_prompt: str, transcript: str, model: str, temperature: float) -> str:
+    print(f"[fpa/openai] falling back to chat completion with inline transcript")
+    full_user = f"{user_prompt.strip()}\n\n{transcript}"
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": full_user},
+        ],
+        temperature=temperature,
+    )
+    return resp.choices[0].message.content or ""
+
+
 def _upload_and_call_openai(
     system: str, user_prompt: str, transcript: str, model: str, temperature: float,
     pair_dir: Optional[Path] = None,
 ) -> str:
-    # Upload text file via purpose="user_data", then reference via Responses API
-    # (Chat Completions rejects text/plain file_id — Responses API handles it correctly)
+    # Upload transcript as a file, then call via Responses API.
+    # Falls back to chat completion (inline transcript) if either the file upload
+    # or the Responses API call is blocked by missing API key scopes.
     from openai import OpenAI
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
     client = OpenAI(api_key=api_key)
 
-    h = _content_hash(transcript)
-    cache = _load_file_id_cache(pair_dir) if pair_dir else {}
-    entry = cache.get("openai", {})
-    if entry.get("content_hash") == h and entry.get("file_id"):
-        file_id = entry["file_id"]
-        print(f"[fpa/openai] reusing cached file_id {file_id}")
-    else:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-            f.write(transcript)
-            tmp = f.name
-        try:
-            with open(tmp, "rb") as fb:
-                file_obj = client.files.create(file=fb, purpose="user_data")
-            file_id = file_obj.id
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-        print(f"[fpa/openai] uploaded file_id {file_id}")
-        if pair_dir:
-            cache["openai"] = {"file_id": file_id, "content_hash": h, "uploaded_at": datetime.utcnow().isoformat()}
-            _save_file_id_cache(pair_dir, cache)
-
-    print(f"[fpa/openai] payload → model={model} temp={temperature} file_id={file_id}")
-    print(f"[fpa/openai] system (instructions): {system[:300]!r}")
-    print(f"[fpa/openai] user_prompt: {user_prompt[:500]!r}")
+    # ── Try file-upload path ───────────────────────────────────────────────────
     try:
+        h = _content_hash(transcript)
+        cache = _load_file_id_cache(pair_dir) if pair_dir else {}
+        entry = cache.get("openai", {})
+        if entry.get("content_hash") == h and entry.get("file_id"):
+            file_id = entry["file_id"]
+            print(f"[fpa/openai] reusing cached file_id {file_id}")
+        else:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                f.write(transcript)
+                tmp = f.name
+            try:
+                with open(tmp, "rb") as fb:
+                    file_obj = client.files.create(file=fb, purpose="user_data")
+                file_id = file_obj.id
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            print(f"[fpa/openai] uploaded file_id {file_id}")
+            if pair_dir:
+                cache["openai"] = {"file_id": file_id, "content_hash": h, "uploaded_at": datetime.utcnow().isoformat()}
+                _save_file_id_cache(pair_dir, cache)
+
+        print(f"[fpa/openai] payload → model={model} temp={temperature} file_id={file_id}")
+        print(f"[fpa/openai] system (instructions): {system[:300]!r}")
+        print(f"[fpa/openai] user_prompt: {user_prompt[:500]!r}")
         response = client.responses.create(
             model=model,
             instructions=system,
@@ -263,20 +289,11 @@ def _upload_and_call_openai(
             temperature=temperature,
         )
         return response.output_text
+
     except Exception as e:
-        err_str = str(e)
-        if "api.responses.write" in err_str or "401" in err_str or "insufficient permissions" in err_str.lower():
-            print(f"[fpa/openai] Responses API unavailable ({e}), falling back to chat completion with inline transcript")
-            full_user = f"{user_prompt.strip()}\n\n{transcript}"
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": full_user},
-                ],
-                temperature=temperature,
-            )
-            return resp.choices[0].message.content or ""
+        if _openai_scope_error(e):
+            print(f"[fpa/openai] scope error ({e}), retrying with inline chat completion")
+            return _openai_chat_fallback(client, system, user_prompt, transcript, model, temperature)
         raise
 
 
