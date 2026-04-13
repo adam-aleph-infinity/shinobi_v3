@@ -467,11 +467,13 @@ export default function FullPersonaAgentPage() {
   const [agentStats, setAgentStats] = useState<AgentStat[]>([]);
   const [customerStats, setCustomerStats] = useState<CustomerStat[]>([]);
 
-  // Selection (persisted to sessionStorage)
-  const [agent, _setAgent] = useState(() => _fpaSS("agent"));
-  const [customer, _setCustomer] = useState(() => _fpaSS("customer"));
+  // Selection — start from "" to match SSR; restored from sessionStorage post-mount
+  const [agent, _setAgent] = useState("");
+  const [customer, _setCustomer] = useState("");
   const setAgent = (v: string) => { _setAgent(v); _fpaSSSet("agent", v); };
   const setCustomer = (v: string) => { _setCustomer(v); _fpaSSSet("customer", v); };
+  // Ref so the customer-stats effect can re-apply the saved customer after stats load
+  const _restoreCustomerRef = useRef("");
 
   const [label, setLabel] = useState("");
   const [labelEdited, setLabelEdited] = useState(false);
@@ -596,11 +598,28 @@ export default function FullPersonaAgentPage() {
     }).catch(() => {});
   }, []);
 
+  // Restore agent (and pending customer) from sessionStorage after mount
+  useEffect(() => {
+    const savedAgent = _fpaSS("agent");
+    if (savedAgent) {
+      _restoreCustomerRef.current = _fpaSS("customer");
+      _setAgent(savedAgent);
+    }
+  }, []); // run once on mount
+
   // Load customer stats when agent changes
   useEffect(() => {
-    if (!agent) { setCustomerStats([]); setCustomer(""); return; }
+    if (!agent) { setCustomerStats([]); _setCustomer(""); return; }
+    const pendingCustomer = _restoreCustomerRef.current;
+    _restoreCustomerRef.current = "";
     fetch(`${API}/full-persona-agent/customer-stats?agent=${encodeURIComponent(agent)}`)
-      .then(r => r.json()).then(d => { setCustomerStats(d); setCustomer(""); });
+      .then(r => r.json())
+      .then(d => {
+        setCustomerStats(d);
+        // Re-apply saved customer (restoration path) or clear on manual agent change
+        if (pendingCustomer) _setCustomer(pendingCustomer);
+        else _setCustomer("");
+      });
   }, [agent]);
 
   // Load cached file IDs when pair is fully selected
