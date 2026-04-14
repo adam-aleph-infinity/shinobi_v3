@@ -767,7 +767,7 @@ export default function NotesPage() {
                     {isSelected && <Check className="w-2.5 h-2.5 text-white" />}
                   </div>
                   <span className="text-xs font-mono font-medium text-gray-200 truncate flex-1">{call.call_id}</span>
-                  {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400 shrink-0" title="Has notes" />}
+                  {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400 shrink-0" />}
                   {call.hasTranscript
                     ? <CheckCircle2 className="w-3 h-3 text-teal-400 shrink-0" />
                     : <Circle className="w-3 h-3 text-gray-700 shrink-0" />}
