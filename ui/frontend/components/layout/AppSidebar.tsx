@@ -23,10 +23,10 @@ const navItems: NavItem[] = [
   { href: "/full-persona-agent",icon: Bot,       label: "Full Persona Agent" },
   { href: "/personas",          icon: FileText,  label: "Personas" },
   { href: "/comparison",        icon: BarChart3,  label: "Compare Personas" },
-  { href: "/notes",             icon: StickyNote, label: "Notes" },
+  { href: "/notes",             icon: StickyNote, label: "Full Notes Agent" },
+  { href: "/calls",             icon: FileText,   label: "Calls" },
   { href: "/agent-comparison",  icon: BarChart3,  label: "Compare Agents" },
   { href: "/agent-dashboard",   icon: BarChart3,  label: "Agent Dashboard" },
-  { href: "/calls",             icon: FileText,   label: "Calls" },
 ];
 
 function BackendStatus() {

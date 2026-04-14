@@ -169,7 +169,7 @@ export default function CallsPage() {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
-  const [showNotes, setShowNotes]               = useState(false);
+  const [showNotes, setShowNotes]               = useState(true);
   const [notesW, notesDrag]                     = useResize(320, 200, 560, "left");
 
   // Restore persisted state after mount (avoid SSR/hydration mismatch)

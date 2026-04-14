@@ -46,6 +46,29 @@ Rules:
 
 const DEFAULT_PROMPT = "Analyse this call and produce a concise call note:";
 
+const DEFAULT_COMPLIANCE_SYSTEM = `You are a regulatory compliance analyst reviewing a single sales call note.
+
+Given the call note, return ONLY a valid JSON object — no markdown, no explanation, no code fences.
+
+The JSON must have this exact structure:
+{
+  "Compliance Risk":     {"score": 80, "reasoning": "brief justification"},
+  "Disclosure Quality":  {"score": 75, "reasoning": "brief justification"},
+  "Regulatory Language": {"score": 85, "reasoning": "brief justification"},
+  "Sales Ethics":        {"score": 90, "reasoning": "brief justification"},
+  "_overall": 82,
+  "_summary": "One sentence overall compliance assessment",
+  "_risk_level": "Low",
+  "_violations": ["list specific violations, or leave empty"]
+}
+
+Rules:
+- All scores are integers 0–100; higher = better compliance.
+- _risk_level is exactly one of: Low, Medium, High.
+- _violations is a list; leave [] if none found.`;
+
+const DEFAULT_COMPLIANCE_PROMPT = "Score the compliance of this call note:";
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface Agent    { agent: string; count: number; }
@@ -64,6 +87,10 @@ interface NotesAgent {
   user_prompt: string;
   is_default: boolean;
   created_at?: string;
+  run_compliance?: boolean;
+  compliance_model?: string;
+  compliance_system_prompt?: string;
+  compliance_user_prompt?: string;
 }
 
 type CallStatus = "idle" | "transcribing" | "analyzing" | "done" | "error";
@@ -96,25 +123,68 @@ function providerFor(model: string) {
   return "OpenAI";
 }
 
-// ── Notes Agent panel ─────────────────────────────────────────────────────────
-// Single-purpose agent — its own preset storage at /api/notes/agents
+// ── Inner config panel ────────────────────────────────────────────────────────
 
-function NotesAgentPanel({
+function ConfigPanel({ title, accentColor, model, onModel, systemPrompt, onSystem, userPrompt, onUser }: {
+  title: string; accentColor: string;
+  model: string; onModel: (v: string) => void;
+  systemPrompt: string; onSystem: (v: string) => void;
+  userPrompt: string; onUser: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={cn("bg-gray-900 border rounded-xl overflow-hidden", accentColor)}>
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full px-4 py-3 flex items-center gap-2 hover:bg-gray-800/40 transition-colors">
+        <span className="text-sm font-semibold text-white flex-1 text-left">{title}</span>
+        <span className="text-[11px] text-gray-500 font-mono">{model}</span>
+        {open ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
+      </button>
+      {open && (
+        <div className="border-t border-gray-800 p-4 space-y-3">
+          <div>
+            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Model</label>
+            <select value={model} onChange={e => onModel(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500">
+              {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">System Prompt</label>
+            <textarea value={systemPrompt} onChange={e => onSystem(e.target.value)} rows={7}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono resize-y focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+          </div>
+          <div>
+            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">User Prompt</label>
+            <textarea value={userPrompt} onChange={e => onUser(e.target.value)} rows={2}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono resize-y focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Full Notes Agent panel ────────────────────────────────────────────────────
+
+function FullNotesAgentPanel({
   name, onNameChange,
-  model, system, prompt,
-  onModel, onSystem, onPrompt,
+  notesModel, notesSystem, notesPrompt,
+  complianceEnabled, complianceModel, complianceSystem, compliancePrompt,
+  onLoad,
+  children,
 }: {
   name: string; onNameChange: (v: string) => void;
-  model: string; system: string; prompt: string;
-  onModel: (v: string) => void;
-  onSystem: (v: string) => void; onPrompt: (v: string) => void;
+  notesModel: string; notesSystem: string; notesPrompt: string;
+  complianceEnabled: boolean; complianceModel: string; complianceSystem: string; compliancePrompt: string;
+  onLoad: (p: NotesAgent) => void;
+  children: React.ReactNode;
 }) {
   const [agents, setAgents] = useState<NotesAgent[]>([]);
   const [showList, setShowList] = useState(false);
   const [loadedFrom, setLoadedFrom] = useState<string | null>(null);
   const [loadedSnapshot, setLoadedSnapshot] = useState<NotesAgent | null>(null);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
 
   const reload = useCallback(async () => {
     const r = await fetch(`${API}/notes/agents`);
@@ -126,17 +196,20 @@ function NotesAgentPanel({
   useEffect(() => {
     if (!loadedSnapshot || nameManuallyEdited) return;
     const changed =
-      model !== loadedSnapshot.model ||
-      system !== loadedSnapshot.system_prompt ||
-      prompt !== loadedSnapshot.user_prompt;
+      notesModel      !== loadedSnapshot.model ||
+      notesSystem     !== loadedSnapshot.system_prompt ||
+      notesPrompt     !== loadedSnapshot.user_prompt ||
+      complianceModel !== (loadedSnapshot.compliance_model ?? "gpt-5.4") ||
+      complianceSystem!== (loadedSnapshot.compliance_system_prompt ?? DEFAULT_COMPLIANCE_SYSTEM) ||
+      compliancePrompt!== (loadedSnapshot.compliance_user_prompt ?? DEFAULT_COMPLIANCE_PROMPT);
     if (changed) {
       onNameChange(`${loadedSnapshot.name} (copy)`);
       setLoadedFrom(null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, system, prompt]);
+  }, [notesModel, notesSystem, notesPrompt, complianceModel, complianceSystem, compliancePrompt]);
 
-  const autoSuggest = `${providerFor(model)} Notes Agent`;
+  const autoSuggest = `${providerFor(notesModel)} Notes Agent`;
 
   const save = async () => {
     const saveName = (name.trim() || autoSuggest).trim();
@@ -144,9 +217,13 @@ function NotesAgentPanel({
     await fetch(`${API}/notes/agents`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: saveName, model, temperature: 0,
-        system_prompt: system, user_prompt: prompt,
+        name: saveName, model: notesModel, temperature: 0,
+        system_prompt: notesSystem, user_prompt: notesPrompt,
         is_default: false,
+        run_compliance: complianceEnabled,
+        compliance_model: complianceModel,
+        compliance_system_prompt: complianceSystem,
+        compliance_user_prompt: compliancePrompt,
       }),
     });
     onNameChange(saveName);
@@ -155,8 +232,7 @@ function NotesAgentPanel({
   };
 
   const loadAgent = (p: NotesAgent) => {
-    onModel(p.model);
-    onSystem(p.system_prompt); onPrompt(p.user_prompt);
+    onLoad(p);
     onNameChange(p.name);
     setLoadedFrom(p.name);
     setLoadedSnapshot(p);
@@ -164,13 +240,17 @@ function NotesAgentPanel({
     setShowList(false);
   };
 
+  const notesProvider      = providerFor(notesModel);
+  const complianceProvider = providerFor(complianceModel);
+  const sameProvider       = notesProvider === complianceProvider;
+
   return (
     <div className="border-2 border-indigo-900/50 rounded-2xl overflow-hidden">
       {/* Header */}
       <div className="bg-gray-900 px-4 pt-4 pb-4 space-y-3">
         <div>
-          <p className="text-xs font-semibold text-indigo-300 uppercase tracking-widest mb-0.5">Notes Agent</p>
-          <p className="text-[11px] text-gray-500">Single-call analysis configuration</p>
+          <p className="text-xs font-semibold text-indigo-300 uppercase tracking-widest mb-0.5">Full Notes Agent</p>
+          <p className="text-[11px] text-gray-500">Per-call note analysis + compliance scoring</p>
         </div>
 
         {/* Name + save + browse */}
@@ -180,6 +260,7 @@ function NotesAgentPanel({
               value={name}
               onChange={e => { onNameChange(e.target.value); setNameManuallyEdited(true); setLoadedFrom(null); }}
               placeholder={autoSuggest}
+              onKeyDown={e => e.key === "Enter" && save()}
               className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button onClick={save}
@@ -187,7 +268,8 @@ function NotesAgentPanel({
               <Save className="w-3.5 h-3.5" /> Save
             </button>
             <button onClick={() => setShowList(v => !v)}
-              className="flex items-center gap-1 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-xs rounded-lg transition-colors shrink-0">
+              className="flex items-center gap-1 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-xs rounded-lg transition-colors shrink-0"
+              title="Browse saved agents">
               {showList ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               <span>{agents.length}</span>
             </button>
@@ -205,30 +287,25 @@ function NotesAgentPanel({
         {/* Saved agents list */}
         {showList && (
           <div className="border border-gray-700 rounded-lg overflow-hidden">
-            {agents.length === 0 && <p className="text-xs text-gray-600 px-3 py-2">No saved notes agents yet</p>}
+            {agents.length === 0 && <p className="text-xs text-gray-600 px-3 py-2">No saved agents yet</p>}
             {agents.map(p => (
               <div key={p.name} className="flex items-center gap-1.5 px-3 py-2 hover:bg-gray-800/60 border-b border-gray-800/50 last:border-0">
                 <button onClick={() => loadAgent(p)} className="flex-1 text-left min-w-0 group">
                   <span className="text-xs font-medium text-gray-200 group-hover:text-white">
                     {p.is_default && <span className="text-yellow-400 mr-1">★</span>}{p.name}
                   </span>
-                  <span className="text-[10px] text-gray-600 ml-2">{p.model}</span>
+                  <span className="text-[10px] text-gray-600 ml-2">
+                    {p.model}{p.run_compliance !== false ? ` + ${p.compliance_model ?? "gpt-5.4"}` : ""}
+                  </span>
                 </button>
                 <button
-                  onClick={async () => {
-                    await fetch(`${API}/notes/agents/${encodeURIComponent(p.name)}/default`, { method: "PATCH" });
-                    reload();
-                  }}
-                  className="text-gray-600 hover:text-yellow-400 p-1 transition-colors" title="Set as default">
+                  onClick={async () => { await fetch(`${API}/notes/agents/${encodeURIComponent(p.name)}/default`, { method: "PATCH" }); reload(); }}
+                  className="text-gray-600 hover:text-yellow-400 p-1 transition-colors shrink-0" title="Set as default">
                   <Check className="w-3 h-3" />
                 </button>
                 <button
-                  onClick={async () => {
-                    await fetch(`${API}/notes/agents/${encodeURIComponent(p.name)}`, { method: "DELETE" });
-                    if (loadedFrom === p.name) setLoadedFrom(null);
-                    reload();
-                  }}
-                  className="text-gray-600 hover:text-red-400 p-1 transition-colors" title="Delete">
+                  onClick={async () => { await fetch(`${API}/notes/agents/${encodeURIComponent(p.name)}`, { method: "DELETE" }); if (loadedFrom === p.name) setLoadedFrom(null); reload(); }}
+                  className="text-gray-600 hover:text-red-400 p-1 transition-colors shrink-0" title="Delete">
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
@@ -236,38 +313,29 @@ function NotesAgentPanel({
           </div>
         )}
 
-        {/* Config summary pill + expand toggle */}
-        <button onClick={() => setConfigOpen(o => !o)}
-          className="w-full flex items-center gap-2 text-[11px] text-gray-600 hover:text-gray-400 transition-colors pt-0.5">
-          <span className="text-indigo-400/70 font-medium">{providerFor(model)}</span>
+        {/* Config summary */}
+        <div className="flex items-center gap-2 text-[11px] text-gray-600 flex-wrap pt-0.5">
+          <span className="text-indigo-400/70 font-medium">
+            {sameProvider ? notesProvider : `${notesProvider} / ${complianceProvider}`}
+          </span>
           <span>·</span>
-          <span>{model}</span>
-          <span className="ml-auto">{configOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}</span>
-        </button>
+          <span>Notes: {notesModel}</span>
+          {complianceEnabled && <><span>·</span><span>Compliance: {complianceModel}</span></>}
+          {!complianceEnabled && <><span>·</span><span className="text-gray-700">Compliance off</span></>}
+        </div>
       </div>
 
-      {/* Expandable config */}
-      {configOpen && (
-        <div className="border-t border-indigo-900/40 bg-gray-950/40 p-4 space-y-3">
-          <div>
-            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Model</label>
-            <select value={model} onChange={e => onModel(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500">
-              {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">System Prompt</label>
-            <textarea value={system} onChange={e => onSystem(e.target.value)} rows={8}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono resize-y focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">User Prompt</label>
-            <textarea value={prompt} onChange={e => onPrompt(e.target.value)} rows={2}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono resize-y focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-          </div>
-        </div>
-      )}
+      {/* Divider */}
+      <div className="flex items-center gap-2 bg-indigo-950/30 px-4 py-1.5 border-t border-b border-indigo-900/40">
+        <div className="flex-1 h-px bg-indigo-900/40" />
+        <span className="text-[10px] font-semibold text-indigo-800 uppercase tracking-widest">Includes</span>
+        <div className="flex-1 h-px bg-indigo-900/40" />
+      </div>
+
+      {/* Sub-panels */}
+      <div className="bg-gray-950/30 p-4 space-y-3">
+        {children}
+      </div>
     </div>
   );
 }
@@ -312,10 +380,16 @@ export default function NotesPage() {
   const [customerSearch, setCustomerSearch]     = useState("");
 
   // Notes agent config
-  const [agentName, setAgentName] = useState("");
-  const [model, setModel]         = useState("gpt-5.4");
-  const [system, setSystem]       = useState(DEFAULT_SYSTEM);
-  const [prompt, setPrompt]       = useState(DEFAULT_PROMPT);
+  const [agentName, setAgentName]   = useState("");
+  const [model, setModel]           = useState("gpt-5.4");
+  const [system, setSystem]         = useState(DEFAULT_SYSTEM);
+  const [prompt, setPrompt]         = useState(DEFAULT_PROMPT);
+
+  // Compliancy agent config
+  const [complianceEnabled, setComplianceEnabled] = useState(true);
+  const [complianceModel, setComplianceModel]     = useState("gpt-5.4");
+  const [complianceSystem, setComplianceSystem]   = useState(DEFAULT_COMPLIANCE_SYSTEM);
+  const [compliancePrompt, setCompliancePrompt]   = useState(DEFAULT_COMPLIANCE_PROMPT);
 
   // Run state
   const [running, setRunning]       = useState(false);
@@ -376,7 +450,12 @@ export default function NotesPage() {
         if (def) {
           setAgentName(def.name);
           setModel(def.model);
-          setSystem(def.system_prompt); setPrompt(def.user_prompt);
+          setSystem(def.system_prompt);
+          setPrompt(def.user_prompt);
+          setComplianceEnabled(def.run_compliance ?? true);
+          setComplianceModel(def.compliance_model ?? "gpt-5.4");
+          setComplianceSystem(def.compliance_system_prompt ?? DEFAULT_COMPLIANCE_SYSTEM);
+          setCompliancePrompt(def.compliance_user_prompt ?? DEFAULT_COMPLIANCE_PROMPT);
         }
       })
       .catch(() => {});
@@ -476,6 +555,10 @@ export default function NotesPage() {
               temperature:    0,
               system_prompt:  system,
               user_prompt:    prompt,
+              run_compliance:             complianceEnabled,
+              compliance_model:           complianceModel,
+              compliance_system_prompt:   complianceSystem,
+              compliance_user_prompt:     compliancePrompt,
             }),
           }).then(async res => {
             if (!res.ok) { reject(new Error(await res.text())); return; }
@@ -678,20 +761,54 @@ export default function NotesPage() {
 
       <DragHandle onMouseDown={callsDrag} />
 
-      {/* Right panel — Notes Agent + Run */}
+      {/* Right panel — Full Notes Agent + Run */}
       <div className="flex-1 min-w-0 overflow-y-auto p-4 space-y-4">
         <div className="flex items-center gap-2 mb-1">
           <StickyNote className="w-4 h-4 text-indigo-400" />
-          <h1 className="text-sm font-semibold text-white">Notes</h1>
-          <span className="text-xs text-gray-600">· per-call analysis</span>
+          <h1 className="text-sm font-semibold text-white">Full Notes Agent</h1>
+          <span className="text-xs text-gray-600">· per-call analysis + compliance scoring</span>
         </div>
 
-        {/* Notes Agent panel */}
-        <NotesAgentPanel
+        {/* Full Notes Agent panel */}
+        <FullNotesAgentPanel
           name={agentName} onNameChange={setAgentName}
-          model={model} system={system} prompt={prompt}
-          onModel={setModel} onSystem={setSystem} onPrompt={setPrompt}
-        />
+          notesModel={model} notesSystem={system} notesPrompt={prompt}
+          complianceEnabled={complianceEnabled}
+          complianceModel={complianceModel}
+          complianceSystem={complianceSystem}
+          compliancePrompt={compliancePrompt}
+          onLoad={p => {
+            setModel(p.model); setSystem(p.system_prompt); setPrompt(p.user_prompt);
+            setComplianceEnabled(p.run_compliance ?? true);
+            setComplianceModel(p.compliance_model ?? "gpt-5.4");
+            setComplianceSystem(p.compliance_system_prompt ?? DEFAULT_COMPLIANCE_SYSTEM);
+            setCompliancePrompt(p.compliance_user_prompt ?? DEFAULT_COMPLIANCE_PROMPT);
+          }}
+        >
+          <ConfigPanel
+            title="Notes Agent"
+            accentColor="border-indigo-900/30"
+            model={model} onModel={setModel}
+            systemPrompt={system} onSystem={setSystem}
+            userPrompt={prompt} onUser={setPrompt}
+          />
+          <div className="flex items-center gap-2 px-1">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={complianceEnabled} onChange={e => setComplianceEnabled(e.target.checked)}
+                className="w-3.5 h-3.5 accent-purple-500 cursor-pointer" />
+              <span className="text-xs text-gray-400">Enable Compliancy Agent</span>
+            </label>
+          </div>
+          {complianceEnabled && (
+            <ConfigPanel
+              title="Compliancy Agent"
+              accentColor="border-purple-900/30"
+              model={complianceModel} onModel={setComplianceModel}
+              systemPrompt={complianceSystem} onSystem={setComplianceSystem}
+              userPrompt={compliancePrompt} onUser={setCompliancePrompt}
+            />
+          )}
+        </FullNotesAgentPanel>
 
         {/* Run section */}
         <div className="border border-gray-800 rounded-xl p-4 space-y-3">
