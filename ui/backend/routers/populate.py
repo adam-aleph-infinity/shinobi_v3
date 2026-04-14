@@ -73,17 +73,24 @@ async def start_populate():
             sync_thread = threading.Thread(target=_run_sync, args=(sync_q,), daemon=True)
             sync_thread.start()
 
+            _last_keepalive = asyncio.get_event_loop().time()
             while True:
                 try:
                     item = sync_q.get_nowait()
                 except queue.Empty:
                     await asyncio.sleep(0.1)
+                    # Emit a keepalive comment every 10s so the proxy doesn't drop the connection
+                    now = asyncio.get_event_loop().time()
+                    if now - _last_keepalive >= 10:
+                        yield ": keepalive\n\n"
+                        _last_keepalive = now
                     continue
                 if item is None:
                     break
                 # Forward sync events; mark errors but keep going
                 evt = "error" if item.get("error") else "sync"
                 yield _sse(evt, item.get("msg", ""), **{k: v for k, v in item.items() if k != "msg"})
+                _last_keepalive = asyncio.get_event_loop().time()
 
             # ── Stage 2: Sort pairs by net deposits ──────────────────────────
             yield _sse("stage", "Stage 2 / 3 — Sorting pairs by net deposits", stage=2)
@@ -160,6 +167,7 @@ async def start_populate():
                 )
 
                 try:
+                    yield ": keepalive\n\n"
                     result = await batch_transcribe_pairs(req)
                     total_submitted += result.get("submitted", 0)
                     total_skipped   += result.get("skipped", 0)
