@@ -45,6 +45,35 @@ Rules:
 
 DEFAULT_COMPLIANCE_PROMPT = "Score the compliance of this call note:"
 
+DEFAULT_ROLLUP_SYSTEM = """You are a senior compliance analyst reviewing a complete series of call notes for a single agent-customer relationship.
+
+Produce a comprehensive roll-up report with EXACTLY these sections (each preceded by ##):
+
+## Compliance Aggregate
+For each compliance procedure, show totals across ALL calls:
+- Format each line: "<Procedure Name>: X compliant, Y violations (Z% violation rate)"
+- Final line: "TOTAL: X violations across Y procedure checks"
+
+## Call Progression Summary
+A concise timeline of how the relationship evolved across calls: key milestones, stages reached, current status, outcomes.
+
+## Key Patterns & Persistent Issues
+Recurring violations, consistent behaviours, issues that appear in multiple calls.
+
+## Consolidated Next Steps
+Top 5–8 priority actions based on ALL notes, ranked by urgency.
+
+## Overall Risk Assessment
+Overall compliance risk (Low / Medium / High) with justification from aggregate data.
+
+Rules:
+- Use exact ## headings above
+- Extract exact numbers from the notes — do not estimate
+- Reference specific call numbers where relevant
+- Keep each section focused and data-driven"""
+
+DEFAULT_ROLLUP_PROMPT = "Summarize and aggregate all notes for this agent-customer relationship:"
+
 DEFAULT_SYSTEM = """You are a senior call analyst reviewing a single sales call transcript.
 
 Produce a concise call note with EXACTLY these sections (each preceded by ##):
@@ -398,6 +427,92 @@ async def analyze_note(req: NoteAnalyzeRequest):
             "content_md": content_md,
             "score_json": comp_json,
         })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
+
+
+# ── Roll-up: aggregate all notes for an agent+customer ────────────────────────
+
+class NoteRollupRequest(BaseModel):
+    agent: str
+    customer: str
+    model: str = "gpt-5.4"
+    temperature: float = 0.0
+    system_prompt: str = DEFAULT_ROLLUP_SYSTEM
+    user_prompt: str = DEFAULT_ROLLUP_PROMPT
+    thinking: bool = False
+
+
+@router.post("/rollup")
+async def rollup_notes(req: NoteRollupRequest):
+    loop = asyncio.get_event_loop()
+    _label = f"{req.agent}/{req.customer}"
+
+    async def stream():
+        yield _sse("progress", {"step": 1, "total": 3, "msg": "Loading notes…"})
+
+        from ui.backend.database import engine
+        from sqlmodel import Session as _Session
+        with _Session(engine) as db:
+            stmt = select(Note).where(
+                Note.agent == req.agent,
+                Note.customer == req.customer,
+            ).order_by(Note.created_at)
+            notes = db.exec(stmt).all()
+
+        if not notes:
+            yield _sse("error", {"msg": "No notes found for this agent-customer pair. Run the notes agent first."})
+            return
+
+        yield _sse("progress", {"step": 1, "total": 3,
+            "msg": f"Loaded {len(notes)} note{'' if len(notes) == 1 else 's'}"})
+
+        # Concatenate all notes with separators
+        combined = ""
+        for i, note in enumerate(notes, 1):
+            combined += f"\n\n---\n### Note {i} (Call: {note.call_id})\n\n{note.content_md}"
+        combined = combined.strip()
+
+        print(f"[rollup] {_label}: running model={req.model} notes={len(notes)} chars={len(combined):,}")
+        yield _sse("progress", {"step": 2, "total": 3,
+            "msg": f"Running roll-up agent ({req.model}) on {len(notes)} notes…"})
+
+        try:
+            user_msg = f"{req.user_prompt.strip()}\n\n{combined}"
+            _q: asyncio.Queue = asyncio.Queue()
+            def _on_chunk(t: str, _q=_q):
+                asyncio.run_coroutine_threadsafe(_q.put(("t", t)), loop)
+            async def _coro(_q=_q):
+                try:
+                    r = await loop.run_in_executor(
+                        None, _llm_stream_thinking,
+                        req.system_prompt, user_msg, req.model,
+                        req.temperature, req.thinking, _on_chunk)
+                    await _q.put(("done", r))
+                except Exception as exc:
+                    await _q.put(("error", str(exc)))
+            asyncio.create_task(_coro())
+            result_md = ""
+            while True:
+                kind, val = await _q.get()
+                if kind == "t":
+                    yield _sse("thinking", {"text": val, "phase": "rollup"})
+                elif kind == "done":
+                    result_md = val
+                    break
+                elif kind == "error":
+                    raise RuntimeError(val)
+        except Exception as e:
+            print(f"[rollup] {_label}: error: {e}")
+            yield _sse("error", {"msg": f"Roll-up failed: {e}"})
+            return
+
+        yield _sse("progress", {"step": 3, "total": 3, "msg": "Summary complete"})
+        print(f"[rollup] {_label}: done — {len(result_md):,} chars")
+        yield _sse("done", {"content_md": result_md, "note_count": len(notes)})
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
