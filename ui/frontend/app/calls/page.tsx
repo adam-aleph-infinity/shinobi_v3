@@ -170,7 +170,7 @@ export default function CallsPage() {
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
   const [showNotes, setShowNotes]               = useState(false);
-  const [notesW, notesDrag]                     = useResize(320, 200, 560);
+  const [notesW, notesDrag]                     = useResize(320, 200, 560, "left");
 
   // Restore persisted state after mount (avoid SSR/hydration mismatch)
   useEffect(() => {
@@ -202,6 +202,16 @@ export default function CallsPage() {
       : null,
     fetcher
   );
+
+  // Fetch all notes for this agent/customer pair to know which calls have notes
+  const { data: pairNotes } = useSWR<{ call_id: string }[]>(
+    selectedAgent && selectedCustomer
+      ? `/api/notes?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer.customer)}`
+      : null,
+    fetcher,
+    { refreshInterval: 15000 }
+  );
+  const notesCallIds = new Set((pairNotes ?? []).map(n => n.call_id));
 
   // Build transcription status map: call_id → TxCall
   const txMap = new Map<string, TxCall>();
@@ -366,6 +376,7 @@ export default function CallsPage() {
           )}
           {calls.map(call => {
             const hasTranscript = call.tx?.has_llm_smoothed || call.tx?.has_llm_voted || call.tx?.has_pipeline_final;
+            const hasNotes = notesCallIds.has(call.call_id);
             const isSelected = selectedCallId === call.call_id;
             return (
               <button key={call.call_id} onClick={() => setSelectedCallId(p => p === call.call_id ? "" : call.call_id)}
@@ -376,7 +387,8 @@ export default function CallsPage() {
                 <div className="flex items-center gap-1.5 mb-0.5">
                   <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
                   <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
-                  <span className="ml-auto shrink-0">
+                  <span className="ml-auto flex items-center gap-1 shrink-0">
+                    {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" title="Has notes" />}
                     {hasTranscript
                       ? <CheckCircle2 className="w-3 h-3 text-teal-400" />
                       : <Circle className="w-3 h-3 text-gray-700" />}

@@ -353,6 +353,16 @@ export default function NotesPage() {
     hasTranscript: !!(txMap.get(c.call_id)?.has_llm_smoothed || txMap.get(c.call_id)?.has_llm_voted),
   }));
 
+  // Fetch all notes for this pair to know which calls already have notes
+  const { data: pairNotes } = useSWR<{ call_id: string }[]>(
+    selectedAgent && selectedCustomer
+      ? `/api/notes?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer.customer)}`
+      : null,
+    fetcher,
+    { refreshInterval: 15000 }
+  );
+  const notesCallIds = new Set((pairNotes ?? []).map(n => n.call_id));
+
   const filteredAgents    = (agents ?? []).filter(a => a.agent.toLowerCase().includes(agentSearch.toLowerCase()));
   const filteredCustomers = (customers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
 
@@ -622,6 +632,7 @@ export default function NotesPage() {
           )}
           {calls.map(call => {
             const isSelected = selectedCalls.has(call.call_id);
+            const hasNotes = notesCallIds.has(call.call_id);
             const progressRow = progress.find(p => p.call_id === call.call_id);
             return (
               <button key={call.call_id} onClick={() => toggleCall(call.call_id)}
@@ -636,6 +647,7 @@ export default function NotesPage() {
                     {isSelected && <Check className="w-2.5 h-2.5 text-white" />}
                   </div>
                   <span className="text-xs font-mono font-medium text-gray-200 truncate flex-1">{call.call_id}</span>
+                  {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400 shrink-0" title="Has notes" />}
                   {call.hasTranscript
                     ? <CheckCircle2 className="w-3 h-3 text-teal-400 shrink-0" />
                     : <Circle className="w-3 h-3 text-gray-700 shrink-0" />}

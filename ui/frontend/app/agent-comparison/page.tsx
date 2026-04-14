@@ -7,8 +7,8 @@ import useSWR from "swr";
 import { cn } from "@/lib/utils";
 import {
   Upload, Trash2, Send, Loader2, CheckCircle2, AlertCircle, RefreshCw,
-  ChevronDown, ChevronUp, Bookmark, Star, X, Search, Play, FileText, Wand2,
-  ArrowUpDown, ArrowUp, ArrowDown,
+  ChevronDown, ChevronUp, X, Search, Play, FileText, Wand2,
+  ArrowUpDown, ArrowUp, ArrowDown, Save, Check,
 } from "lucide-react";
 
 // ── Interactive sortable table ───────────────────────────────────────────────
@@ -195,6 +195,147 @@ function StatPill({ value, total, label, icon: Icon }: { value: number; total: n
       <Icon className="w-3 h-3 flex-shrink-0" />
       <span>{value}<span className="text-gray-600">/{total}</span></span>
     </span>
+  );
+}
+
+// ── Query Preset Panel ──────────────────────────────────────────────────────
+
+function QueryPresetPanel({
+  name, onNameChange,
+  model, systemPrompt, userPrompt,
+  onLoad,
+}: {
+  name: string;
+  onNameChange: (v: string) => void;
+  model: string;
+  systemPrompt: string;
+  userPrompt: string;
+  onLoad: (p: ComparisonPreset) => void;
+}) {
+  const { data: presets = [], mutate } = useSWR<ComparisonPreset[]>("/api/agent-comparison/presets", fetcher);
+  const [showList, setShowList] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [loadedFrom, setLoadedFrom] = useState<string | null>(null);
+  const [loadedSnapshot, setLoadedSnapshot] = useState<ComparisonPreset | null>(null);
+  const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
+
+  // Auto-rename to "(copy)" when config diverges from loaded preset
+  useEffect(() => {
+    if (!loadedSnapshot || nameManuallyEdited) return;
+    const changed =
+      model        !== loadedSnapshot.model        ||
+      systemPrompt !== loadedSnapshot.system_prompt ||
+      userPrompt   !== loadedSnapshot.user_prompt;
+    if (changed) {
+      onNameChange(`${loadedSnapshot.name} (copy)`);
+      setLoadedFrom(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, systemPrompt, userPrompt]);
+
+  const autoSuggest = model ? `${model} Query` : "New Query";
+  const isAutoSuggested = !name;
+
+  const save = async () => {
+    const saveName = (name.trim() || autoSuggest).trim();
+    if (!saveName) return;
+    setSaving(true);
+    try {
+      await fetch("/api/agent-comparison/presets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: saveName, model, system_prompt: systemPrompt, user_prompt: userPrompt, temperature: 0 }),
+      });
+      onNameChange(saveName);
+      setLoadedFrom(null); setLoadedSnapshot(null); setNameManuallyEdited(false);
+      mutate();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadPreset = (p: ComparisonPreset) => {
+    onLoad(p);
+    onNameChange(p.name);
+    setLoadedFrom(p.name);
+    setLoadedSnapshot(p);
+    setNameManuallyEdited(false);
+    setShowList(false);
+  };
+
+  return (
+    <div className="border border-indigo-900/40 rounded-xl overflow-hidden">
+      <div className="bg-gray-800/60 px-4 py-3 space-y-2">
+        <p className="text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">Query Preset</p>
+
+        {/* Name + Save + Browse */}
+        <div className="flex gap-2">
+          <input
+            value={name}
+            onChange={e => { onNameChange(e.target.value); setNameManuallyEdited(true); setLoadedFrom(null); }}
+            placeholder={autoSuggest}
+            onKeyDown={e => e.key === "Enter" && save()}
+            className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          />
+          <button onClick={save} disabled={saving}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors shrink-0 disabled:opacity-40">
+            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            Save
+          </button>
+          <button onClick={() => setShowList(v => !v)}
+            className="flex items-center gap-1 px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-400 hover:text-white text-xs rounded-lg transition-colors shrink-0"
+            title="Browse saved presets">
+            {showList ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            <span>{presets.length}</span>
+          </button>
+        </div>
+
+        {/* Hints */}
+        <div className="min-h-[14px]">
+          {isAutoSuggested && (
+            <p className="text-[11px] text-gray-600">Auto-suggested · type to override</p>
+          )}
+          {loadedFrom && (
+            <p className="text-[11px] text-emerald-700">Loaded: <span className="text-emerald-600">{loadedFrom}</span> · change any field to create a copy</p>
+          )}
+        </div>
+
+        {/* Browse list */}
+        {showList && (
+          <div className="border border-gray-700 rounded-lg overflow-hidden">
+            {presets.length === 0 && (
+              <p className="text-xs text-gray-600 px-3 py-2">No presets saved yet</p>
+            )}
+            {presets.map(p => (
+              <div key={p.name} className="flex items-center gap-1.5 px-3 py-2 hover:bg-gray-800/60 border-b border-gray-800/50 last:border-0">
+                <button onClick={() => loadPreset(p)} className="flex-1 text-left min-w-0 group">
+                  <span className="text-xs font-medium text-gray-200 group-hover:text-white">
+                    {p.is_default && <span className="text-yellow-400 mr-1">★</span>}{p.name}
+                  </span>
+                  <span className="text-[10px] text-gray-600 ml-2">{p.model}</span>
+                </button>
+                <button
+                  onClick={async () => { await fetch(`/api/agent-comparison/presets/${encodeURIComponent(p.name)}/default`, { method: "PATCH" }); mutate(); }}
+                  className="text-gray-600 hover:text-yellow-400 p-1 shrink-0 transition-colors" title="Set as default">
+                  <Check className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={async () => { await fetch(`/api/agent-comparison/presets/${encodeURIComponent(p.name)}`, { method: "DELETE" }); if (loadedFrom === p.name) setLoadedFrom(null); mutate(); }}
+                  className="text-gray-600 hover:text-red-400 p-1 shrink-0 transition-colors" title="Delete">
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Config summary */}
+        <p className="text-[11px] text-gray-600 pt-0.5">
+          <span className="text-indigo-400/70 font-medium">{model}</span>
+          {systemPrompt && <> · sys: {systemPrompt.slice(0, 40)}{systemPrompt.length > 40 ? "…" : ""}</>}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -394,7 +535,7 @@ function AgentSlot({
 export default function AgentComparisonPage() {
   const { data: agents = [] } = useSWR<string[]>("/api/agent-comparison/agents", fetcher);
   const { data: filesData = [], mutate: mutateFiles } = useSWR<UploadedPair[]>("/api/agent-comparison/files", fetcher, { refreshInterval: 0 });
-  const { data: presetsData = [], mutate: mutatePresets } = useSWR<ComparisonPreset[]>("/api/agent-comparison/presets", fetcher);
+  // (presetsData handled inside QueryPresetPanel via its own SWR)
   const { data: agentStats = [] } = useSWR<AgentStat[]>("/api/agent-comparison/agent-stats", fetcher);
 
   const [agent1, setAgent1] = useState("Ron Silver");
@@ -432,10 +573,8 @@ export default function AgentComparisonPage() {
   const [reformatting, setReformatting] = useState(false);
   const [reformatModel, setReformatModel] = useState("gpt-4.1");
 
-  // Presets
+  // Preset name (managed by QueryPresetPanel)
   const [presetName, setPresetName] = useState("");
-  const [savingPreset, setSavingPreset] = useState(false);
-  const [showPresets, setShowPresets] = useState(false);
 
   // ── Auto-select customers with uploaded Grok files ────────────────────────
 
@@ -610,22 +749,13 @@ export default function AgentComparisonPage() {
     }
   };
 
-  // ── Presets ────────────────────────────────────────────────────────────────
+  // ── Preset load ────────────────────────────────────────────────────────────
 
-  const savePreset = async () => {
-    if (!presetName.trim()) return;
-    setSavingPreset(true);
-    try {
-      await fetch("/api/agent-comparison/presets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: presetName, model: queryModel, system_prompt: systemPrompt, user_prompt: userPrompt, temperature: 0 }),
-      });
-      await mutatePresets();
-      setPresetName("");
-    } finally {
-      setSavingPreset(false);
-    }
+  const handlePresetLoad = (p: ComparisonPreset) => {
+    setQueryModel(p.model);
+    setSystemPrompt(p.system_prompt);
+    setUserPrompt(p.user_prompt ?? "");
+    setPresetName(p.name);
   };
 
   const handleReformat = async () => {
@@ -861,56 +991,13 @@ export default function AgentComparisonPage() {
               </select>
             </div>
 
-            {/* Presets */}
-            <div className="flex items-end gap-2 flex-1 min-w-0">
-              <div className="relative flex-1 min-w-40">
-                <label className="block text-xs text-gray-500 mb-1">Presets</label>
-                <button onClick={() => setShowPresets(v => !v)}
-                  className="w-full flex items-center justify-between bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white hover:border-indigo-500 transition-colors">
-                  <span className="text-gray-400">Select preset…</span>
-                  <ChevronDown className="w-4 h-4 text-gray-500" />
-                </button>
-                {showPresets && (
-                  <div className="absolute top-full left-0 mt-1 w-72 bg-gray-800 border border-gray-600 rounded-xl shadow-2xl z-50 overflow-hidden">
-                    {presetsData.length === 0 ? (
-                      <p className="px-3 py-3 text-xs text-gray-500">No presets saved yet</p>
-                    ) : (
-                      presetsData.map(p => (
-                        <div key={p.name} className="flex items-center gap-2 px-3 py-2 hover:bg-gray-700 group">
-                          <button onClick={() => { setQueryModel(p.model); setSystemPrompt(p.system_prompt); setUserPrompt(p.user_prompt ?? ""); setTemperature(p.temperature ?? 0.0); setShowPresets(false); }}
-                            className="flex-1 text-left text-sm text-white truncate">{p.name}</button>
-                          {p.is_default && <Star className="w-3 h-3 text-yellow-400 flex-shrink-0" />}
-                          <button onClick={async () => {
-                            await fetch(`/api/agent-comparison/presets/${encodeURIComponent(p.name)}/default`, { method: "PATCH" });
-                            mutatePresets();
-                          }} title="Set default" className="text-gray-600 hover:text-yellow-400 transition-colors opacity-0 group-hover:opacity-100">
-                            <Star className="w-3 h-3" />
-                          </button>
-                          <button onClick={async () => {
-                            await fetch(`/api/agent-comparison/presets/${encodeURIComponent(p.name)}`, { method: "DELETE" });
-                            mutatePresets();
-                          }} title="Delete" className="text-gray-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100">
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
-              <div className="flex gap-1.5 items-end pb-px">
-                <input value={presetName} onChange={e => setPresetName(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && savePreset()}
-                  placeholder="Preset name…"
-                  className="bg-gray-700 border border-gray-600 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-36" />
-                <button onClick={savePreset} disabled={!presetName.trim() || savingPreset}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-xs text-gray-300 hover:text-white hover:border-gray-500 disabled:opacity-40 transition-colors">
-                  {savingPreset ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Bookmark className="w-3.5 h-3.5" />}
-                  Save
-                </button>
-              </div>
-            </div>
           </div>
+
+          <QueryPresetPanel
+            name={presetName} onNameChange={setPresetName}
+            model={queryModel} systemPrompt={systemPrompt} userPrompt={userPrompt}
+            onLoad={handlePresetLoad}
+          />
 
           <div>
             <label className="block text-xs text-gray-500 mb-1">System prompt (optional)</label>
