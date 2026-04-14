@@ -469,34 +469,38 @@ def _llm_call_with_file(
 
 # ── Output normalizers ────────────────────────────────────────────────────────
 
-_SCORE_NORMALISE_SYSTEM = """You are a data extractor. Convert raw LLM score output into a strict JSON object.
+_SCORE_NORMALISE_SYSTEM = """You are a universal evaluation data extractor. Convert ANY scorer output into a standardised JSON schema for UI visualisation.
 
-The input may be plain text ("Score: 8/10" or "82/100"), markdown tables, or already valid JSON.
+The input may be ANY format:
+- Plain text with scores ("Score: 8/10", "82/100")
+- Markdown tables or bullet lists
+- Simple score maps: {"Section": {"score": 75}}
+- Detailed compliance audit JSON with procedures, statuses, families, metrics
+- Any other structured or unstructured evaluation output
 
-Return ONLY a valid JSON object — no markdown fences, no explanation — with EXACTLY this structure:
+Return ONLY valid JSON (no fences, no explanation):
 
-SECTION SCORES — one key per evaluated section (the main evaluation results):
-  "<Section Name>": {"score": <0-100 integer>, "reasoning": "<one concise sentence>"}
+SECTION SCORES — 3–8 logical categories (required):
+  "<Category Name>": {"score": <0-100 integer>, "reasoning": "<one concise sentence>"}
 
-REQUIRED METADATA — underscore-prefixed, always present:
-  "_overall": <0-100 integer — arithmetic mean of all section scores>
-  "_summary": "<one sentence summarising overall quality>"
+How to derive scores from different input types:
+- Numeric scores present → normalise to 0-100 (multiply by 10 if 0-10 scale)
+- Status-based (COMPLIANT/VIOLATION/NOT_APPLICABLE) → score per family = compliant/(compliant+violations)*100, ignore NOT_APPLICABLE; if all NOT_APPLICABLE use 100
+- Boolean flags (true/false) → score = true_count/total_count * 100
+- Qualitative only → estimate: excellent=90, good=75, mixed=55, poor=30
+- Group related items into logical categories — do NOT create one entry per procedure or per metric
 
-OPTIONAL METADATA — include only if the corresponding content exists in the input:
-  "_strengths": ["<bullet text>", ...]   — array of strength bullet points from a Strengths section
-  "_weaknesses": ["<bullet text>", ...]  — array of weakness bullet points from a Weaknesses section
-  "_assessment": "<paragraph>"           — full Overall Assessment paragraph if present
-  "_system_notes": "<string>"            — the full raw markdown text of the "ADDITIONAL OUTPUT – SYSTEM NOTES" section if present (preserve it exactly as-is, including all per-call notes, compliance statuses, call summaries, next-call actions, and any global compliance summary at the end)
+REQUIRED METADATA:
+  "_overall": <0-100 integer — weighted average of all section scores>
+  "_summary": "<one sentence overall assessment — include outcome if present>"
 
-Rules for SECTION SCORES:
-- Use the exact section name strings from the input as JSON keys
-- score must be a 0-100 integer (if input is 0-10 scale multiply by 10; if 0-1 scale multiply by 100)
-- reasoning must be one concise sentence — no newlines, no bullet points
-- Do NOT include non-scored items (Strengths, Weaknesses, Overall Assessment) as section score keys
-
-Rules for REQUIRED METADATA:
-- _overall = arithmetic mean of all section scores, rounded to nearest integer (0-100)
-- _summary = one overall quality sentence; no newlines
+OPTIONAL METADATA (include only when clearly present in input):
+  "_strengths": ["<bullet>", ...]
+  "_weaknesses": ["<bullet>", ...]
+  "_risk_level": "Low|Medium|High"
+  "_violations": ["<concise description of each violation>", ...]
+  "_assessment": "<full assessment paragraph if present>"
+  "_system_notes": "<preserve important structured context not captured above — call summaries, next actions, stage progression, detailed procedure results, metrics — as a readable string>"
 
 Return ONLY valid JSON — no markdown fences, no explanation."""
 

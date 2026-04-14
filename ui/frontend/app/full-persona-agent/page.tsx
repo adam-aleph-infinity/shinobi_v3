@@ -483,11 +483,18 @@ function ConfigPanel({ title, color, model, onModel, systemPrompt, onSystem, use
 // ── Score display ──────────────────────────────────────────────────────────────
 
 function ScoreDisplay({ scoreJson }: { scoreJson: Record<string, any> }) {
-  const overall = scoreJson._overall as number | undefined;
-  const summary = scoreJson._summary as string | undefined;
-  const rawText = scoreJson._raw_text as string | undefined;
+  const overall     = scoreJson._overall     as number | undefined;
+  const summary     = scoreJson._summary     as string | undefined;
+  const rawText     = scoreJson._raw_text    as string | undefined;
+  const riskLevel   = scoreJson._risk_level  as string | undefined;
+  const violations  = scoreJson._violations  as string[] | undefined;
+  const strengths   = scoreJson._strengths   as string[] | undefined;
+  const weaknesses  = scoreJson._weaknesses  as string[] | undefined;
+  const assessment  = scoreJson._assessment  as string | undefined;
+  const systemNotes = scoreJson._system_notes as string | undefined;
   const sections = Object.entries(scoreJson).filter(([k]) => !k.startsWith("_"));
   const color = (s: number) => s >= 75 ? "text-emerald-400" : s >= 50 ? "text-yellow-400" : "text-red-400";
+  const [showNotes, setShowNotes] = useState(false);
 
   // Scorer returned plain text instead of JSON — render as markdown
   if (rawText) {
@@ -501,30 +508,101 @@ function ScoreDisplay({ scoreJson }: { scoreJson: Record<string, any> }) {
     );
   }
 
+  const riskColor = riskLevel === "Low" ? "text-emerald-400 border-emerald-700/40 bg-emerald-900/20"
+    : riskLevel === "High" ? "text-red-400 border-red-700/40 bg-red-900/20"
+    : "text-yellow-400 border-yellow-700/40 bg-yellow-900/20";
+
   return (
-    <div className="space-y-2">
-      {overall !== undefined && (
-        <div className="flex items-center gap-3 mb-3">
-          <span className={cn("text-3xl font-bold", color(overall))}>{Math.round(overall)}</span>
-          <span className="text-gray-500 text-sm">/100 overall</span>
+    <div className="space-y-3">
+      {/* Header: overall + risk + summary */}
+      {(overall !== undefined || riskLevel) && (
+        <div className="flex items-center gap-3 flex-wrap">
+          {overall !== undefined && (
+            <>
+              <span className={cn("text-3xl font-bold", color(overall))}>{Math.round(overall)}</span>
+              <span className="text-gray-500 text-sm">/100 overall</span>
+            </>
+          )}
+          {riskLevel && (
+            <span className={cn("text-xs px-2 py-0.5 rounded border font-semibold", riskColor)}>
+              {riskLevel} Risk
+            </span>
+          )}
           {summary && <p className="text-gray-400 text-xs flex-1">{summary}</p>}
         </div>
       )}
-      <div className="space-y-1.5">
-        {sections.map(([name, val]) => {
-          const score = typeof val === "object" ? val.score : val;
-          const reasoning = typeof val === "object" ? val.reasoning : "";
-          return (
-            <div key={name} className="flex items-start gap-3 bg-gray-800/50 rounded px-3 py-2">
-              <span className={cn("text-sm font-bold tabular-nums w-8 shrink-0", color(score))}>{typeof score === "number" ? Math.round(score) : score}</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-gray-300">{name}</p>
-                {reasoning && <p className="text-xs text-gray-500 mt-0.5">{reasoning}</p>}
+
+      {/* Section scores */}
+      {sections.length > 0 && (
+        <div className="space-y-1.5">
+          {sections.map(([name, val]) => {
+            const score = typeof val === "object" ? val.score : val;
+            const reasoning = typeof val === "object" ? val.reasoning : "";
+            return (
+              <div key={name} className="flex items-start gap-3 bg-gray-800/50 rounded px-3 py-2">
+                <span className={cn("text-sm font-bold tabular-nums w-8 shrink-0", color(score))}>
+                  {typeof score === "number" ? Math.round(score) : score}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-gray-300">{name}</p>
+                  {reasoning && <p className="text-xs text-gray-500 mt-0.5">{reasoning}</p>}
+                </div>
               </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Violations */}
+      {violations && violations.length > 0 && (
+        <div className="bg-red-950/20 border border-red-800/30 rounded p-2 space-y-1">
+          <p className="text-xs font-semibold text-red-400 uppercase tracking-wide">Violations</p>
+          {violations.map((v, i) => (
+            <p key={i} className="text-xs text-red-300/80">• {v}</p>
+          ))}
+        </div>
+      )}
+
+      {/* Strengths + Weaknesses */}
+      {((strengths && strengths.length > 0) || (weaknesses && weaknesses.length > 0)) && (
+        <div className="grid grid-cols-2 gap-2">
+          {strengths && strengths.length > 0 && (
+            <div className="bg-emerald-950/20 border border-emerald-800/30 rounded p-2 space-y-1">
+              <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wide">Strengths</p>
+              {strengths.map((s, i) => <p key={i} className="text-xs text-emerald-300/80">• {s}</p>)}
             </div>
-          );
-        })}
-      </div>
+          )}
+          {weaknesses && weaknesses.length > 0 && (
+            <div className="bg-amber-950/20 border border-amber-800/30 rounded p-2 space-y-1">
+              <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Weaknesses</p>
+              {weaknesses.map((w, i) => <p key={i} className="text-xs text-amber-300/80">• {w}</p>)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Assessment */}
+      {assessment && (
+        <p className="text-xs text-gray-400 bg-gray-800/40 rounded px-3 py-2">{assessment}</p>
+      )}
+
+      {/* System notes — collapsible */}
+      {systemNotes && (
+        <div className="border border-gray-700/50 rounded">
+          <button
+            onClick={() => setShowNotes(v => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 text-xs text-gray-400 hover:text-gray-300"
+          >
+            <span className="font-semibold uppercase tracking-wide">Detailed Notes</span>
+            <span>{showNotes ? "▲" : "▼"}</span>
+          </button>
+          {showNotes && (
+            <div className="px-3 pb-3 max-h-80 overflow-y-auto">
+              <pre className="text-[11px] text-gray-400 whitespace-pre-wrap font-mono leading-relaxed">{systemNotes}</pre>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
