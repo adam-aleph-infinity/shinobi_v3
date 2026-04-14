@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import useSWR from "swr";
 import {
   Users, Search, Loader2, CheckCircle2, Circle, ChevronDown, ChevronUp,
-  Play, Save, Trash2, Check, StickyNote, AlertTriangle, XCircle, Square,
+  Play, Save, Trash2, Check, StickyNote, AlertTriangle, XCircle, Square, Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
@@ -125,18 +125,35 @@ function providerFor(model: string) {
 
 // ── Inner config panel ────────────────────────────────────────────────────────
 
-function ConfigPanel({ title, accentColor, model, onModel, systemPrompt, onSystem, userPrompt, onUser }: {
+function supportsThinking(model: string): boolean {
+  return model.startsWith("claude-") || model.startsWith("gemini-2.5");
+}
+
+function ConfigPanel({ title, accentColor, model, onModel, systemPrompt, onSystem, userPrompt, onUser, thinking, onThinking }: {
   title: string; accentColor: string;
   model: string; onModel: (v: string) => void;
   systemPrompt: string; onSystem: (v: string) => void;
   userPrompt: string; onUser: (v: string) => void;
+  thinking: boolean; onThinking: (v: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const canThink = supportsThinking(model);
   return (
     <div className={cn("bg-gray-900 border rounded-xl overflow-hidden", accentColor)}>
       <button onClick={() => setOpen(o => !o)}
         className="w-full px-4 py-3 flex items-center gap-2 hover:bg-gray-800/40 transition-colors">
         <span className="text-sm font-semibold text-white flex-1 text-left">{title}</span>
+        {canThink && (
+          <span onClick={e => { e.stopPropagation(); onThinking(!thinking); }}
+            className={cn(
+              "flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors border",
+              thinking
+                ? "bg-purple-900/40 border-purple-600/60 text-purple-300"
+                : "bg-gray-800 border-gray-700 text-gray-600 hover:text-gray-400"
+            )}>
+            <Brain className="w-2.5 h-2.5" />Thinking
+          </span>
+        )}
         <span className="text-[11px] text-gray-500 font-mono">{model}</span>
         {open ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
       </button>
@@ -386,10 +403,14 @@ export default function NotesPage() {
   const [prompt, setPrompt]         = useState(DEFAULT_PROMPT);
 
   // Compliancy agent config
-  const [complianceEnabled, setComplianceEnabled] = useState(true);
-  const [complianceModel, setComplianceModel]     = useState("gpt-5.4");
-  const [complianceSystem, setComplianceSystem]   = useState(DEFAULT_COMPLIANCE_SYSTEM);
-  const [compliancePrompt, setCompliancePrompt]   = useState(DEFAULT_COMPLIANCE_PROMPT);
+  const [complianceEnabled, setComplianceEnabled]   = useState(true);
+  const [complianceModel, setComplianceModel]       = useState("gpt-5.4");
+  const [complianceSystem, setComplianceSystem]     = useState(DEFAULT_COMPLIANCE_SYSTEM);
+  const [compliancePrompt, setCompliancePrompt]     = useState(DEFAULT_COMPLIANCE_PROMPT);
+
+  // Thinking toggles
+  const [notesThinking, setNotesThinking]           = useState(false);
+  const [complianceThinking, setComplianceThinking] = useState(false);
 
   // Run state
   const [running, setRunning]       = useState(false);
@@ -555,10 +576,12 @@ export default function NotesPage() {
               temperature:    0,
               system_prompt:  system,
               user_prompt:    prompt,
+              notes_thinking:             notesThinking,
               run_compliance:             complianceEnabled,
               compliance_model:           complianceModel,
               compliance_system_prompt:   complianceSystem,
               compliance_user_prompt:     compliancePrompt,
+              compliance_thinking:        complianceThinking,
             }),
           }).then(async res => {
             if (!res.ok) { reject(new Error(await res.text())); return; }
@@ -791,6 +814,7 @@ export default function NotesPage() {
             model={model} onModel={setModel}
             systemPrompt={system} onSystem={setSystem}
             userPrompt={prompt} onUser={setPrompt}
+            thinking={notesThinking} onThinking={setNotesThinking}
           />
           <div className="flex items-center gap-2 px-1">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -806,6 +830,7 @@ export default function NotesPage() {
               model={complianceModel} onModel={setComplianceModel}
               systemPrompt={complianceSystem} onSystem={setComplianceSystem}
               userPrompt={compliancePrompt} onUser={setCompliancePrompt}
+              thinking={complianceThinking} onThinking={setComplianceThinking}
             />
           )}
         </FullNotesAgentPanel>

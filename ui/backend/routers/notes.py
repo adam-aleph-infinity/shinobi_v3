@@ -239,11 +239,13 @@ class NoteAnalyzeRequest(BaseModel):
     temperature: float = 0.0
     system_prompt: str = DEFAULT_SYSTEM
     user_prompt: str = DEFAULT_PROMPT
+    notes_thinking: bool = False
     # Compliancy agent
     run_compliance: bool = False
     compliance_model: str = "gpt-5.4"
     compliance_system_prompt: str = DEFAULT_COMPLIANCE_SYSTEM
     compliance_user_prompt: str = DEFAULT_COMPLIANCE_PROMPT
+    compliance_thinking: bool = False
 
 
 @router.post("/analyze")
@@ -283,7 +285,7 @@ async def analyze_note(req: NoteAnalyzeRequest):
             user_msg = f"{req.user_prompt.strip()}\n\n{transcript}"
             content_md = await loop.run_in_executor(
                 None, _llm_call_temp,
-                req.system_prompt, user_msg, req.model, req.temperature,
+                req.system_prompt, user_msg, req.model, req.temperature, req.notes_thinking,
             )
         except Exception as e:
             print(f"[notes] {_label}: notes agent error: {e}")
@@ -329,7 +331,7 @@ async def analyze_note(req: NoteAnalyzeRequest):
                 comp_msg = f"{req.compliance_user_prompt.strip()}\n\n{content_md}"
                 comp_raw = await loop.run_in_executor(
                     None, _llm_call_temp,
-                    req.compliance_system_prompt, comp_msg, req.compliance_model, 0.0,
+                    req.compliance_system_prompt, comp_msg, req.compliance_model, 0.0, req.compliance_thinking,
                 )
                 try:
                     comp_json = json.loads(comp_raw)

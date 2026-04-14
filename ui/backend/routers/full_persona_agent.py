@@ -83,7 +83,7 @@ DEFAULT_SCORER_PROMPT = "Score this persona document:"
 
 # ── LLM call with configurable temperature ────────────────────────────────────
 
-def _llm_call_temp(system: str, user: str, model: str, temperature: float) -> str:
+def _llm_call_temp(system: str, user: str, model: str, temperature: float, thinking: bool = False) -> str:
     import sys
     sys.path.insert(0, str(settings.project_root))
     from shared.llm_client import LLMClient
@@ -114,6 +114,7 @@ def _llm_call_temp(system: str, user: str, model: str, temperature: float) -> st
         model=model,
         messages=messages,
         temperature=temperature,
+        thinking=thinking,
     )
     result = resp.choices[0].message.content or ""
     # Strip markdown fences if present
@@ -812,6 +813,8 @@ class AnalyzeRequest(BaseModel):
     scorer_temperature: float = 0.0
     scorer_system: str = DEFAULT_SCORER_SYSTEM
     scorer_prompt: str = DEFAULT_SCORER_PROMPT
+    generator_thinking: bool = False   # enable extended thinking for generator
+    scorer_thinking: bool = False      # enable extended thinking for scorer
     force_merge: bool = True   # rebuild merged_transcript.txt even if cached
     use_file_upload: bool = False   # upload transcript as file instead of pasting in prompt
 
@@ -857,7 +860,7 @@ async def analyze(req: AnalyzeRequest):
                 user_msg = f"{req.generator_prompt.strip()}\n\n{transcript}"
                 content_md = await loop.run_in_executor(
                     None, _llm_call_temp,
-                    req.generator_system, user_msg, req.generator_model, req.generator_temperature,
+                    req.generator_system, user_msg, req.generator_model, req.generator_temperature, req.generator_thinking,
                 )
             content_raw = content_md
         except Exception as e:
@@ -900,7 +903,7 @@ async def analyze(req: AnalyzeRequest):
             else:
                 score_raw = await loop.run_in_executor(
                     None, _llm_call_temp,
-                    req.scorer_system, score_user_msg, req.scorer_model, req.scorer_temperature,
+                    req.scorer_system, score_user_msg, req.scorer_model, req.scorer_temperature, req.scorer_thinking,
                 )
             print(f"[fpa/scorer] raw output ({len(score_raw):,} chars):\n{score_raw[:1000]}")
             score_json = _parse_score_json(score_raw)
@@ -996,10 +999,12 @@ class AnalyzerPresetIn(BaseModel):
     gen_temperature: float = 0.0
     gen_system_prompt: str = ""
     gen_user_prompt: str = ""
+    gen_thinking: bool = False
     score_model: str = "gpt-5.4"
     score_temperature: float = 0.0
     score_system_prompt: str = ""
     score_user_prompt: str = ""
+    score_thinking: bool = False
     is_default: bool = False
 
 
@@ -1075,8 +1080,10 @@ def save_analyzer_preset(req: AnalyzerPresetIn):
         "provider": _analyzer_provider(req.gen_model),
         "gen_model": req.gen_model, "gen_temperature": req.gen_temperature,
         "gen_system_prompt": req.gen_system_prompt, "gen_user_prompt": req.gen_user_prompt,
+        "gen_thinking": req.gen_thinking,
         "score_model": req.score_model, "score_temperature": req.score_temperature,
         "score_system_prompt": req.score_system_prompt, "score_user_prompt": req.score_user_prompt,
+        "score_thinking": req.score_thinking,
         "is_default": req.is_default, "created_at": datetime.utcnow().isoformat(),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

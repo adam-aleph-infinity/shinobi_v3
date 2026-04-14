@@ -47,6 +47,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
+        thinking: bool = False,
     ):
         if self.provider == "openai":
             # Reasoning models (o-series and gpt-5.x) reject temperature — omit it entirely.
@@ -72,15 +73,23 @@ class LLMClient:
                     user_msgs.append(m)
             kwargs = {
                 "model": model,
-                "max_tokens": max_tokens or 8192,
+                "max_tokens": max_tokens or (16000 if thinking else 8192),
                 "messages": user_msgs,
             }
             if system_content:
                 kwargs["system"] = system_content
-            if temperature is not None:
+            if thinking:
+                # Extended thinking requires temperature=1 (Anthropic hard requirement)
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+                kwargs["temperature"] = 1
+            elif temperature is not None:
                 kwargs["temperature"] = temperature
             response = self.client.messages.create(**kwargs)
-            content = response.content[0].text
+            # Extract only text blocks (thinking blocks are separate)
+            content = "\n\n".join(
+                block.text for block in response.content
+                if getattr(block, "type", None) == "text"
+            )
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
             )
@@ -94,12 +103,15 @@ class LLMClient:
             full_prompt = "\n".join(prompt_parts)
 
             gen_model = genai.GenerativeModel(model)
+            gen_cfg: dict = {"temperature": temperature}
+            if max_tokens is not None:
+                gen_cfg["max_output_tokens"] = max_tokens
+            if thinking:
+                # Gemini 2.5 thinking budget (0 = disabled, higher = more thinking)
+                gen_cfg["thinking_config"] = {"thinking_budget": 8192}
             response = gen_model.generate_content(
                 full_prompt,
-                generation_config={
-                    "temperature": temperature,
-                    **({"max_output_tokens": max_tokens} if max_tokens is not None else {}),
-                },
+                generation_config=gen_cfg,
             )
             # response.text raises ValueError if content was blocked; let it propagate.
             # Access candidates directly to produce a clear error message instead of empty string.

@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import {
   ChevronDown, ChevronUp, Play, Eye, Save, Trash2, Check,
   ArrowUpDown, ArrowUp, ArrowDown, Loader2, CheckCircle2, XCircle, Bot,
-  FileText, Search, RefreshCw,
+  FileText, Search, RefreshCw, Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SectionCard } from "@/components/personas/PersonaSections";
@@ -101,10 +101,12 @@ interface AnalyzerPreset {
   gen_temperature: number;
   gen_system_prompt: string;
   gen_user_prompt: string;
+  gen_thinking?: boolean;
   score_model: string;
   score_temperature: number;
   score_system_prompt: string;
   score_user_prompt: string;
+  score_thinking?: boolean;
   is_default: boolean;
   created_at?: string;
 }
@@ -240,14 +242,14 @@ function providerFor(model: string): string {
 
 function PersonaAgentPanel({
   name, onNameChange, onNameEdit,
-  genModel, genSystem, genPrompt,
-  scoreModel, scoreSystem, scorePrompt,
+  genModel, genSystem, genPrompt, genThinking,
+  scoreModel, scoreSystem, scorePrompt, scoreThinking,
   onLoad,
   children,
 }: {
   name: string; onNameChange: (v: string) => void; onNameEdit: () => void;
-  genModel: string; genSystem: string; genPrompt: string;
-  scoreModel: string; scoreSystem: string; scorePrompt: string;
+  genModel: string; genSystem: string; genPrompt: string; genThinking: boolean;
+  scoreModel: string; scoreSystem: string; scorePrompt: string; scoreThinking: boolean;
   onLoad: (p: AnalyzerPreset) => void;
   children: React.ReactNode;
 }) {
@@ -270,18 +272,20 @@ function PersonaAgentPanel({
   useEffect(() => {
     if (!loadedSnapshot || nameManuallyEdited) return;
     const changed =
-      genModel   !== loadedSnapshot.gen_model   ||
-      genSystem  !== loadedSnapshot.gen_system_prompt ||
-      genPrompt  !== loadedSnapshot.gen_user_prompt   ||
-      scoreModel !== loadedSnapshot.score_model  ||
+      genModel    !== loadedSnapshot.gen_model   ||
+      genSystem   !== loadedSnapshot.gen_system_prompt ||
+      genPrompt   !== loadedSnapshot.gen_user_prompt   ||
+      genThinking !== (loadedSnapshot.gen_thinking ?? false) ||
+      scoreModel  !== loadedSnapshot.score_model  ||
       scoreSystem !== loadedSnapshot.score_system_prompt ||
-      scorePrompt !== loadedSnapshot.score_user_prompt;
+      scorePrompt !== loadedSnapshot.score_user_prompt ||
+      scoreThinking !== (loadedSnapshot.score_thinking ?? false);
     if (changed) {
       onNameChange(`${loadedSnapshot.name} (copy)`);
       setLoadedFrom(null); // hide the "loaded from" hint — user is now diverging
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [genModel, genSystem, genPrompt, scoreModel, scoreSystem, scorePrompt]);
+  }, [genModel, genSystem, genPrompt, genThinking, scoreModel, scoreSystem, scorePrompt, scoreThinking]);
 
   // Auto-suggest name based on provider when no name set
   const autoSuggest = `${providerFor(genModel)} Analyzer`;
@@ -296,8 +300,10 @@ function PersonaAgentPanel({
         name: saveName,
         gen_model: genModel, gen_temperature: 0,
         gen_system_prompt: genSystem, gen_user_prompt: genPrompt,
+        gen_thinking: genThinking,
         score_model: scoreModel, score_temperature: 0,
         score_system_prompt: scoreSystem, score_user_prompt: scorePrompt,
+        score_thinking: scoreThinking,
         is_default: false,
       }),
     });
@@ -422,15 +428,37 @@ function PersonaAgentPanel({
 
 // ── Config panel ───────────────────────────────────────────────────────────────
 
-function ConfigPanel({ title, color, model, onModel, systemPrompt, onSystem, userPrompt, onUser }: {
+function supportsThinking(model: string): boolean {
+  return model.startsWith("claude-") || model.startsWith("gemini-2.5");
+}
+
+function ConfigPanel({ title, color, model, onModel, systemPrompt, onSystem, userPrompt, onUser, thinking, onThinking }: {
   title: string; color: string;
   model: string; onModel: (v: string) => void;
   systemPrompt: string; onSystem: (v: string) => void;
   userPrompt: string; onUser: (v: string) => void;
+  thinking: boolean; onThinking: (v: boolean) => void;
 }) {
+  const canThink = supportsThinking(model);
   return (
     <div className={cn("bg-gray-900 border rounded-xl p-4 flex flex-col gap-3", color)}>
-      <h3 className="text-sm font-semibold text-white">{title}</h3>
+      <div className="flex items-center gap-2">
+        <h3 className="text-sm font-semibold text-white flex-1">{title}</h3>
+        {canThink && (
+          <button
+            onClick={() => onThinking(!thinking)}
+            title={thinking ? "Extended thinking ON — click to disable" : "Enable extended thinking"}
+            className={cn(
+              "flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors border",
+              thinking
+                ? "bg-purple-900/40 border-purple-600/60 text-purple-300 hover:bg-purple-900/60"
+                : "bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600"
+            )}>
+            <Brain className="w-3 h-3" />
+            <span>Thinking</span>
+          </button>
+        )}
+      </div>
       <div>
         <label className="block text-xs text-gray-500 mb-1">Model</label>
         <select value={model} onChange={e => onModel(e.target.value)}
@@ -630,6 +658,7 @@ export default function FullPersonaAgentPage() {
   const [genModel, setGenModel] = useState("gpt-5.4");
   const [genSystem, setGenSystem] = useState(DEFAULT_GEN_SYSTEM);
   const [genPrompt, setGenPrompt] = useState(DEFAULT_GEN_PROMPT);
+  const [genThinking, setGenThinking] = useState(false);
 
   // Persona agent name (single name for the whole preset)
   const [presetName, setPresetName] = useState("");
@@ -639,6 +668,7 @@ export default function FullPersonaAgentPage() {
   const [scoreModel, setScoreModel] = useState("gpt-5.4");
   const [scoreSystem, setScoreSystem] = useState(DEFAULT_SCORER_SYSTEM);
   const [scorePrompt, setScorePrompt] = useState(DEFAULT_SCORER_PROMPT);
+  const [scoreThinking, setScoreThinking] = useState(false);
 
   // File upload toggle (default on — toggle disables to text-paste)
   const [useFileUpload, setUseFileUpload] = useState(true);
@@ -737,9 +767,11 @@ export default function FullPersonaAgentPage() {
         setGenModel(def.gen_model);
         setGenSystem(def.gen_system_prompt);
         setGenPrompt(def.gen_user_prompt);
+        setGenThinking(def.gen_thinking ?? false);
         setScoreModel(def.score_model);
         setScoreSystem(def.score_system_prompt);
         setScorePrompt(def.score_user_prompt);
+        setScoreThinking(def.score_thinking ?? false);
         setPresetName(def.name);
       }
     }).catch(() => {});
@@ -863,8 +895,10 @@ export default function FullPersonaAgentPage() {
       generator_model: genModel, generator_temperature: 0,
       generator_system: genSystem, generator_prompt: genPrompt,
       generator_preset_name: presetName,
+      generator_thinking: genThinking,
       scorer_model: scoreModel, scorer_temperature: 0,
       scorer_system: scoreSystem, scorer_prompt: scorePrompt,
+      scorer_thinking: scoreThinking,
       use_file_upload: useFileUpload,
     };
     try {
@@ -1047,22 +1081,26 @@ export default function FullPersonaAgentPage() {
         {/* Persona Agent — wraps both config modules */}
         <PersonaAgentPanel
           name={presetName} onNameChange={setPresetName} onNameEdit={() => setPresetNameEdited(true)}
-          genModel={genModel} genSystem={genSystem} genPrompt={genPrompt}
-          scoreModel={scoreModel} scoreSystem={scoreSystem} scorePrompt={scorePrompt}
+          genModel={genModel} genSystem={genSystem} genPrompt={genPrompt} genThinking={genThinking}
+          scoreModel={scoreModel} scoreSystem={scoreSystem} scorePrompt={scorePrompt} scoreThinking={scoreThinking}
           onLoad={p => {
             setGenModel(p.gen_model);
             setGenSystem(p.gen_system_prompt); setGenPrompt(p.gen_user_prompt);
+            setGenThinking(p.gen_thinking ?? false);
             setScoreModel(p.score_model);
             setScoreSystem(p.score_system_prompt); setScorePrompt(p.score_user_prompt);
+            setScoreThinking(p.score_thinking ?? false);
           }}
         >
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <ConfigPanel title="Persona Generator" color="border-indigo-900/50"
               model={genModel} onModel={setGenModel}
-              systemPrompt={genSystem} onSystem={setGenSystem} userPrompt={genPrompt} onUser={setGenPrompt} />
+              systemPrompt={genSystem} onSystem={setGenSystem} userPrompt={genPrompt} onUser={setGenPrompt}
+              thinking={genThinking} onThinking={setGenThinking} />
             <ConfigPanel title="Persona Scorer" color="border-purple-900/50"
               model={scoreModel} onModel={setScoreModel}
-              systemPrompt={scoreSystem} onSystem={setScoreSystem} userPrompt={scorePrompt} onUser={setScorePrompt} />
+              systemPrompt={scoreSystem} onSystem={setScoreSystem} userPrompt={scorePrompt} onUser={setScorePrompt}
+              thinking={scoreThinking} onThinking={setScoreThinking} />
           </div>
         </PersonaAgentPanel>
 
