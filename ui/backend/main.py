@@ -25,6 +25,7 @@ from ui.backend.routers.agent_comparison import router as agent_comparison_route
 from ui.backend.routers.full_persona_agent import router as full_persona_agent_router
 from ui.backend.routers.persona_agents import router as persona_agents_router
 from ui.backend.routers.notes import router as notes_router
+from ui.backend.routers.populate import router as populate_router
 from ui.backend.services import log_buffer
 
 app = FastAPI(title="Shinobi V3 API", version="1.0.0")
@@ -52,6 +53,7 @@ app.include_router(agent_comparison_router)
 app.include_router(full_persona_agent_router)
 app.include_router(persona_agents_router)
 app.include_router(notes_router)
+app.include_router(populate_router)
 
 
 @app.on_event("startup")

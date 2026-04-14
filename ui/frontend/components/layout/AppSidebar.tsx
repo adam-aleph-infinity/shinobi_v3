@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote,
+  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -26,7 +26,8 @@ const navItems: NavItem[] = [
   { href: "/notes",             icon: StickyNote, label: "Full Notes Agent" },
   { href: "/calls",             icon: FileText,   label: "Calls" },
   { href: "/agent-comparison",  icon: BarChart3,  label: "Compare Agents" },
-  { href: "/agent-dashboard",   icon: BarChart3,  label: "Agent Dashboard" },
+  { href: "/agent-dashboard",   icon: BarChart3,     label: "Agent Dashboard" },
+  { href: "/populate",          icon: DatabaseZap,   label: "Populate" },
 ];
 
 function BackendStatus() {
