@@ -443,7 +443,7 @@ class NoteRollupRequest(BaseModel):
     agent: str
     customer: str
     preset: str = ""          # notes_agent_id to filter by; empty = all presets
-    max_notes: int = 30       # cap to N most recent unique calls to avoid LLM timeout
+    max_notes: int = 10       # cap to N most recent unique calls to avoid LLM timeout
     model: str = "gemini-2.5-flash"
     temperature: float = 0.0
     system_prompt: str = DEFAULT_ROLLUP_SYSTEM

@@ -164,7 +164,33 @@ def _llm_stream_thinking(system: str, user: str, model: str, temperature: float,
             result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         return result
 
-    # Non-Claude or thinking disabled — regular blocking call
+    if model.startswith("gemini"):
+        # Gemini streaming — emits text chunks via on_chunk so the SSE connection
+        # stays alive during long generations instead of silently blocking for 90s+
+        import google.generativeai as _genai
+        _gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        if not _gemini_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
+        _genai.configure(api_key=_gemini_key)
+        _gen_model = _genai.GenerativeModel(model, system_instruction=system)
+        _gen_cfg: dict = {"temperature": temperature}
+        if thinking:
+            _gen_cfg["thinking_config"] = {"thinking_budget": 8192}
+        _text_parts: list[str] = []
+        for _chunk in _gen_model.generate_content(user, generation_config=_gen_cfg, stream=True):
+            try:
+                _t = _chunk.text
+            except Exception:
+                continue
+            if _t:
+                on_chunk(_t)
+                _text_parts.append(_t)
+        result = "".join(_text_parts).strip()
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        return result
+
+    # All other models — regular blocking call
     return _llm_call_temp(system, user, model, temperature, thinking)
 
 

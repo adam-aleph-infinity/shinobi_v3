@@ -321,7 +321,7 @@ export default function AgentDashboardPage() {
     try {
       const r = await fetch(`${API}/notes/rollup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent, customer, model, temperature: 0, preset: rollupPersona, max_notes: 30 }),
+        body: JSON.stringify({ agent, customer, model, temperature: 0, preset: rollupPersona, max_notes: 10 }),
       });
       if (!r.ok || !r.body) throw new Error(await r.text());
       const reader = r.body.getReader();
