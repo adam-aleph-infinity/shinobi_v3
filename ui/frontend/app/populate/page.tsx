@@ -51,11 +51,11 @@ export default function PopulatePage() {
   const [resetting, setResetting] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
-  // Poll status every 2s while a run is active
+  // Poll status every 2s whenever a run is active (started by us OR detected as running)
   const { data: status, mutate: refreshStatus } = useSWR(
     `${API}/populate/status`,
     fetcher,
-    { refreshInterval: started ? 2000 : 0 },
+    { refreshInterval: 2000 },   // always poll — cheap GET, stops when done
   );
 
   const running = status?.running ?? false;
@@ -109,6 +109,11 @@ export default function PopulatePage() {
 
       {/* Stage bar */}
       {(started || running || done) && stage > 0 && <StageBar stage={stage} />}
+
+      {/* Progress note during stale run */}
+      {staleRun && log.length > 0 && (
+        <p className="text-xs text-gray-500">Showing progress from active run — reset above to start fresh.</p>
+      )}
 
       {/* Summary cards */}
       {showSummary && (
