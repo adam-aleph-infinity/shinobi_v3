@@ -267,7 +267,7 @@ export default function AgentDashboardPage() {
     if (rollupThinkScroll.current) rollupThinkScroll.current.scrollTop = rollupThinkScroll.current.scrollHeight;
   }, [rollupThinking]);
 
-  // Reset preview when selection changes
+  // Reset when agent changes
   useEffect(() => {
     setRollupCustomer("");
     setRollupResult(null);
@@ -276,6 +276,15 @@ export default function AgentDashboardPage() {
     setNotesPreview(null);
     setShowMergedNotes(false);
   }, [selected]);
+
+  // Reset result/preview when customer or persona changes (keep customer value itself)
+  useEffect(() => {
+    setRollupResult(null);
+    setRollupError(null);
+    setRollupThinking("");
+    setNotesPreview(null);
+    setShowMergedNotes(false);
+  }, [rollupCustomer, rollupPersona]);
 
   // Auto-select first customer when list loads
   useEffect(() => {
@@ -292,13 +301,14 @@ export default function AgentDashboardPage() {
     }
   }, [notesPersonas]);
 
-  // Auto-run whenever customer / persona changes — but only if no saved result exists
+  // Auto-run only when we have confirmed there is no saved result (savedRollup === null means 404)
   useEffect(() => {
     if (!selected || !rollupCustomer || !rollupPersona) return;
-    if (savedRollupLoading) return;   // wait for cache check to complete
-    if (savedRollup) return;          // already have a persisted result — display it
+    if (savedRollupLoading) return;        // SWR still fetching
+    if (savedRollup === undefined) return; // SWR key just changed, not resolved yet
+    if (savedRollup) return;              // saved result exists — display it, no LLM needed
     triggerRollup(selected, rollupCustomer, "gemini-2.5-flash");
-  }, [rollupCustomer, rollupPersona, savedRollupLoading]);
+  }, [rollupCustomer, rollupPersona, savedRollupLoading, savedRollup]);
 
   const triggerRollup = async (agent: string, customer: string, model: string) => {
     rollupAbort.current = false;
