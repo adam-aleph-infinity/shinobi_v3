@@ -318,9 +318,10 @@ export default function NotesPage() {
   const [prompt, setPrompt]       = useState(DEFAULT_PROMPT);
 
   // Run state
-  const [running, setRunning]   = useState(false);
-  const [progress, setProgress] = useState<CallProgress[]>([]);
-  const abortRef                = useRef(false);
+  const [running, setRunning]       = useState(false);
+  const [progress, setProgress]     = useState<CallProgress[]>([]);
+  const [forceNotes, setForceNotes] = useState(false);
+  const abortRef                    = useRef(false);
 
   // ── Data ──────────────────────────────────────────────────────────────────
   const { data: agents } = useSWR<Agent[]>("/api/crm/nav/agents", fetcher);
@@ -399,7 +400,7 @@ export default function NotesPage() {
 
   const runAnalysis = async () => {
     if (!selectedAgent || !selectedCustomer || selectedCalls.size === 0) return;
-    const ordered = calls.filter(c => selectedCalls.has(c.call_id) && !notesCallIds.has(c.call_id));
+    const ordered = calls.filter(c => selectedCalls.has(c.call_id) && (forceNotes || !notesCallIds.has(c.call_id)));
 
     setRunning(true);
     abortRef.current = false;
@@ -524,6 +525,8 @@ export default function NotesPage() {
   };
 
   const selectedNeedingTx = calls.filter(c => selectedCalls.has(c.call_id) && !c.hasTranscript).length;
+  const selectedWithNotes = calls.filter(c => selectedCalls.has(c.call_id) && notesCallIds.has(c.call_id)).length;
+  const willRun = selectedCalls.size - (forceNotes ? 0 : selectedWithNotes);
   const canRun = !!(selectedAgent && selectedCustomer && selectedCalls.size > 0 && !running);
 
   return (
@@ -701,26 +704,45 @@ export default function NotesPage() {
             </div>
           )}
 
+          {!running && selectedWithNotes > 0 && (
+            <div className="flex items-center justify-between gap-3 p-3 bg-indigo-950/40 border border-indigo-900/40 rounded-lg">
+              <p className="text-xs text-indigo-300">
+                {forceNotes
+                  ? <>{selectedWithNotes} call{selectedWithNotes !== 1 ? "s" : ""} with existing notes will be re-analyzed.</>
+                  : <>{selectedWithNotes} call{selectedWithNotes !== 1 ? "s" : ""} already have notes and will be skipped.</>
+                }
+              </p>
+              <label className="flex items-center gap-1.5 shrink-0 cursor-pointer">
+                <input type="checkbox" checked={forceNotes} onChange={e => setForceNotes(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-indigo-500 cursor-pointer" />
+                <span className="text-xs text-gray-400">Force re-analyze</span>
+              </label>
+            </div>
+          )}
+
           <div className="flex items-center gap-3">
             <button
               onClick={running ? () => { abortRef.current = true; } : runAnalysis}
-              disabled={!running && !canRun}
+              disabled={!running && (!canRun || willRun === 0)}
               className={cn(
                 "flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors",
                 running
                   ? "bg-red-700 hover:bg-red-600 text-white"
-                  : canRun
+                  : canRun && willRun > 0
                     ? "bg-indigo-600 hover:bg-indigo-500 text-white"
                     : "bg-gray-800 text-gray-600 cursor-not-allowed"
               )}>
               {running
                 ? <><Square className="w-4 h-4" /> Stop</>
-                : <><Play className="w-4 h-4" /> Analyze{selectedCalls.size > 0 ? ` ${selectedCalls.size} call${selectedCalls.size !== 1 ? "s" : ""}` : ""}</>
+                : <><Play className="w-4 h-4" /> Analyze{willRun > 0 ? ` ${willRun} call${willRun !== 1 ? "s" : ""}` : ""}</>
               }
             </button>
             {!selectedAgent && <p className="text-xs text-gray-600">Select an agent</p>}
             {selectedAgent && !selectedCustomer && <p className="text-xs text-gray-600">Select a customer</p>}
             {selectedCustomer && selectedCalls.size === 0 && <p className="text-xs text-gray-600">Select calls to analyze</p>}
+            {selectedCustomer && selectedCalls.size > 0 && willRun === 0 && !running && (
+              <p className="text-xs text-gray-500">All selected calls already have notes</p>
+            )}
           </div>
 
           {progress.length > 0 && (

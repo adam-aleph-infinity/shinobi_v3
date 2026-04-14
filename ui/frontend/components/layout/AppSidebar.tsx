@@ -35,7 +35,7 @@ function BackendStatus() {
   useEffect(() => {
     let cancelled = false;
     const check = () => {
-      fetch("/api/health", { signal: AbortSignal.timeout(2000) })
+      fetch("/api/health", { signal: AbortSignal.timeout(8000) })
         .then(r => { if (!cancelled) setOk(r.ok); })
         .catch(() => { if (!cancelled) setOk(false); });
     };
