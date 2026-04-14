@@ -9,12 +9,6 @@ import { cn } from "@/lib/utils";
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
-const ALL_MODELS = [
-  "gpt-5.4", "gpt-4.1", "gpt-4.1-mini",
-  "claude-opus-4-6", "claude-sonnet-4-6",
-  "gemini-2.5-pro", "gemini-2.5-flash",
-  "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
-];
 
 const DEFAULT_ROLLUP_SYSTEM = `You are a senior compliance analyst reviewing a complete series of call notes for a single agent-customer relationship.
 
@@ -113,22 +107,23 @@ export default function AgentDashboardPage() {
     ? [...new Set(agentNotes.map((n: any) => n.customer as string))].sort()
     : [];
 
+  // Fetch saved notes-agent presets (used as "personas" for the roll-up)
+  const { data: notesPersonas } = useSWR<any[]>(`${API}/notes/agents`, fetcher);
+
   // Roll-up state
   const [rollupCustomer, setRollupCustomer] = useState("");
-  const [rollupModel, setRollupModel]       = useState("gpt-5.4");
-  const [rollupSystem, setRollupSystem]     = useState(DEFAULT_ROLLUP_SYSTEM);
-  const [rollupPrompt, setRollupPrompt]     = useState(DEFAULT_ROLLUP_PROMPT);
+  const [rollupPersona, setRollupPersona]   = useState(""); // name of selected notes agent preset
   const [rollupRunning, setRollupRunning]   = useState(false);
   const [rollupResult, setRollupResult]     = useState<string | null>(null);
   const [rollupError, setRollupError]       = useState<string | null>(null);
   const [rollupThinking, setRollupThinking] = useState("");
-  const [showRollupConfig, setShowRollupConfig] = useState(false);
   const rollupThinkScroll = useRef<HTMLDivElement>(null);
+  const rollupAbort = useRef(false);
   useEffect(() => {
     if (rollupThinkScroll.current) rollupThinkScroll.current.scrollTop = rollupThinkScroll.current.scrollHeight;
   }, [rollupThinking]);
 
-  // Reset roll-up when agent changes
+  // Auto-select defaults when agent changes
   useEffect(() => {
     setRollupCustomer("");
     setRollupResult(null);
@@ -136,8 +131,30 @@ export default function AgentDashboardPage() {
     setRollupThinking("");
   }, [selected]);
 
-  const runRollup = async () => {
-    if (!selected || !rollupCustomer) return;
+  // Auto-select first customer when list loads
+  useEffect(() => {
+    if (noteCustomers.length > 0 && !rollupCustomer) {
+      setRollupCustomer(noteCustomers[0]);
+    }
+  }, [noteCustomers.join(",")]);
+
+  // Auto-select default persona when presets load
+  useEffect(() => {
+    if (notesPersonas && notesPersonas.length > 0 && !rollupPersona) {
+      const def = notesPersonas.find((p: any) => p.is_default) ?? notesPersonas[0];
+      setRollupPersona(def.name);
+    }
+  }, [notesPersonas]);
+
+  // Auto-run whenever customer OR persona changes (if both are set)
+  useEffect(() => {
+    if (!selected || !rollupCustomer || !rollupPersona) return;
+    const persona = notesPersonas?.find((p: any) => p.name === rollupPersona);
+    triggerRollup(selected, rollupCustomer, persona?.model ?? "gpt-5.4");
+  }, [rollupCustomer, rollupPersona]);
+
+  const triggerRollup = async (agent: string, customer: string, model: string) => {
+    rollupAbort.current = false;
     setRollupRunning(true);
     setRollupResult(null);
     setRollupError(null);
@@ -146,12 +163,9 @@ export default function AgentDashboardPage() {
       const r = await fetch(`${API}/notes/rollup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          agent: selected,
-          customer: rollupCustomer,
-          model: rollupModel,
-          temperature: 0,
-          system_prompt: rollupSystem,
-          user_prompt: rollupPrompt,
+          agent, customer, model, temperature: 0,
+          system_prompt: DEFAULT_ROLLUP_SYSTEM,
+          user_prompt: DEFAULT_ROLLUP_PROMPT,
         }),
       });
       if (!r.ok || !r.body) throw new Error(await r.text());
@@ -161,6 +175,7 @@ export default function AgentDashboardPage() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (rollupAbort.current) { reader.cancel(); break; }
         buf += dec.decode(value, { stream: true });
         const parts = buf.split("\n\n");
         buf = parts.pop() ?? "";
@@ -178,7 +193,7 @@ export default function AgentDashboardPage() {
         }
       }
     } catch (e: any) {
-      setRollupError(e.message ?? "Roll-up failed");
+      if (!rollupAbort.current) setRollupError(e.message ?? "Roll-up failed");
     } finally {
       setRollupRunning(false);
     }
@@ -334,77 +349,47 @@ export default function AgentDashboardPage() {
               <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
                 <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
                   <BarChart2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                  <span className="text-xs font-semibold text-gray-300 flex-1">Notes Roll-up Analysis</span>
-                  <button
-                    onClick={() => setShowRollupConfig(v => !v)}
-                    className="text-[10px] text-gray-600 hover:text-gray-400 transition-colors"
-                  >
-                    {showRollupConfig ? "▲ Hide config" : "▼ Config"}
-                  </button>
+                  <span className="text-xs font-semibold text-gray-300">Notes Roll-up Analysis</span>
+                  {rollupRunning && <Loader2 className="w-3 h-3 animate-spin text-teal-400 ml-1" />}
                 </div>
 
                 <div className="p-4 space-y-3">
-                  {/* Customer selector */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500 shrink-0">Customer</span>
-                    <select
-                      value={rollupCustomer}
-                      onChange={e => { setRollupCustomer(e.target.value); setRollupResult(null); setRollupError(null); }}
-                      className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300"
-                    >
-                      <option value="">— select customer —</option>
-                      {noteCustomers.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
+                  {/* Two selectors — customer + persona */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Customer</p>
+                      <select
+                        value={rollupCustomer}
+                        onChange={e => setRollupCustomer(e.target.value)}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300"
+                      >
+                        {noteCustomers.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Notes Persona</p>
+                      <select
+                        value={rollupPersona}
+                        onChange={e => setRollupPersona(e.target.value)}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300"
+                      >
+                        {!notesPersonas?.length && <option value="">— no presets saved —</option>}
+                        {(notesPersonas ?? []).map((p: any) => (
+                          <option key={p.name} value={p.name}>{p.name}{p.is_default ? " ★" : ""}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
 
-                  {/* Collapsible config */}
-                  {showRollupConfig && (
-                    <div className="space-y-2 border border-gray-800 rounded-lg p-3">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-500 w-12 shrink-0">Model</span>
-                        <select
-                          value={rollupModel} onChange={e => setRollupModel(e.target.value)}
-                          className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-300"
-                        >
-                          {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-                        </select>
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-[10px] text-gray-500">System prompt</p>
-                        <textarea
-                          value={rollupSystem} onChange={e => setRollupSystem(e.target.value)}
-                          rows={5}
-                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-300 resize-y font-mono"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-[10px] text-gray-500">User prompt</p>
-                        <textarea
-                          value={rollupPrompt} onChange={e => setRollupPrompt(e.target.value)}
-                          rows={1}
-                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-300 resize-y"
-                        />
-                      </div>
+                  {/* Running indicator */}
+                  {rollupRunning && (
+                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                      <span>Analysing notes for {rollupCustomer}…</span>
                     </div>
                   )}
 
-                  {/* Run button */}
-                  <button
-                    onClick={runRollup}
-                    disabled={rollupRunning || !rollupCustomer}
-                    className={cn(
-                      "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors",
-                      rollupRunning || !rollupCustomer
-                        ? "bg-gray-800 text-gray-600 cursor-not-allowed"
-                        : "bg-teal-700 hover:bg-teal-600 text-white"
-                    )}
-                  >
-                    {rollupRunning
-                      ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Summarizing…</>
-                      : <><BarChart2 className="w-3.5 h-3.5" /> Summarize All Notes</>}
-                  </button>
-
-                  {/* Thinking */}
+                  {/* Thinking stream */}
                   {rollupRunning && rollupThinking && (
                     <div className="space-y-1">
                       <p className="text-[10px] font-semibold text-purple-500 uppercase tracking-wide flex items-center gap-1">
@@ -427,8 +412,8 @@ export default function AgentDashboardPage() {
                     <div className="border border-gray-700/50 rounded-lg overflow-hidden">
                       <div className="px-3 py-2 bg-gray-800 border-b border-gray-700/50 flex items-center gap-2">
                         <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
-                        <span className="text-xs font-semibold text-teal-300">{rollupCustomer} — Summary</span>
-                        <button onClick={() => setRollupResult(null)} className="ml-auto text-[10px] text-gray-600 hover:text-gray-400">✕ Clear</button>
+                        <span className="text-xs font-semibold text-teal-300">{rollupCustomer}</span>
+                        <span className="text-[10px] text-gray-600 ml-1">via {rollupPersona}</span>
                       </div>
                       <div className="p-4 max-h-[600px] overflow-y-auto prose prose-invert prose-sm max-w-none">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{rollupResult}</ReactMarkdown>
