@@ -20,6 +20,7 @@ router = APIRouter(prefix="/notes", tags=["notes"])
 # ── Notes Agent preset storage ────────────────────────────────────────────────
 
 NOTES_AGENTS_DIR = settings.ui_data_dir / "_notes_agents"
+NOTE_ROLLUPS_DIR  = settings.ui_data_dir / "_note_rollups"
 
 DEFAULT_COMPLIANCE_SYSTEM = """You are a regulatory compliance analyst reviewing a single sales call note.
 
@@ -47,32 +48,34 @@ DEFAULT_COMPLIANCE_PROMPT = "Score the compliance of this call note:"
 
 DEFAULT_ROLLUP_SYSTEM = """You are a senior compliance analyst reviewing a complete series of call notes for a single agent-customer relationship.
 
-Produce a comprehensive roll-up report with EXACTLY these sections (each preceded by ##):
+Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
 
-## Compliance Aggregate
-For each compliance procedure, show totals across ALL calls:
-- Format each line: "<Procedure Name>: X compliant, Y violations (Z% violation rate)"
-- Final line: "TOTAL: X violations across Y procedure checks"
-
-## Call Progression Summary
-A concise timeline of how the relationship evolved across calls: key milestones, stages reached, current status, outcomes.
-
-## Key Patterns & Persistent Issues
-Recurring violations, consistent behaviours, issues that appear in multiple calls.
-
-## Consolidated Next Steps
-Top 5–8 priority actions based on ALL notes, ranked by urgency.
-
-## Overall Risk Assessment
-Overall compliance risk (Low / Medium / High) with justification from aggregate data.
+The JSON must have this exact structure:
+{
+  "overall_risk": "Low",
+  "summary": "One sentence overall assessment.",
+  "compliance_aggregate": {
+    "procedures": [{"name": "Procedure Name", "compliant": 3, "violations": 1}],
+    "total_violations": 5,
+    "total_checks": 18
+  },
+  "call_progression": [{"call_id": "call_001", "stage": "Introduction", "outcome": "Interested"}],
+  "key_patterns": ["Pattern observed across calls"],
+  "next_steps": ["Priority action 1"],
+  "violated_procedures": ["Procedure name"]
+}
 
 Rules:
-- Use exact ## headings above
-- Extract exact numbers from the notes — do not estimate
-- Reference specific call numbers where relevant
-- Keep each section focused and data-driven"""
+- overall_risk is exactly one of: Low, Medium, High
+- summary is a single sentence
+- procedures: one entry per distinct compliance procedure found across all notes; compliant/violations are exact integer counts
+- call_progression: one entry per call in chronological order
+- key_patterns: 3–6 most important recurring issues as short strings
+- next_steps: 5–8 actions ranked by urgency as short strings
+- violated_procedures: list of procedure names that had at least one violation
+- Do not estimate — extract exact numbers from the notes"""
 
-DEFAULT_ROLLUP_PROMPT = "Summarize and aggregate all notes for this agent-customer relationship:"
+DEFAULT_ROLLUP_PROMPT = "Analyse and aggregate all notes for this agent-customer relationship and return the JSON object:"
 
 DEFAULT_SYSTEM = """You are a senior call analyst reviewing a single sales call transcript.
 
@@ -446,6 +449,18 @@ class NoteRollupRequest(BaseModel):
     thinking: bool = False
 
 
+@router.get("/rollup")
+def get_rollup(agent: str = Query(...), customer: str = Query(...)):
+    """Return the persisted roll-up JSON for agent+customer, or 404."""
+    rollup_path = NOTE_ROLLUPS_DIR / agent / f"{customer}.json"
+    if not rollup_path.exists():
+        raise HTTPException(404, "No saved rollup found")
+    try:
+        return json.loads(rollup_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read rollup: {e}")
+
+
 @router.post("/rollup")
 async def rollup_notes(req: NoteRollupRequest):
     loop = asyncio.get_event_loop()
@@ -495,13 +510,13 @@ async def rollup_notes(req: NoteRollupRequest):
                 except Exception as exc:
                     await _q.put(("error", str(exc)))
             asyncio.create_task(_coro())
-            result_md = ""
+            result_raw = ""
             while True:
                 kind, val = await _q.get()
                 if kind == "t":
                     yield _sse("thinking", {"text": val, "phase": "rollup"})
                 elif kind == "done":
-                    result_md = val
+                    result_raw = val
                     break
                 elif kind == "error":
                     raise RuntimeError(val)
@@ -510,9 +525,32 @@ async def rollup_notes(req: NoteRollupRequest):
             yield _sse("error", {"msg": f"Roll-up failed: {e}"})
             return
 
+        # Parse JSON output (strip accidental code fences)
+        import re as _re
+        try:
+            result_json = json.loads(result_raw)
+        except Exception:
+            m = _re.search(r'\{[\s\S]+\}', result_raw)
+            try:
+                result_json = json.loads(m.group()) if m else {"_raw_text": result_raw}
+            except Exception:
+                result_json = {"_raw_text": result_raw}
+
+        # Persist to disk
+        result_json["_saved_at"] = datetime.utcnow().isoformat()
+        result_json["_note_count"] = len(notes)
+        try:
+            save_dir = NOTE_ROLLUPS_DIR / req.agent
+            save_dir.mkdir(parents=True, exist_ok=True)
+            save_path = save_dir / f"{req.customer}.json"
+            save_path.write_text(json.dumps(result_json, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"[rollup] {_label}: saved to {save_path}")
+        except Exception as e:
+            print(f"[rollup] {_label}: save error (non-fatal): {e}")
+
         yield _sse("progress", {"step": 3, "total": 3, "msg": "Summary complete"})
-        print(f"[rollup] {_label}: done — {len(result_md):,} chars")
-        yield _sse("done", {"content_md": result_md, "note_count": len(notes)})
+        print(f"[rollup] {_label}: done — {len(result_raw):,} chars")
+        yield _sse("done", {"result_json": result_json, "note_count": len(notes)})
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",

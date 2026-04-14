@@ -1,43 +1,13 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
-import useSWR from "swr";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2 } from "lucide-react";
+import useSWR, { useSWRConfig } from "swr";
+import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2, AlertTriangle, RefreshCw, Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
 
-const DEFAULT_ROLLUP_SYSTEM = `You are a senior compliance analyst reviewing a complete series of call notes for a single agent-customer relationship.
-
-Produce a comprehensive roll-up report with EXACTLY these sections (each preceded by ##):
-
-## Compliance Aggregate
-For each compliance procedure, show totals across ALL calls:
-- Format each line: "<Procedure Name>: X compliant, Y violations (Z% violation rate)"
-- Final line: "TOTAL: X violations across Y procedure checks"
-
-## Call Progression Summary
-A concise timeline of how the relationship evolved across calls: key milestones, stages reached, current status, outcomes.
-
-## Key Patterns & Persistent Issues
-Recurring violations, consistent behaviours, issues that appear in multiple calls.
-
-## Consolidated Next Steps
-Top 5–8 priority actions based on ALL notes, ranked by urgency.
-
-## Overall Risk Assessment
-Overall compliance risk (Low / Medium / High) with justification from aggregate data.
-
-Rules:
-- Use exact ## headings above
-- Extract exact numbers from the notes — do not estimate
-- Reference specific call numbers where relevant
-- Keep each section focused and data-driven`;
-
-const DEFAULT_ROLLUP_PROMPT = "Summarize and aggregate all notes for this agent-customer relationship:";
 
 function fmt(n: number | null, prefix = "") {
   if (n == null) return "—";
@@ -76,6 +46,163 @@ function TopicBar({ label, count, max }: { label: string; count: number; max: nu
   );
 }
 
+// ── Roll-up dashboard components ─────────────────────────────────────────────
+
+function RiskBadge({ risk }: { risk?: string }) {
+  const color =
+    risk === "High"   ? "bg-red-900/60 text-red-300 border-red-700" :
+    risk === "Medium" ? "bg-amber-900/60 text-amber-300 border-amber-700" :
+    risk === "Low"    ? "bg-emerald-900/60 text-emerald-300 border-emerald-700" :
+                        "bg-gray-800 text-gray-400 border-gray-700";
+  return (
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${color}`}>
+      {risk ?? "—"} Risk
+    </span>
+  );
+}
+
+function RollupDashboard({ data, customer, persona, onRerun, running }: {
+  data: any; customer: string; persona: string;
+  onRerun: () => void; running: boolean;
+}) {
+  const procs: { name: string; compliant: number; violations: number }[] =
+    data?.compliance_aggregate?.procedures ?? [];
+
+  const savedAt: string | undefined = data?._saved_at;
+  const fmtSavedAt = savedAt
+    ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(savedAt + "Z"))
+    : null;
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="flex items-start gap-3 flex-wrap">
+        <RiskBadge risk={data?.overall_risk} />
+        <p className="flex-1 text-sm text-gray-300 leading-snug min-w-0">{data?.summary ?? ""}</p>
+        <div className="flex items-center gap-2 shrink-0">
+          {fmtSavedAt && (
+            <span className="flex items-center gap-1 text-[10px] text-gray-600">
+              <Clock className="w-3 h-3" />{fmtSavedAt}
+            </span>
+          )}
+          <button onClick={onRerun} disabled={running}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 disabled:opacity-50 transition-colors">
+            {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Re-run
+          </button>
+        </div>
+      </div>
+
+      {/* Compliance table */}
+      {procs.length > 0 && (
+        <div>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Compliance Aggregate</p>
+          <div className="rounded-lg border border-gray-800 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-800 bg-gray-900/60 text-left">
+                  <th className="px-3 py-2 font-medium text-gray-400">Procedure</th>
+                  <th className="px-3 py-2 font-medium text-emerald-500 w-20 text-right">OK</th>
+                  <th className="px-3 py-2 font-medium text-red-400 w-20 text-right">Viol.</th>
+                  <th className="px-3 py-2 w-28">Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {procs.map((p, i) => {
+                  const total = p.compliant + p.violations;
+                  const violPct = total > 0 ? (p.violations / total) * 100 : 0;
+                  const isViolated = p.violations > 0;
+                  return (
+                    <tr key={i} className={cn("border-b border-gray-800/50 last:border-0", isViolated && "bg-red-950/10")}>
+                      <td className={cn("px-3 py-2", isViolated ? "text-red-300" : "text-gray-300")}>{p.name}</td>
+                      <td className="px-3 py-2 text-right text-emerald-400 font-mono">{p.compliant}</td>
+                      <td className="px-3 py-2 text-right text-red-400 font-mono">{p.violations}</td>
+                      <td className="px-3 py-2">
+                        <div className="h-2 bg-gray-800 rounded-sm overflow-hidden">
+                          <div className="h-full bg-red-600 rounded-sm" style={{ width: `${violPct}%` }} />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              {(data?.compliance_aggregate?.total_violations != null) && (
+                <tfoot>
+                  <tr className="bg-gray-900/40 border-t border-gray-700">
+                    <td className="px-3 py-2 text-[10px] text-gray-500 font-semibold uppercase">Total</td>
+                    <td className="px-3 py-2 text-right font-mono text-gray-400">
+                      {(data.compliance_aggregate.total_checks ?? 0) - (data.compliance_aggregate.total_violations ?? 0)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-red-400 font-semibold">
+                      {data.compliance_aggregate.total_violations}
+                    </td>
+                    <td />
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Key Patterns + Next Steps — side by side */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {(data?.key_patterns ?? []).length > 0 && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Key Patterns</p>
+            <ul className="space-y-1.5">
+              {data.key_patterns.map((p: string, i: number) => (
+                <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
+                  <AlertTriangle className="w-3 h-3 mt-0.5 text-amber-500 shrink-0" />
+                  {p}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {(data?.next_steps ?? []).length > 0 && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Next Steps</p>
+            <ol className="space-y-1.5">
+              {data.next_steps.map((s: string, i: number) => (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <span className="shrink-0 w-4 h-4 rounded-full bg-indigo-700 text-white text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
+                  <span className={cn("text-gray-300", i === 0 && "font-medium text-white")}>{s}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+      </div>
+
+      {/* Call Progression */}
+      {(data?.call_progression ?? []).length > 0 && (
+        <div>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Call Progression</p>
+          <div className="space-y-0.5">
+            {data.call_progression.map((c: any, i: number) => (
+              <div key={i} className="flex items-center gap-2 text-xs text-gray-400 py-1.5 border-b border-gray-800/40 last:border-0">
+                <span className="font-mono text-gray-600 w-20 shrink-0 truncate">{c.call_id}</span>
+                <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
+                <span className="text-indigo-400 shrink-0 truncate max-w-[120px]">{c.stage}</span>
+                <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
+                <span className="text-gray-300 truncate">{c.outcome}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Fallback: raw text if JSON parse failed */}
+      {data?._raw_text && (
+        <pre className="text-xs text-gray-400 whitespace-pre-wrap font-mono bg-gray-950 rounded p-3 max-h-80 overflow-y-auto">{data._raw_text}</pre>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function _dss(k: string) { try { return sessionStorage.getItem(`dash_${k}`) ?? ""; } catch { return ""; } }
 function _dssSet(k: string, v: string) { try { sessionStorage.setItem(`dash_${k}`, v); } catch {} }
 
@@ -110,15 +237,27 @@ export default function AgentDashboardPage() {
   // Fetch saved notes-agent presets (used as "personas" for the roll-up)
   const { data: notesPersonas } = useSWR<any[]>(`${API}/notes/agents`, fetcher);
 
+  const { mutate } = useSWRConfig();
+
   // Roll-up state
   const [rollupCustomer, setRollupCustomer] = useState("");
   const [rollupPersona, setRollupPersona]   = useState(""); // name of selected notes agent preset
   const [rollupRunning, setRollupRunning]   = useState(false);
-  const [rollupResult, setRollupResult]     = useState<string | null>(null);
+  const [rollupResult, setRollupResult]     = useState<any>(null);
   const [rollupError, setRollupError]       = useState<string | null>(null);
   const [rollupThinking, setRollupThinking] = useState("");
   const rollupThinkScroll = useRef<HTMLDivElement>(null);
   const rollupAbort = useRef(false);
+
+  // Persisted rollup (null = 404 not yet run; object = saved result)
+  const savedRollupKey = selected && rollupCustomer
+    ? `${API}/notes/rollup?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}`
+    : null;
+  const { data: savedRollup, isLoading: savedRollupLoading } = useSWR<any>(
+    savedRollupKey,
+    (url: string) => fetch(url).then(r => r.status === 404 ? null : r.json()),
+    { revalidateOnFocus: false }
+  );
   useEffect(() => {
     if (rollupThinkScroll.current) rollupThinkScroll.current.scrollTop = rollupThinkScroll.current.scrollHeight;
   }, [rollupThinking]);
@@ -146,12 +285,14 @@ export default function AgentDashboardPage() {
     }
   }, [notesPersonas]);
 
-  // Auto-run whenever customer OR persona changes (if both are set)
+  // Auto-run whenever customer / persona changes — but only if no saved result exists
   useEffect(() => {
     if (!selected || !rollupCustomer || !rollupPersona) return;
+    if (savedRollupLoading) return;   // wait for cache check to complete
+    if (savedRollup) return;          // already have a persisted result — display it
     const persona = notesPersonas?.find((p: any) => p.name === rollupPersona);
     triggerRollup(selected, rollupCustomer, persona?.model ?? "gpt-5.4");
-  }, [rollupCustomer, rollupPersona]);
+  }, [rollupCustomer, rollupPersona, savedRollupLoading]);
 
   const triggerRollup = async (agent: string, customer: string, model: string) => {
     rollupAbort.current = false;
@@ -162,11 +303,7 @@ export default function AgentDashboardPage() {
     try {
       const r = await fetch(`${API}/notes/rollup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent, customer, model, temperature: 0,
-          system_prompt: DEFAULT_ROLLUP_SYSTEM,
-          user_prompt: DEFAULT_ROLLUP_PROMPT,
-        }),
+        body: JSON.stringify({ agent, customer, model, temperature: 0 }),
       });
       if (!r.ok || !r.body) throw new Error(await r.text());
       const reader = r.body.getReader();
@@ -187,7 +324,12 @@ export default function AgentDashboardPage() {
           try {
             const data = JSON.parse(dataLine.replace("data:", "").trim());
             if (event === "thinking") setRollupThinking(prev => prev + data.text);
-            else if (event === "done")  setRollupResult(data.content_md);
+            else if (event === "done") {
+              setRollupResult(data.result_json);
+              if (data.result_json && savedRollupKey) {
+                mutate(savedRollupKey, data.result_json, { revalidate: false });
+              }
+            }
             else if (event === "error") setRollupError(data.msg ?? "Roll-up failed");
           } catch {}
         }
@@ -407,16 +549,33 @@ export default function AgentDashboardPage() {
                     <div className="p-2 bg-red-950/30 border border-red-800/40 rounded text-xs text-red-400">{rollupError}</div>
                   )}
 
-                  {/* Result */}
-                  {rollupResult && (
+                  {/* Saved result loading */}
+                  {savedRollupLoading && !rollupRunning && (
+                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                      <span>Loading saved analysis…</span>
+                    </div>
+                  )}
+
+                  {/* Result — live or persisted */}
+                  {(rollupResult ?? savedRollup) && (
                     <div className="border border-gray-700/50 rounded-lg overflow-hidden">
                       <div className="px-3 py-2 bg-gray-800 border-b border-gray-700/50 flex items-center gap-2">
                         <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
                         <span className="text-xs font-semibold text-teal-300">{rollupCustomer}</span>
                         <span className="text-[10px] text-gray-600 ml-1">via {rollupPersona}</span>
                       </div>
-                      <div className="p-4 max-h-[600px] overflow-y-auto prose prose-invert prose-sm max-w-none">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{rollupResult}</ReactMarkdown>
+                      <div className="p-4 max-h-[600px] overflow-y-auto">
+                        <RollupDashboard
+                          data={rollupResult ?? savedRollup}
+                          customer={rollupCustomer}
+                          persona={rollupPersona}
+                          running={rollupRunning}
+                          onRerun={() => {
+                            const persona = notesPersonas?.find((p: any) => p.name === rollupPersona);
+                            triggerRollup(selected!, rollupCustomer, persona?.model ?? "gpt-5.4");
+                          }}
+                        />
                       </div>
                     </div>
                   )}
