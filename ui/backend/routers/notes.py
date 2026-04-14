@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 from ui.backend.config import settings
 from ui.backend.database import get_session
 from ui.backend.models.note import Note
-from ui.backend.routers.full_persona_agent import _llm_call_temp, _sse
+from ui.backend.routers.full_persona_agent import _llm_call_temp, _llm_stream_thinking, _sse
 
 router = APIRouter(prefix="/notes", tags=["notes"])
 
@@ -283,10 +283,29 @@ async def analyze_note(req: NoteAnalyzeRequest):
             "msg": f"Running notes agent ({req.model})…"})
         try:
             user_msg = f"{req.user_prompt.strip()}\n\n{transcript}"
-            content_md = await loop.run_in_executor(
-                None, _llm_call_temp,
-                req.system_prompt, user_msg, req.model, req.temperature, req.notes_thinking,
-            )
+            _notes_q: asyncio.Queue = asyncio.Queue()
+            def _on_notes_chunk(t: str, _q=_notes_q):
+                asyncio.run_coroutine_threadsafe(_q.put(("t", t)), loop)
+            async def _notes_coro(_q=_notes_q):
+                try:
+                    r = await loop.run_in_executor(
+                        None, _llm_stream_thinking,
+                        req.system_prompt, user_msg, req.model,
+                        req.temperature, req.notes_thinking, _on_notes_chunk)
+                    await _q.put(("done", r))
+                except Exception as exc:
+                    await _q.put(("error", str(exc)))
+            asyncio.create_task(_notes_coro())
+            content_md = ""
+            while True:
+                kind, val = await _notes_q.get()
+                if kind == "t":
+                    yield _sse("thinking", {"text": val, "phase": "notes"})
+                elif kind == "done":
+                    content_md = val
+                    break
+                elif kind == "error":
+                    raise RuntimeError(val)
         except Exception as e:
             print(f"[notes] {_label}: notes agent error: {e}")
             yield _sse("error", {"msg": f"Notes agent failed: {e}"})
@@ -329,10 +348,29 @@ async def analyze_note(req: NoteAnalyzeRequest):
             try:
                 import re as _re
                 comp_msg = f"{req.compliance_user_prompt.strip()}\n\n{content_md}"
-                comp_raw = await loop.run_in_executor(
-                    None, _llm_call_temp,
-                    req.compliance_system_prompt, comp_msg, req.compliance_model, 0.0, req.compliance_thinking,
-                )
+                _comp_q: asyncio.Queue = asyncio.Queue()
+                def _on_comp_chunk(t: str, _q=_comp_q):
+                    asyncio.run_coroutine_threadsafe(_q.put(("t", t)), loop)
+                async def _comp_coro(_q=_comp_q):
+                    try:
+                        r = await loop.run_in_executor(
+                            None, _llm_stream_thinking,
+                            req.compliance_system_prompt, comp_msg, req.compliance_model,
+                            0.0, req.compliance_thinking, _on_comp_chunk)
+                        await _q.put(("done", r))
+                    except Exception as exc:
+                        await _q.put(("error", str(exc)))
+                asyncio.create_task(_comp_coro())
+                comp_raw = ""
+                while True:
+                    kind, val = await _comp_q.get()
+                    if kind == "t":
+                        yield _sse("thinking", {"text": val, "phase": "compliance"})
+                    elif kind == "done":
+                        comp_raw = val
+                        break
+                    elif kind == "error":
+                        raise RuntimeError(val)
                 try:
                     comp_json = json.loads(comp_raw)
                 except Exception:

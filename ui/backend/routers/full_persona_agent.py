@@ -125,6 +125,49 @@ def _llm_call_temp(system: str, user: str, model: str, temperature: float, think
     return result
 
 
+def _llm_stream_thinking(system: str, user: str, model: str, temperature: float,
+                          thinking: bool, on_chunk=None) -> str:
+    """Like _llm_call_temp, but for Claude+thinking streams thinking tokens via on_chunk(text)."""
+    if on_chunk is None:
+        on_chunk = lambda _: None
+
+    if model.startswith("claude-") and thinking:
+        import sys as _sys
+        _sys.path.insert(0, str(settings.project_root))
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set")
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        text_parts: list[str] = []
+        with client.messages.stream(
+            model=model,
+            max_tokens=16000,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            thinking={"type": "enabled", "budget_tokens": 8000},
+            temperature=1,
+        ) as stream:
+            for event in stream:
+                t = getattr(event, "type", None)
+                if t == "content_block_delta":
+                    d = event.delta
+                    dt = getattr(d, "type", None)
+                    if dt == "thinking_delta":
+                        chunk_text = getattr(d, "thinking", "") or ""
+                        if chunk_text:
+                            on_chunk(chunk_text)
+                    elif dt == "text_delta":
+                        text_parts.append(getattr(d, "text", "") or "")
+        result = "".join(text_parts).strip()
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        return result
+
+    # Non-Claude or thinking disabled — regular blocking call
+    return _llm_call_temp(system, user, model, temperature, thinking)
+
+
 # ── File-upload LLM call ──────────────────────────────────────────────────────
 # Each provider uploads the transcript as a file, builds a message referencing it,
 # calls the model, then cleans up. File IDs are cached by content-hash in
@@ -858,10 +901,29 @@ async def analyze(req: AnalyzeRequest):
                 )
             else:
                 user_msg = f"{req.generator_prompt.strip()}\n\n{transcript}"
-                content_md = await loop.run_in_executor(
-                    None, _llm_call_temp,
-                    req.generator_system, user_msg, req.generator_model, req.generator_temperature, req.generator_thinking,
-                )
+                _gen_q: asyncio.Queue = asyncio.Queue()
+                def _on_gen_chunk(t: str, _q=_gen_q):
+                    asyncio.run_coroutine_threadsafe(_q.put(("t", t)), loop)
+                async def _gen_coro(_q=_gen_q):
+                    try:
+                        r = await loop.run_in_executor(
+                            None, _llm_stream_thinking,
+                            req.generator_system, user_msg, req.generator_model,
+                            req.generator_temperature, req.generator_thinking, _on_gen_chunk)
+                        await _q.put(("done", r))
+                    except Exception as exc:
+                        await _q.put(("error", str(exc)))
+                asyncio.create_task(_gen_coro())
+                content_md = ""
+                while True:
+                    kind, val = await _gen_q.get()
+                    if kind == "t":
+                        yield _sse("thinking", {"text": val, "phase": "generator"})
+                    elif kind == "done":
+                        content_md = val
+                        break
+                    elif kind == "error":
+                        raise RuntimeError(val)
             content_raw = content_md
         except Exception as e:
             content_raw = str(e)
@@ -901,10 +963,29 @@ async def analyze(req: AnalyzeRequest):
                     req.scorer_model, req.scorer_temperature, pair_dir,
                 )
             else:
-                score_raw = await loop.run_in_executor(
-                    None, _llm_call_temp,
-                    req.scorer_system, score_user_msg, req.scorer_model, req.scorer_temperature, req.scorer_thinking,
-                )
+                _score_q: asyncio.Queue = asyncio.Queue()
+                def _on_score_chunk(t: str, _q=_score_q):
+                    asyncio.run_coroutine_threadsafe(_q.put(("t", t)), loop)
+                async def _score_coro(_q=_score_q):
+                    try:
+                        r = await loop.run_in_executor(
+                            None, _llm_stream_thinking,
+                            req.scorer_system, score_user_msg, req.scorer_model,
+                            req.scorer_temperature, req.scorer_thinking, _on_score_chunk)
+                        await _q.put(("done", r))
+                    except Exception as exc:
+                        await _q.put(("error", str(exc)))
+                asyncio.create_task(_score_coro())
+                score_raw = ""
+                while True:
+                    kind, val = await _score_q.get()
+                    if kind == "t":
+                        yield _sse("thinking", {"text": val, "phase": "scorer"})
+                    elif kind == "done":
+                        score_raw = val
+                        break
+                    elif kind == "error":
+                        raise RuntimeError(val)
             print(f"[fpa/scorer] raw output ({len(score_raw):,} chars):\n{score_raw[:1000]}")
             score_json = _parse_score_json(score_raw)
             print(f"[fpa/scorer] parsed score_json keys: {list(score_json.keys())}")

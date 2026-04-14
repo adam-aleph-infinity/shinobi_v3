@@ -412,6 +412,15 @@ export default function NotesPage() {
   const [notesThinking, setNotesThinking]           = useState(false);
   const [complianceThinking, setComplianceThinking] = useState(false);
 
+  // Thinking stream (accumulates across all concurrent calls)
+  const [thinkingText, setThinkingText] = useState("");
+  const thinkingScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (thinkingScrollRef.current) {
+      thinkingScrollRef.current.scrollTop = thinkingScrollRef.current.scrollHeight;
+    }
+  }, [thinkingText]);
+
   // Run state
   const [running, setRunning]       = useState(false);
   const [progress, setProgress]     = useState<CallProgress[]>([]);
@@ -504,6 +513,7 @@ export default function NotesPage() {
 
     setRunning(true);
     abortRef.current = false;
+    setThinkingText("");
     setProgress(ordered.map(c => ({ call_id: c.call_id, status: "idle", msg: "Queued…" })));
 
     // Build one async task per call, each closing over its own row index
@@ -602,6 +612,7 @@ export default function NotesPage() {
                 try {
                   const data = JSON.parse(dataLine.replace("data:", "").trim());
                   if (event === "progress") updateRow({ msg: data.msg ?? "" });
+                  else if (event === "thinking") setThinkingText(prev => prev + data.text);
                   else if (event === "done") {
                     updateRow({ status: "done", msg: "Done", note_id: data.note_id });
                     resolve();
@@ -898,6 +909,19 @@ export default function NotesPage() {
               <div className="p-2">
                 {progress.map(p => <ProgressRow key={p.call_id} p={p} />)}
               </div>
+              {thinkingText && (
+                <div className="px-2 pb-2">
+                  <p className="text-[10px] font-semibold text-purple-500 uppercase tracking-wide flex items-center gap-1 mb-1">
+                    <Brain className="w-2.5 h-2.5" /> Reasoning
+                  </p>
+                  <div
+                    ref={thinkingScrollRef}
+                    className="bg-gray-950 border border-purple-900/30 rounded p-1.5 max-h-28 overflow-y-auto font-mono text-[10px] text-purple-300/70 whitespace-pre-wrap leading-relaxed"
+                  >
+                    {thinkingText}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

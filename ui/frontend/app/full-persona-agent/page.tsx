@@ -695,6 +695,15 @@ export default function FullPersonaAgentPage() {
     return () => clearInterval(id);
   }, [running]);
 
+  // Thinking stream
+  const [thinkingText, setThinkingText] = useState("");
+  const thinkingScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (thinkingScrollRef.current) {
+      thinkingScrollRef.current.scrollTop = thinkingScrollRef.current.scrollHeight;
+    }
+  }, [thinkingText]);
+
   // View mode toggles
   const [genView, setGenView] = useState<"rendered" | "raw" | "sections">("rendered");
   const [showScoreRaw, setShowScoreRaw] = useState(false);
@@ -890,6 +899,7 @@ export default function FullPersonaAgentPage() {
   const runAnalysis = async () => {
     if (!agent || !customer) return;
     _upd({ running: true, progress: [], error: null, result: null });
+    setThinkingText("");
     const body = {
       agent, customer, label,
       generator_model: genModel, generator_temperature: 0,
@@ -923,6 +933,8 @@ export default function FullPersonaAgentPage() {
           const data = JSON.parse(dataLine.replace("data:", "").trim());
           if (event === "progress") {
             _upd({ progress: [..._astore.progress, data] });
+          } else if (event === "thinking") {
+            setThinkingText(prev => prev + data.text);
           } else if (event === "error") {
             _upd({ error: data.msg, running: false });
             return;
@@ -1166,6 +1178,19 @@ export default function FullPersonaAgentPage() {
                     ? progress[progress.length - 1].msg
                     : "Starting…"}
                 </span>
+              </div>
+            )}
+            {thinkingText && (
+              <div className="mt-1 space-y-1">
+                <p className="text-xs font-semibold text-purple-500 uppercase tracking-wide flex items-center gap-1.5">
+                  <Brain className="w-3 h-3" /> Reasoning
+                </p>
+                <div
+                  ref={thinkingScrollRef}
+                  className="bg-gray-950 border border-purple-900/30 rounded-lg p-2 max-h-36 overflow-y-auto font-mono text-xs text-purple-300/70 whitespace-pre-wrap leading-relaxed"
+                >
+                  {thinkingText}
+                </div>
               </div>
             )}
           </div>
