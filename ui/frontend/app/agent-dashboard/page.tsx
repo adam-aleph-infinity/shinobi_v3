@@ -250,7 +250,7 @@ export default function AgentDashboardPage() {
   const rollupAbort = useRef(false);
 
   // Notes preview state (populated before LLM runs)
-  const [notesPreview, setNotesPreview] = useState<{ note_count: number; total_chars: number; preset: string; preview: string } | null>(null);
+  const [notesPreview, setNotesPreview] = useState<{ note_count: number; total_unique: number; total_chars: number; preset: string; preview: string } | null>(null);
   const [showMergedNotes, setShowMergedNotes] = useState(false);
 
   // Persisted rollup (null = 404 not yet run; object = saved result)
@@ -321,7 +321,7 @@ export default function AgentDashboardPage() {
     try {
       const r = await fetch(`${API}/notes/rollup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent, customer, model, temperature: 0, preset: rollupPersona }),
+        body: JSON.stringify({ agent, customer, model, temperature: 0, preset: rollupPersona, max_notes: 30 }),
       });
       if (!r.ok || !r.body) throw new Error(await r.text());
       const reader = r.body.getReader();
@@ -557,6 +557,9 @@ export default function AgentDashboardPage() {
                         <div className="flex items-center gap-3 text-xs">
                           <span className="font-semibold text-gray-300">
                             {notesPreview.note_count} note{notesPreview.note_count !== 1 ? "s" : ""}
+                            {notesPreview.total_unique > notesPreview.note_count && (
+                              <span className="text-gray-500 font-normal"> of {notesPreview.total_unique}</span>
+                            )}
                           </span>
                           <span className="text-gray-600">·</span>
                           <span className="text-gray-500">{(notesPreview.total_chars / 1000).toFixed(1)}k chars</span>

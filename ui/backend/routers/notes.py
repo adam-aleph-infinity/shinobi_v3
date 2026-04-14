@@ -443,6 +443,7 @@ class NoteRollupRequest(BaseModel):
     agent: str
     customer: str
     preset: str = ""          # notes_agent_id to filter by; empty = all presets
+    max_notes: int = 30       # cap to N most recent unique calls to avoid LLM timeout
     model: str = "gemini-2.5-flash"
     temperature: float = 0.0
     system_prompt: str = DEFAULT_ROLLUP_SYSTEM
@@ -471,8 +472,11 @@ async def rollup_notes(req: NoteRollupRequest):
     loop = asyncio.get_event_loop()
     _label = f"{req.agent}/{req.customer}"
 
+    # Padding to push through Next.js / nginx proxy buffers (must be > 4 KB to flush)
+    _PAD = ": " + " " * 4096 + "\n\n"
+
     async def stream():
-        yield _sse("progress", {"step": 1, "total": 3, "msg": "Loading notes…"})
+        yield _PAD  # flush proxy buffer immediately
 
         from ui.backend.database import engine
         from sqlmodel import Session as _Session
@@ -490,31 +494,37 @@ async def rollup_notes(req: NoteRollupRequest):
         seen: dict[str, Note] = {}
         for n in all_notes:
             seen[n.call_id] = n   # later rows overwrite earlier ones (ordered by created_at)
-        notes = list(seen.values())
-        notes.sort(key=lambda n: n.created_at)
+        all_unique = list(seen.values())
+        all_unique.sort(key=lambda n: n.created_at)
 
-        if not notes:
+        if not all_unique:
             preset_hint = f" with preset '{req.preset}'" if req.preset else ""
             yield _sse("error", {"msg": f"No notes found for this agent-customer pair{preset_hint}. Run the notes agent first."})
             return
 
-        # Concatenate all notes with separators
-        combined = ""
-        for i, note in enumerate(notes, 1):
-            combined += f"\n\n---\n### Note {i} (Call: {note.call_id})\n\n{note.content_md}"
-        combined = combined.strip()
+        # Cap to most recent N notes to avoid LLM timeout on huge inputs
+        total_unique = len(all_unique)
+        notes = all_unique[-req.max_notes:] if req.max_notes > 0 else all_unique
 
-        # Emit preview so the UI can show note count + merged content
+        # Concatenate notes with separators
+        parts_list = [f"\n\n---\n### Note {i} (Call: {note.call_id})\n\n{note.content_md}"
+                      for i, note in enumerate(notes, 1)]
+        combined = "".join(parts_list).strip()
+
+        print(f"[rollup] {_label}: preset={req.preset!r} total_unique={total_unique} using={len(notes)} chars={len(combined):,}")
+
+        # Emit preview — send another pad to ensure it flushes through the proxy
         yield _sse("notes_preview", {
             "note_count": len(notes),
+            "total_unique": total_unique,
             "total_chars": len(combined),
             "preset": req.preset or "(all)",
-            "preview": combined[:4000],   # first ~4k chars for display
+            "preview": combined[:4000],
         })
+        yield _PAD  # flush after preview so UI updates before LLM starts
 
-        print(f"[rollup] {_label}: preset={req.preset!r} unique_calls={len(notes)} chars={len(combined):,}")
         yield _sse("progress", {"step": 2, "total": 3,
-            "msg": f"Running roll-up agent ({req.model}) on {len(notes)} notes…"})
+            "msg": f"Running LLM on {len(notes)} notes ({len(combined):,} chars)…"})
 
         try:
             user_msg = f"{req.user_prompt.strip()}\n\n{combined}"
