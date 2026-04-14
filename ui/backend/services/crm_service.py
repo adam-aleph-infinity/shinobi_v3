@@ -146,7 +146,7 @@ def seed_db(pairs: list[dict], session, replace_crm_urls: set[str] | None = None
         session.exec(text("DELETE FROM crm_pair"))
     else:
         for url in replace_crm_urls:
-            session.exec(text("DELETE FROM crm_pair WHERE crm_url = :u"), {"u": url})
+            session.exec(text("DELETE FROM crm_pair WHERE crm_url = :u").bindparams(u=url))
     now = datetime.now(timezone.utc)
     for p in pairs:
         crm_url = p.get("crm", p.get("crm_url", ""))
