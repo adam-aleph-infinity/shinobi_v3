@@ -38,6 +38,14 @@ def populate_status():
     return _pop_state
 
 
+@router.post("/reset")
+def populate_reset():
+    """Force-clear the running flag (e.g. after a dropped SSE connection)."""
+    with _pop_lock:
+        _pop_state["running"] = False
+    return {"ok": True}
+
+
 @router.post("/start")
 async def start_populate():
     """

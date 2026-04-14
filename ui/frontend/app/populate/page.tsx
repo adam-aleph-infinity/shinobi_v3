@@ -59,6 +59,7 @@ export default function PopulatePage() {
   const [stage, setStage] = useState(0);
   const [done, setDone] = useState(false);
   const [summary, setSummary] = useState<{ submitted: number; skipped: number; pairs: number } | null>(null);
+  const [resetting, setResetting] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef(false);
   const idRef = useRef(0);
@@ -66,6 +67,16 @@ export default function PopulatePage() {
   const { data: status, mutate: refreshStatus } = useSWR(`${API}/populate/status`, fetcher, {
     refreshInterval: running ? 3000 : 0,
   });
+
+  // True when the server thinks it's running but we didn't start it (stale state from a dropped connection)
+  const staleRun = !running && status?.running;
+
+  async function resetStaleRun() {
+    setResetting(true);
+    await fetch(`${API}/populate/reset`, { method: "POST" });
+    await refreshStatus();
+    setResetting(false);
+  }
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -178,11 +189,26 @@ export default function PopulatePage() {
         </div>
       )}
 
+      {/* Stale-run banner — server thinks it's running but we didn't start it */}
+      {staleRun && (
+        <div className="flex items-center gap-3 bg-yellow-900/20 border border-yellow-700/40 rounded-xl px-4 py-3 text-sm text-yellow-300">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span className="flex-1">A previous run is still marked as active (connection was likely dropped).</span>
+          <button
+            onClick={resetStaleRun}
+            disabled={resetting}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-700 hover:bg-yellow-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+          >
+            {resetting ? <><Loader2 className="w-3 h-3 animate-spin" /> Resetting…</> : "Reset & Start Fresh"}
+          </button>
+        </div>
+      )}
+
       {/* Action button */}
       <div className="flex gap-3">
         <button
           onClick={startPopulate}
-          disabled={running}
+          disabled={running || !!staleRun}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
         >
           {running
