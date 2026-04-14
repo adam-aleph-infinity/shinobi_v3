@@ -1,10 +1,49 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import useSWR from "swr";
-import { Users, Phone, Clock, DollarSign, BarChart3, ChevronRight, Loader2, Search } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
+
+const ALL_MODELS = [
+  "gpt-5.4", "gpt-4.1", "gpt-4.1-mini",
+  "claude-opus-4-6", "claude-sonnet-4-6",
+  "gemini-2.5-pro", "gemini-2.5-flash",
+  "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
+];
+
+const DEFAULT_ROLLUP_SYSTEM = `You are a senior compliance analyst reviewing a complete series of call notes for a single agent-customer relationship.
+
+Produce a comprehensive roll-up report with EXACTLY these sections (each preceded by ##):
+
+## Compliance Aggregate
+For each compliance procedure, show totals across ALL calls:
+- Format each line: "<Procedure Name>: X compliant, Y violations (Z% violation rate)"
+- Final line: "TOTAL: X violations across Y procedure checks"
+
+## Call Progression Summary
+A concise timeline of how the relationship evolved across calls: key milestones, stages reached, current status, outcomes.
+
+## Key Patterns & Persistent Issues
+Recurring violations, consistent behaviours, issues that appear in multiple calls.
+
+## Consolidated Next Steps
+Top 5–8 priority actions based on ALL notes, ranked by urgency.
+
+## Overall Risk Assessment
+Overall compliance risk (Low / Medium / High) with justification from aggregate data.
+
+Rules:
+- Use exact ## headings above
+- Extract exact numbers from the notes — do not estimate
+- Reference specific call numbers where relevant
+- Keep each section focused and data-driven`;
+
+const DEFAULT_ROLLUP_PROMPT = "Summarize and aggregate all notes for this agent-customer relationship:";
 
 function fmt(n: number | null, prefix = "") {
   if (n == null) return "—";
@@ -64,6 +103,86 @@ export default function AgentDashboardPage() {
     selected ? `${API}/agent-stats/${encodeURIComponent(selected)}` : null,
     fetcher
   );
+
+  // Fetch customers who have notes for the selected agent
+  const { data: agentNotes } = useSWR<any[]>(
+    selected ? `${API}/notes?agent=${encodeURIComponent(selected)}` : null,
+    fetcher
+  );
+  const noteCustomers: string[] = agentNotes
+    ? [...new Set(agentNotes.map((n: any) => n.customer as string))].sort()
+    : [];
+
+  // Roll-up state
+  const [rollupCustomer, setRollupCustomer] = useState("");
+  const [rollupModel, setRollupModel]       = useState("gpt-5.4");
+  const [rollupSystem, setRollupSystem]     = useState(DEFAULT_ROLLUP_SYSTEM);
+  const [rollupPrompt, setRollupPrompt]     = useState(DEFAULT_ROLLUP_PROMPT);
+  const [rollupRunning, setRollupRunning]   = useState(false);
+  const [rollupResult, setRollupResult]     = useState<string | null>(null);
+  const [rollupError, setRollupError]       = useState<string | null>(null);
+  const [rollupThinking, setRollupThinking] = useState("");
+  const [showRollupConfig, setShowRollupConfig] = useState(false);
+  const rollupThinkScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (rollupThinkScroll.current) rollupThinkScroll.current.scrollTop = rollupThinkScroll.current.scrollHeight;
+  }, [rollupThinking]);
+
+  // Reset roll-up when agent changes
+  useEffect(() => {
+    setRollupCustomer("");
+    setRollupResult(null);
+    setRollupError(null);
+    setRollupThinking("");
+  }, [selected]);
+
+  const runRollup = async () => {
+    if (!selected || !rollupCustomer) return;
+    setRollupRunning(true);
+    setRollupResult(null);
+    setRollupError(null);
+    setRollupThinking("");
+    try {
+      const r = await fetch(`${API}/notes/rollup`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent: selected,
+          customer: rollupCustomer,
+          model: rollupModel,
+          temperature: 0,
+          system_prompt: rollupSystem,
+          user_prompt: rollupPrompt,
+        }),
+      });
+      if (!r.ok || !r.body) throw new Error(await r.text());
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const part of parts) {
+          const evLine   = part.split("\n").find(l => l.startsWith("event:"));
+          const dataLine = part.split("\n").find(l => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const event = evLine?.replace("event:", "").trim() ?? "message";
+          try {
+            const data = JSON.parse(dataLine.replace("data:", "").trim());
+            if (event === "thinking") setRollupThinking(prev => prev + data.text);
+            else if (event === "done")  setRollupResult(data.content_md);
+            else if (event === "error") setRollupError(data.msg ?? "Roll-up failed");
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      setRollupError(e.message ?? "Roll-up failed");
+    } finally {
+      setRollupRunning(false);
+    }
+  };
 
   const maxDeposits = Math.max(...(agents ?? []).map((a: any) => a.net_deposits || 0), 1);
   const filteredAgents = (agents ?? []).filter((a: any) =>
@@ -207,6 +326,116 @@ export default function AgentDashboardPage() {
                     </li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {/* Notes Roll-up */}
+            {noteCustomers.length > 0 && (
+              <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
+                  <BarChart2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                  <span className="text-xs font-semibold text-gray-300 flex-1">Notes Roll-up Analysis</span>
+                  <button
+                    onClick={() => setShowRollupConfig(v => !v)}
+                    className="text-[10px] text-gray-600 hover:text-gray-400 transition-colors"
+                  >
+                    {showRollupConfig ? "▲ Hide config" : "▼ Config"}
+                  </button>
+                </div>
+
+                <div className="p-4 space-y-3">
+                  {/* Customer selector */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500 shrink-0">Customer</span>
+                    <select
+                      value={rollupCustomer}
+                      onChange={e => { setRollupCustomer(e.target.value); setRollupResult(null); setRollupError(null); }}
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300"
+                    >
+                      <option value="">— select customer —</option>
+                      {noteCustomers.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+
+                  {/* Collapsible config */}
+                  {showRollupConfig && (
+                    <div className="space-y-2 border border-gray-800 rounded-lg p-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-500 w-12 shrink-0">Model</span>
+                        <select
+                          value={rollupModel} onChange={e => setRollupModel(e.target.value)}
+                          className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-300"
+                        >
+                          {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-[10px] text-gray-500">System prompt</p>
+                        <textarea
+                          value={rollupSystem} onChange={e => setRollupSystem(e.target.value)}
+                          rows={5}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-300 resize-y font-mono"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-[10px] text-gray-500">User prompt</p>
+                        <textarea
+                          value={rollupPrompt} onChange={e => setRollupPrompt(e.target.value)}
+                          rows={1}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-300 resize-y"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Run button */}
+                  <button
+                    onClick={runRollup}
+                    disabled={rollupRunning || !rollupCustomer}
+                    className={cn(
+                      "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors",
+                      rollupRunning || !rollupCustomer
+                        ? "bg-gray-800 text-gray-600 cursor-not-allowed"
+                        : "bg-teal-700 hover:bg-teal-600 text-white"
+                    )}
+                  >
+                    {rollupRunning
+                      ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Summarizing…</>
+                      : <><BarChart2 className="w-3.5 h-3.5" /> Summarize All Notes</>}
+                  </button>
+
+                  {/* Thinking */}
+                  {rollupRunning && rollupThinking && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-semibold text-purple-500 uppercase tracking-wide flex items-center gap-1">
+                        <Brain className="w-2.5 h-2.5" /> Reasoning
+                      </p>
+                      <div ref={rollupThinkScroll}
+                        className="bg-gray-950 border border-purple-900/30 rounded p-2 max-h-24 overflow-y-auto font-mono text-[10px] text-purple-300/70 whitespace-pre-wrap leading-relaxed">
+                        {rollupThinking}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error */}
+                  {rollupError && (
+                    <div className="p-2 bg-red-950/30 border border-red-800/40 rounded text-xs text-red-400">{rollupError}</div>
+                  )}
+
+                  {/* Result */}
+                  {rollupResult && (
+                    <div className="border border-gray-700/50 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 bg-gray-800 border-b border-gray-700/50 flex items-center gap-2">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
+                        <span className="text-xs font-semibold text-teal-300">{rollupCustomer} — Summary</span>
+                        <button onClick={() => setRollupResult(null)} className="ml-auto text-[10px] text-gray-600 hover:text-gray-400">✕ Clear</button>
+                      </div>
+                      <div className="p-4 max-h-[600px] overflow-y-auto prose prose-invert prose-sm max-w-none">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{rollupResult}</ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
