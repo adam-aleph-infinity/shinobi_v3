@@ -653,6 +653,18 @@ export default function FullPersonaAgentPage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SSEDone | null>(null);
 
+  // Elapsed timer — increments every second while running
+  const [elapsed, setElapsed] = useState(0);
+  const startedAtRef = useRef<number>(0);
+  useEffect(() => {
+    if (!running) { setElapsed(0); return; }
+    startedAtRef.current = Date.now();
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [running]);
+
   // View mode toggles
   const [genView, setGenView] = useState<"rendered" | "raw" | "sections">("rendered");
   const [showScoreRaw, setShowScoreRaw] = useState(false);
@@ -1091,17 +1103,33 @@ export default function FullPersonaAgentPage() {
         {/* Progress */}
         {(running || progress.length > 0) && (
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Progress</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex-1">Progress</h3>
+              {running && (
+                <span className="text-xs tabular-nums text-gray-600 font-mono">
+                  {Math.floor(elapsed / 60) > 0 ? `${Math.floor(elapsed / 60)}m ` : ""}{elapsed % 60}s
+                </span>
+              )}
+            </div>
             {progress.map((p, i) => (
               <div key={i} className="flex items-center gap-2 text-sm">
                 <span className="text-gray-600 text-xs tabular-nums w-12 shrink-0">{p.step}/{p.total}</span>
                 <div className="flex-1 bg-gray-800 rounded-full h-1.5">
                   <div className="bg-indigo-500 h-1.5 rounded-full transition-all" style={{ width: `${(p.step / p.total) * 100}%` }} />
                 </div>
-                <span className="text-gray-400 text-xs flex-shrink-0">{p.msg}</span>
+                <span className="text-gray-400 text-xs flex-shrink-0 max-w-[220px] truncate">{p.msg}</span>
               </div>
             ))}
-            {running && <div className="flex items-center gap-2 text-xs text-gray-600"><Loader2 className="w-3 h-3 animate-spin" /> Working…</div>}
+            {running && (
+              <div className="flex items-center gap-2 text-xs text-gray-600 pt-0.5">
+                <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                <span>
+                  {progress.length > 0
+                    ? progress[progress.length - 1].msg
+                    : "Starting…"}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
