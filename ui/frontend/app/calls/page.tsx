@@ -388,7 +388,7 @@ export default function CallsPage() {
                   <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
                   <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
                   <span className="ml-auto flex items-center gap-1 shrink-0">
-                    {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" title="Has notes" />}
+                    {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
                     {hasTranscript
                       ? <CheckCircle2 className="w-3 h-3 text-teal-400" />
                       : <Circle className="w-3 h-3 text-gray-700" />}
