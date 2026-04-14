@@ -442,6 +442,7 @@ async def analyze_note(req: NoteAnalyzeRequest):
 class NoteRollupRequest(BaseModel):
     agent: str
     customer: str
+    preset: str = ""          # notes_agent_id to filter by; empty = all presets
     model: str = "gemini-2.5-flash"
     temperature: float = 0.0
     system_prompt: str = DEFAULT_ROLLUP_SYSTEM
@@ -450,9 +451,13 @@ class NoteRollupRequest(BaseModel):
 
 
 @router.get("/rollup")
-def get_rollup(agent: str = Query(...), customer: str = Query(...)):
-    """Return the persisted roll-up JSON for agent+customer, or 404."""
-    rollup_path = NOTE_ROLLUPS_DIR / agent / f"{customer}.json"
+def get_rollup(agent: str = Query(...), customer: str = Query(...), preset: str = Query("")):
+    """Return the persisted roll-up JSON for agent+customer (optionally scoped to preset), or 404."""
+    slug = preset.replace(" ", "_") if preset else "_all"
+    rollup_path = NOTE_ROLLUPS_DIR / agent / f"{customer}__{slug}.json"
+    # Fallback: legacy path without preset slug
+    if not rollup_path.exists():
+        rollup_path = NOTE_ROLLUPS_DIR / agent / f"{customer}.json"
     if not rollup_path.exists():
         raise HTTPException(404, "No saved rollup found")
     try:
@@ -475,15 +480,23 @@ async def rollup_notes(req: NoteRollupRequest):
             stmt = select(Note).where(
                 Note.agent == req.agent,
                 Note.customer == req.customer,
-            ).order_by(Note.created_at)
-            notes = db.exec(stmt).all()
+            )
+            if req.preset:
+                stmt = stmt.where(Note.persona_agent_id == req.preset)
+            stmt = stmt.order_by(Note.created_at)
+            all_notes = db.exec(stmt).all()
+
+        # Deduplicate: keep only the latest note per call_id
+        seen: dict[str, Note] = {}
+        for n in all_notes:
+            seen[n.call_id] = n   # later rows overwrite earlier ones (ordered by created_at)
+        notes = list(seen.values())
+        notes.sort(key=lambda n: n.created_at)
 
         if not notes:
-            yield _sse("error", {"msg": "No notes found for this agent-customer pair. Run the notes agent first."})
+            preset_hint = f" with preset '{req.preset}'" if req.preset else ""
+            yield _sse("error", {"msg": f"No notes found for this agent-customer pair{preset_hint}. Run the notes agent first."})
             return
-
-        yield _sse("progress", {"step": 1, "total": 3,
-            "msg": f"Loaded {len(notes)} note{'' if len(notes) == 1 else 's'}"})
 
         # Concatenate all notes with separators
         combined = ""
@@ -491,7 +504,15 @@ async def rollup_notes(req: NoteRollupRequest):
             combined += f"\n\n---\n### Note {i} (Call: {note.call_id})\n\n{note.content_md}"
         combined = combined.strip()
 
-        print(f"[rollup] {_label}: running model={req.model} notes={len(notes)} chars={len(combined):,}")
+        # Emit preview so the UI can show note count + merged content
+        yield _sse("notes_preview", {
+            "note_count": len(notes),
+            "total_chars": len(combined),
+            "preset": req.preset or "(all)",
+            "preview": combined[:4000],   # first ~4k chars for display
+        })
+
+        print(f"[rollup] {_label}: preset={req.preset!r} unique_calls={len(notes)} chars={len(combined):,}")
         yield _sse("progress", {"step": 2, "total": 3,
             "msg": f"Running roll-up agent ({req.model}) on {len(notes)} notes…"})
 
@@ -539,10 +560,12 @@ async def rollup_notes(req: NoteRollupRequest):
         # Persist to disk
         result_json["_saved_at"] = datetime.utcnow().isoformat()
         result_json["_note_count"] = len(notes)
+        result_json["_preset"] = req.preset or "(all)"
+        slug = req.preset.replace(" ", "_") if req.preset else "_all"
         try:
             save_dir = NOTE_ROLLUPS_DIR / req.agent
             save_dir.mkdir(parents=True, exist_ok=True)
-            save_path = save_dir / f"{req.customer}.json"
+            save_path = save_dir / f"{req.customer}__{slug}.json"
             save_path.write_text(json.dumps(result_json, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"[rollup] {_label}: saved to {save_path}")
         except Exception as e:

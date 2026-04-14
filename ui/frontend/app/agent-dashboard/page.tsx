@@ -249,9 +249,14 @@ export default function AgentDashboardPage() {
   const rollupThinkScroll = useRef<HTMLDivElement>(null);
   const rollupAbort = useRef(false);
 
+  // Notes preview state (populated before LLM runs)
+  const [notesPreview, setNotesPreview] = useState<{ note_count: number; total_chars: number; preset: string; preview: string } | null>(null);
+  const [showMergedNotes, setShowMergedNotes] = useState(false);
+
   // Persisted rollup (null = 404 not yet run; object = saved result)
-  const savedRollupKey = selected && rollupCustomer
-    ? `${API}/notes/rollup?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}`
+  // Key includes preset so different presets get different cache entries
+  const savedRollupKey = selected && rollupCustomer && rollupPersona
+    ? `${API}/notes/rollup?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}&preset=${encodeURIComponent(rollupPersona)}`
     : null;
   const { data: savedRollup, isLoading: savedRollupLoading } = useSWR<any>(
     savedRollupKey,
@@ -262,12 +267,14 @@ export default function AgentDashboardPage() {
     if (rollupThinkScroll.current) rollupThinkScroll.current.scrollTop = rollupThinkScroll.current.scrollHeight;
   }, [rollupThinking]);
 
-  // Auto-select defaults when agent changes
+  // Reset preview when selection changes
   useEffect(() => {
     setRollupCustomer("");
     setRollupResult(null);
     setRollupError(null);
     setRollupThinking("");
+    setNotesPreview(null);
+    setShowMergedNotes(false);
   }, [selected]);
 
   // Auto-select first customer when list loads
@@ -299,10 +306,12 @@ export default function AgentDashboardPage() {
     setRollupResult(null);
     setRollupError(null);
     setRollupThinking("");
+    setNotesPreview(null);
+    setShowMergedNotes(false);
     try {
       const r = await fetch(`${API}/notes/rollup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent, customer, model, temperature: 0 }),
+        body: JSON.stringify({ agent, customer, model, temperature: 0, preset: rollupPersona }),
       });
       if (!r.ok || !r.body) throw new Error(await r.text());
       const reader = r.body.getReader();
@@ -322,7 +331,8 @@ export default function AgentDashboardPage() {
           const event = evLine?.replace("event:", "").trim() ?? "message";
           try {
             const data = JSON.parse(dataLine.replace("data:", "").trim());
-            if (event === "thinking") setRollupThinking(prev => prev + data.text);
+            if (event === "notes_preview") setNotesPreview(data);
+            else if (event === "thinking") setRollupThinking(prev => prev + data.text);
             else if (event === "done") {
               setRollupResult(data.result_json);
               if (data.result_json && savedRollupKey) {
@@ -523,10 +533,39 @@ export default function AgentDashboardPage() {
                   </div>
 
                   {/* Running indicator */}
-                  {rollupRunning && (
+                  {rollupRunning && !notesPreview && (
                     <div className="flex items-center gap-2 text-xs text-gray-500">
                       <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                      <span>Analysing notes for {rollupCustomer}…</span>
+                      <span>Loading notes for {rollupCustomer}…</span>
+                    </div>
+                  )}
+
+                  {/* Notes preview — shown as soon as backend loads notes */}
+                  {notesPreview && (
+                    <div className="rounded-lg border border-gray-800 overflow-hidden">
+                      <div className="flex items-center justify-between px-3 py-2 bg-gray-900/60 border-b border-gray-800">
+                        <div className="flex items-center gap-3 text-xs">
+                          <span className="font-semibold text-gray-300">
+                            {notesPreview.note_count} note{notesPreview.note_count !== 1 ? "s" : ""}
+                          </span>
+                          <span className="text-gray-600">·</span>
+                          <span className="text-gray-500">{(notesPreview.total_chars / 1000).toFixed(1)}k chars</span>
+                          <span className="text-gray-600">·</span>
+                          <span className="text-gray-500">preset: <span className="text-indigo-400">{notesPreview.preset}</span></span>
+                          {rollupRunning && <Loader2 className="w-3 h-3 animate-spin text-teal-400 ml-1" />}
+                        </div>
+                        <button
+                          onClick={() => setShowMergedNotes(v => !v)}
+                          className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
+                        >
+                          {showMergedNotes ? "hide" : "show merged notes"}
+                        </button>
+                      </div>
+                      {showMergedNotes && (
+                        <pre className="text-[10px] text-gray-400 font-mono whitespace-pre-wrap leading-relaxed p-3 max-h-64 overflow-y-auto bg-gray-950">
+                          {notesPreview.preview}{notesPreview.total_chars > 4000 ? `\n\n… (${((notesPreview.total_chars - 4000) / 1000).toFixed(1)}k more chars truncated)` : ""}
+                        </pre>
+                      )}
                     </div>
                   )}
 
