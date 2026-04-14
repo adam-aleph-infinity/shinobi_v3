@@ -379,7 +379,7 @@ export default function CallsPage() {
             const hasNotes = notesCallIds.has(call.call_id);
             const isSelected = selectedCallId === call.call_id;
             return (
-              <button key={call.call_id} onClick={() => setSelectedCallId(p => p === call.call_id ? "" : call.call_id)}
+              <button key={call.call_id} onClick={() => setSelectedCallId((p: string) => p === call.call_id ? "" : call.call_id)}
                 className={cn(
                   "w-full text-left px-3 py-2.5 border-b border-gray-800/50 hover:bg-gray-800/40 transition-colors",
                   isSelected && "bg-teal-500/5 border-l-2 border-l-teal-500"
