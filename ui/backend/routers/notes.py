@@ -442,7 +442,7 @@ async def analyze_note(req: NoteAnalyzeRequest):
 class NoteRollupRequest(BaseModel):
     agent: str
     customer: str
-    model: str = "gpt-5.4"
+    model: str = "gemini-2.5-flash"
     temperature: float = 0.0
     system_prompt: str = DEFAULT_ROLLUP_SYSTEM
     user_prompt: str = DEFAULT_ROLLUP_PROMPT

@@ -290,8 +290,7 @@ export default function AgentDashboardPage() {
     if (!selected || !rollupCustomer || !rollupPersona) return;
     if (savedRollupLoading) return;   // wait for cache check to complete
     if (savedRollup) return;          // already have a persisted result — display it
-    const persona = notesPersonas?.find((p: any) => p.name === rollupPersona);
-    triggerRollup(selected, rollupCustomer, persona?.model ?? "gpt-5.4");
+    triggerRollup(selected, rollupCustomer, "gemini-2.5-flash");
   }, [rollupCustomer, rollupPersona, savedRollupLoading]);
 
   const triggerRollup = async (agent: string, customer: string, model: string) => {
@@ -572,8 +571,7 @@ export default function AgentDashboardPage() {
                           persona={rollupPersona}
                           running={rollupRunning}
                           onRerun={() => {
-                            const persona = notesPersonas?.find((p: any) => p.name === rollupPersona);
-                            triggerRollup(selected!, rollupCustomer, persona?.model ?? "gpt-5.4");
+                            triggerRollup(selected!, rollupCustomer, "gemini-2.5-flash");
                           }}
                         />
                       </div>
