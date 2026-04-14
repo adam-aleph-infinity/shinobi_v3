@@ -399,7 +399,7 @@ export default function NotesPage() {
 
   const runAnalysis = async () => {
     if (!selectedAgent || !selectedCustomer || selectedCalls.size === 0) return;
-    const ordered = calls.filter(c => selectedCalls.has(c.call_id));
+    const ordered = calls.filter(c => selectedCalls.has(c.call_id) && !notesCallIds.has(c.call_id));
 
     setRunning(true);
     abortRef.current = false;
