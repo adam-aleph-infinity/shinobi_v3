@@ -2,21 +2,12 @@ import { NextRequest } from "next/server";
 
 const BACKEND = "http://127.0.0.1:8000";
 
-/**
- * Streaming SSE passthrough — forwards the populate pipeline progress stream
- * from the FastAPI backend directly to the browser without buffering.
- * The Next.js rewrite proxy buffers SSE and causes GCP LB 30s timeouts;
- * this custom handler passes the body through as a raw stream.
- */
+/** Fire-and-forget: starts the populate job and returns {ok: true} immediately. */
 export async function POST(_req: NextRequest) {
   const res = await fetch(`${BACKEND}/populate/start`, { method: "POST" });
-
-  return new Response(res.body, {
+  const data = await res.json();
+  return new Response(JSON.stringify(data), {
     status: res.status,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "X-Accel-Buffering": "no",
-    },
+    headers: { "Content-Type": "application/json" },
   });
 }

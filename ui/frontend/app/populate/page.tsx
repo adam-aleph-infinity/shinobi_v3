@@ -10,14 +10,6 @@ import { cn } from "@/lib/utils";
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
-type LogEntry = {
-  id: number;
-  event: string;
-  msg: string;
-  ts: string;
-  meta?: Record<string, any>;
-};
-
 const EVENT_STYLE: Record<string, string> = {
   stage:      "text-indigo-300 font-semibold",
   sync:       "text-gray-300",
@@ -54,22 +46,45 @@ function StageBar({ stage }: { stage: number }) {
 }
 
 export default function PopulatePage() {
-  const [running, setRunning] = useState(false);
-  const [log, setLog] = useState<LogEntry[]>([]);
-  const [stage, setStage] = useState(0);
+  const [started, setStarted] = useState(false);
   const [done, setDone] = useState(false);
-  const [summary, setSummary] = useState<{ submitted: number; skipped: number; pairs: number } | null>(null);
   const [resetting, setResetting] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef(false);
-  const idRef = useRef(0);
 
-  const { data: status, mutate: refreshStatus } = useSWR(`${API}/populate/status`, fetcher, {
-    refreshInterval: running ? 3000 : 0,
-  });
+  // Poll status every 2s while a run is active
+  const { data: status, mutate: refreshStatus } = useSWR(
+    `${API}/populate/status`,
+    fetcher,
+    { refreshInterval: started ? 2000 : 0 },
+  );
 
-  // True when the server thinks it's running but we didn't start it (stale state from a dropped connection)
-  const staleRun = !running && status?.running;
+  const running = status?.running ?? false;
+  const log: any[] = status?.log ?? [];
+  const stage: number = status?.stage ?? 0;
+  const staleRun = !started && running; // server thinks it's running but we didn't start it
+
+  // Stop polling when the job finishes
+  useEffect(() => {
+    if (started && !running && log.length > 0) {
+      setDone(true);
+      setStarted(false);
+    }
+  }, [started, running, log.length]);
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log.length]);
+
+  async function startPopulate() {
+    setDone(false);
+    const r = await fetch(`${API}/populate/start`, { method: "POST" });
+    const data = await r.json();
+    if (data.ok) {
+      setStarted(true);
+      refreshStatus();
+    }
+  }
 
   async function resetStaleRun() {
     setResetting(true);
@@ -78,74 +93,9 @@ export default function PopulatePage() {
     setResetting(false);
   }
 
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [log]);
-
-  function addLog(event: string, msg: string, meta?: Record<string, any>) {
-    setLog(prev => [...prev, {
-      id: idRef.current++,
-      event,
-      msg,
-      ts: new Date().toLocaleTimeString(),
-      meta,
-    }]);
-  }
-
-  async function startPopulate() {
-    setRunning(true);
-    setLog([]);
-    setStage(1);
-    setDone(false);
-    setSummary(null);
-    abortRef.current = false;
-
-    try {
-      const r = await fetch(`${API}/populate/start`, { method: "POST" });
-      if (!r.ok || !r.body) throw new Error(await r.text());
-
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
-        if (abortRef.current) { reader.cancel(); break; }
-
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-
-        for (const part of parts) {
-          const evLine   = part.split("\n").find(l => l.startsWith("event:"));
-          const dataLine = part.split("\n").find(l => l.startsWith("data:"));
-          if (!dataLine) continue;
-
-          const event = evLine?.replace("event:", "").trim() ?? "message";
-          try {
-            const data = JSON.parse(dataLine.replace("data:", "").trim());
-            const msg = data.msg ?? "";
-            const meta = Object.fromEntries(Object.entries(data).filter(([k]) => k !== "msg"));
-
-            addLog(event, msg, meta);
-
-            if (event === "stage" && data.stage) setStage(data.stage);
-            if (event === "done") {
-              setDone(true);
-              setStage(4);
-              setSummary({ submitted: data.submitted ?? 0, skipped: data.skipped ?? 0, pairs: data.pairs ?? 0 });
-            }
-          } catch {}
-        }
-      }
-    } catch (e: any) {
-      if (!abortRef.current) addLog("error", e.message ?? "Populate failed");
-    } finally {
-      setRunning(false);
-      refreshStatus();
-    }
-  }
+  const summary = status?.last_result;
+  const showSummary = done && summary;
+  const showLastRun = summary && !started && !done;
 
   return (
     <div className="max-w-3xl mx-auto space-y-5 py-2">
@@ -158,10 +108,10 @@ export default function PopulatePage() {
       </div>
 
       {/* Stage bar */}
-      {(running || done) && <StageBar stage={stage} />}
+      {(started || running || done) && stage > 0 && <StageBar stage={stage} />}
 
       {/* Summary cards */}
-      {done && summary && (
+      {showSummary && (
         <div className="grid grid-cols-3 gap-3">
           <div className="bg-emerald-900/20 border border-emerald-800/40 rounded-xl p-4 text-center">
             <p className="text-2xl font-bold text-emerald-400">{summary.submitted.toLocaleString()}</p>
@@ -172,24 +122,24 @@ export default function PopulatePage() {
             <p className="text-[10px] text-gray-500 uppercase tracking-wide mt-1">Already Done</p>
           </div>
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-            <p className="text-2xl font-bold text-gray-300">{summary.pairs.toLocaleString()}</p>
+            <p className="text-2xl font-bold text-gray-300">{summary.pairs_processed?.toLocaleString()}</p>
             <p className="text-[10px] text-gray-500 uppercase tracking-wide mt-1">Pairs Processed</p>
           </div>
         </div>
       )}
 
       {/* Last run info from server */}
-      {status?.last_result && !running && !done && (
+      {showLastRun && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs text-gray-400 space-y-1">
           <p className="text-gray-300 font-medium">Last run</p>
-          <p>{status.last_result.submitted} jobs submitted · {status.last_result.skipped} already done · {status.last_result.pairs_processed} pairs</p>
-          {status.last_result.completed_at && (
-            <p className="text-gray-600">{new Date(status.last_result.completed_at).toLocaleString()}</p>
+          <p>{summary.submitted} jobs submitted · {summary.skipped} already done · {summary.pairs_processed} pairs</p>
+          {summary.completed_at && (
+            <p className="text-gray-600">{new Date(summary.completed_at).toLocaleString()}</p>
           )}
         </div>
       )}
 
-      {/* Stale-run banner — server thinks it's running but we didn't start it */}
+      {/* Stale-run banner */}
       {staleRun && (
         <div className="flex items-center gap-3 bg-yellow-900/20 border border-yellow-700/40 rounded-xl px-4 py-3 text-sm text-yellow-300">
           <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -208,36 +158,27 @@ export default function PopulatePage() {
       <div className="flex gap-3">
         <button
           onClick={startPopulate}
-          disabled={running || !!staleRun}
+          disabled={started || running || !!staleRun}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
         >
-          {running
+          {(started || running)
             ? <><Loader2 className="w-4 h-4 animate-spin" /> Running…</>
             : done
               ? <><RefreshCw className="w-4 h-4" /> Run Again</>
               : <><Play className="w-4 h-4" /> Start Populate</>
           }
         </button>
-        {running && (
-          <button
-            onClick={() => { abortRef.current = true; setRunning(false); }}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-sm rounded-lg transition-colors"
-          >
-            Stop
-          </button>
-        )}
       </div>
 
       {/* Live log */}
       {log.length > 0 && (
         <div className="bg-gray-950 border border-gray-800 rounded-xl overflow-hidden">
           <div className="px-4 py-2 border-b border-gray-800 text-[10px] text-gray-500 uppercase tracking-wide font-semibold">
-            Live Log
+            Log
           </div>
           <div ref={logRef} className="max-h-[520px] overflow-y-auto p-4 space-y-0.5 font-mono text-[11px]">
-            {log.map(entry => (
-              <div key={entry.id} className="flex gap-2 items-start">
-                <span className="text-gray-700 shrink-0 w-16">{entry.ts}</span>
+            {log.map((entry, i) => (
+              <div key={i} className="flex gap-2 items-start">
                 {entry.event === "error" && <AlertTriangle className="w-3 h-3 text-red-400 shrink-0 mt-0.5" />}
                 {entry.event === "done"  && <CheckCircle2  className="w-3 h-3 text-emerald-400 shrink-0 mt-0.5" />}
                 <span className={cn("leading-relaxed", EVENT_STYLE[entry.event] ?? "text-gray-400")}>
@@ -245,9 +186,8 @@ export default function PopulatePage() {
                 </span>
               </div>
             ))}
-            {running && (
+            {(started || running) && (
               <div className="flex gap-2 items-center pt-1">
-                <span className="text-gray-700 w-16" />
                 <Loader2 className="w-3 h-3 animate-spin text-indigo-400 shrink-0" />
                 <span className="text-gray-600">Running…</span>
               </div>
