@@ -96,6 +96,49 @@ def create_agent(req: UniversalAgentIn):
     return record
 
 
+@router.get("/uploaded-files")
+def list_uploaded_files(
+    provider: str = Query(""),
+    db: Session = Depends(get_session),
+):
+    """List all tracked uploaded files across providers."""
+    from ui.backend.models.uploaded_file import UploadedFile as UF
+    stmt = select(UF).order_by(UF.created_at.desc())
+    if provider:
+        stmt = stmt.where(UF.provider == provider)
+    return db.exec(stmt).all()
+
+
+@router.delete("/uploaded-files/{record_id}")
+def delete_uploaded_file(record_id: str, db: Session = Depends(get_session)):
+    """Delete a file record and attempt to remove the file from the provider."""
+    from ui.backend.models.uploaded_file import UploadedFile as UF
+    record = db.get(UF, record_id)
+    if not record:
+        raise HTTPException(404, "Record not found")
+
+    if record.provider == "gemini":
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+            genai.delete_file(record.provider_file_id)
+        except Exception:
+            pass
+
+    elif record.provider == "anthropic":
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+            client.beta.files.delete(record.provider_file_id,
+                                     betas=["files-api-2025-04-14"])
+        except Exception:
+            pass
+
+    db.delete(record)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/raw-input")
 def get_raw_input(
     source: str = Query(""),
@@ -322,6 +365,8 @@ def _sse(event: str, data: dict) -> str:
     return f"data: {json.dumps({'type': event, 'data': data})}\n\n"
 
 
+import hashlib
+
 def _clean_result(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -329,16 +374,137 @@ def _clean_result(text: str) -> str:
     return text
 
 
-def _llm_call_gemini_files(
-    system: str,
-    user_template: str,
-    file_inputs: dict,   # key → text content
-    inline_inputs: dict, # key → text content
-    model: str,
-    temperature: float,
-) -> str:
-    """Gemini call: each file input is uploaded via the Files API (never inlined)."""
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+
+
+# ── Per-provider file upload helpers (with DB dedup) ─────────────────────────
+
+def _get_or_upload_gemini(
+    content: str, key: str, source: str,
+    sales_agent: str, customer: str, call_id: str,
+    db: Session,
+):
+    """Upload to Gemini Files API or reuse cached record if still valid."""
     import io
+    from datetime import timedelta
+    import google.generativeai as genai
+    from ui.backend.models.uploaded_file import UploadedFile as UF
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    genai.configure(api_key=api_key)
+
+    chash = _content_hash(content)
+    now   = datetime.utcnow()
+
+    # Try existing record first
+    existing = db.exec(
+        select(UF).where(UF.provider == "gemini", UF.content_hash == chash)
+        .order_by(UF.created_at.desc())
+    ).first()
+
+    if existing and (existing.expires_at is None or existing.expires_at > now):
+        try:
+            f = genai.get_file(existing.provider_file_id)
+            return f  # ✓ reused cached file
+        except Exception:
+            pass  # file gone on Google's side; fall through
+
+    # Upload fresh
+    f = genai.upload_file(
+        io.BytesIO(content.encode("utf-8")),
+        mime_type="text/plain",
+        display_name=f"{key}.txt",
+    )
+
+    record = UF(
+        id=str(uuid.uuid4()),
+        provider="gemini",
+        provider_file_id=f.name,
+        provider_file_uri=getattr(f, "uri", ""),
+        content_hash=chash,
+        input_key=key,
+        source=source,
+        sales_agent=sales_agent,
+        customer=customer,
+        call_id=call_id,
+        chars=len(content),
+        created_at=now,
+        expires_at=now + timedelta(hours=47),  # Gemini files expire after 48 h
+    )
+    db.add(record)
+    db.commit()
+    return f
+
+
+def _get_or_upload_anthropic(
+    content: str, key: str, source: str,
+    sales_agent: str, customer: str, call_id: str,
+    db: Session,
+) -> str:
+    """Upload to Anthropic Files API (beta) or reuse cached file_id."""
+    import anthropic
+    from ui.backend.models.uploaded_file import UploadedFile as UF
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    chash = _content_hash(content)
+    now   = datetime.utcnow()
+
+    # Try existing record
+    existing = db.exec(
+        select(UF).where(UF.provider == "anthropic", UF.content_hash == chash)
+        .order_by(UF.created_at.desc())
+    ).first()
+
+    if existing:
+        try:
+            client.beta.files.retrieve(existing.provider_file_id,
+                                        betas=["files-api-2025-04-14"])
+            return existing.provider_file_id  # ✓ reused
+        except Exception:
+            pass  # file deleted on Anthropic's side; fall through
+
+    # Upload fresh
+    resp = client.beta.files.upload(
+        file=(f"{key}.txt", content.encode("utf-8"), "text/plain"),
+        betas=["files-api-2025-04-14"],
+    )
+    file_id = resp.id
+
+    record = UF(
+        id=str(uuid.uuid4()),
+        provider="anthropic",
+        provider_file_id=file_id,
+        provider_file_uri="",
+        content_hash=chash,
+        input_key=key,
+        source=source,
+        sales_agent=sales_agent,
+        customer=customer,
+        call_id=call_id,
+        chars=len(content),
+        created_at=now,
+        expires_at=None,  # Anthropic files persist until deleted
+    )
+    db.add(record)
+    db.commit()
+    return file_id
+
+
+# ── LLM call with file upload ─────────────────────────────────────────────────
+
+def _llm_call_gemini_files(
+    system: str, user_template: str,
+    file_inputs: dict, inline_inputs: dict,
+    model: str, temperature: float,
+    db: Session,
+) -> str:
     import google.generativeai as genai
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -346,67 +512,55 @@ def _llm_call_gemini_files(
         raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
 
-    uploaded: list = []
+    # Get or upload each file input (context passed for record-keeping)
+    ctx = getattr(db, "_agent_run_ctx", {})
+    file_objs = {}
+    for key, content in file_inputs.items():
+        file_objs[key] = _get_or_upload_gemini(
+            content, key,
+            ctx.get("source_for_key", {}).get(key, ""),
+            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
+            db,
+        )
+
+    # Build user message — strip {key} placeholders for file inputs
+    user_text = user_template
+    for key in file_objs:
+        user_text = user_text.replace(f"{{{key}}}", "")
+    for key, val in inline_inputs.items():
+        user_text = user_text.replace(f"{{{key}}}", val)
+
+    parts = list(file_objs.values()) + [user_text.strip()]
+
+    gen_model = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=system or None,
+    )
+    cfg: dict = {}
+    if temperature > 0:
+        cfg["temperature"] = temperature
+
+    response = gen_model.generate_content(
+        parts,
+        generation_config=genai.GenerationConfig(**cfg) if cfg else None,
+    )
     try:
-        # Upload each file input to Gemini's File API
-        for key, content in file_inputs.items():
-            f = genai.upload_file(
-                io.BytesIO(content.encode("utf-8")),
-                mime_type="text/plain",
-                display_name=f"{key}.txt",
-            )
-            uploaded.append((key, f))
-
-        # Build user message — strip {key} placeholders for uploaded files,
-        # substitute inline inputs normally.
-        user_text = user_template
-        for key, _ in uploaded:
-            user_text = user_text.replace(f"{{{key}}}", "")
-        for key, val in inline_inputs.items():
-            user_text = user_text.replace(f"{{{key}}}", val)
-
-        # Content parts: file objects first, then the instruction text
-        parts = [f for _, f in uploaded] + [user_text.strip()]
-
-        gen_model = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system or None,
-        )
-        cfg: dict = {}
-        if temperature > 0:
-            cfg["temperature"] = temperature
-
-        response = gen_model.generate_content(
-            parts,
-            generation_config=genai.GenerationConfig(**cfg) if cfg else None,
-        )
+        return _clean_result(response.text)
+    except ValueError as e:
+        finish = ""
         try:
-            return _clean_result(response.text)
-        except ValueError as e:
-            finish = ""
-            try:
-                finish = response.candidates[0].finish_reason.name if response.candidates else "NONE"
-            except Exception:
-                pass
-            raise RuntimeError(f"Gemini blocked/empty (finish_reason={finish}): {e}") from e
-
-    finally:
-        for _, f in uploaded:
-            try:
-                genai.delete_file(f.name)
-            except Exception:
-                pass
+            finish = response.candidates[0].finish_reason.name if response.candidates else "NONE"
+        except Exception:
+            pass
+        raise RuntimeError(f"Gemini blocked/empty (finish_reason={finish}): {e}") from e
 
 
-def _llm_call_anthropic_docs(
-    system: str,
-    user_template: str,
-    file_inputs: dict,
-    inline_inputs: dict,
-    model: str,
-    temperature: float,
+def _llm_call_anthropic_files(
+    system: str, user_template: str,
+    file_inputs: dict, inline_inputs: dict,
+    model: str, temperature: float,
+    db: Session,
 ) -> str:
-    """Anthropic call: file inputs become document content blocks (not inlined as raw text)."""
     import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -417,12 +571,18 @@ def _llm_call_anthropic_docs(
     content_blocks: list = []
     user_text = user_template
 
-    # Add each file as a document block; strip the placeholder from the text
+    ctx = getattr(db, "_agent_run_ctx", {})
     for key, content in file_inputs.items():
         user_text = user_text.replace(f"{{{key}}}", "")
+        file_id = _get_or_upload_anthropic(
+            content, key,
+            ctx.get("source_for_key", {}).get(key, ""),
+            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
+            db,
+        )
         content_blocks.append({
             "type": "document",
-            "source": {"type": "text", "media_type": "text/plain", "data": content},
+            "source": {"type": "file", "file_id": file_id},
             "title": key,
         })
 
@@ -436,11 +596,12 @@ def _llm_call_anthropic_docs(
         "max_tokens": 8192,
         "system": system,
         "messages": [{"role": "user", "content": content_blocks}],
+        "betas": ["files-api-2025-04-14"],
     }
     if temperature is not None and temperature > 0:
         kwargs["temperature"] = temperature
 
-    response = client.messages.create(**kwargs)
+    response = client.beta.messages.create(**kwargs)
     text = "\n\n".join(
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
@@ -449,25 +610,21 @@ def _llm_call_anthropic_docs(
 
 
 def _llm_call_with_files(
-    system: str,
-    user_template: str,
-    file_inputs: dict,   # inputs from _FILE_SOURCES — never pasted inline
-    inline_inputs: dict, # small inputs (agent_output, manual, chain_previous)
-    model: str,
-    temperature: float,
+    system: str, user_template: str,
+    file_inputs: dict, inline_inputs: dict,
+    model: str, temperature: float,
+    db: Session,
 ) -> str:
-    """
-    Route to the right provider implementation.
-    File inputs are uploaded as native file/document objects.
-    For OpenAI / Grok, file inputs are still inlined (no native file API in chat).
-    """
+    """Route to provider-specific file-upload implementation. Never inlines file inputs."""
     if model.startswith("gemini"):
-        return _llm_call_gemini_files(system, user_template, file_inputs, inline_inputs, model, temperature)
+        return _llm_call_gemini_files(
+            system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
     if model.startswith("claude-"):
-        return _llm_call_anthropic_docs(system, user_template, file_inputs, inline_inputs, model, temperature)
+        return _llm_call_anthropic_files(
+            system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
-    # OpenAI / Grok: inline everything (they handle large context well)
+    # OpenAI / Grok — inline (their chat API has no equivalent file upload)
     import sys
     sys.path.insert(0, str(settings.project_root))
     from shared.llm_client import LLMClient
@@ -628,6 +785,19 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
             file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
             inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
+            # Attach run context to db session so upload helpers can record it
+            db._agent_run_ctx = {
+                "sales_agent": req.sales_agent,
+                "customer":    req.customer,
+                "call_id":     req.call_id,
+                "source_for_key": {
+                    inp.get("key", ""): req.source_overrides.get(
+                        inp.get("key", ""), inp.get("source", "")
+                    )
+                    for inp in agent_def.get("inputs", [])
+                },
+            }
+
             yield _sse("progress", {
                 "msg": f"Calling {model}… ({len(file_inputs)} file(s), {len(inline_inputs)} inline)"
             })
@@ -637,7 +807,7 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 lambda: _llm_call_with_files(
                     system_prompt, user_template,
                     file_inputs, inline_inputs,
-                    model, temperature,
+                    model, temperature, db,
                 ),
             )
 
