@@ -5,8 +5,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Users, Search, Loader2, FileText, CheckCircle2,
-  Circle, ChevronRight, Mic2, StickyNote, Trash2, X, ChevronDown, ChevronUp,
+  Circle, ChevronRight, Mic2, StickyNote, Trash2, X, ChevronDown, ChevronUp, Play,
 } from "lucide-react";
+import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
@@ -31,15 +32,22 @@ interface Note {
 
 // ── Notes panel ───────────────────────────────────────────────────────────────
 
-function NotesPanel({ agent, customer, callId }: { agent: string; customer: string; callId: string }) {
+function NotesPanel({
+  agent, customer, callId, llmAgentName,
+}: {
+  agent: string; customer: string; callId: string; llmAgentName?: string;
+}) {
   const { data: notes, mutate } = useSWR<Note[]>(
     agent && customer && callId
       ? `/api/notes?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`
       : null,
     fetcher,
-    { refreshInterval: 5000 },
+    { refreshInterval: 8000 },
   );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [creating, setCreating] = useState(false);
+  const [createProgress, setCreateProgress] = useState("");
+  const [createError, setCreateError] = useState("");
 
   const toggle = (id: string) =>
     setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -48,6 +56,63 @@ function NotesPanel({ agent, customer, callId }: { agent: string; customer: stri
     await fetch(`/api/notes/${id}`, { method: "DELETE" });
     mutate();
   };
+
+  // Notes filtered by active LLM agent (if one is selected)
+  const visibleNotes = llmAgentName
+    ? (notes ?? []).filter(n => n.notes_agent_id === llmAgentName)
+    : (notes ?? []);
+
+  async function createNote() {
+    if (!agent || !customer || !callId || !llmAgentName) return;
+    setCreating(true);
+    setCreateProgress("Loading agent config…");
+    setCreateError("");
+    try {
+      const presets: any[] = await fetch("/api/notes/agents").then(r => r.json());
+      const preset = presets.find((p: any) => p.name === llmAgentName);
+      if (!preset) throw new Error(`Agent "${llmAgentName}" not found in Agents`);
+
+      setCreateProgress(`Running ${preset.name}…`);
+      const res = await fetch("/api/notes/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent, customer, call_id: callId,
+          notes_agent_id: preset.name,
+          model: preset.model ?? "gpt-5.4",
+          temperature: preset.temperature ?? 0,
+          system_prompt: preset.system_prompt,
+          user_prompt: preset.user_prompt,
+          run_compliance: preset.run_compliance ?? false,
+          compliance_model: preset.compliance_model,
+          compliance_system_prompt: preset.compliance_system_prompt,
+          compliance_user_prompt: preset.compliance_user_prompt,
+        }),
+      });
+      if (!res.body) throw new Error("No response body");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value);
+        for (const line of text.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          try {
+            const evt = JSON.parse(line.slice(5).trim());
+            if (evt.type === "progress") setCreateProgress(evt.data.msg ?? "");
+            if (evt.type === "done") { setCreateProgress(""); mutate(); }
+            if (evt.type === "error") throw new Error(evt.data.msg);
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      setCreateError(e.message ?? "Failed to create note");
+    } finally {
+      setCreating(false);
+      setCreateProgress("");
+    }
+  }
 
   if (!callId) {
     return (
@@ -67,22 +132,61 @@ function NotesPanel({ agent, customer, callId }: { agent: string; customer: stri
     );
   }
 
-  if (notes.length === 0) {
+  if (visibleNotes.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-gray-600 gap-2">
+      <div className="flex flex-col items-center justify-center h-full text-gray-600 gap-3 px-4">
         <StickyNote className="w-8 h-8 opacity-20" />
-        <p className="text-xs text-center">No notes for this call yet.<br />Use the Notes page to generate them.</p>
+        {creating ? (
+          <>
+            <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+            <p className="text-xs text-gray-400 text-center">{createProgress || "Working…"}</p>
+          </>
+        ) : llmAgentName ? (
+          <>
+            <p className="text-xs text-center">
+              No notes from <span className="text-indigo-300 font-medium">{llmAgentName}</span>
+            </p>
+            <button
+              onClick={createNote}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors"
+            >
+              <Play className="w-3 h-3" />
+              Create notes
+            </button>
+            {createError && <p className="text-xs text-red-400 text-center">{createError}</p>}
+          </>
+        ) : (
+          <p className="text-xs text-center text-gray-600">
+            No notes for this call yet.<br />
+            Select an agent in the context bar or use the Notes page.
+          </p>
+        )}
       </div>
     );
   }
 
   return (
     <div className="h-full overflow-y-auto p-3 space-y-3">
-      {notes.map(note => {
+      {/* Create another button when llmAgent is active */}
+      {llmAgentName && !creating && (
+        <button
+          onClick={createNote}
+          className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-dashed border-indigo-800/50 rounded-lg transition-colors"
+        >
+          <Play className="w-3 h-3" />
+          Re-run {llmAgentName}
+        </button>
+      )}
+      {creating && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-indigo-900/20 border border-indigo-800/30 rounded-lg">
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400 shrink-0" />
+          <span className="text-xs text-gray-400">{createProgress || "Working…"}</span>
+        </div>
+      )}
+      {visibleNotes.map(note => {
         const isExpanded = expanded.has(note.id);
         return (
           <div key={note.id} className="border border-gray-700 rounded-xl overflow-hidden">
-            {/* Header */}
             <div className="flex items-center gap-2 px-3 py-2 bg-gray-900 border-b border-gray-800">
               <div className="flex-1 min-w-0">
                 {note.notes_agent_id && (
@@ -101,8 +205,6 @@ function NotesPanel({ agent, customer, callId }: { agent: string; customer: stri
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
             </div>
-
-            {/* Body */}
             {isExpanded && (
               <div className="p-3 bg-gray-950/60">
                 <div className="prose prose-invert prose-sm max-w-none text-xs">
@@ -120,7 +222,6 @@ function NotesPanel({ agent, customer, callId }: { agent: string; customer: stri
                     {note.content_md}
                   </ReactMarkdown>
                 </div>
-
               </div>
             )}
           </div>
@@ -144,6 +245,8 @@ function _css(k: string) { try { return sessionStorage.getItem(`calls_${k}`) ?? 
 function _cssSet(k: string, v: string) { try { sessionStorage.setItem(`calls_${k}`, v); } catch {} }
 
 export default function CallsPage() {
+  const ctx = useAppCtx();
+
   const [agentW, agentDrag]       = useResize(180, 120, 360);
   const [customerW, customerDrag] = useResize(180, 120, 360);
   const [callsW, callsDrag]       = useResize(280, 180, 440);
@@ -159,11 +262,20 @@ export default function CallsPage() {
   const [agentSearch, _setAgentSearch]           = useState("");
   const [customerSearch, _setCustomerSearch]     = useState("");
 
-  const setSelectedAgent   = (v: string)          => { _setSelectedAgent(v);   _cssSet("selectedAgent",   v); };
-  const setSelectedCustomer = (v: Customer | null) => { _setSelectedCustomer(v); _cssSet("selectedCustomer", v ? JSON.stringify(v) : ""); };
-  const setSelectedCallId  = (v: string)          => { _setSelectedCallId(v);  _cssSet("selectedCallId",  v); };
-  const setAgentSearch     = (v: string)          => { _setAgentSearch(v);     _cssSet("agentSearch",     v); };
-  const setCustomerSearch  = (v: string)          => { _setCustomerSearch(v);  _cssSet("customerSearch",  v); };
+  const setSelectedAgent = (v: string) => {
+    _setSelectedAgent(v); _cssSet("selectedAgent", v);
+    ctx.setSalesAgent(v);
+  };
+  const setSelectedCustomer = (v: Customer | null) => {
+    _setSelectedCustomer(v); _cssSet("selectedCustomer", v ? JSON.stringify(v) : "");
+    if (v) ctx.setCustomer(v.customer);
+  };
+  const setSelectedCallId = (v: string) => {
+    _setSelectedCallId(v); _cssSet("selectedCallId", v);
+    ctx.setCallId(v);
+  };
+  const setAgentSearch     = (v: string) => { _setAgentSearch(v);     _cssSet("agentSearch",     v); };
+  const setCustomerSearch  = (v: string) => { _setCustomerSearch(v);  _cssSet("customerSearch",  v); };
 
   const [transcript, setTranscript]             = useState("");
   const [transcriptLoading, setTranscriptLoading] = useState(false);
@@ -172,13 +284,18 @@ export default function CallsPage() {
   const [showNotes, setShowNotes]               = useState(true);
   const [notesW, notesDrag]                     = useResize(320, 200, 560, "left");
 
-  // Restore persisted state after mount (avoid SSR/hydration mismatch)
+  // Restore persisted state after mount — prefer context values if local storage is empty
   useEffect(() => {
-    _setSelectedAgent(_css("selectedAgent"));
-    try { const v = _css("selectedCustomer"); if (v) _setSelectedCustomer(JSON.parse(v)); } catch {}
-    _setSelectedCallId(_css("selectedCallId"));
+    const localAgent = _css("selectedAgent") || ctx.salesAgent;
+    const localCustomerRaw = _css("selectedCustomer");
+    const localCall = _css("selectedCallId") || ctx.callId;
+
+    _setSelectedAgent(localAgent);
+    try { const v = localCustomerRaw; if (v) _setSelectedCustomer(JSON.parse(v)); } catch {}
+    _setSelectedCallId(localCall);
     _setAgentSearch(_css("agentSearch"));
     _setCustomerSearch(_css("customerSearch"));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
@@ -273,7 +390,7 @@ export default function CallsPage() {
   const filteredCustomers = (customers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
 
   return (
-    <div className="h-[calc(100vh-3rem)] flex">
+    <div className="h-full flex">
 
       {/* Panel 1 — Agents */}
       <CollapsiblePanel title="Agents" width={agentW} collapsed={agentsCollapsed} onToggle={() => setAgentsCollapsed(c => !c)}>
@@ -491,6 +608,7 @@ export default function CallsPage() {
                   agent={selectedAgent}
                   customer={selectedCustomer?.customer ?? ""}
                   callId={selectedCallId}
+                  llmAgentName={ctx.llmAgentName || undefined}
                 />
               </div>
             </div>

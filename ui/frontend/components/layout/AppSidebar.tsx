@@ -7,28 +7,45 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap,
+  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, Layers,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
-interface NavItem {
-  href: string;
-  icon: React.ElementType;
-  label: string;
-  sub?: boolean;
-}
+// ── Nav structure ─────────────────────────────────────────────────────────────
 
-const navItems: NavItem[] = [
-  { href: "/crm",               icon: Users,     label: "CRM Browser" },
-  { href: "/full-persona-agent",icon: Bot,       label: "Full Persona Agent" },
-  { href: "/personas",          icon: FileText,  label: "Personas" },
-  { href: "/comparison",        icon: BarChart3,  label: "Compare Personas" },
-  { href: "/notes",             icon: StickyNote, label: "Full Notes Agent" },
-  { href: "/calls",             icon: FileText,   label: "Calls" },
-  { href: "/agent-comparison",  icon: BarChart3,  label: "Compare Agents" },
-  { href: "/agent-dashboard",   icon: BarChart3,     label: "Agent Dashboard" },
-  { href: "/populate",          icon: DatabaseZap,   label: "Populate" },
+const GROUPS = [
+  {
+    label: "Browse",
+    items: [
+      { href: "/crm",   icon: Users,      label: "CRM Browser" },
+      { href: "/calls", icon: FileText,   label: "Calls" },
+    ],
+  },
+  {
+    label: "Agents",
+    items: [
+      { href: "/agents", icon: Bot, label: "Agents" },
+    ],
+  },
+  {
+    label: "Analyze",
+    items: [
+      { href: "/agent-dashboard",  icon: BarChart3,  label: "Agent Dashboard" },
+      { href: "/personas",         icon: FileText,   label: "Personas" },
+      { href: "/comparison",       icon: BarChart3,  label: "Compare Personas" },
+      { href: "/agent-comparison", icon: BarChart3,  label: "Compare Agents" },
+    ],
+  },
 ];
+
+const FOOTER_ITEMS = [
+  { href: "/populate",  icon: DatabaseZap, label: "Populate" },
+  { href: "/logs",      icon: Terminal,    label: "Logs" },
+  { href: "/workspace", icon: FolderOpen,  label: "Workspace" },
+  { href: "/settings",  icon: Settings,    label: "Settings" },
+];
+
+// ── Backend status dot ────────────────────────────────────────────────────────
 
 function BackendStatus() {
   const [ok, setOk] = useState<boolean | null>(null);
@@ -48,7 +65,7 @@ function BackendStatus() {
   return (
     <div className="flex items-center gap-1.5">
       <span className={cn(
-        "w-2 h-2 rounded-full flex-shrink-0",
+        "w-2 h-2 rounded-full shrink-0",
         ok === null ? "bg-gray-600 animate-pulse" :
         ok ? "bg-emerald-500" : "bg-red-500 animate-pulse"
       )} />
@@ -63,60 +80,68 @@ function BackendStatus() {
   );
 }
 
-export default function AppSidebar({ onToggle, extraFooter }: {
-  onToggle?: () => void;
-  extraFooter?: React.ReactNode;
-}) {
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
   const pathname = usePathname();
 
-  const isActive = (href: string) =>
-    href === "/personas" || href === "/calls" || href === "/notes"
-      ? pathname === href
-      : pathname.startsWith(href);
-
-  const NavLink = ({ href, icon: Icon, label }: NavItem) => (
-    <Link
-      href={href}
-      className={cn(
-        "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
-        isActive(href)
-          ? "bg-indigo-600 text-white"
-          : "text-gray-400 hover:text-white hover:bg-gray-800"
-      )}
-    >
-      <Icon className="w-4 h-4 flex-shrink-0" />
-      {label}
-    </Link>
-  );
+  const isActive = (href: string) => {
+    // Exact match for paths that share a prefix with others
+    if (href === "/personas" || href === "/calls" || href === "/agents") return pathname === href;
+    return pathname.startsWith(href);
+  };
 
   return (
     <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40">
       {/* Logo */}
-      <div className="p-4 border-b border-gray-800">
+      <div className="p-4 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-2">
-          <Image src="/shinobilookintothefuture.png" alt="Shinobi" width={120} height={32} className="object-contain" style={{ maxHeight: 32 }} />
+          <Image src="/shinobilookintothefuture.png" alt="Shinobi" width={120} height={32}
+            className="object-contain" style={{ maxHeight: 32 }} />
           {onToggle && (
-            <button onClick={onToggle} className="ml-auto p-1 rounded text-gray-600 hover:text-gray-400 transition-colors" title="Collapse sidebar">
+            <button onClick={onToggle}
+              className="ml-auto p-1 rounded text-gray-600 hover:text-gray-400 transition-colors"
+              title="Collapse sidebar">
               <PanelLeftClose className="w-4 h-4" />
             </button>
           )}
         </div>
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 p-3 space-y-0.5 overflow-y-auto">
-        {navItems.map(item => <NavLink key={item.href} {...item} />)}
+      {/* Nav groups */}
+      <nav className="flex-1 overflow-y-auto py-3 px-3 space-y-4">
+        {GROUPS.map(group => (
+          <div key={group.label}>
+            <p className="px-2 mb-1 text-[10px] font-semibold text-gray-600 uppercase tracking-widest">
+              {group.label}
+            </p>
+            <div className="space-y-0.5">
+              {group.items.map(({ href, icon: Icon, label }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
+                    isActive(href)
+                      ? "bg-indigo-600 text-white"
+                      : "text-gray-400 hover:text-white hover:bg-gray-800"
+                  )}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  {label}
+                </Link>
+              ))}
+            </div>
+          </div>
+        ))}
       </nav>
 
-      <div className="p-3 border-t border-gray-800 space-y-1.5">
+      {/* Footer */}
+      <div className="p-3 border-t border-gray-800 shrink-0 space-y-2">
         <BackendStatus />
         <SyncButton />
-        <div className="flex flex-col gap-0.5">
-          {([
-            { href: "/logs",      icon: Terminal,   label: "Logs" },
-            { href: "/workspace", icon: FolderOpen, label: "Workspace" },
-            { href: "/settings",  icon: Settings,   label: "Settings" },
-          ] as NavItem[]).map(({ href, icon: Icon, label }) => (
+        <div className="space-y-0.5">
+          {FOOTER_ITEMS.map(({ href, icon: Icon, label }) => (
             <Link
               key={href}
               href={href}
@@ -132,7 +157,6 @@ export default function AppSidebar({ onToggle, extraFooter }: {
             </Link>
           ))}
         </div>
-        {extraFooter}
         <p className="text-xs text-gray-700">© 2026 Shinobi · v{VERSION}</p>
       </div>
     </aside>

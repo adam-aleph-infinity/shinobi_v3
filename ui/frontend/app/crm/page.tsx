@@ -5,9 +5,10 @@ import { AgentCustomerPair, TxStats } from "@/lib/types";
 import { formatDuration } from "@/lib/utils";
 import {
   RefreshCw, Search, Loader2, ChevronUp, ChevronDown, ChevronsUpDown,
-  X, Mic2, CheckSquare, Square, CheckCircle2, CalendarDays,
+  X, Mic2, CheckSquare, Square, CheckCircle2, CalendarDays, Target,
 } from "lucide-react";
 import { refreshCache } from "@/lib/api";
+import { useAppCtx } from "@/lib/app-context";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(`${API}${url}`).then(r => r.json());
@@ -54,6 +55,8 @@ function FilterInput({ label, value, onChange, type = "text", step, placeholder 
 }
 
 export default function CRMPage() {
+  const ctx = useAppCtx();
+
   // ── Filters (persisted to sessionStorage) — start from safe defaults; restored post-mount
   const [agentFilter, _setAgentFilter]         = useState("");
   const [customerFilter, _setCustomerFilter]   = useState("");
@@ -361,16 +364,17 @@ export default function CRMPage() {
                   <ThBtn col="duration" label="Duration" align="right" />
                   <ThBtn col="deposits" label="Net Dep."  align="right" />
                   <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">FTD</th>
+                  <th className="w-8 px-2 py-3" />
                 </tr>
               </thead>
               <tbody>
                 {isLoading && (
-                  <tr><td colSpan={10} className="text-center py-12 text-gray-500">
+                  <tr><td colSpan={11} className="text-center py-12 text-gray-500">
                     <Loader2 className="w-4 h-4 animate-spin inline mr-2" />Loading…
                   </td></tr>
                 )}
                 {error && (
-                  <tr><td colSpan={10} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
+                  <tr><td colSpan={11} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
                 )}
                 {!isLoading && displayPairs.map((pair) => {
                   const isSelected = selectedIds.has(pair.id);
@@ -414,11 +418,24 @@ export default function CRMPage() {
                         ) : <span className="text-gray-600">—</span>}
                       </td>
                       <td className="px-3 py-3 text-right text-gray-300 text-xs">{fmtDate(pair.ftd_at)}</td>
+                      <td className="px-2 py-3 text-center">
+                        <button
+                          onClick={() => ctx.setCustomer(pair.customer, pair.agent)}
+                          title={`Set context: ${pair.agent} / ${pair.customer}`}
+                          className={`p-1 rounded transition-colors ${
+                            ctx.salesAgent === pair.agent && ctx.customer === pair.customer
+                              ? "text-indigo-400"
+                              : "text-gray-700 hover:text-indigo-400"
+                          }`}
+                        >
+                          <Target className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
                 {!isLoading && displayPairs.length === 0 && (
-                  <tr><td colSpan={10} className="text-center py-12 text-gray-500">No pairs found</td></tr>
+                  <tr><td colSpan={11} className="text-center py-12 text-gray-500">No pairs found</td></tr>
                 )}
               </tbody>
             </table>

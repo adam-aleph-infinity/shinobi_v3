@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2, AlertTriangle, RefreshCw, Clock, X } from "lucide-react";
+import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2, AlertTriangle, RefreshCw, Clock, X, VolumeX } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const API = "/api";
@@ -61,15 +61,17 @@ function RiskBadge({ risk }: { risk?: string }) {
   );
 }
 
+type CallInfo = { date: string; has_audio: boolean };
+
 function RollupDashboard({ data, agent, customer, persona, onRerun, running, callDates }: {
   data: any; agent: string; customer: string; persona: string;
   onRerun: () => void; running: boolean;
-  callDates?: Record<string, string>;
+  callDates?: Record<string, CallInfo>;
 }) {
   const [popup, setPopup] = useState<{ title: string; subtitle?: string; text: string; loading?: boolean } | null>(null);
 
   async function openTranscript(callId: string) {
-    const date = callDates?.[callId]?.slice(0, 10);
+    const date = callDates?.[callId]?.date?.slice(0, 10);
     setPopup({ title: "Transcript", subtitle: [callId, date].filter(Boolean).join(" · "), text: "", loading: true });
     try {
       const r = await fetch(`/api/notes/transcript?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`);
@@ -239,12 +241,15 @@ function RollupDashboard({ data, agent, customer, persona, onRerun, running, cal
           <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Call Progression</p>
           <div className="space-y-0.5">
             {data.call_progression.map((c: any, i: number) => {
-              const date = callDates?.[c.call_id]?.slice(0, 10);
+              const info = callDates?.[c.call_id];
+              const date = info?.date?.slice(0, 10);
+              const hasAudio = info?.has_audio ?? true;
               return (
                 <div key={i} onClick={() => openTranscript(c.call_id)}
                   className="flex items-center gap-2 text-xs text-gray-400 py-1.5 border-b border-gray-800/40 last:border-0 cursor-pointer hover:bg-gray-800/30 rounded px-1 -mx-1 transition-colors">
                   <span className="font-mono text-gray-600 shrink-0 truncate w-20">{c.call_id}</span>
                   {date && <span className="text-gray-600 text-[10px] shrink-0">{date}</span>}
+                  {!hasAudio && <span title="No audio"><VolumeX className="w-3 h-3 text-gray-600 shrink-0" /></span>}
                   <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
                   <span className="text-indigo-400 shrink-0 truncate max-w-[120px]">{c.stage}</span>
                   <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
@@ -307,8 +312,8 @@ export default function AgentDashboardPage() {
   const [rollupPersona, setRollupPersona]   = useState(""); // name of selected notes agent preset
   const [rollupRunning, setRollupRunning]   = useState(false);
 
-  // Call dates for the selected agent+customer pair (for call progression display)
-  const { data: callDates } = useSWR<Record<string, string>>(
+  // Call dates + audio status for the selected agent+customer pair (for call progression display)
+  const { data: callDates } = useSWR<Record<string, CallInfo>>(
     selected && rollupCustomer
       ? `${API}/crm/call-dates?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}`
       : null,

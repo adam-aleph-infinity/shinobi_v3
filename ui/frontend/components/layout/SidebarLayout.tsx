@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import AppSidebar from "./AppSidebar";
+import { ContextBar } from "./ContextBar";
 import { PanelLeftOpen } from "lucide-react";
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
@@ -42,9 +43,12 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       ) : (
         <AppSidebar onToggle={toggle} />
       )}
-      <main className={`min-h-screen p-6 transition-all duration-200 ${collapsed ? "ml-0" : "ml-56"}`}>
-        {children}
-      </main>
+      <div className={`flex flex-col h-screen transition-all duration-200 ${collapsed ? "ml-0" : "ml-56"}`}>
+        <ContextBar />
+        <main className="flex-1 min-h-0 overflow-auto p-6">
+          {children}
+        </main>
+      </div>
     </>
   );
 }

@@ -326,7 +326,7 @@ def get_call_dates(
     customer: str = Query(...),
     db: Session = Depends(get_session),
 ):
-    """Return {call_id: started_at} for all calls of an agent-customer pair (including aliases).
+    """Return {call_id: {date, has_audio}} for all calls of an agent-customer pair (including aliases).
     Checks DB first, then falls back to calls.json on disk."""
     import json as _json
     from ui.backend.models.crm import CRMCall
@@ -336,13 +336,16 @@ def get_call_dates(
     aliases = _load_aliases()
     agent_names = [agent] + [a for a, p in aliases.items() if p == agent]
 
-    # DB lookup
-    stmt = select(CRMCall.call_id, CRMCall.started_at).where(CRMCall.customer == customer)
+    # DB lookup — include has_local_audio
+    stmt = select(CRMCall.call_id, CRMCall.started_at, CRMCall.has_local_audio).where(CRMCall.customer == customer)
     if len(agent_names) == 1:
         stmt = stmt.where(CRMCall.agent == agent)
     else:
         stmt = stmt.where(or_(*[CRMCall.agent == n for n in agent_names]))
-    result = {r[0]: r[1] for r in db.exec(stmt).all() if r[0] and r[1]}
+    result: dict = {}
+    for r in db.exec(stmt).all():
+        if r[0] and r[1]:
+            result[r[0]] = {"date": str(r[1]), "has_audio": bool(r[2])}
 
     # Fallback: read calls.json for any call IDs not in DB
     for a in agent_names:
@@ -354,7 +357,10 @@ def get_call_dates(
                     if cid and cid not in result:
                         date = c.get("started_at") or c.get("date", "")
                         if date:
-                            result[cid] = str(date)
+                            result[cid] = {
+                                "date": str(date),
+                                "has_audio": bool(c.get("has_local_audio", False)),
+                            }
             except Exception:
                 pass
 

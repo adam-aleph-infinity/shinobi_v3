@@ -264,6 +264,78 @@ def list_notes(
     ]
 
 
+# ── Manager summary helpers ───────────────────────────────────────────────────
+
+def _get_call_meta(agent: str, customer: str, call_id: str) -> dict:
+    """Return {date, duration_s, net_deposits, crm_url} for a specific call."""
+    import json as _json
+    meta: dict = {"date": None, "duration_s": None, "net_deposits": None, "crm_url": None}
+
+    # Call date + duration from calls.json (tries alias dirs too)
+    for a in _agent_names_for(agent):
+        calls_path = settings.agents_dir / a / customer / "calls.json"
+        if calls_path.exists():
+            try:
+                for c in _json.loads(calls_path.read_text()):
+                    if str(c.get("call_id", "")) == str(call_id):
+                        meta["date"] = c.get("started_at") or c.get("date")
+                        meta["duration_s"] = c.get("duration_s") or c.get("audio_duration_s")
+                        meta["crm_url"] = c.get("crm_url", "")
+                        break
+            except Exception:
+                pass
+        if meta["date"]:
+            break
+
+    # Net deposits from crm_pair table
+    try:
+        from ui.backend.database import engine
+        from sqlmodel import Session as _Sess
+        from ui.backend.models.crm import CRMPair
+        with _Sess(engine) as _db:
+            pairs = _db.exec(
+                select(CRMPair.net_deposits, CRMPair.crm_url)
+                .where(CRMPair.agent == agent, CRMPair.customer == customer)
+            ).all()
+            if pairs:
+                meta["net_deposits"] = sum(float(p[0] or 0) for p in pairs)
+                if not meta["crm_url"] and pairs[0][1]:
+                    meta["crm_url"] = pairs[0][1]
+    except Exception:
+        pass
+
+    return meta
+
+
+def _build_summary_header(agent: str, customer: str, call_id: str, meta: dict) -> str:
+    """Build a manager summary block matching the merged-transcript style."""
+    from datetime import datetime, timezone
+    nd = meta.get("net_deposits")
+    nd_line = f"Net Deposits: ${nd:,.2f}\n" if nd is not None else ""
+    date_str = str(meta.get("date") or "")[:19]
+    dur_str = ""
+    if meta.get("duration_s") is not None:
+        d = int(meta["duration_s"])
+        dur_str = f"  |  {d // 60}m{d % 60:02d}s"
+    call_line = f"CALL {call_id}"
+    if date_str:
+        call_line += f"  |  {date_str}"
+    call_line += dur_str
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f"{'═' * 60}\n"
+        f"MANAGER SUMMARY\n"
+        f"Agent:    {agent}\n"
+        f"Customer: {customer}\n"
+        f"{nd_line}"
+        f"Generated: {now}\n"
+        f"{'═' * 60}\n"
+        f"{'─' * 60}\n"
+        f"{call_line}\n"
+        f"{'─' * 60}\n\n"
+    )
+
+
 # ── Fetch transcript for a call ──────────────────────────────────────────────
 
 @router.get("/transcript")
@@ -384,6 +456,14 @@ async def analyze_note(req: NoteAnalyzeRequest):
             "msg": f"Note generated — {len(content_md):,} chars"})
 
         # Step 3: save
+        # Prepend manager summary header
+        try:
+            meta = _get_call_meta(req.agent, req.customer, req.call_id)
+            summary_header = _build_summary_header(req.agent, req.customer, req.call_id, meta)
+            content_md = summary_header + content_md
+        except Exception as _hdr_err:
+            print(f"[notes] {_label}: summary header error (non-fatal): {_hdr_err}")
+
         yield _sse("progress", {"step": 3, "total": 3, "msg": "Saving note…"})
         try:
             from ui.backend.database import engine
