@@ -30,6 +30,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     );
   }
 
+  const ml = collapsed ? "ml-0" : "ml-56";
+
   return (
     <>
       {collapsed ? (
@@ -43,9 +45,13 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       ) : (
         <AppSidebar onToggle={toggle} />
       )}
-      <div className={`flex flex-col h-screen transition-all duration-200 ${collapsed ? "ml-0" : "ml-56"}`}>
-        <ContextBar />
-        <main className="flex-1 min-h-0 overflow-auto p-6">
+
+      <div className={`${ml} transition-all duration-200`}>
+        {/* Sticky context bar — sits at top, scrolls away with content on short pages */}
+        <div className="sticky top-0 z-30">
+          <ContextBar />
+        </div>
+        <main className="min-h-screen p-6">
           {children}
         </main>
       </div>

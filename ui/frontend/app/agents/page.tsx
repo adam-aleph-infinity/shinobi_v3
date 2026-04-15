@@ -1,17 +1,17 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { Bot, Plus, Trash2, Check, Loader2, ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
+import { Bot, Plus, Trash2, Check, Loader2, ChevronDown, ChevronUp, AlertTriangle, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
-const ALL_MODELS = [
-  "gpt-5.4", "gpt-4.1", "gpt-4.1-mini",
-  "claude-opus-4-6", "claude-sonnet-4-6",
-  "gemini-2.5-pro", "gemini-2.5-flash",
-  "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
+const MODEL_GROUPS = [
+  { provider: "OpenAI",    models: ["gpt-5.4", "gpt-4.1", "gpt-4.1-mini"] },
+  { provider: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-6"] },
+  { provider: "Google",    models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+  { provider: "xAI",       models: ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"] },
 ];
 
 const DEFAULT_NOTES_SYSTEM = `You are a senior call analyst reviewing a single sales call transcript.
@@ -59,6 +59,24 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
 Rules: scores 0–100 (higher=better), _risk_level is Low/Medium/High, _violations is a list.`;
 
 const DEFAULT_COMPLIANCE_PROMPT = "Score the compliance of this call note:";
+
+// ── Reusable grouped model select ─────────────────────────────────────────────
+
+function ModelSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+    >
+      {MODEL_GROUPS.map(g => (
+        <optgroup key={g.provider} label={g.provider}>
+          {g.models.map(m => <option key={m} value={m}>{m}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
 
 // ── Notes Agent types ─────────────────────────────────────────────────────────
 
@@ -120,6 +138,7 @@ function NotesAgentsTab() {
   const [form, setForm] = useState({ ...EMPTY_NOTES_AGENT });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showCompliance, setShowCompliance] = useState(false);
   const [isNew, setIsNew] = useState(false);
 
@@ -226,6 +245,7 @@ function NotesAgentsTab() {
       {/* Form */}
       {showForm ? (
         <div className="flex-1 min-w-0 overflow-y-auto p-6 space-y-5">
+          {/* Header */}
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-white">
               {isNew ? "New Notes Agent" : `Edit: ${selected}`}
@@ -259,56 +279,68 @@ function NotesAgentsTab() {
             </div>
           </div>
 
-          {/* Basic fields */}
-          <div className="grid grid-cols-3 gap-4">
-            <div className="col-span-2">
-              <label className="block text-xs text-gray-400 mb-1">Name</label>
-              <input
-                value={form.name}
-                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                placeholder="e.g. call_notes_agent"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Temperature</label>
-              <input
-                type="number" min={0} max={2} step={0.1}
-                value={form.temperature}
-                onChange={e => setForm(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-              />
-            </div>
-          </div>
-
+          {/* Name */}
           <div>
-            <label className="block text-xs text-gray-400 mb-1">Model</label>
-            <select
-              value={form.model}
-              onChange={e => setForm(f => ({ ...f, model: e.target.value }))}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-            >
-              {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
-            <textarea
-              value={form.system_prompt}
-              onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
-              rows={10}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
+            <label className="block text-xs text-gray-400 mb-1">Name</label>
             <input
-              value={form.user_prompt}
-              onChange={e => setForm(f => ({ ...f, user_prompt: e.target.value }))}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+              value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              placeholder="e.g. call_notes_agent"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500"
             />
+          </div>
+
+          {/* Side-by-side prompts */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col">
+              <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
+              <textarea
+                value={form.system_prompt}
+                onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                rows={16}
+                className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
+              <textarea
+                value={form.user_prompt}
+                onChange={e => setForm(f => ({ ...f, user_prompt: e.target.value }))}
+                rows={16}
+                className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+              />
+            </div>
+          </div>
+
+          {/* Settings collapsible */}
+          <div className="border border-gray-800 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setShowSettings(s => !s)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-gray-900 hover:bg-gray-800 transition-colors text-xs"
+            >
+              <span className="flex items-center gap-2 text-gray-300 font-medium">
+                <Settings2 className="w-3.5 h-3.5 text-gray-400" />
+                Settings
+              </span>
+              {showSettings ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
+            </button>
+            {showSettings && (
+              <div className="p-4 space-y-4 border-t border-gray-800">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Model</label>
+                  <ModelSelect value={form.model} onChange={v => setForm(f => ({ ...f, model: v }))} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Temperature</label>
+                  <input
+                    type="number" min={0} max={2} step={0.1}
+                    value={form.temperature}
+                    onChange={e => setForm(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Compliance section */}
@@ -339,30 +371,27 @@ function NotesAgentsTab() {
               <div className="p-4 space-y-4 border-t border-gray-800">
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Compliance Model</label>
-                  <select
-                    value={form.compliance_model}
-                    onChange={e => setForm(f => ({ ...f, compliance_model: e.target.value }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-                  >
-                    {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
+                  <ModelSelect value={form.compliance_model} onChange={v => setForm(f => ({ ...f, compliance_model: v }))} />
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Compliance System Prompt</label>
-                  <textarea
-                    value={form.compliance_system_prompt}
-                    onChange={e => setForm(f => ({ ...f, compliance_system_prompt: e.target.value }))}
-                    rows={8}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Compliance User Prompt</label>
-                  <input
-                    value={form.compliance_user_prompt}
-                    onChange={e => setForm(f => ({ ...f, compliance_user_prompt: e.target.value }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-                  />
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col">
+                    <label className="block text-xs text-gray-400 mb-1">Compliance System Prompt</label>
+                    <textarea
+                      value={form.compliance_system_prompt}
+                      onChange={e => setForm(f => ({ ...f, compliance_system_prompt: e.target.value }))}
+                      rows={8}
+                      className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <label className="block text-xs text-gray-400 mb-1">Compliance User Prompt</label>
+                    <textarea
+                      value={form.compliance_user_prompt}
+                      onChange={e => setForm(f => ({ ...f, compliance_user_prompt: e.target.value }))}
+                      rows={8}
+                      className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                    />
+                  </div>
                 </div>
               </div>
             )}
@@ -389,6 +418,7 @@ function PersonaAgentsTab() {
   const [form, setForm] = useState({ ...EMPTY_PERSONA_AGENT });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [isNew, setIsNew] = useState(false);
 
   const selectedAgent = agents?.find(a => a.id === selected);
@@ -457,7 +487,7 @@ function PersonaAgentsTab() {
         <div className="p-3 border-b border-gray-800">
           <button
             onClick={openNew}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors"
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-purple-700 hover:bg-purple-600 text-white text-xs font-medium rounded-lg transition-colors"
           >
             <Plus className="w-3.5 h-3.5" />
             New Persona Agent
@@ -472,7 +502,7 @@ function PersonaAgentsTab() {
               className={cn(
                 "w-full text-left px-3 py-2.5 rounded-lg text-xs transition-colors",
                 selected === a.id
-                  ? "bg-indigo-600/20 border border-indigo-600/30 text-white"
+                  ? "bg-purple-600/20 border border-purple-600/30 text-white"
                   : "text-gray-400 hover:bg-gray-800 hover:text-white"
               )}
             >
@@ -493,6 +523,7 @@ function PersonaAgentsTab() {
       {/* Form */}
       {showForm ? (
         <div className="flex-1 min-w-0 overflow-y-auto p-6 space-y-5">
+          {/* Header */}
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-white">
               {isNew ? "New Persona Agent" : `Edit: ${form.name}`}
@@ -518,7 +549,7 @@ function PersonaAgentsTab() {
               <button
                 onClick={save}
                 disabled={saving || !form.name.trim()}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-purple-700 hover:bg-purple-600 text-white rounded-lg transition-colors disabled:opacity-50"
               >
                 {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
                 {saved ? "Saved" : "Save"}
@@ -526,14 +557,15 @@ function PersonaAgentsTab() {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <div className="col-span-1">
+          {/* Name + Agent Type */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
               <label className="block text-xs text-gray-400 mb-1">Name</label>
               <input
                 value={form.name}
                 onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                 placeholder="e.g. agent_analyst_v1"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-purple-500"
               />
             </div>
             <div>
@@ -541,44 +573,56 @@ function PersonaAgentsTab() {
               <select
                 value={form.agent_type}
                 onChange={e => setForm(f => ({ ...f, agent_type: e.target.value }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-purple-500"
               >
                 <option value="agent_overall">agent_overall</option>
                 <option value="pair">pair</option>
                 <option value="customer">customer</option>
               </select>
             </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Temperature</label>
-              <input
-                type="number" min={0} max={2} step={0.1}
-                value={form.temperature}
-                onChange={e => setForm(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-              />
-            </div>
           </div>
 
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">Model</label>
-            <select
-              value={form.model}
-              onChange={e => setForm(f => ({ ...f, model: e.target.value }))}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-            >
-              {ALL_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-
+          {/* System Prompt */}
           <div>
             <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
             <textarea
               value={form.system_prompt}
               onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
-              rows={14}
+              rows={16}
               placeholder="Enter the system prompt for this persona agent…"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-purple-500 resize-y"
             />
+          </div>
+
+          {/* Settings collapsible */}
+          <div className="border border-gray-800 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setShowSettings(s => !s)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-gray-900 hover:bg-gray-800 transition-colors text-xs"
+            >
+              <span className="flex items-center gap-2 text-gray-300 font-medium">
+                <Settings2 className="w-3.5 h-3.5 text-gray-400" />
+                Settings
+              </span>
+              {showSettings ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
+            </button>
+            {showSettings && (
+              <div className="p-4 space-y-4 border-t border-gray-800">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Model</label>
+                  <ModelSelect value={form.model} onChange={v => setForm(f => ({ ...f, model: v }))} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Temperature</label>
+                  <input
+                    type="number" min={0} max={2} step={0.1}
+                    value={form.temperature}
+                    onChange={e => setForm(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       ) : (
@@ -595,13 +639,13 @@ function PersonaAgentsTab() {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-type Tab = "notes" | "persona";
+type Tab = "persona" | "notes";
 
 export default function AgentsPage() {
-  const [tab, setTab] = useState<Tab>("notes");
+  const [tab, setTab] = useState<Tab>("persona");
 
   return (
-    <div className="h-full flex flex-col -m-6">
+    <div className="min-h-[calc(100vh-5.25rem)] flex flex-col -m-6">
       {/* Header */}
       <div className="px-6 pt-5 pb-0 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-3 mb-4">
@@ -610,7 +654,7 @@ export default function AgentsPage() {
           <p className="text-sm text-gray-500">Create and manage analysis agents</p>
         </div>
         <div className="flex gap-1">
-          {(["notes", "persona"] as Tab[]).map(t => (
+          {(["persona", "notes"] as Tab[]).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -629,8 +673,8 @@ export default function AgentsPage() {
 
       {/* Tab content */}
       <div className="flex-1 min-h-0 bg-gray-950">
-        {tab === "notes"   && <NotesAgentsTab />}
         {tab === "persona" && <PersonaAgentsTab />}
+        {tab === "notes"   && <NotesAgentsTab />}
       </div>
     </div>
   );

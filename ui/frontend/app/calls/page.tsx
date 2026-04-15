@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Users, Search, Loader2, FileText, CheckCircle2,
-  Circle, ChevronRight, Mic2, StickyNote, Trash2, X, ChevronDown, ChevronUp, Play,
+  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
@@ -44,13 +44,9 @@ function NotesPanel({
     fetcher,
     { refreshInterval: 8000 },
   );
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
   const [createProgress, setCreateProgress] = useState("");
   const [createError, setCreateError] = useState("");
-
-  const toggle = (id: string) =>
-    setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const deleteNote = async (id: string) => {
     await fetch(`/api/notes/${id}`, { method: "DELETE" });
@@ -183,50 +179,37 @@ function NotesPanel({
           <span className="text-xs text-gray-400">{createProgress || "Working…"}</span>
         </div>
       )}
-      {visibleNotes.map(note => {
-        const isExpanded = expanded.has(note.id);
-        return (
-          <div key={note.id} className="border border-gray-700 rounded-xl overflow-hidden">
-            <div className="flex items-center gap-2 px-3 py-2 bg-gray-900 border-b border-gray-800">
-              <div className="flex-1 min-w-0">
-                {note.notes_agent_id && (
-                  <p className="text-[10px] text-indigo-400 truncate font-medium">{note.notes_agent_id}</p>
-                )}
-                <p className="text-[9px] text-gray-600 mt-0.5">
-                  {note.model} · {new Date(note.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                </p>
-              </div>
-              <button onClick={() => toggle(note.id)}
-                className="text-gray-600 hover:text-white p-1 transition-colors shrink-0">
-                {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              </button>
-              <button onClick={() => deleteNote(note.id)}
-                className="text-gray-700 hover:text-red-400 p-1 transition-colors shrink-0">
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            {isExpanded && (
-              <div className="p-3 bg-gray-950/60">
-                <div className="prose prose-invert prose-sm max-w-none text-xs">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      h2: ({ children }) => <h2 className="text-xs font-semibold text-indigo-300 mt-3 mb-1 border-b border-gray-800 pb-0.5">{children}</h2>,
-                      h3: ({ children }) => <h3 className="text-xs font-semibold text-gray-300 mt-2 mb-0.5">{children}</h3>,
-                      p:  ({ children }) => <p className="text-gray-400 mb-1 leading-relaxed text-[11px]">{children}</p>,
-                      ul: ({ children }) => <ul className="list-disc list-inside text-gray-400 mb-1 space-y-0 pl-2 text-[11px]">{children}</ul>,
-                      li: ({ children }) => <li className="text-gray-400">{children}</li>,
-                      strong: ({ children }) => <strong className="text-white font-medium">{children}</strong>,
-                    }}
-                  >
-                    {note.content_md}
-                  </ReactMarkdown>
-                </div>
-              </div>
-            )}
+      {visibleNotes.map(note => (
+        <div key={note.id} className="border border-gray-800 rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between px-3 pt-2 pb-0">
+            <span className="text-[9px] text-gray-600">
+              {note.notes_agent_id && <span className="text-indigo-500 mr-1">{note.notes_agent_id}</span>}
+              {new Date(note.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+            </span>
+            <button onClick={() => deleteNote(note.id)}
+              className="text-gray-700 hover:text-red-400 p-1 transition-colors shrink-0">
+              <Trash2 className="w-3 h-3" />
+            </button>
           </div>
-        );
-      })}
+          <div className="px-3 pb-3 bg-gray-950/40">
+            <div className="prose prose-invert prose-sm max-w-none text-xs">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  h2: ({ children }) => <h2 className="text-xs font-semibold text-indigo-300 mt-3 mb-1 border-b border-gray-800 pb-0.5">{children}</h2>,
+                  h3: ({ children }) => <h3 className="text-xs font-semibold text-gray-300 mt-2 mb-0.5">{children}</h3>,
+                  p:  ({ children }) => <p className="text-gray-400 mb-1 leading-relaxed text-[11px]">{children}</p>,
+                  ul: ({ children }) => <ul className="list-disc list-inside text-gray-400 mb-1 space-y-0 pl-2 text-[11px]">{children}</ul>,
+                  li: ({ children }) => <li className="text-gray-400">{children}</li>,
+                  strong: ({ children }) => <strong className="text-white font-medium">{children}</strong>,
+                }}
+              >
+                {note.content_md}
+              </ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -281,7 +264,6 @@ export default function CallsPage() {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
-  const [showNotes, setShowNotes]               = useState(true);
   const [notesW, notesDrag]                     = useResize(320, 200, 560, "left");
 
   // Restore persisted state after mount — prefer context values if local storage is empty
@@ -390,11 +372,11 @@ export default function CallsPage() {
   const filteredCustomers = (customers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
 
   return (
-    <div className="h-full flex">
+    <div className="h-[calc(100vh-5.25rem)] flex">
 
       {/* Panel 1 — Agents */}
       <CollapsiblePanel title="Agents" width={agentW} collapsed={agentsCollapsed} onToggle={() => setAgentsCollapsed(c => !c)}>
-        <div className="px-2 py-1.5 border-b border-gray-800/60">
+        <div className="px-2 py-1.5 border-b border-gray-800/60 shrink-0">
           <div className="flex items-center gap-1.5 bg-gray-800 rounded-md px-2 py-1">
             <Search className="w-3 h-3 text-gray-600 shrink-0" />
             <input value={agentSearch} onChange={e => setAgentSearch(e.target.value)}
@@ -402,25 +384,47 @@ export default function CallsPage() {
               className="flex-1 bg-transparent text-[11px] text-gray-300 placeholder-gray-600 outline-none min-w-0" />
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
+        <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
           {!agents && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-          {filteredAgents.map(a => (
-            <button key={a.agent} onClick={() => {
-              if (selectedAgent === a.agent) { setSelectedAgent(""); setSelectedCustomer(null); }
-              else { setSelectedAgent(a.agent); setSelectedCustomer(null); setSelectedCallId(""); }
-            }}
-              className={cn("w-full text-left px-2 py-2 rounded-lg text-xs transition-colors",
-                selectedAgent === a.agent
-                  ? "bg-teal-500/10 border border-teal-500/20 text-white"
-                  : "text-gray-400 hover:bg-gray-800 hover:text-white"
-              )}>
-              <div className="flex items-center gap-1.5">
-                <Users className="w-3 h-3 text-teal-400 shrink-0" />
-                <span className="font-medium truncate">{a.agent}</span>
+          {filteredAgents.map(a => {
+            const isSelected = selectedAgent === a.agent;
+            return (
+              <div
+                key={a.agent}
+                onClick={() => {
+                  if (isSelected) { setSelectedAgent(""); setSelectedCustomer(null); }
+                  else { setSelectedAgent(a.agent); setSelectedCustomer(null); setSelectedCallId(""); }
+                }}
+                className={cn(
+                  "rounded-lg border p-2.5 cursor-pointer transition-colors",
+                  isSelected
+                    ? "border-teal-500/60 bg-teal-900/20"
+                    : "border-gray-700 bg-gray-800/30 hover:border-gray-600"
+                )}
+              >
+                <div className="flex items-start gap-2">
+                  <div className={cn(
+                    "mt-0.5 w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center",
+                    isSelected ? "border-teal-500 bg-teal-600" : "border-gray-600"
+                  )}>
+                    {isSelected && (
+                      <svg className="w-2 h-2 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className={cn("text-xs font-medium truncate leading-tight", isSelected ? "text-white" : "text-gray-300")}>
+                      {a.agent}
+                    </p>
+                    <p className="text-[10px] text-gray-600 mt-0.5">
+                      {a.count} customer{a.count !== 1 ? "s" : ""}
+                    </p>
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-600 pl-[18px] text-[10px] mt-0.5">{a.count} customer{a.count !== 1 ? "s" : ""}</p>
-            </button>
-          ))}
+            );
+          })}
         </div>
       </CollapsiblePanel>
 
@@ -541,20 +545,6 @@ export default function CallsPage() {
                 {selectedCallData.date && <span>{formatDate(selectedCallData.date)}</span>}
               </div>
             )}
-            {/* Notes toggle */}
-            <button
-              onClick={() => setShowNotes(n => !n)}
-              title="Toggle notes panel"
-              className={cn(
-                "flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors shrink-0",
-                showNotes
-                  ? "bg-indigo-600 text-white"
-                  : "bg-gray-800 text-gray-500 hover:text-white hover:bg-gray-700"
-              )}
-            >
-              <StickyNote className="w-3 h-3" />
-              <span>Notes</span>
-            </button>
           </div>
 
           {!selectedCallId ? (
@@ -591,29 +581,27 @@ export default function CallsPage() {
           )}
         </div>
 
-        {/* Notes side panel */}
-        {showNotes && (
-          <>
-            <DragHandle onMouseDown={notesDrag} />
-            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col shrink-0" style={{ width: notesW }}>
-              <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
-                <StickyNote className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="text-xs font-semibold text-white flex-1">Notes</span>
-                <button onClick={() => setShowNotes(false)} className="text-gray-600 hover:text-white transition-colors">
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <div className="flex-1 min-h-0">
-                <NotesPanel
-                  agent={selectedAgent}
-                  customer={selectedCustomer?.customer ?? ""}
-                  callId={selectedCallId}
-                  llmAgentName={ctx.llmAgentName || undefined}
-                />
-              </div>
+        {/* Notes side panel — always visible */}
+        <>
+          <DragHandle onMouseDown={notesDrag} />
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col shrink-0" style={{ width: notesW }}>
+            <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+              <StickyNote className="w-3.5 h-3.5 text-indigo-400" />
+              <span className="text-xs font-semibold text-white flex-1">Notes</span>
+              {ctx.llmAgentName && (
+                <span className="text-[10px] text-indigo-400 truncate max-w-[100px]">{ctx.llmAgentName}</span>
+              )}
             </div>
-          </>
-        )}
+            <div className="flex-1 min-h-0">
+              <NotesPanel
+                agent={selectedAgent}
+                customer={selectedCustomer?.customer ?? ""}
+                callId={selectedCallId}
+                llmAgentName={ctx.llmAgentName || undefined}
+              />
+            </div>
+          </div>
+        </>
       </div>
     </div>
   );
