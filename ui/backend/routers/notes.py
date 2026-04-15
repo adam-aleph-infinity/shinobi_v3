@@ -215,6 +215,17 @@ def delete_notes_agent(name: str):
 
 # ── List notes ────────────────────────────────────────────────────────────────
 
+def _agent_names_for(agent: str) -> list[str]:
+    """Return [agent] plus any alias names that map to this primary agent.
+
+    e.g. "Leo West" → ["Leo West", "Leo West-Re13"]
+    """
+    from ui.backend.services.crm_service import _load_aliases
+    aliases = _load_aliases()
+    extras = [a for a, p in aliases.items() if p == agent]
+    return [agent] + extras
+
+
 @router.get("")
 def list_notes(
     agent: str = Query(""),
@@ -224,7 +235,12 @@ def list_notes(
 ):
     stmt = select(Note)
     if agent:
-        stmt = stmt.where(Note.agent == agent)
+        names = _agent_names_for(agent)
+        if len(names) == 1:
+            stmt = stmt.where(Note.agent == agent)
+        else:
+            from sqlalchemy import or_
+            stmt = stmt.where(or_(*[Note.agent == n for n in names]))
     if customer:
         stmt = stmt.where(Note.customer == customer)
     if call_id:
@@ -481,8 +497,14 @@ async def rollup_notes(req: NoteRollupRequest):
         from ui.backend.database import engine
         from sqlmodel import Session as _Session
         with _Session(engine) as db:
+            agent_names = _agent_names_for(req.agent)
+            if len(agent_names) == 1:
+                agent_filter = Note.agent == req.agent
+            else:
+                from sqlalchemy import or_
+                agent_filter = or_(*[Note.agent == n for n in agent_names])
             stmt = select(Note).where(
-                Note.agent == req.agent,
+                agent_filter,
                 Note.customer == req.customer,
             )
             if req.preset:
