@@ -12,6 +12,7 @@ import { cn, formatDuration, formatDate } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
 import { DragHandle } from "@/components/shared/DragHandle";
+import { AgentSidePanel } from "@/components/shared/AgentSidePanel";
 import { useResize } from "@/lib/useResize";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
@@ -581,25 +582,11 @@ export default function CallsPage() {
           )}
         </div>
 
-        {/* Notes side panel — always visible */}
+        {/* Agent side panel — always visible */}
         <>
           <DragHandle onMouseDown={notesDrag} />
           <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col shrink-0" style={{ width: notesW }}>
-            <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
-              <StickyNote className="w-3.5 h-3.5 text-indigo-400" />
-              <span className="text-xs font-semibold text-white flex-1">Notes</span>
-              {ctx.llmAgentName && (
-                <span className="text-[10px] text-indigo-400 truncate max-w-[100px]">{ctx.llmAgentName}</span>
-              )}
-            </div>
-            <div className="flex-1 min-h-0">
-              <NotesPanel
-                agent={selectedAgent}
-                customer={selectedCustomer?.customer ?? ""}
-                callId={selectedCallId}
-                llmAgentName={ctx.llmAgentName || undefined}
-              />
-            </div>
+            <AgentSidePanel />
           </div>
         </>
       </div>

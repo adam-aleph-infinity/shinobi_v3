@@ -1,13 +1,18 @@
 """Universal Agents — flexible multi-input LLM agent definitions."""
+import asyncio
 import json
+import os
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlmodel import Session, select
 
 from ui.backend.config import settings
+from ui.backend.database import get_session
 
 router = APIRouter(prefix="/universal-agents", tags=["universal-agents"])
 
@@ -38,6 +43,7 @@ class AgentInput(BaseModel):
 class UniversalAgentIn(BaseModel):
     name: str
     description: str = ""
+    agent_class: str = ""    # user-defined class: notes | persona | compliance | scorer | custom…
     model: str = "gpt-5.4"
     temperature: float = 0.0
     system_prompt: str = ""
@@ -273,3 +279,219 @@ def import_presets():
         "created_pipelines": created_pipelines,
         "skipped":           skipped,
     }
+
+
+# ── Run engine ────────────────────────────────────────────────────────────────
+
+def _sse(event: str, data: dict) -> str:
+    return f"data: {json.dumps({'type': event, 'data': data})}\n\n"
+
+
+def _llm_call(system: str, user: str, model: str, temperature: float) -> str:
+    """Thin wrapper around the shared LLM client."""
+    import sys
+    sys.path.insert(0, str(settings.project_root))
+    from shared.llm_client import LLMClient
+
+    if model.startswith("claude-"):
+        provider, key = "anthropic", os.environ.get("ANTHROPIC_API_KEY", "")
+    elif model.startswith("gemini"):
+        provider, key = "gemini", os.environ.get("GEMINI_API_KEY", "")
+    elif model.startswith("grok"):
+        provider = "grok"
+        from shared.llm_client import resolve_grok_key
+        key = resolve_grok_key() or ""
+    else:
+        provider, key = "openai", os.environ.get("OPENAI_API_KEY", "")
+
+    if not key:
+        raise RuntimeError(f"API key not set for provider '{provider}'")
+
+    client = LLMClient(provider=provider, api_key=key)
+    resp = client.chat_completion(
+        model=model,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=temperature,
+    )
+    result = (resp.choices[0].message.content or "").strip()
+    if result.startswith("```"):
+        result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return result
+
+
+def _resolve_input(source: str, agent_id: Optional[str],
+                   sales_agent: str, customer: str, call_id: str,
+                   manual_inputs: dict, db: Session) -> str:
+    """Resolve one declared input to its text content."""
+    from ui.backend.models.note import Note
+    from ui.backend.models.agent_result import AgentResult as AR
+
+    ui_data = settings.ui_data_dir
+
+    if source == "transcript":
+        path = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final" / "smoothed.txt"
+        if not path.exists():
+            raise RuntimeError(f"Transcript not found for call {call_id}")
+        return path.read_text(encoding="utf-8").strip()
+
+    if source == "merged_transcript":
+        merged = ui_data / "agents" / sales_agent / customer / "merged_transcript.txt"
+        if merged.exists():
+            return merged.read_text(encoding="utf-8").strip()
+        # Build on the fly
+        pair_dir = ui_data / "agents" / sales_agent / customer
+        parts = []
+        for call_dir in sorted(pair_dir.iterdir()):
+            s = call_dir / "transcribed" / "llm_final" / "smoothed.txt"
+            if s.exists():
+                parts.append(f"--- {call_dir.name} ---\n{s.read_text(encoding='utf-8').strip()}")
+        if not parts:
+            raise RuntimeError(f"No transcripts found for {sales_agent}/{customer}")
+        content = "\n\n".join(parts)
+        merged.write_text(content, encoding="utf-8")
+        return content
+
+    if source == "notes":
+        stmt = select(Note).where(
+            Note.agent == sales_agent, Note.customer == customer, Note.call_id == call_id
+        ).order_by(Note.created_at.desc())
+        note = db.exec(stmt).first()
+        if not note:
+            raise RuntimeError(f"No notes found for call {call_id}")
+        return note.content_md
+
+    if source == "merged_notes":
+        stmt = select(Note).where(
+            Note.agent == sales_agent, Note.customer == customer
+        ).order_by(Note.created_at.asc())
+        notes = db.exec(stmt).all()
+        if not notes:
+            raise RuntimeError(f"No notes found for {sales_agent}/{customer}")
+        return "\n\n---\n\n".join(
+            f"Call: {n.call_id}\n{n.content_md}" for n in notes
+        )
+
+    if source == "agent_output":
+        if not agent_id:
+            raise RuntimeError("agent_output input missing agent_id")
+        stmt = select(AR).where(
+            AR.agent_id == agent_id,
+            AR.sales_agent == sales_agent,
+            AR.customer == customer,
+        )
+        if call_id:
+            stmt = stmt.where(AR.call_id == call_id)
+        stmt = stmt.order_by(AR.created_at.desc())
+        result = db.exec(stmt).first()
+        if not result:
+            raise RuntimeError(f"No stored result for agent {agent_id} in this context")
+        return result.content
+
+    if source == "manual":
+        return manual_inputs.get("manual", "")
+
+    return ""
+
+
+class RunRequest(BaseModel):
+    sales_agent: str = ""
+    customer: str = ""
+    call_id: str = ""
+    manual_inputs: dict = {}
+
+
+@router.post("/{agent_id}/run")
+async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_session)):
+    """Execute a universal agent against a given context and stream results via SSE."""
+    from ui.backend.models.agent_result import AgentResult as AR
+
+    _, agent_def = _find_file(agent_id)
+
+    async def stream():
+        try:
+            yield _sse("progress", {"msg": "Resolving inputs…"})
+
+            # Resolve all inputs
+            resolved: dict[str, str] = {}
+            loop = asyncio.get_event_loop()
+
+            for inp in agent_def.get("inputs", []):
+                key     = inp.get("key", "input")
+                source  = inp.get("source", "manual")
+                ref_id  = inp.get("agent_id")
+
+                yield _sse("progress", {"msg": f"Loading {key} ({source})…"})
+
+                try:
+                    text = await loop.run_in_executor(
+                        None,
+                        lambda s=source, a=ref_id: _resolve_input(
+                            s, a, req.sales_agent, req.customer, req.call_id,
+                            req.manual_inputs, db
+                        ),
+                    )
+                    resolved[key] = text
+                except Exception as e:
+                    yield _sse("error", {"msg": str(e)})
+                    return
+
+            # Substitute {key} vars into user_prompt
+            user_prompt = agent_def.get("user_prompt", "")
+            for k, v in resolved.items():
+                user_prompt = user_prompt.replace(f"{{{k}}}", v)
+
+            system_prompt = agent_def.get("system_prompt", "")
+            model         = agent_def.get("model", "gpt-5.4")
+            temperature   = float(agent_def.get("temperature", 0.0))
+
+            yield _sse("progress", {"msg": f"Calling {model}…"})
+
+            content = await loop.run_in_executor(
+                None,
+                lambda: _llm_call(system_prompt, user_prompt, model, temperature),
+            )
+
+            # Save result
+            result_id = str(uuid.uuid4())
+            record = AR(
+                id=result_id,
+                agent_id=agent_id,
+                agent_name=agent_def.get("name", ""),
+                sales_agent=req.sales_agent,
+                customer=req.customer,
+                call_id=req.call_id,
+                content=content,
+                model=model,
+            )
+            db.add(record)
+            db.commit()
+
+            yield _sse("done", {"content": content, "result_id": result_id})
+
+        except Exception as e:
+            yield _sse("error", {"msg": str(e)})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.get("/{agent_id}/results")
+def get_results(
+    agent_id: str,
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: str = Query(""),
+    db: Session = Depends(get_session),
+):
+    """Fetch stored results for a given agent + context."""
+    from ui.backend.models.agent_result import AgentResult as AR
+
+    stmt = select(AR).where(AR.agent_id == agent_id)
+    if sales_agent:
+        stmt = stmt.where(AR.sales_agent == sales_agent)
+    if customer:
+        stmt = stmt.where(AR.customer == customer)
+    if call_id:
+        stmt = stmt.where(AR.call_id == call_id)
+    stmt = stmt.order_by(AR.created_at.desc())
+    results = db.exec(stmt).all()
+    return results

@@ -7,18 +7,23 @@ export interface AppCtxType {
   salesAgent: string;
   customer: string;
   callId: string;
-  // Notes agent
+  // Notes agent (legacy — kept for backward compat)
   llmAgentName: string;
   llmAgentType: LLMAgentType;
-  // Persona agent
+  // Persona agent (legacy — kept for backward compat)
   personaAgentId: string;
   personaAgentName: string;
+  // Active universal agent
+  activeAgentId: string;
+  activeAgentName: string;
+  activeAgentClass: string;
 
   setSalesAgent: (v: string) => void;
   setCustomer: (v: string, agentOverride?: string) => void;
   setCallId: (v: string) => void;
   setLlmAgent: (name: string, type: LLMAgentType) => void;
   setPersonaAgent: (id: string, name: string) => void;
+  setActiveAgent: (id: string, name: string, cls: string) => void;
   clearAll: () => void;
 }
 
@@ -26,8 +31,9 @@ const AppCtx = createContext<AppCtxType>({
   salesAgent: "", customer: "", callId: "",
   llmAgentName: "", llmAgentType: "",
   personaAgentId: "", personaAgentName: "",
+  activeAgentId: "", activeAgentName: "", activeAgentClass: "",
   setSalesAgent: () => {}, setCustomer: () => {}, setCallId: () => {},
-  setLlmAgent: () => {}, setPersonaAgent: () => {}, clearAll: () => {},
+  setLlmAgent: () => {}, setPersonaAgent: () => {}, setActiveAgent: () => {}, clearAll: () => {},
 });
 
 function ss(k: string) { try { return sessionStorage.getItem(k) ?? ""; } catch { return ""; } }
@@ -36,13 +42,16 @@ function ssSet(k: string, v: string) {
 }
 
 export function AppContextProvider({ children }: { children: React.ReactNode }) {
-  const [salesAgent, _setSA] = useState("");
-  const [customer,   _setCu] = useState("");
-  const [callId,     _setCa] = useState("");
-  const [llmName,    _setLN] = useState("");
-  const [llmType,    _setLT] = useState<LLMAgentType>("");
-  const [personaId,  _setPI] = useState("");
-  const [personaNm,  _setPN] = useState("");
+  const [salesAgent,      _setSA] = useState("");
+  const [customer,        _setCu] = useState("");
+  const [callId,          _setCa] = useState("");
+  const [llmName,         _setLN] = useState("");
+  const [llmType,         _setLT] = useState<LLMAgentType>("");
+  const [personaId,       _setPI] = useState("");
+  const [personaNm,       _setPN] = useState("");
+  const [activeAgentId,   _setAAI] = useState("");
+  const [activeAgentName, _setAAN] = useState("");
+  const [activeAgentClass,_setAAC] = useState("");
 
   useEffect(() => {
     _setSA(ss("ctx_agent"));
@@ -52,6 +61,9 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     _setLT((ss("ctx_llm_type") || "") as LLMAgentType);
     _setPI(ss("ctx_persona_id"));
     _setPN(ss("ctx_persona_name"));
+    _setAAI(ss("ctx_active_agent_id"));
+    _setAAN(ss("ctx_active_agent_name"));
+    _setAAC(ss("ctx_active_agent_class"));
   }, []);
 
   const setSalesAgent = useCallback((v: string) => {
@@ -80,10 +92,20 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     _setPN(name); ssSet("ctx_persona_name", name);
   }, []);
 
+  const setActiveAgent = useCallback((id: string, name: string, cls: string) => {
+    _setAAI(id);   ssSet("ctx_active_agent_id",    id);
+    _setAAN(name); ssSet("ctx_active_agent_name",  name);
+    _setAAC(cls);  ssSet("ctx_active_agent_class", cls);
+  }, []);
+
   const clearAll = useCallback(() => {
     _setSA(""); _setCu(""); _setCa(""); _setLN(""); _setLT(""); _setPI(""); _setPN("");
-    ["ctx_agent","ctx_customer","ctx_call","ctx_llm_name","ctx_llm_type","ctx_persona_id","ctx_persona_name"]
-      .forEach(k => ssSet(k, ""));
+    _setAAI(""); _setAAN(""); _setAAC("");
+    [
+      "ctx_agent","ctx_customer","ctx_call","ctx_llm_name","ctx_llm_type",
+      "ctx_persona_id","ctx_persona_name",
+      "ctx_active_agent_id","ctx_active_agent_name","ctx_active_agent_class",
+    ].forEach(k => ssSet(k, ""));
   }, []);
 
   return (
@@ -91,7 +113,8 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
       salesAgent, customer, callId,
       llmAgentName: llmName, llmAgentType: llmType,
       personaAgentId: personaId, personaAgentName: personaNm,
-      setSalesAgent, setCustomer, setCallId, setLlmAgent, setPersonaAgent, clearAll,
+      activeAgentId, activeAgentName, activeAgentClass,
+      setSalesAgent, setCustomer, setCallId, setLlmAgent, setPersonaAgent, setActiveAgent, clearAll,
     }}>
       {children}
     </AppCtx.Provider>

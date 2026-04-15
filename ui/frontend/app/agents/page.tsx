@@ -68,6 +68,7 @@ interface UniversalAgent {
   id: string;
   name: string;
   description: string;
+  agent_class: string;
   model: string;
   temperature: number;
   system_prompt: string;
@@ -82,6 +83,7 @@ interface UniversalAgent {
 const EMPTY_AGENT: Omit<UniversalAgent, "id" | "created_at"> = {
   name: "",
   description: "",
+  agent_class: "",
   model: "gpt-5.4",
   temperature: 0,
   system_prompt: "",
@@ -224,6 +226,7 @@ function AgentsTab() {
     setSelected(a.id); setIsNew(false);
     setForm({
       name: a.name, description: a.description ?? "",
+      agent_class: a.agent_class ?? "",
       model: a.model, temperature: a.temperature ?? 0,
       system_prompt: a.system_prompt ?? "", user_prompt: a.user_prompt ?? "",
       inputs: a.inputs ?? [], output_format: a.output_format ?? "markdown",
@@ -370,13 +373,27 @@ function AgentsTab() {
             </div>
           </div>
 
-          {/* Name + Description */}
-          <div className="grid grid-cols-2 gap-4">
+          {/* Name + Class + Description */}
+          <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Name</label>
               <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                 placeholder="e.g. Persona Scorer"
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Class</label>
+              <input value={form.agent_class} onChange={e => setForm(f => ({ ...f, agent_class: e.target.value }))}
+                placeholder="persona / notes / compliance…"
+                list="agent-class-list"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+              <datalist id="agent-class-list">
+                <option value="persona" />
+                <option value="notes" />
+                <option value="compliance" />
+                <option value="scorer" />
+                <option value="general" />
+              </datalist>
             </div>
             <div>
               <label className="block text-xs text-gray-400 mb-1">Description</label>

@@ -1,40 +1,30 @@
 "use client";
-import { useAppCtx, LLMAgentType } from "@/lib/app-context";
+import { useAppCtx } from "@/lib/app-context";
 import useSWR from "swr";
-import { User, ChevronRight, X, ChevronDown, StickyNote, Users } from "lucide-react";
+import { User, ChevronRight, X, ChevronDown, Bot } from "lucide-react";
 import { useRef, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
-interface NotesAgent   { name: string; model: string; is_default: boolean; }
-interface PersonaAgent { id: string; name: string; persona_type: string; is_default: boolean; }
+interface UniversalAgent {
+  id: string;
+  name: string;
+  agent_class: string;
+  is_default: boolean;
+}
 
-// ── Reusable compact agent picker ─────────────────────────────────────────────
+// ── Universal Agent Picker ─────────────────────────────────────────────────────
 function AgentPicker({
-  label,
-  icon,
   value,
-  items,
-  idKey,
-  nameKey,
-  accentClass,
+  agents,
   onSelect,
   onClear,
-  emptyMsg,
-  linkLabel,
 }: {
-  label: string;
-  icon: React.ReactNode;
   value: string;
-  items: any[] | undefined;
-  idKey: string;
-  nameKey: string;
-  accentClass: string;
-  onSelect: (item: any) => void;
+  agents: UniversalAgent[] | undefined;
+  onSelect: (agent: UniversalAgent) => void;
   onClear: () => void;
-  emptyMsg: string;
-  linkLabel: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -47,20 +37,29 @@ function AgentPicker({
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
+  // Group agents by agent_class
+  const grouped: Record<string, UniversalAgent[]> = {};
+  for (const a of agents ?? []) {
+    const cls = a.agent_class || "general";
+    if (!grouped[cls]) grouped[cls] = [];
+    grouped[cls].push(a);
+  }
+  const classes = Object.keys(grouped).sort();
+
   return (
     <div className="relative shrink-0 flex items-center gap-1" ref={ref}>
-      <span className="text-[10px] text-gray-600 font-medium">{label}</span>
+      <span className="text-[10px] text-gray-600 font-medium">Agent</span>
       <button
         onClick={() => setOpen(o => !o)}
         className={cn(
           "flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition-colors",
           value
-            ? accentClass
+            ? "bg-violet-900/50 border-violet-700/60 text-violet-300 hover:bg-violet-900/70"
             : "bg-gray-800/60 border-gray-700/60 text-gray-500 hover:text-gray-300 hover:bg-gray-800"
         )}
       >
-        {icon}
-        <span className="max-w-[110px] truncate">{value || "none"}</span>
+        <Bot className="w-2.5 h-2.5 shrink-0" />
+        <span className="max-w-[130px] truncate">{value || "none"}</span>
         <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
       </button>
       {value && (
@@ -70,9 +69,9 @@ function AgentPicker({
       )}
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-56 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 py-1 overflow-hidden">
-          <p className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-semibold border-b border-gray-800">
-            {label}
+        <div className="absolute right-0 top-full mt-1 w-64 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 py-1 overflow-hidden max-h-80 overflow-y-auto">
+          <p className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-semibold border-b border-gray-800 sticky top-0 bg-gray-900">
+            Active Agent
           </p>
           {value && (
             <button
@@ -82,30 +81,35 @@ function AgentPicker({
               — Clear
             </button>
           )}
-          {(items ?? []).length === 0 && (
+          {(agents ?? []).length === 0 && (
             <p className="px-3 py-3 text-xs text-gray-600 text-center">
-              No agents yet. Create one in <span className="text-indigo-400">{linkLabel}</span>.
+              No agents yet. Create one in <span className="text-violet-400">Agents</span>.
             </p>
           )}
-          {(items ?? []).map(item => {
-            const id   = item[idKey];
-            const name = item[nameKey];
-            return (
-              <button
-                key={id}
-                onClick={() => { onSelect(item); setOpen(false); }}
-                className={cn(
-                  "w-full px-3 py-2 text-left text-xs flex items-center justify-between transition-colors",
-                  value === name
-                    ? "bg-indigo-900/40 text-indigo-300"
-                    : "text-gray-300 hover:bg-gray-800 hover:text-white"
-                )}
-              >
-                <span className="truncate">{name}</span>
-                {item.is_default && <span className="text-[10px] text-gray-600 shrink-0 ml-1">default</span>}
-              </button>
-            );
-          })}
+          {classes.map(cls => (
+            <div key={cls}>
+              <p className="px-3 pt-2 pb-0.5 text-[9px] text-gray-600 uppercase tracking-widest font-bold">
+                {cls}
+              </p>
+              {grouped[cls].map(agent => (
+                <button
+                  key={agent.id}
+                  onClick={() => { onSelect(agent); setOpen(false); }}
+                  className={cn(
+                    "w-full px-3 py-1.5 text-left text-xs flex items-center justify-between transition-colors",
+                    value === agent.name
+                      ? "bg-violet-900/40 text-violet-300"
+                      : "text-gray-300 hover:bg-gray-800 hover:text-white"
+                  )}
+                >
+                  <span className="truncate">{agent.name}</span>
+                  {agent.is_default && (
+                    <span className="text-[10px] text-gray-600 shrink-0 ml-1">default</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -116,15 +120,14 @@ function AgentPicker({
 export function ContextBar() {
   const {
     salesAgent, customer, callId,
-    llmAgentName, personaAgentName,
+    activeAgentName,
     setSalesAgent, setCustomer, setCallId,
-    setLlmAgent, setPersonaAgent,
+    setActiveAgent,
   } = useAppCtx();
 
-  const { data: notesAgents }   = useSWR<NotesAgent[]>("/api/notes/agents", fetcher);
-  const { data: personaAgents } = useSWR<PersonaAgent[]>("/api/persona-agents", fetcher);
+  const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
 
-  const hasCtx = !!(salesAgent || llmAgentName || personaAgentName);
+  const hasCtx = !!(salesAgent || activeAgentName);
 
   return (
     <div className={cn(
@@ -161,39 +164,14 @@ export function ContextBar() {
         </span>
       )}
 
-      {/* ── Agent pickers — right-aligned ── */}
+      {/* ── Agent picker — right-aligned ── */}
       <div className="ml-auto flex items-center gap-3">
-
-        {/* Notes agent */}
         <AgentPicker
-          label="Notes"
-          icon={<StickyNote className="w-2.5 h-2.5 shrink-0" />}
-          value={llmAgentName}
-          items={notesAgents}
-          idKey="name"
-          nameKey="name"
-          accentClass="bg-indigo-900/50 border-indigo-700/60 text-indigo-300 hover:bg-indigo-900/70"
-          onSelect={a => setLlmAgent(a.name, "notes")}
-          onClear={() => setLlmAgent("", "")}
-          emptyMsg="No notes agents"
-          linkLabel="Agents"
+          value={activeAgentName}
+          agents={agents}
+          onSelect={a => setActiveAgent(a.id, a.name, a.agent_class || "general")}
+          onClear={() => setActiveAgent("", "", "")}
         />
-
-        {/* Persona agent */}
-        <AgentPicker
-          label="Persona"
-          icon={<Users className="w-2.5 h-2.5 shrink-0" />}
-          value={personaAgentName}
-          items={personaAgents}
-          idKey="id"
-          nameKey="name"
-          accentClass="bg-teal-900/50 border-teal-700/60 text-teal-300 hover:bg-teal-900/70"
-          onSelect={a => setPersonaAgent(a.id, a.name)}
-          onClear={() => setPersonaAgent("", "")}
-          emptyMsg="No persona agents"
-          linkLabel="Agents"
-        />
-
       </div>
     </div>
   );
