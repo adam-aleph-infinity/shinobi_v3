@@ -326,19 +326,39 @@ def get_call_dates(
     customer: str = Query(...),
     db: Session = Depends(get_session),
 ):
-    """Return {call_id: started_at} for all calls of an agent-customer pair (including aliases)."""
+    """Return {call_id: started_at} for all calls of an agent-customer pair (including aliases).
+    Checks DB first, then falls back to calls.json on disk."""
+    import json as _json
     from ui.backend.models.crm import CRMCall
     from ui.backend.services.crm_service import _load_aliases
+    from ui.backend.config import settings
     from sqlalchemy import or_
     aliases = _load_aliases()
     agent_names = [agent] + [a for a, p in aliases.items() if p == agent]
+
+    # DB lookup
     stmt = select(CRMCall.call_id, CRMCall.started_at).where(CRMCall.customer == customer)
     if len(agent_names) == 1:
         stmt = stmt.where(CRMCall.agent == agent)
     else:
         stmt = stmt.where(or_(*[CRMCall.agent == n for n in agent_names]))
-    rows = db.exec(stmt).all()
-    return {r[0]: r[1] for r in rows if r[0]}
+    result = {r[0]: r[1] for r in db.exec(stmt).all() if r[0] and r[1]}
+
+    # Fallback: read calls.json for any call IDs not in DB
+    for a in agent_names:
+        calls_path = settings.agents_dir / a / customer / "calls.json"
+        if calls_path.exists():
+            try:
+                for c in _json.loads(calls_path.read_text()):
+                    cid = str(c.get("call_id", ""))
+                    if cid and cid not in result:
+                        date = c.get("started_at") or c.get("date", "")
+                        if date:
+                            result[cid] = str(date)
+            except Exception:
+                pass
+
+    return result
 
 
 @router.get("/nav/agents")
