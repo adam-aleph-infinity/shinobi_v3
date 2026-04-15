@@ -20,8 +20,14 @@ import os
 import re
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Optional
+
+
+def _today_end() -> str:
+    """Return today's date as 'DD/MM/YYYY 23:59' for use as date_end."""
+    return date.today().strftime("%d/%m/%Y") + " 23:59"
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
@@ -118,7 +124,7 @@ def fetch_accounts(
     creds: CRMCredentials,
     callers: list[str] | None = None,
     date_start: str = "01/01/2025 00:00",
-    date_end: str = "01/04/2026 00:00",
+    date_end: str | None = None,
     timeout: int = 60,
 ) -> list[dict]:
     """
@@ -137,7 +143,7 @@ def fetch_accounts(
         "api_password": creds.api_password,
         "api_key":      creds.api_key,
         "date_start":   date_start,
-        "date_end":     date_end,
+        "date_end":     date_end or _today_end(),
     }
     if callers:
         for i, name in enumerate(callers):
@@ -194,7 +200,7 @@ def list_agent_customer_pairs(
     customer_filter: str | None = None,
     min_calls: int = 1,
     date_start: str = "01/01/2025 00:00",
-    date_end: str = "01/04/2026 00:00",
+    date_end: str | None = None,
 ) -> list[dict]:
     """
     Return list of {crm, agent_id, agent, account_id, customer, ftd_at,
@@ -267,7 +273,7 @@ def get_calls_for_pair(
     agent_name: str,
     account_id: int,
     date_start: str = "01/01/2025 00:00",
-    date_end: str = "01/04/2026 00:00",
+    date_end: str | None = None,
 ) -> list[dict]:
     """
     Return all calls for a specific (caller, account_id) pair.

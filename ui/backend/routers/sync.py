@@ -138,7 +138,7 @@ def _run_sync(q: queue.Queue) -> None:
                     try:
                         return fetch_accounts(
                             crm_url, creds, callers=all_agents,
-                            date_start="01/01/2025 00:00", date_end="01/04/2026 00:00",
+                            date_start="01/01/2025 00:00",
                         )
                     except Exception as exc:
                         msg = str(exc)
