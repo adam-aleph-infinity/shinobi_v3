@@ -115,9 +115,18 @@ interface PersonaAgent {
   model: string;
   temperature: number;
   system_prompt: string;
-  agent_type: string;
+  user_prompt: string;
+  persona_type: string;
   is_default: boolean;
   created_at?: string;
+}
+
+interface FpaPreset {
+  name: string;
+  gen_model: string;
+  gen_temperature: number;
+  gen_system_prompt: string;
+  gen_user_prompt: string;
 }
 
 const EMPTY_PERSONA_AGENT: Omit<PersonaAgent, "id" | "created_at"> = {
@@ -125,7 +134,8 @@ const EMPTY_PERSONA_AGENT: Omit<PersonaAgent, "id" | "created_at"> = {
   model: "gpt-5.4",
   temperature: 0.3,
   system_prompt: "",
-  agent_type: "agent_overall",
+  user_prompt: "Analyse all the calls in this transcript and produce a comprehensive persona document:",
+  persona_type: "agent_overall",
   is_default: false,
 };
 
@@ -414,6 +424,7 @@ function NotesAgentsTab() {
 function PersonaAgentsTab() {
   const { mutate } = useSWRConfig();
   const { data: agents, isLoading } = useSWR<PersonaAgent[]>(`${API}/persona-agents`, fetcher);
+  const { data: presets } = useSWR<FpaPreset[]>(`${API}/full-persona-agent/presets/analyzer`, fetcher);
   const [selected, setSelected] = useState<string | null>(null);
   const [form, setForm] = useState({ ...EMPTY_PERSONA_AGENT });
   const [saving, setSaving] = useState(false);
@@ -422,6 +433,16 @@ function PersonaAgentsTab() {
   const [isNew, setIsNew] = useState(false);
 
   const selectedAgent = agents?.find(a => a.id === selected);
+
+  function loadPreset(preset: FpaPreset) {
+    setForm(f => ({
+      ...f,
+      model: preset.gen_model || f.model,
+      temperature: preset.gen_temperature ?? f.temperature,
+      system_prompt: preset.gen_system_prompt || f.system_prompt,
+      user_prompt: preset.gen_user_prompt || f.user_prompt,
+    }));
+  }
 
   function openNew() {
     setSelected(null);
@@ -438,7 +459,8 @@ function PersonaAgentsTab() {
       model: a.model,
       temperature: a.temperature ?? 0.3,
       system_prompt: a.system_prompt ?? "",
-      agent_type: a.agent_type ?? "agent_overall",
+      user_prompt: a.user_prompt ?? "Analyse all the calls in this transcript and produce a comprehensive persona document:",
+      persona_type: a.persona_type ?? "agent_overall",
       is_default: a.is_default ?? false,
     });
     setSaved(false);
@@ -448,7 +470,7 @@ function PersonaAgentsTab() {
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      const method = isNew ? "POST" : "PATCH";
+      const method = isNew ? "POST" : "PUT";
       const url = isNew ? `${API}/persona-agents` : `${API}/persona-agents/${selected}`;
       const res = await fetch(url, {
         method,
@@ -511,7 +533,7 @@ function PersonaAgentsTab() {
                 <span className="font-medium truncate flex-1">{a.name}</span>
                 {a.is_default && <span className="text-[9px] bg-purple-900 text-purple-400 px-1.5 py-0.5 rounded">default</span>}
               </div>
-              <p className="text-[10px] text-gray-600 mt-0.5 pl-[18px] truncate">{a.model} · {a.agent_type}</p>
+              <p className="text-[10px] text-gray-600 mt-0.5 pl-[18px] truncate">{a.model} · {a.persona_type}</p>
             </button>
           ))}
           {!isLoading && (agents ?? []).length === 0 && (
@@ -557,8 +579,8 @@ function PersonaAgentsTab() {
             </div>
           </div>
 
-          {/* Name + Agent Type */}
-          <div className="grid grid-cols-2 gap-4">
+          {/* Name + Type + Preset loader */}
+          <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Name</label>
               <input
@@ -569,10 +591,10 @@ function PersonaAgentsTab() {
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1">Agent Type</label>
+              <label className="block text-xs text-gray-400 mb-1">Persona Type</label>
               <select
-                value={form.agent_type}
-                onChange={e => setForm(f => ({ ...f, agent_type: e.target.value }))}
+                value={form.persona_type}
+                onChange={e => setForm(f => ({ ...f, persona_type: e.target.value }))}
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-purple-500"
               >
                 <option value="agent_overall">agent_overall</option>
@@ -580,18 +602,46 @@ function PersonaAgentsTab() {
                 <option value="customer">customer</option>
               </select>
             </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Load Preset</label>
+              <select
+                defaultValue=""
+                onChange={e => {
+                  const p = (presets ?? []).find(x => x.name === e.target.value);
+                  if (p) loadPreset(p);
+                  e.target.value = "";
+                }}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-purple-500"
+              >
+                <option value="" disabled>— pick preset —</option>
+                {(presets ?? []).map(p => (
+                  <option key={p.name} value={p.name}>{p.name}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          {/* System Prompt */}
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
-            <textarea
-              value={form.system_prompt}
-              onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
-              rows={16}
-              placeholder="Enter the system prompt for this persona agent…"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-purple-500 resize-y"
-            />
+          {/* Side-by-side prompts */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col">
+              <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
+              <textarea
+                value={form.system_prompt}
+                onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                rows={16}
+                placeholder="Enter the system prompt for this persona agent…"
+                className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-purple-500 resize-y"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
+              <textarea
+                value={form.user_prompt}
+                onChange={e => setForm(f => ({ ...f, user_prompt: e.target.value }))}
+                rows={16}
+                className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-purple-500 resize-y"
+              />
+            </div>
           </div>
 
           {/* Settings collapsible */}
