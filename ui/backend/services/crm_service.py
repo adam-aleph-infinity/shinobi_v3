@@ -381,19 +381,14 @@ def _all_crm_accounts_for_pair(canonical_agent: str, customer: str) -> list[tupl
 def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str = "") -> dict:
     """Fetch calls from ALL CRMs × ALL aliases for this agent/customer pair.
 
-    Queries every (crm_url, account_id) found in the local cache for this
-    canonical agent + customer, using both the canonical name and all known
-    aliases on each CRM.  Results are merged and deduplicated by call_id.
+    1. Searches the local cache for known (crm_url, account_id) pairs.
+    2. For any configured CRM not covered by the cache, queries the CRM API
+       directly with each alias to discover the account_id there.
+    3. Fetches calls from every discovered (crm_url, account_id) × every name.
+    Results are merged and deduplicated by call_id.
     """
     try:
         creds = load_credentials()
-
-        # Discover all (crm_url, account_id) combos across all CRMs
-        all_pairs = _all_crm_accounts_for_pair(agent, customer)
-
-        # Always include the explicitly requested pair (may not be in cache yet)
-        if (crm_url, str(account_id)) not in {(c, a) for c, a in all_pairs}:
-            all_pairs.insert(0, (crm_url, str(account_id)))
 
         # Build the full set of names to try on each CRM
         file_aliases = _load_aliases()
@@ -415,6 +410,38 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
         query_names: list[str] = list(dict.fromkeys(
             [agent] + alias_names + manifest_callers
         ))
+
+        # Step 1: find known (crm_url, account_id) pairs from local cache
+        all_pairs = _all_crm_accounts_for_pair(agent, customer)
+
+        # Always include the explicitly requested pair (may not be in cache yet)
+        if (crm_url, str(account_id)) not in {(c, a) for c, a in all_pairs}:
+            all_pairs.insert(0, (crm_url, str(account_id)))
+
+        # Step 2: for any configured CRM not covered by the cache, actively
+        # query the CRM API with each alias to discover account IDs there.
+        covered_crms = {p[0] for p in all_pairs}
+        for crm in creds.crm_urls:
+            if crm in covered_crms:
+                continue
+            for name in query_names:
+                try:
+                    discovered = list_agent_customer_pairs(
+                        crm, creds,
+                        agent_filter=name,
+                        customer_filter=customer,
+                        min_calls=1,
+                    )
+                    for p in discovered:
+                        if p.get("customer", "").lower() == customer.lower():
+                            acc = str(p.get("account_id", ""))
+                            if acc and (crm, acc) not in {(c, a) for c, a in all_pairs}:
+                                all_pairs.append((crm, acc))
+                                covered_crms.add(crm)
+                                print(f"[crm_service] Discovered account {acc} on {crm} "
+                                      f"for {name}/{customer}")
+                except Exception as _e:
+                    print(f"[crm_service] Discovery {crm}/{name}: {_e}")
 
         all_calls: list[dict] = []
         existing_ids: set[str] = set()

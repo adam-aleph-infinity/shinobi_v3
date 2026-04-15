@@ -382,13 +382,29 @@ def nav_agents(db: Session = Depends(get_session)):
 @router.get("/nav/customers")
 def nav_customers(agent: str = Query(...), db: Session = Depends(get_session)):
     """All customers for an agent with account_id, crm_url, and call_count.
+    Queries canonical name + all known aliases so unmerged alias rows are included.
     Deduplicates by customer name, keeping the row with the highest call_count.
     """
+    from sqlalchemy import or_
+    from ui.backend.services.crm_service import _load_aliases, _auto_detect_re_aliases
+
+    file_aliases = _load_aliases()
+    auto_aliases = _auto_detect_re_aliases([agent])
+    all_aliases  = {**auto_aliases, **file_aliases}
+    alias_names  = [k for k, v in all_aliases.items() if v == agent]
+    all_names    = [agent] + alias_names  # canonical first
+
+    if len(all_names) == 1:
+        cond = CRMPair.agent == agent
+    else:
+        cond = or_(*[CRMPair.agent == n for n in all_names])
+
     rows = db.exec(
         select(CRMPair.customer, CRMPair.account_id, CRMPair.crm_url, CRMPair.call_count)
-        .where(CRMPair.agent == agent)
+        .where(cond)
         .order_by(CRMPair.customer)
     ).all()
+
     best: dict[str, tuple] = {}
     for r in rows:
         if r[0] not in best or r[3] > best[r[0]][3]:
