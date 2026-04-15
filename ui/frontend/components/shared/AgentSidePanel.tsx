@@ -214,7 +214,7 @@ export function AgentSidePanel() {
           </span>
         )}
         <button
-          onClick={mutateResults}
+          onClick={() => mutateResults()}
           className="text-gray-600 hover:text-gray-400 transition-colors shrink-0"
           title="Refresh results"
         >
