@@ -257,7 +257,7 @@ def list_agent_customer_pairs(
                     pair_map[key]["recorded_calls"] += 1
                 pair_map[key]["total_duration_s"] += c.get("duration") or 0
 
-    pairs = [p for p in pair_map.values() if p["recorded_calls"] >= min_calls]
+    pairs = [p for p in pair_map.values() if p["total_calls"] >= min_calls]
     return sorted(pairs, key=lambda p: (p["agent"], p["customer"]))
 
 
