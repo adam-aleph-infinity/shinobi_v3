@@ -439,7 +439,7 @@ def _run_sync(q: queue.Queue) -> None:
                     row_id = f"{crm_url}::{account_id}::{agent}"
                     pair = db.get(CRMPair, row_id)
 
-                    call_count = int(p.get("recorded_calls") or 0)
+                    call_count = int(p.get("total_calls") or p.get("recorded_calls") or 0)
                     total_dur = int(p.get("total_duration_s") or 0)
                     nd = p.get("net_deposits")
                     td = p.get("total_deposits")
