@@ -3,41 +3,59 @@ import { useState, useRef } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, Play, Loader2, AlertCircle, Clock, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import {
+  Bot, Play, Loader2, AlertCircle, Clock,
+  ChevronDown, ChevronUp, RefreshCw, Eye, EyeOff,
+} from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
+interface AgentInput { key: string; source: string; agent_id?: string; }
 interface AgentDef {
   id: string;
   name: string;
   agent_class: string;
-  inputs: { key: string; source: string; agent_id?: string }[];
+  inputs: AgentInput[];
   output_format: string;
 }
-
 interface AgentResult {
-  id: string;
-  agent_id: string;
-  agent_name: string;
-  sales_agent: string;
-  customer: string;
-  call_id: string;
-  content: string;
-  model: string;
-  created_at: string;
+  id: string; agent_id: string; agent_name: string;
+  sales_agent: string; customer: string; call_id: string;
+  content: string; model: string; created_at: string;
 }
 
-// Determine what context a given input source requires
+// ── Source / output metadata ──────────────────────────────────────────────────
+
+const SOURCE_META: Record<string, { label: string; badge: string }> = {
+  transcript:         { label: "Transcript",        badge: "bg-blue-900/60 text-blue-300 border-blue-700/50" },
+  merged_transcript:  { label: "Merged Transcript",  badge: "bg-cyan-900/60 text-cyan-300 border-cyan-700/50" },
+  notes:              { label: "Notes",              badge: "bg-green-900/60 text-green-300 border-green-700/50" },
+  merged_notes:       { label: "Merged Notes",       badge: "bg-teal-900/60 text-teal-300 border-teal-700/50" },
+  agent_output:       { label: "Agent Output",       badge: "bg-purple-900/60 text-purple-300 border-purple-700/50" },
+  chain_previous:     { label: "Prev Step",          badge: "bg-amber-900/60 text-amber-300 border-amber-700/50" },
+  manual:             { label: "Manual",             badge: "bg-gray-700/60 text-gray-300 border-gray-600/50" },
+};
+
+const FORMAT_META: Record<string, { label: string; badge: string }> = {
+  markdown: { label: "Markdown", badge: "bg-indigo-900/60 text-indigo-300 border-indigo-700/50" },
+  json:     { label: "JSON",     badge: "bg-orange-900/60 text-orange-300 border-orange-700/50" },
+  text:     { label: "Text",     badge: "bg-gray-700/60 text-gray-300 border-gray-600/50" },
+};
+
+function sourceMeta(s: string) { return SOURCE_META[s] ?? { label: s, badge: "bg-gray-700/60 text-gray-300 border-gray-600/50" }; }
+function formatMeta(f: string) { return FORMAT_META[f] ?? FORMAT_META.text; }
+
+// ── Context helpers ───────────────────────────────────────────────────────────
+
 function sourceRequires(source: string): "call" | "pair" | "none" {
   if (source === "transcript" || source === "notes") return "call";
   if (source === "merged_transcript" || source === "merged_notes" || source === "agent_output") return "pair";
   return "none";
 }
 
-// Highest context requirement across all inputs
-function agentRequires(inputs: AgentDef["inputs"]): "call" | "pair" | "none" {
+function agentRequires(inputs: AgentInput[]): "call" | "pair" | "none" {
   let level: "call" | "pair" | "none" = "none";
   for (const inp of inputs) {
     const r = sourceRequires(inp.source);
@@ -47,18 +65,84 @@ function agentRequires(inputs: AgentDef["inputs"]): "call" | "pair" | "none" {
   return level;
 }
 
-// Does the agent have any merged_transcript inputs that could be scoped down?
-function hasMergedInputs(inputs: AgentDef["inputs"]): boolean {
+function hasMergedInputs(inputs: AgentInput[]) {
   return inputs.some(i => i.source === "merged_transcript" || i.source === "merged_notes");
 }
 
-function formatTs(iso: string) {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      month: "short", day: "numeric",
-      hour: "2-digit", minute: "2-digit",
-    });
-  } catch { return iso; }
+// ── Inline input viewer ───────────────────────────────────────────────────────
+
+function InputViewer({
+  inp, salesAgent, customer, callId, scopedCallId,
+}: {
+  inp: AgentInput;
+  salesAgent: string; customer: string; callId: string;
+  scopedCallId: string; // non-empty when scope=call override is active
+}) {
+  const [open, setOpen] = useState(false);
+
+  const effectiveSource = scopedCallId
+    ? (inp.source === "merged_transcript" ? "transcript"
+      : inp.source === "merged_notes" ? "notes"
+      : inp.source)
+    : inp.source;
+
+  const params = new URLSearchParams({
+    source: effectiveSource,
+    sales_agent: salesAgent,
+    customer,
+    call_id: scopedCallId || callId,
+    ...(inp.agent_id ? { agent_id: inp.agent_id } : {}),
+  });
+
+  const { data, isLoading, error } = useSWR<{ content: string; chars: number }>(
+    open ? `/api/universal-agents/raw-input?${params}` : null,
+    fetcher,
+  );
+
+  const meta = sourceMeta(inp.source);
+
+  return (
+    <div>
+      <div className="flex items-center gap-1.5">
+        <span className={cn(
+          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium leading-none",
+          meta.badge,
+        )}>
+          <span className="text-[9px] text-gray-500 font-mono">{"{" + inp.key + "}"}</span>
+          {meta.label}
+        </span>
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="text-gray-600 hover:text-gray-400 transition-colors"
+          title={open ? "Hide content" : "View content"}
+        >
+          {open ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+        </button>
+        {data && (
+          <span className="text-[10px] text-gray-600">
+            {(data.chars / 1000).toFixed(1)}k chars
+          </span>
+        )}
+      </div>
+      {open && (
+        <div className="mt-1.5 rounded-lg border border-gray-700/60 bg-gray-950 overflow-hidden">
+          {isLoading && (
+            <div className="flex justify-center p-3">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-600" />
+            </div>
+          )}
+          {error && (
+            <p className="px-3 py-2 text-[11px] text-red-400">Failed to load</p>
+          )}
+          {data && (
+            <pre className="px-3 py-2 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-relaxed">
+              {data.content}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Result card ───────────────────────────────────────────────────────────────
@@ -73,7 +157,7 @@ function ResultCard({ result, format }: { result: AgentResult; format: string })
       >
         <div className="flex items-center gap-2 text-gray-400 min-w-0">
           <Clock className="w-3 h-3 shrink-0 text-gray-600" />
-          <span className="truncate">{formatTs(result.created_at)}</span>
+          <span className="truncate">{new Date(result.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
           {result.call_id && (
             <span className="text-[10px] text-gray-600 font-mono truncate max-w-[80px]">{result.call_id}</span>
           )}
@@ -105,46 +189,36 @@ function ResultCard({ result, format }: { result: AgentResult; format: string })
 export function AgentSidePanel() {
   const { salesAgent, customer, callId, activeAgentId, activeAgentName } = useAppCtx();
 
-  // Fetch agent definition
   const { data: agentDef } = useSWR<AgentDef>(
     activeAgentId ? `/api/universal-agents/${activeAgentId}` : null,
     fetcher,
   );
 
-  // Scope: "call" = this call only (override merged→single), "pair" = all calls merged
-  // Only relevant when the agent uses merged inputs AND a callId is selected
+  // Scope toggle — only for agents with merged inputs when a call is selected
   const canScopeDown = !!(agentDef && hasMergedInputs(agentDef.inputs) && callId);
   const [scope, setScope] = useState<"call" | "pair">("pair");
+  const scopedCallId = canScopeDown && scope === "call" ? callId : "";
 
-  // Context sufficiency check
+  // Context sufficiency
   const requires = agentDef ? agentRequires(agentDef.inputs) : "none";
   const hasPair = !!(salesAgent && customer);
   const hasCall = !!(hasPair && callId);
+  const contextOk = requires === "none" ? true : requires === "pair" ? hasPair : hasCall;
 
-  const contextOk =
-    requires === "none" ? true :
-    requires === "pair" ? hasPair :
-    hasCall; // "call"
-
-  // When scope is "call", treat results as call-level (filter by callId)
-  const effectiveCallId = canScopeDown && scope === "call" ? callId : "";
-
-  // Build results query URL
+  // Results query
   const resultsUrl = activeAgentId && contextOk
     ? `/api/universal-agents/${activeAgentId}/results?${new URLSearchParams({
         sales_agent: salesAgent,
         customer,
         ...(requires === "call" || (canScopeDown && scope === "call") ? { call_id: callId } : {}),
-      }).toString()}`
+      })}`
     : null;
 
   const { data: results, mutate: mutateResults } = useSWR<AgentResult[]>(
-    resultsUrl,
-    fetcher,
-    { refreshInterval: 15000 },
+    resultsUrl, fetcher, { refreshInterval: 15000 },
   );
 
-  // Run state
+  // Run
   const [running, setRunning] = useState(false);
   const [runProgress, setRunProgress] = useState("");
   const [runError, setRunError] = useState("");
@@ -152,14 +226,11 @@ export function AgentSidePanel() {
 
   async function runAgent() {
     if (!activeAgentId || !contextOk) return;
-    setRunning(true);
-    setRunError("");
-    setRunProgress("Starting…");
+    setRunning(true); setRunError(""); setRunProgress("Starting…");
     abortRef.current = new AbortController();
 
-    // When scope is "call", override merged sources to use single-call sources
     const sourceOverrides: Record<string, string> = {};
-    if (canScopeDown && scope === "call" && agentDef) {
+    if (scopedCallId && agentDef) {
       for (const inp of agentDef.inputs) {
         if (inp.source === "merged_transcript") sourceOverrides[inp.key] = "transcript";
         if (inp.source === "merged_notes")      sourceOverrides[inp.key] = "notes";
@@ -171,36 +242,28 @@ export function AgentSidePanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortRef.current.signal,
-        body: JSON.stringify({
-          sales_agent: salesAgent,
-          customer,
-          call_id: callId,
-          manual_inputs: {},
-          source_overrides: sourceOverrides,
-        }),
+        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: callId, manual_inputs: {}, source_overrides: sourceOverrides }),
       });
       if (!res.body) throw new Error("No response body");
       const reader = res.body.getReader();
-      const decoder = new TextDecoder();
+      const dec = new TextDecoder();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value);
-        for (const line of chunk.split("\n")) {
+        for (const line of dec.decode(value).split("\n")) {
           if (!line.startsWith("data:")) continue;
           try {
             const evt = JSON.parse(line.slice(5).trim());
             if (evt.type === "progress") setRunProgress(evt.data.msg ?? "");
-            if (evt.type === "error")    { setRunError(evt.data.msg ?? "Error"); }
+            if (evt.type === "error")    setRunError(evt.data.msg ?? "Error");
             if (evt.type === "done")     { setRunProgress(""); mutateResults(); }
-          } catch { /* ignore parse errors */ }
+          } catch { /* skip */ }
         }
       }
     } catch (e: any) {
       if (e.name !== "AbortError") setRunError(e.message ?? "Unexpected error");
     } finally {
-      setRunning(false);
-      setRunProgress("");
+      setRunning(false); setRunProgress("");
     }
   }
 
@@ -226,6 +289,8 @@ export function AgentSidePanel() {
     );
   }
 
+  const outMeta = formatMeta(agentDef?.output_format ?? "markdown");
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -237,16 +302,34 @@ export function AgentSidePanel() {
             {agentDef.agent_class}
           </span>
         )}
-        <button
-          onClick={() => mutateResults()}
-          className="text-gray-600 hover:text-gray-400 transition-colors shrink-0"
-          title="Refresh results"
-        >
+        <button onClick={() => mutateResults()} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0" title="Refresh results">
           <RefreshCw className="w-3 h-3" />
         </button>
       </div>
 
-      {/* Scope toggle — only shown when agent uses merged inputs and a call is selected */}
+      {/* Input + output badges */}
+      {agentDef && agentDef.inputs.length > 0 && (
+        <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
+          {agentDef.inputs.map((inp, i) => (
+            <InputViewer
+              key={i}
+              inp={inp}
+              salesAgent={salesAgent}
+              customer={customer}
+              callId={callId}
+              scopedCallId={scopedCallId}
+            />
+          ))}
+          <div className="flex items-center gap-1 pt-0.5">
+            <span className="text-[9px] text-gray-600 uppercase tracking-wide mr-0.5">out</span>
+            <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium leading-none", outMeta.badge)}>
+              {outMeta.label}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Scope toggle */}
       {canScopeDown && (
         <div className="px-3 py-2 border-b border-gray-800 shrink-0 flex items-center gap-2">
           <span className="text-[10px] text-gray-500 shrink-0">Scope</span>
@@ -255,9 +338,7 @@ export function AgentSidePanel() {
               onClick={() => setScope("call")}
               className={cn(
                 "flex-1 px-2 py-1 transition-colors",
-                scope === "call"
-                  ? "bg-violet-800 text-violet-100"
-                  : "bg-gray-800 text-gray-400 hover:text-white"
+                scope === "call" ? "bg-violet-800 text-violet-100" : "bg-gray-800 text-gray-400 hover:text-white"
               )}
             >
               This call
@@ -266,9 +347,7 @@ export function AgentSidePanel() {
               onClick={() => setScope("pair")}
               className={cn(
                 "flex-1 px-2 py-1 transition-colors border-l border-gray-700",
-                scope === "pair"
-                  ? "bg-violet-800 text-violet-100"
-                  : "bg-gray-800 text-gray-400 hover:text-white"
+                scope === "pair" ? "bg-violet-800 text-violet-100" : "bg-gray-800 text-gray-400 hover:text-white"
               )}
             >
               All calls
@@ -277,29 +356,23 @@ export function AgentSidePanel() {
         </div>
       )}
 
-      {/* Run button + progress */}
+      {/* Run button */}
       <div className="px-3 py-2 border-b border-gray-800 shrink-0">
         <button
           onClick={runAgent}
           disabled={running}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-violet-700 hover:bg-violet-600 disabled:opacity-60 text-white text-xs font-medium rounded-lg transition-colors"
         >
-          {running
-            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            : <Play className="w-3.5 h-3.5" />}
+          {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
           {running ? (runProgress || "Running…") : "Run Agent"}
         </button>
-        {runError && (
-          <p className="mt-1.5 text-[11px] text-red-400 text-center break-words">{runError}</p>
-        )}
+        {runError && <p className="mt-1.5 text-[11px] text-red-400 text-center break-words">{runError}</p>}
       </div>
 
       {/* Results */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
         {!results ? (
-          <div className="flex justify-center py-6">
-            <Loader2 className="w-4 h-4 animate-spin text-gray-600" />
-          </div>
+          <div className="flex justify-center py-6"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>
         ) : results.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
             <Bot className="w-8 h-8 opacity-20" />
@@ -307,11 +380,7 @@ export function AgentSidePanel() {
           </div>
         ) : (
           results.map(r => (
-            <ResultCard
-              key={r.id}
-              result={r}
-              format={agentDef?.output_format ?? "markdown"}
-            />
+            <ResultCard key={r.id} result={r} format={agentDef?.output_format ?? "markdown"} />
           ))
         )}
       </div>

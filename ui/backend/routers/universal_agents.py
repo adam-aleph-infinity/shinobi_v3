@@ -96,6 +96,25 @@ def create_agent(req: UniversalAgentIn):
     return record
 
 
+@router.get("/raw-input")
+def get_raw_input(
+    source: str = Query(""),
+    agent_id: Optional[str] = Query(None),
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: str = Query(""),
+    db: Session = Depends(get_session),
+):
+    """Resolve and return the raw text for a single input source."""
+    try:
+        content = _resolve_input(
+            source, agent_id, sales_agent, customer, call_id, {}, db
+        )
+        return {"content": content, "chars": len(content)}
+    except RuntimeError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.get("/{agent_id}")
 def get_agent(agent_id: str):
     _, data = _find_file(agent_id)
