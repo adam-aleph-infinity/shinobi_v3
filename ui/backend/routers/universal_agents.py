@@ -410,6 +410,7 @@ class RunRequest(BaseModel):
     customer: str = ""
     call_id: str = ""
     manual_inputs: dict = {}
+    source_overrides: dict = {}  # input key → alternative source (e.g. "transcript" → "transcript")
 
 
 @router.post("/{agent_id}/run")
@@ -429,7 +430,8 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
 
             for inp in agent_def.get("inputs", []):
                 key     = inp.get("key", "input")
-                source  = inp.get("source", "manual")
+                # Allow caller to override the source for this input key
+                source  = req.source_overrides.get(key, inp.get("source", "manual"))
                 ref_id  = inp.get("agent_id")
 
                 yield _sse("progress", {"msg": f"Loading {key} ({source})…"})

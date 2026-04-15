@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -45,6 +45,11 @@ function agentRequires(inputs: AgentDef["inputs"]): "call" | "pair" | "none" {
     if (r === "pair" && level === "none") level = "pair";
   }
   return level;
+}
+
+// Does the agent have any merged_transcript inputs that could be scoped down?
+function hasMergedInputs(inputs: AgentDef["inputs"]): boolean {
+  return inputs.some(i => i.source === "merged_transcript" || i.source === "merged_notes");
 }
 
 function formatTs(iso: string) {
@@ -106,6 +111,11 @@ export function AgentSidePanel() {
     fetcher,
   );
 
+  // Scope: "call" = this call only (override merged→single), "pair" = all calls merged
+  // Only relevant when the agent uses merged inputs AND a callId is selected
+  const canScopeDown = !!(agentDef && hasMergedInputs(agentDef.inputs) && callId);
+  const [scope, setScope] = useState<"call" | "pair">("pair");
+
   // Context sufficiency check
   const requires = agentDef ? agentRequires(agentDef.inputs) : "none";
   const hasPair = !!(salesAgent && customer);
@@ -116,12 +126,15 @@ export function AgentSidePanel() {
     requires === "pair" ? hasPair :
     hasCall; // "call"
 
+  // When scope is "call", treat results as call-level (filter by callId)
+  const effectiveCallId = canScopeDown && scope === "call" ? callId : "";
+
   // Build results query URL
   const resultsUrl = activeAgentId && contextOk
     ? `/api/universal-agents/${activeAgentId}/results?${new URLSearchParams({
         sales_agent: salesAgent,
         customer,
-        ...(requires === "call" ? { call_id: callId } : {}),
+        ...(requires === "call" || (canScopeDown && scope === "call") ? { call_id: callId } : {}),
       }).toString()}`
     : null;
 
@@ -143,6 +156,16 @@ export function AgentSidePanel() {
     setRunError("");
     setRunProgress("Starting…");
     abortRef.current = new AbortController();
+
+    // When scope is "call", override merged sources to use single-call sources
+    const sourceOverrides: Record<string, string> = {};
+    if (canScopeDown && scope === "call" && agentDef) {
+      for (const inp of agentDef.inputs) {
+        if (inp.source === "merged_transcript") sourceOverrides[inp.key] = "transcript";
+        if (inp.source === "merged_notes")      sourceOverrides[inp.key] = "notes";
+      }
+    }
+
     try {
       const res = await fetch(`/api/universal-agents/${activeAgentId}/run`, {
         method: "POST",
@@ -153,6 +176,7 @@ export function AgentSidePanel() {
           customer,
           call_id: callId,
           manual_inputs: {},
+          source_overrides: sourceOverrides,
         }),
       });
       if (!res.body) throw new Error("No response body");
@@ -167,7 +191,7 @@ export function AgentSidePanel() {
           try {
             const evt = JSON.parse(line.slice(5).trim());
             if (evt.type === "progress") setRunProgress(evt.data.msg ?? "");
-            if (evt.type === "error")    { setRunError(evt.data.msg ?? "Error"); break; }
+            if (evt.type === "error")    { setRunError(evt.data.msg ?? "Error"); }
             if (evt.type === "done")     { setRunProgress(""); mutateResults(); }
           } catch { /* ignore parse errors */ }
         }
@@ -222,6 +246,37 @@ export function AgentSidePanel() {
         </button>
       </div>
 
+      {/* Scope toggle — only shown when agent uses merged inputs and a call is selected */}
+      {canScopeDown && (
+        <div className="px-3 py-2 border-b border-gray-800 shrink-0 flex items-center gap-2">
+          <span className="text-[10px] text-gray-500 shrink-0">Scope</span>
+          <div className="flex rounded-lg overflow-hidden border border-gray-700 text-[11px] flex-1">
+            <button
+              onClick={() => setScope("call")}
+              className={cn(
+                "flex-1 px-2 py-1 transition-colors",
+                scope === "call"
+                  ? "bg-violet-800 text-violet-100"
+                  : "bg-gray-800 text-gray-400 hover:text-white"
+              )}
+            >
+              This call
+            </button>
+            <button
+              onClick={() => setScope("pair")}
+              className={cn(
+                "flex-1 px-2 py-1 transition-colors border-l border-gray-700",
+                scope === "pair"
+                  ? "bg-violet-800 text-violet-100"
+                  : "bg-gray-800 text-gray-400 hover:text-white"
+              )}
+            >
+              All calls
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Run button + progress */}
       <div className="px-3 py-2 border-b border-gray-800 shrink-0">
         <button
@@ -235,7 +290,7 @@ export function AgentSidePanel() {
           {running ? (runProgress || "Running…") : "Run Agent"}
         </button>
         {runError && (
-          <p className="mt-1.5 text-[11px] text-red-400 text-center">{runError}</p>
+          <p className="mt-1.5 text-[11px] text-red-400 text-center break-words">{runError}</p>
         )}
       </div>
 
