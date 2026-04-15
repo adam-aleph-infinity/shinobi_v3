@@ -63,17 +63,19 @@ async def on_startup():
     from datetime import datetime
     from sqlalchemy import text
     from sqlmodel import Session, select
-    from ui.backend.database import engine, DB_PATH
+    from ui.backend.database import engine, _DATABASE_URL
     from ui.backend.models.job import Job, JobStatus
     from ui.backend.models.crm import CRMPair
     from ui.backend.services import job_runner
 
-    # One-time migration: copy old DB to new canonical location
-    old_db = settings.data_dir / "shinobi_ui.db"
-    if not DB_PATH.exists() and old_db.exists():
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old_db, DB_PATH)
-        print(f"[startup] Migrated DB: {old_db} → {DB_PATH}")
+    # One-time migration: copy old SQLite DB (SQLite only, skipped when using PostgreSQL)
+    if not _DATABASE_URL:
+        from ui.backend.database import DB_PATH  # type: ignore[attr-defined]  # noqa: F401
+        old_db = settings.data_dir / "shinobi_ui.db"
+        if not DB_PATH.exists() and old_db.exists():
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(old_db, DB_PATH)
+            print(f"[startup] Migrated DB: {old_db} → {DB_PATH}")
 
     create_db()  # creates any missing tables
 
