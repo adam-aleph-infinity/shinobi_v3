@@ -341,64 +341,128 @@ def get_calls(account_id: str, crm_url: str, agent: str = "", customer: str = ""
     return []
 
 
+def _all_crm_accounts_for_pair(canonical_agent: str, customer: str) -> list[tuple[str, str]]:
+    """
+    Search the local cache for every (crm_url, account_id) that belongs to
+    canonical_agent + customer — across ALL CRMs and under ALL alias names.
+    Returns a list of (crm_url, account_id) tuples, deduplicated.
+    """
+    file_aliases = _load_aliases()
+    auto_aliases = _auto_detect_re_aliases([canonical_agent])
+    all_aliases   = {**auto_aliases, **file_aliases}
+
+    # All names this canonical agent is known by
+    alias_names = {k for k, v in all_aliases.items() if v == canonical_agent}
+    all_names   = {canonical_agent} | alias_names
+
+    pairs = _load_local()
+    seen: set[tuple[str, str]] = set()
+    result: list[tuple[str, str]] = []
+
+    for p in pairs:
+        p_agent   = p.get("agent", "")
+        p_cust    = p.get("customer", "")
+        p_crm     = p.get("crm", p.get("crm_url", ""))
+        p_acc     = str(p.get("account_id", ""))
+
+        if not p_crm or not p_acc:
+            continue
+        if p_cust.lower() != customer.lower():
+            continue
+        if p_agent in all_names:
+            key = (p_crm, p_acc)
+            if key not in seen:
+                seen.add(key)
+                result.append(key)
+
+    return result
+
+
 def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str = "") -> dict:
-    """Fetch calls from CRM API and save to ui/data/agents/{agent}/{customer}/calls.json.
-    Also upserts the crm_pair DB row so call counts stay current."""
+    """Fetch calls from ALL CRMs × ALL aliases for this agent/customer pair.
+
+    Queries every (crm_url, account_id) found in the local cache for this
+    canonical agent + customer, using both the canonical name and all known
+    aliases on each CRM.  Results are merged and deduplicated by call_id.
+    """
     try:
         creds = load_credentials()
-        calls = get_calls_for_pair(crm_url, creds, agent_name=agent, account_id=int(account_id))
 
-        # Fetch calls for any alias agents (Ron Silver-re10 → Ron Silver, etc.)
-        # Sources: agent_aliases.json (reverse lookup) + manifest also_callers
-        aliases = _load_aliases()
-        reverse_aliases: list[str] = [a for a, p in aliases.items() if p == agent]
+        # Discover all (crm_url, account_id) combos across all CRMs
+        all_pairs = _all_crm_accounts_for_pair(agent, customer)
+
+        # Always include the explicitly requested pair (may not be in cache yet)
+        if (crm_url, str(account_id)) not in {(c, a) for c, a in all_pairs}:
+            all_pairs.insert(0, (crm_url, str(account_id)))
+
+        # Build the full set of names to try on each CRM
+        file_aliases = _load_aliases()
+        auto_aliases = _auto_detect_re_aliases([agent])
+        all_aliases  = {**auto_aliases, **file_aliases}
+        alias_names  = [k for k, v in all_aliases.items() if v == agent]
+
         pair_dir = settings.agents_dir / agent / customer
+        manifest_callers: list[str] = []
         manifest_path = pair_dir / "manifest.json"
         if manifest_path.exists():
             try:
                 m = json.loads(manifest_path.read_text())
-                for alias in m.get("also_callers", []):
-                    if alias not in reverse_aliases:
-                        reverse_aliases.append(alias)
+                manifest_callers = m.get("also_callers", [])
             except Exception:
                 pass
-        existing_ids = {str(c["call_id"]) for c in calls}
-        for alias in reverse_aliases:
-            try:
-                extra = get_calls_for_pair(crm_url, creds, agent_name=alias, account_id=int(account_id))
-                for c in extra:
-                    if str(c["call_id"]) not in existing_ids:
-                        c["agent"] = agent  # normalize to primary name
-                        calls.append(c)
-                        existing_ids.add(str(c["call_id"]))
-            except Exception as _e:
-                print(f"[crm_service] alias call merge error ({alias}): {_e}")
+
+        # Deduplicated ordered list: canonical first, then aliases, then also_callers
+        query_names: list[str] = list(dict.fromkeys(
+            [agent] + alias_names + manifest_callers
+        ))
+
+        all_calls: list[dict] = []
+        existing_ids: set[str] = set()
+
+        for pair_crm, pair_acc in all_pairs:
+            for name in query_names:
+                try:
+                    found = get_calls_for_pair(
+                        pair_crm, creds,
+                        agent_name=name, account_id=int(pair_acc),
+                    )
+                    for c in found:
+                        cid = str(c.get("call_id", ""))
+                        if cid and cid not in existing_ids:
+                            c["agent"] = agent   # normalize to canonical name
+                            all_calls.append(c)
+                            existing_ids.add(cid)
+                except Exception as _e:
+                    print(f"[crm_service] refresh_calls {pair_crm}/{name}/{pair_acc}: {_e}")
+
+        if not all_calls and not existing_ids:
+            # Nothing found at all — return a soft error so the caller can surface it
+            return {"count": 0, "error": f"No calls found across {len(all_pairs)} CRM(s)"}
 
         pair_dir.mkdir(parents=True, exist_ok=True)
 
-        # Always write manifest so Audio Library can resolve crm_url/account_id
-        manifest = pair_dir / "manifest.json"
-        if not manifest.exists():
-            manifest.write_text(json.dumps({
-                "agent": agent, "customer": customer, "crm": crm_url,
-                "account_id": int(account_id),
+        # Write manifest if it doesn't exist
+        if not manifest_path.exists():
+            manifest_path.write_text(json.dumps({
+                "agent": agent, "customer": customer,
+                "crm": crm_url, "account_id": int(account_id),
             }, indent=2))
 
-        if calls:
-            (pair_dir / "calls.json").write_text(json.dumps(calls, indent=2))
+        if all_calls:
+            (pair_dir / "calls.json").write_text(json.dumps(all_calls, indent=2))
 
-        # Upsert crm_pair DB row with live call count + duration
+        # Upsert crm_pair DB row (keyed to the primary crm_url/account_id)
         try:
             from datetime import datetime, timezone
             from sqlmodel import Session
             from ui.backend.database import engine
             from ui.backend.models.crm import CRMPair
-            total_duration = sum(int(c.get("duration_s") or 0) for c in calls)
+            total_duration = sum(int(c.get("duration_s") or 0) for c in all_calls)
             row_id = f"{crm_url}::{account_id}::{agent}"
             with Session(engine) as db:
                 existing = db.get(CRMPair, row_id)
                 if existing:
-                    existing.call_count = len(calls)
+                    existing.call_count     = len(all_calls)
                     existing.total_duration_s = total_duration
                     existing.last_synced_at = datetime.now(timezone.utc)
                     db.add(existing)
@@ -409,7 +473,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                         account_id=str(account_id),
                         agent=agent,
                         customer=customer,
-                        call_count=len(calls),
+                        call_count=len(all_calls),
                         total_duration_s=total_duration,
                         last_synced_at=datetime.now(timezone.utc),
                     ))
@@ -417,10 +481,13 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
         except Exception as db_err:
             print(f"[crm_service] Warning: DB update failed after refresh_calls: {db_err}")
 
-        return {"count": len(calls), "error": None}
+        print(f"[crm_service] refresh_calls {agent}/{customer}: "
+              f"{len(all_calls)} calls from {len(all_pairs)} CRM(s) × {len(query_names)} name(s)")
+
+        return {"count": len(all_calls), "error": None}
+
     except Exception as e:
         msg = str(e)
-        # Strip HTML block pages (Cloudflare / nginx) from the error message
         if "<" in msg:
             msg = msg.split("<")[0].strip().rstrip(":").strip()
         return {"count": 0, "error": msg}
