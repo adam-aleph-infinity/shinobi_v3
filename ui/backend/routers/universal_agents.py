@@ -200,12 +200,18 @@ def import_presets():
                 continue
 
             # Generator agent — input: merged_transcript
+            # If the legacy prompt has no {transcript} placeholder, append it so the
+            # resolved transcript is always injected at the end of the user message.
+            gen_user_prompt = p.get("gen_user_prompt", "")
+            if "{transcript}" not in gen_user_prompt:
+                gen_user_prompt = gen_user_prompt.rstrip() + "\n\n{transcript}"
+
             gen = _make_agent(
                 name=gen_name,
                 model=p.get("gen_model", "gpt-5.4"),
                 temperature=float(p.get("gen_temperature", 0.0)),
                 system_prompt=p.get("gen_system_prompt", ""),
-                user_prompt=p.get("gen_user_prompt", ""),
+                user_prompt=gen_user_prompt,
                 inputs=[{"key": "transcript", "source": "merged_transcript"}],
                 output_format="markdown",
                 tags=["persona", "generator"],
@@ -215,12 +221,18 @@ def import_presets():
             created_agents.append(gen_name)
 
             # Scorer agent — inputs: persona (agent_output) + transcript (merged)
+            score_user_prompt = p.get("score_user_prompt", "")
+            if "{persona}" not in score_user_prompt:
+                score_user_prompt = score_user_prompt.rstrip() + "\n\nPersona Analysis:\n{persona}"
+            if "{transcript}" not in score_user_prompt:
+                score_user_prompt = score_user_prompt.rstrip() + "\n\nTranscript:\n{transcript}"
+
             scorer = _make_agent(
                 name=score_name,
                 model=p.get("score_model", "gpt-5.4"),
                 temperature=float(p.get("score_temperature", 0.0)),
                 system_prompt=p.get("score_system_prompt", ""),
-                user_prompt=p.get("score_user_prompt", ""),
+                user_prompt=score_user_prompt,
                 inputs=[
                     {"key": "persona",     "source": "agent_output", "agent_id": gen["id"]},
                     {"key": "transcript",  "source": "merged_transcript"},
