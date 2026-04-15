@@ -264,6 +264,27 @@ def list_notes(
     ]
 
 
+# ── Fetch transcript for a call ──────────────────────────────────────────────
+
+@router.get("/transcript")
+def get_transcript(
+    agent: str = Query(...),
+    customer: str = Query(...),
+    call_id: str = Query(...),
+):
+    """Return the transcript text for a specific call (tries alias agent dirs too)."""
+    for a in _agent_names_for(agent):
+        call_dir = settings.agents_dir / a / customer / call_id
+        for path in [
+            call_dir / "transcribed" / "llm_final" / "smoothed.txt",
+            call_dir / "transcribed" / "llm_final" / "voted.txt",
+            call_dir / "transcribed" / "final.txt",
+        ]:
+            if path.exists():
+                return {"text": path.read_text(encoding="utf-8").strip(), "source": path.name, "call_id": call_id}
+    raise HTTPException(404, "No transcript found for this call")
+
+
 # ── Delete note ───────────────────────────────────────────────────────────────
 
 @router.delete("/{note_id}")

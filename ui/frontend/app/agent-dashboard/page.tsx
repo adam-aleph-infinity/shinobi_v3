@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2, AlertTriangle, RefreshCw, Clock } from "lucide-react";
+import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2, AlertTriangle, RefreshCw, Clock, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const API = "/api";
@@ -61,10 +61,46 @@ function RiskBadge({ risk }: { risk?: string }) {
   );
 }
 
-function RollupDashboard({ data, customer, persona, onRerun, running }: {
-  data: any; customer: string; persona: string;
+function RollupDashboard({ data, agent, customer, persona, onRerun, running, callDates }: {
+  data: any; agent: string; customer: string; persona: string;
   onRerun: () => void; running: boolean;
+  callDates?: Record<string, string>;
 }) {
+  const [popup, setPopup] = useState<{ title: string; subtitle?: string; text: string; loading?: boolean } | null>(null);
+
+  async function openTranscript(callId: string) {
+    const date = callDates?.[callId]?.slice(0, 10);
+    setPopup({ title: "Transcript", subtitle: [callId, date].filter(Boolean).join(" · "), text: "", loading: true });
+    try {
+      const r = await fetch(`/api/notes/transcript?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`);
+      const d = await r.json();
+      if (r.ok) setPopup({ title: "Transcript", subtitle: [callId, date].filter(Boolean).join(" · "), text: d.text });
+      else setPopup({ title: "Transcript", subtitle: callId, text: "Transcript not available for this call." });
+    } catch {
+      setPopup({ title: "Transcript", subtitle: callId, text: "Failed to load transcript." });
+    }
+  }
+
+  async function openNotes(context: string) {
+    setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "", loading: true });
+    try {
+      const r = await fetch(`/api/notes?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}`);
+      if (r.ok) {
+        const notes = await r.json();
+        if (!notes.length) {
+          setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "No notes found." });
+        } else {
+          const text = notes.map((n: any) => `─── Call: ${n.call_id} ───\n\n${n.content_md}`).join("\n\n\n");
+          setPopup({ title: context, subtitle: `Notes for ${customer} · ${notes.length} call${notes.length !== 1 ? "s" : ""}`, text });
+        }
+      } else {
+        setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "Failed to load notes." });
+      }
+    } catch {
+      setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "Failed to load notes." });
+    }
+  }
+
   const procs: { name: string; compliant: number; violations: number }[] =
     data?.compliance_aggregate?.procedures ?? [];
 
@@ -75,6 +111,28 @@ function RollupDashboard({ data, customer, persona, onRerun, running }: {
 
   return (
     <div className="space-y-5">
+      {/* Transcript / Notes popup */}
+      {popup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={() => setPopup(null)}>
+          <div className="bg-gray-950 border border-gray-700 rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between px-4 py-3 border-b border-gray-800 shrink-0">
+              <div>
+                <p className="text-sm font-semibold text-white">{popup.title}</p>
+                {popup.subtitle && <p className="text-xs text-gray-500 mt-0.5">{popup.subtitle}</p>}
+              </div>
+              <button onClick={() => setPopup(null)} className="text-gray-500 hover:text-white transition-colors ml-4 shrink-0 mt-0.5">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-4">
+              {popup.loading
+                ? <div className="flex items-center justify-center py-8"><Loader2 className="w-4 h-4 animate-spin text-gray-500" /></div>
+                : <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed">{popup.text}</pre>
+              }
+            </div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-start gap-3 flex-wrap">
         <RiskBadge risk={data?.overall_risk} />
@@ -113,7 +171,7 @@ function RollupDashboard({ data, customer, persona, onRerun, running }: {
                   const violPct = total > 0 ? (p.violations / total) * 100 : 0;
                   const isViolated = p.violations > 0;
                   return (
-                    <tr key={i} className={cn("border-b border-gray-800/50 last:border-0", isViolated && "bg-red-950/10")}>
+                    <tr key={i} onClick={() => openNotes(p.name)} className={cn("border-b border-gray-800/50 last:border-0 cursor-pointer hover:bg-gray-800/30 transition-colors", isViolated && "bg-red-950/10")}>
                       <td className={cn("px-3 py-2", isViolated ? "text-red-300" : "text-gray-300")}>{p.name}</td>
                       <td className="px-3 py-2 text-right text-emerald-400 font-mono">{p.compliant}</td>
                       <td className="px-3 py-2 text-right text-red-400 font-mono">{p.violations}</td>
@@ -152,7 +210,7 @@ function RollupDashboard({ data, customer, persona, onRerun, running }: {
             <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Key Patterns</p>
             <ul className="space-y-1.5">
               {data.key_patterns.map((p: string, i: number) => (
-                <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
+                <li key={i} onClick={() => openNotes(p)} className="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white transition-colors">
                   <AlertTriangle className="w-3 h-3 mt-0.5 text-amber-500 shrink-0" />
                   {p}
                 </li>
@@ -165,7 +223,7 @@ function RollupDashboard({ data, customer, persona, onRerun, running }: {
             <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Next Steps</p>
             <ol className="space-y-1.5">
               {data.next_steps.map((s: string, i: number) => (
-                <li key={i} className="flex items-start gap-2 text-xs">
+                <li key={i} onClick={() => openNotes(s)} className="flex items-start gap-2 text-xs cursor-pointer hover:opacity-80 transition-opacity">
                   <span className="shrink-0 w-4 h-4 rounded-full bg-indigo-700 text-white text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
                   <span className={cn("text-gray-300", i === 0 && "font-medium text-white")}>{s}</span>
                 </li>
@@ -180,15 +238,20 @@ function RollupDashboard({ data, customer, persona, onRerun, running }: {
         <div>
           <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Call Progression</p>
           <div className="space-y-0.5">
-            {data.call_progression.map((c: any, i: number) => (
-              <div key={i} className="flex items-center gap-2 text-xs text-gray-400 py-1.5 border-b border-gray-800/40 last:border-0">
-                <span className="font-mono text-gray-600 w-20 shrink-0 truncate">{c.call_id}</span>
-                <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
-                <span className="text-indigo-400 shrink-0 truncate max-w-[120px]">{c.stage}</span>
-                <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
-                <span className="text-gray-300 truncate">{c.outcome}</span>
-              </div>
-            ))}
+            {data.call_progression.map((c: any, i: number) => {
+              const date = callDates?.[c.call_id]?.slice(0, 10);
+              return (
+                <div key={i} onClick={() => openTranscript(c.call_id)}
+                  className="flex items-center gap-2 text-xs text-gray-400 py-1.5 border-b border-gray-800/40 last:border-0 cursor-pointer hover:bg-gray-800/30 rounded px-1 -mx-1 transition-colors">
+                  <span className="font-mono text-gray-600 shrink-0 truncate w-20">{c.call_id}</span>
+                  {date && <span className="text-gray-600 text-[10px] shrink-0">{date}</span>}
+                  <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
+                  <span className="text-indigo-400 shrink-0 truncate max-w-[120px]">{c.stage}</span>
+                  <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
+                  <span className="text-gray-300 truncate">{c.outcome}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -243,6 +306,14 @@ export default function AgentDashboardPage() {
   const [rollupCustomer, setRollupCustomer] = useState("");
   const [rollupPersona, setRollupPersona]   = useState(""); // name of selected notes agent preset
   const [rollupRunning, setRollupRunning]   = useState(false);
+
+  // Call dates for the selected agent+customer pair (for call progression display)
+  const { data: callDates } = useSWR<Record<string, string>>(
+    selected && rollupCustomer
+      ? `${API}/crm/call-dates?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}`
+      : null,
+    fetcher
+  );
   const [rollupResult, setRollupResult]     = useState<any>(null);
   const [rollupError, setRollupError]       = useState<string | null>(null);
   const [rollupThinking, setRollupThinking] = useState("");
@@ -619,9 +690,11 @@ export default function AgentDashboardPage() {
                       <div className="p-4 max-h-[600px] overflow-y-auto">
                         <RollupDashboard
                           data={rollupResult ?? savedRollup}
+                          agent={selected!}
                           customer={rollupCustomer}
                           persona={rollupPersona}
                           running={rollupRunning}
+                          callDates={callDates}
                           onRerun={() => {
                             triggerRollup(selected!, rollupCustomer, "gemini-2.5-flash");
                           }}

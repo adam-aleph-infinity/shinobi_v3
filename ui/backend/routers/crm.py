@@ -320,6 +320,27 @@ def _host(crm_url: str) -> str:
     return crm_url.replace("https://", "").replace("http://", "").split("/")[0]
 
 
+@router.get("/call-dates")
+def get_call_dates(
+    agent: str = Query(...),
+    customer: str = Query(...),
+    db: Session = Depends(get_session),
+):
+    """Return {call_id: started_at} for all calls of an agent-customer pair (including aliases)."""
+    from ui.backend.models.crm import CRMCall
+    from ui.backend.services.crm_service import _load_aliases
+    from sqlalchemy import or_
+    aliases = _load_aliases()
+    agent_names = [agent] + [a for a, p in aliases.items() if p == agent]
+    stmt = select(CRMCall.call_id, CRMCall.started_at).where(CRMCall.customer == customer)
+    if len(agent_names) == 1:
+        stmt = stmt.where(CRMCall.agent == agent)
+    else:
+        stmt = stmt.where(or_(*[CRMCall.agent == n for n in agent_names]))
+    rows = db.exec(stmt).all()
+    return {r[0]: r[1] for r in rows if r[0]}
+
+
 @router.get("/nav/agents")
 def nav_agents(db: Session = Depends(get_session)):
     """Unique agent names with customer count — for nav panels."""
