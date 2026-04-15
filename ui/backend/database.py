@@ -1,15 +1,23 @@
+import os
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session
 
-# Canonical DB location: ui/database/shinobi.db
-DB_PATH = Path(__file__).parent.parent.parent / "ui" / "database" / "shinobi.db"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+# If DATABASE_URL is set (e.g. postgresql://user:pass@host/db), use it.
+# Otherwise fall back to the local SQLite file for local dev.
+_DATABASE_URL = os.environ.get("DATABASE_URL")
 
-engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+if _DATABASE_URL:
+    engine = create_engine(_DATABASE_URL, echo=False, pool_pre_ping=True)
+else:
+    DB_PATH = Path(__file__).parent.parent.parent / "ui" / "database" / "shinobi.db"
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
 
 def _migrate():
-    """Apply incremental schema migrations (idempotent)."""
+    """Apply incremental schema migrations (idempotent). SQLite-only DDL hacks."""
+    if _DATABASE_URL:
+        return  # PostgreSQL — SQLModel.metadata.create_all handles everything
     from sqlalchemy import text
     with engine.connect() as conn:
         for ddl in [
