@@ -314,29 +314,176 @@ def import_presets():
 
 # ── Run engine ────────────────────────────────────────────────────────────────
 
+# Input sources that represent large text files — never pasted inline into the prompt.
+# These are uploaded as native file objects to the LLM provider.
+_FILE_SOURCES = {"transcript", "merged_transcript", "notes", "merged_notes"}
+
 def _sse(event: str, data: dict) -> str:
     return f"data: {json.dumps({'type': event, 'data': data})}\n\n"
 
 
-def _llm_call(system: str, user: str, model: str, temperature: float) -> str:
-    """Thin wrapper around the shared LLM client."""
+def _clean_result(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return text
+
+
+def _llm_call_gemini_files(
+    system: str,
+    user_template: str,
+    file_inputs: dict,   # key → text content
+    inline_inputs: dict, # key → text content
+    model: str,
+    temperature: float,
+) -> str:
+    """Gemini call: each file input is uploaded via the Files API (never inlined)."""
+    import io
+    import google.generativeai as genai
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    genai.configure(api_key=api_key)
+
+    uploaded: list = []
+    try:
+        # Upload each file input to Gemini's File API
+        for key, content in file_inputs.items():
+            f = genai.upload_file(
+                io.BytesIO(content.encode("utf-8")),
+                mime_type="text/plain",
+                display_name=f"{key}.txt",
+            )
+            uploaded.append((key, f))
+
+        # Build user message — strip {key} placeholders for uploaded files,
+        # substitute inline inputs normally.
+        user_text = user_template
+        for key, _ in uploaded:
+            user_text = user_text.replace(f"{{{key}}}", "")
+        for key, val in inline_inputs.items():
+            user_text = user_text.replace(f"{{{key}}}", val)
+
+        # Content parts: file objects first, then the instruction text
+        parts = [f for _, f in uploaded] + [user_text.strip()]
+
+        gen_model = genai.GenerativeModel(
+            model_name=model,
+            system_instruction=system or None,
+        )
+        cfg: dict = {}
+        if temperature > 0:
+            cfg["temperature"] = temperature
+
+        response = gen_model.generate_content(
+            parts,
+            generation_config=genai.GenerationConfig(**cfg) if cfg else None,
+        )
+        try:
+            return _clean_result(response.text)
+        except ValueError as e:
+            finish = ""
+            try:
+                finish = response.candidates[0].finish_reason.name if response.candidates else "NONE"
+            except Exception:
+                pass
+            raise RuntimeError(f"Gemini blocked/empty (finish_reason={finish}): {e}") from e
+
+    finally:
+        for _, f in uploaded:
+            try:
+                genai.delete_file(f.name)
+            except Exception:
+                pass
+
+
+def _llm_call_anthropic_docs(
+    system: str,
+    user_template: str,
+    file_inputs: dict,
+    inline_inputs: dict,
+    model: str,
+    temperature: float,
+) -> str:
+    """Anthropic call: file inputs become document content blocks (not inlined as raw text)."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content_blocks: list = []
+    user_text = user_template
+
+    # Add each file as a document block; strip the placeholder from the text
+    for key, content in file_inputs.items():
+        user_text = user_text.replace(f"{{{key}}}", "")
+        content_blocks.append({
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": content},
+            "title": key,
+        })
+
+    for key, val in inline_inputs.items():
+        user_text = user_text.replace(f"{{{key}}}", val)
+
+    content_blocks.append({"type": "text", "text": user_text.strip()})
+
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": 8192,
+        "system": system,
+        "messages": [{"role": "user", "content": content_blocks}],
+    }
+    if temperature is not None and temperature > 0:
+        kwargs["temperature"] = temperature
+
+    response = client.messages.create(**kwargs)
+    text = "\n\n".join(
+        block.text for block in response.content
+        if getattr(block, "type", None) == "text"
+    )
+    return _clean_result(text)
+
+
+def _llm_call_with_files(
+    system: str,
+    user_template: str,
+    file_inputs: dict,   # inputs from _FILE_SOURCES — never pasted inline
+    inline_inputs: dict, # small inputs (agent_output, manual, chain_previous)
+    model: str,
+    temperature: float,
+) -> str:
+    """
+    Route to the right provider implementation.
+    File inputs are uploaded as native file/document objects.
+    For OpenAI / Grok, file inputs are still inlined (no native file API in chat).
+    """
+    if model.startswith("gemini"):
+        return _llm_call_gemini_files(system, user_template, file_inputs, inline_inputs, model, temperature)
+
+    if model.startswith("claude-"):
+        return _llm_call_anthropic_docs(system, user_template, file_inputs, inline_inputs, model, temperature)
+
+    # OpenAI / Grok: inline everything (they handle large context well)
     import sys
     sys.path.insert(0, str(settings.project_root))
     from shared.llm_client import LLMClient
 
-    if model.startswith("claude-"):
-        provider, key = "anthropic", os.environ.get("ANTHROPIC_API_KEY", "")
-    elif model.startswith("gemini"):
-        provider, key = "gemini", os.environ.get("GEMINI_API_KEY", "")
-    elif model.startswith("grok"):
-        provider = "grok"
+    provider = "grok" if model.startswith("grok") else "openai"
+    if provider == "grok":
         from shared.llm_client import resolve_grok_key
         key = resolve_grok_key() or ""
     else:
-        provider, key = "openai", os.environ.get("OPENAI_API_KEY", "")
-
+        key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
         raise RuntimeError(f"API key not set for provider '{provider}'")
+
+    user = user_template
+    for k, v in {**file_inputs, **inline_inputs}.items():
+        user = user.replace(f"{{{k}}}", v)
 
     client = LLMClient(provider=provider, api_key=key)
     resp = client.chat_completion(
@@ -344,10 +491,7 @@ def _llm_call(system: str, user: str, model: str, temperature: float) -> str:
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=temperature,
     )
-    result = (resp.choices[0].message.content or "").strip()
-    if result.startswith("```"):
-        result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    return result
+    return _clean_result(resp.choices[0].message.content or "")
 
 
 def _resolve_input(source: str, agent_id: Optional[str],
@@ -468,20 +612,33 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                     yield _sse("error", {"msg": str(e)})
                     return
 
-            # Substitute {key} vars into user_prompt
-            user_prompt = agent_def.get("user_prompt", "")
-            for k, v in resolved.items():
-                user_prompt = user_prompt.replace(f"{{{k}}}", v)
+            system_prompt    = agent_def.get("system_prompt", "")
+            user_template    = agent_def.get("user_prompt", "")
+            model            = agent_def.get("model", "gpt-5.4")
+            temperature      = float(agent_def.get("temperature", 0.0))
 
-            system_prompt = agent_def.get("system_prompt", "")
-            model         = agent_def.get("model", "gpt-5.4")
-            temperature   = float(agent_def.get("temperature", 0.0))
+            # Split resolved inputs into file-type (uploaded) vs inline (substituted)
+            file_keys: set[str] = set()
+            for inp in agent_def.get("inputs", []):
+                k = inp.get("key", "")
+                effective_src = req.source_overrides.get(k, inp.get("source", "manual"))
+                if effective_src in _FILE_SOURCES:
+                    file_keys.add(k)
 
-            yield _sse("progress", {"msg": f"Calling {model}…"})
+            file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
+            inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
+
+            yield _sse("progress", {
+                "msg": f"Calling {model}… ({len(file_inputs)} file(s), {len(inline_inputs)} inline)"
+            })
 
             content = await loop.run_in_executor(
                 None,
-                lambda: _llm_call(system_prompt, user_prompt, model, temperature),
+                lambda: _llm_call_with_files(
+                    system_prompt, user_template,
+                    file_inputs, inline_inputs,
+                    model, temperature,
+                ),
             )
 
             # Save result
