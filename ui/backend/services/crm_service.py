@@ -1,5 +1,6 @@
 """CRM service — loads pairs from JSON cache + SQLite DB, refreshes from CRM API on demand."""
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,27 @@ def _load_aliases() -> dict[str, str]:
         except Exception:
             pass
     return {}
+
+
+# Matches "Name-Re13", "Name Re10", "Name-re10", "Name-R5", "Name re3", etc.
+_RE_VARIANT_RE = re.compile(r'^(.+?)[\s\-][Rr][eE]?\d+$')
+
+
+def _auto_detect_re_aliases(agent_names: list[str]) -> dict[str, str]:
+    """Scan agent names for Re-variant suffixes and return {alias: primary}.
+
+    e.g. ["Leo West-Re13", "Leo West"] → {"Leo West-Re13": "Leo West"}
+    Works even if the base name is absent from the list — the alias system
+    will rename the variant row to the base name.
+    """
+    aliases: dict[str, str] = {}
+    for name in agent_names:
+        m = _RE_VARIANT_RE.match(name)
+        if m:
+            base = m.group(1).strip()
+            if base and base != name:
+                aliases[name] = base
+    return aliases
 
 
 def _apply_aliases(pairs: list[dict], aliases: dict[str, str]) -> list[dict]:
@@ -204,8 +226,25 @@ def refresh_pairs() -> dict:
             # Preserve existing cached data for this CRM
             new_pairs.extend(existing_by_crm.get(crm_url, []))
 
-    # Apply alias merges — Ron Silver-re10 → Ron Silver, etc.
-    aliases = _load_aliases()
+    # Apply alias merges — Ron Silver-re10 → Ron Silver, Leo West-Re13 → Leo West, etc.
+    file_aliases = _load_aliases()
+    all_agent_names = list({p.get("agent", "") for p in new_pairs if p.get("agent")})
+    auto_aliases = _auto_detect_re_aliases(all_agent_names)
+
+    # Save any newly discovered aliases back to the file (manual entries take priority)
+    if auto_aliases:
+        new_entries = {k: v for k, v in auto_aliases.items() if k not in file_aliases}
+        if new_entries:
+            updated_file = {**file_aliases, **new_entries}
+            try:
+                _ALIASES_FILE.write_text(json.dumps(updated_file, sort_keys=True, indent=2))
+                print(f"[crm_service] Auto-saved {len(new_entries)} new Re-variant alias(es): {new_entries}")
+            except Exception as _e:
+                print(f"[crm_service] Warning: could not save aliases: {_e}")
+            file_aliases = updated_file
+
+    # Merge: manual aliases override auto-detected ones
+    aliases = {**auto_aliases, **file_aliases}
     if aliases:
         pre = len(new_pairs)
         new_pairs = _apply_aliases(new_pairs, aliases)

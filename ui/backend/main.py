@@ -176,10 +176,17 @@ async def on_startup():
 
     # Merge alias agent rows in crm_pair table (e.g. Ron Silver-re10 → Ron Silver)
     async def _merge_alias_pairs():
-        from ui.backend.services.crm_service import _load_aliases
+        from ui.backend.services.crm_service import _load_aliases, _auto_detect_re_aliases
         from ui.backend.models.crm import CRMPair
-        from sqlalchemy import text
-        aliases = _load_aliases()
+        from sqlalchemy import text, func as sa_func
+        file_aliases = _load_aliases()
+        # Auto-detect Re-variant aliases from current DB agent names
+        with Session(engine) as db:
+            all_agents = [r[0] for r in db.exec(
+                select(CRMPair.agent).distinct()
+            ).all() if r[0]]
+        auto_aliases = _auto_detect_re_aliases(all_agents)
+        aliases = {**auto_aliases, **file_aliases}  # file entries take priority
         if not aliases:
             return
         with Session(engine) as db:

@@ -39,14 +39,14 @@ def get_pairs(
     try:
         stmt = select(CRMPair)
         if crm:
-            stmt = stmt.where(CRMPair.crm_url.like(f"%{crm}%"))
+            stmt = stmt.where(CRMPair.crm_url.ilike(f"%{crm}%"))
         if agent:
             if agent_exact:
-                stmt = stmt.where(CRMPair.agent == agent)
+                stmt = stmt.where(CRMPair.agent.ilike(agent))
             else:
-                stmt = stmt.where(CRMPair.agent.like(f"%{agent}%"))
+                stmt = stmt.where(CRMPair.agent.ilike(f"%{agent}%"))
         if customer:
-            stmt = stmt.where(CRMPair.customer.like(f"%{customer}%"))
+            stmt = stmt.where(CRMPair.customer.ilike(f"%{customer}%"))
         if min_calls:
             stmt = stmt.where(CRMPair.call_count >= min_calls)
         if min_duration:
@@ -134,11 +134,11 @@ def get_pairs_local(
         stmt = select(CRMPair)
         if agent:
             if agent_exact:
-                stmt = stmt.where(CRMPair.agent == agent)
+                stmt = stmt.where(CRMPair.agent.ilike(agent))
             else:
-                stmt = stmt.where(CRMPair.agent.like(f"%{agent}%"))
+                stmt = stmt.where(CRMPair.agent.ilike(f"%{agent}%"))
         if customer:
-            stmt = stmt.where(CRMPair.customer.like(f"%{customer}%"))
+            stmt = stmt.where(CRMPair.customer.ilike(f"%{customer}%"))
         if min_calls:
             stmt = stmt.where(CRMPair.call_count >= min_calls)
         if min_duration:
