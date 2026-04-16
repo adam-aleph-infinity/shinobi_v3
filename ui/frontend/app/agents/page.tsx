@@ -1,11 +1,15 @@
 "use client";
 import { useState, useRef } from "react";
 import useSWR, { useSWRConfig } from "swr";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Bot, Plus, Trash2, Check, Loader2, ChevronDown, ChevronUp,
   Settings2, X, GripVertical, ArrowUp, ArrowDown, Workflow, Download,
+  Play, AlertCircle, Clock, CheckCircle2, SkipForward,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAppCtx } from "@/lib/app-context";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
@@ -725,6 +729,215 @@ function StepRow({
   );
 }
 
+// ── Pipeline Run Panel ────────────────────────────────────────────────────────
+
+type StepStatus = "pending" | "loading" | "cached" | "done" | "error";
+
+interface StepState {
+  agentName: string;
+  status: StepStatus;
+  content: string;
+  thinking: string;
+  resultId: string;
+  stream: string;
+  expanded: boolean;
+}
+
+function PipelineRunPanel({ pipeline, agents }: { pipeline: Pipeline; agents: UniversalAgent[] }) {
+  const { salesAgent, customer, callId } = useAppCtx();
+  const [running, setRunning] = useState(false);
+  const [steps, setSteps] = useState<StepState[]>([]);
+  const [runError, setRunError] = useState("");
+  const [done, setDone] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const streamEndRef = useRef<HTMLDivElement | null>(null);
+
+  const hasPair = !!(salesAgent && customer);
+  const needsCall = pipeline.scope === "per_call";
+  const hasCall = !!(hasPair && callId);
+  const contextOk = needsCall ? hasCall : hasPair;
+
+  function initSteps() {
+    return pipeline.steps.map(s => {
+      const a = agents.find(x => x.id === s.agent_id);
+      return { agentName: a?.name ?? s.agent_id, status: "pending" as StepStatus, content: "", thinking: "", resultId: "", stream: "", expanded: false };
+    });
+  }
+
+  async function run() {
+    if (!contextOk || running) return;
+    setRunning(true); setRunError(""); setDone(false);
+    setSteps(initSteps());
+    abortRef.current = new AbortController();
+
+    try {
+      const res = await fetch(`/api/pipelines/${pipeline.id}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortRef.current.signal,
+        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: callId }),
+      });
+      if (!res.body) throw new Error("No response body");
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+
+      while (true) {
+        const { done: eof, value } = await reader.read();
+        if (eof) break;
+        for (const line of dec.decode(value).split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          try {
+            const evt = JSON.parse(line.slice(5).trim());
+            const s: number = evt.data.step ?? 0;
+
+            if (evt.type === "step_start") {
+              setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.data.agent_name } : st));
+            }
+            if (evt.type === "step_cached") {
+              setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "cached", content: evt.data.content, resultId: evt.data.result_id } : st));
+            }
+            if (evt.type === "stream") {
+              setSteps(prev => prev.map((st, i) => {
+                if (i !== s) return st;
+                const ns = { ...st, stream: st.stream + (evt.data.text ?? "") };
+                setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0);
+                return ns;
+              }));
+            }
+            if (evt.type === "thinking") {
+              setSteps(prev => prev.map((st, i) => i === s ? { ...st, thinking: evt.data.content ?? "" } : st));
+            }
+            if (evt.type === "step_done") {
+              setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "done", content: evt.data.content, resultId: evt.data.result_id, stream: "" } : st));
+            }
+            if (evt.type === "error") {
+              if (evt.data.step != null) {
+                setSteps(prev => prev.map((st, i) => i === evt.data.step ? { ...st, status: "error" } : st));
+              }
+              setRunError(evt.data.msg ?? "Error");
+            }
+            if (evt.type === "pipeline_done") {
+              setDone(true);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") setRunError(e.message ?? "Unexpected error");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const statusIcon = (st: StepStatus, stream: string) => {
+    if (st === "loading" && !stream) return <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />;
+    if (st === "loading" && stream)  return <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse shrink-0" />;
+    if (st === "cached")  return <SkipForward className="w-3 h-3 text-amber-400 shrink-0" />;
+    if (st === "done")    return <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />;
+    if (st === "error")   return <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />;
+    return <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />;
+  };
+
+  const statusLabel = (st: StepStatus) => {
+    if (st === "cached") return <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 font-medium">cached</span>;
+    if (st === "done")   return <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 font-medium">done</span>;
+    if (st === "error")  return <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 font-medium">error</span>;
+    return null;
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Context bar */}
+      <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0 flex-wrap">
+        {salesAgent
+          ? <span className="text-[11px] text-teal-300 bg-teal-900/30 border border-teal-700/40 rounded px-1.5 py-0.5">{salesAgent}</span>
+          : <span className="text-[11px] text-gray-600 italic">no agent selected</span>}
+        {customer && <span className="text-[11px] text-cyan-300 bg-cyan-900/30 border border-cyan-700/40 rounded px-1.5 py-0.5">{customer}</span>}
+        {callId && <span className="text-[11px] text-blue-300 bg-blue-900/30 border border-blue-700/40 rounded px-1.5 py-0.5 font-mono">{callId}</span>}
+        {!contextOk && (
+          <span className="text-[11px] text-red-400 ml-auto">
+            Needs: {needsCall ? "agent + customer + call" : "agent + customer"}
+          </span>
+        )}
+      </div>
+
+      {/* Run button */}
+      <div className="px-4 py-3 border-b border-gray-800 shrink-0">
+        <button
+          onClick={run}
+          disabled={running || !contextOk}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+        >
+          {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+          {running ? "Running pipeline…" : done ? "Run again" : "Run Pipeline"}
+        </button>
+        {runError && <p className="mt-1.5 text-[11px] text-red-400 break-words">{runError}</p>}
+      </div>
+
+      {/* Step list */}
+      {steps.length > 0 && (
+        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+          {steps.map((st, i) => (
+            <div key={i} className={cn(
+              "border rounded-xl overflow-hidden",
+              st.status === "done" || st.status === "cached" ? "border-gray-700/60" : "border-gray-800",
+            )}>
+              {/* Step header */}
+              <div
+                className={cn(
+                  "flex items-center gap-2 px-3 py-2 cursor-pointer",
+                  (st.status === "done" || st.status === "cached") ? "hover:bg-gray-800/40" : "",
+                )}
+                onClick={() => {
+                  if (st.status === "done" || st.status === "cached") {
+                    setSteps(prev => prev.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s));
+                  }
+                }}
+              >
+                {statusIcon(st.status, st.stream)}
+                <span className="text-[10px] text-gray-500 font-mono shrink-0">#{i + 1}</span>
+                <span className={cn("text-xs flex-1 font-medium truncate", st.status === "loading" ? "text-teal-300" : "text-gray-300")}>{st.agentName}</span>
+                {statusLabel(st.status)}
+                {(st.status === "done" || st.status === "cached") && (
+                  st.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />
+                )}
+              </div>
+
+              {/* Live stream (while running) */}
+              {st.status === "loading" && st.stream && (
+                <div className="px-3 pb-3 bg-gray-950">
+                  <pre className="text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
+                    {st.stream}
+                    <div ref={streamEndRef} />
+                  </pre>
+                </div>
+              )}
+
+              {/* Completed content */}
+              {st.expanded && (st.status === "done" || st.status === "cached") && st.content && (
+                <div className="px-3 pb-3 bg-gray-950">
+                  <div className="prose prose-invert prose-xs max-w-none text-xs text-gray-300">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{st.content}</ReactMarkdown>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {steps.length === 0 && (
+        <div className="flex-1 flex items-center justify-center text-gray-600">
+          <div className="text-center space-y-2">
+            <Workflow className="w-10 h-10 mx-auto opacity-15" />
+            <p className="text-xs">Select context above and hit Run</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Pipelines Tab ─────────────────────────────────────────────────────────────
 
 function PipelinesTab() {
@@ -740,12 +953,14 @@ function PipelinesTab() {
   function openNew() {
     setSelected(null); setIsNew(true);
     setForm({ ...EMPTY_PIPELINE }); setSaved(false);
+    setRightTab("configure");
   }
 
   function openEdit(p: Pipeline) {
     setSelected(p.id); setIsNew(false);
     setForm({ name: p.name, description: p.description ?? "", scope: p.scope ?? "per_pair", steps: p.steps ?? [] });
     setSaved(false);
+    setRightTab("run");
   }
 
   async function save() {
@@ -794,6 +1009,7 @@ function PipelinesTab() {
 
   const showForm = isNew || selected !== null;
   const allAgents = agents ?? [];
+  const [rightTab, setRightTab] = useState<"run" | "configure">("run");
 
   return (
     <div className="flex h-full gap-0">
@@ -826,90 +1042,120 @@ function PipelinesTab() {
         </div>
       </div>
 
-      {/* Form */}
+      {/* Right panel */}
       {showForm ? (
-        <div className="flex-1 min-w-0 overflow-y-auto p-6 space-y-5">
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white">{isNew ? "New Pipeline" : `Edit: ${form.name}`}</h2>
-            <div className="flex items-center gap-2">
-              {selected && (
-                <button onClick={del}
-                  className="text-xs px-2.5 py-1.5 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/50 rounded-lg transition-colors">
-                  <Trash2 className="w-3 h-3" />
-                </button>
+        <div className="flex-1 min-w-0 flex flex-col min-h-0">
+          {/* Panel header with tab toggle */}
+          <div className="px-4 pt-3 pb-0 border-b border-gray-800 shrink-0 flex items-center justify-between gap-3">
+            <span className="text-sm font-semibold text-white truncate">{isNew ? "New Pipeline" : form.name}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              {!isNew && (
+                <div className="flex rounded-lg overflow-hidden border border-gray-700 text-[11px]">
+                  <button onClick={() => setRightTab("run")}
+                    className={cn("px-3 py-1 transition-colors", rightTab === "run" ? "bg-teal-800 text-teal-100" : "bg-gray-800 text-gray-400 hover:text-white")}>
+                    Run
+                  </button>
+                  <button onClick={() => setRightTab("configure")}
+                    className={cn("px-3 py-1 border-l border-gray-700 transition-colors", rightTab === "configure" ? "bg-gray-700 text-white" : "bg-gray-800 text-gray-400 hover:text-white")}>
+                    Configure
+                  </button>
+                </div>
               )}
-              <button onClick={save} disabled={saving || !form.name.trim()}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-teal-700 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50">
-                {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
-                {saved ? "Saved" : "Save"}
-              </button>
+              {(isNew || rightTab === "configure") && (
+                <div className="flex items-center gap-1.5">
+                  {selected && (
+                    <button onClick={del}
+                      className="text-xs px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/50 rounded-lg transition-colors">
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                  <button onClick={save} disabled={saving || !form.name.trim()}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-teal-700 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50">
+                    {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
+                    {saved ? "Saved" : "Save"}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Name + Description + Scope */}
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Name</label>
-              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                placeholder="e.g. Full Analysis"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-teal-500" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Description</label>
-              <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-                placeholder="What does this pipeline do?"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-teal-500" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Scope</label>
-              <select value={form.scope} onChange={e => setForm(f => ({ ...f, scope: e.target.value }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-teal-500">
-                <option value="per_call">Per Call — runs once per call</option>
-                <option value="per_pair">Per Pair — runs on merged data for an agent/customer pair</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Steps */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <label className="text-xs text-gray-400 font-medium">Steps</label>
-              <button onClick={addStep}
-                className="flex items-center gap-1 text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors">
-                <Plus className="w-3 h-3" /> Add Step
-              </button>
-            </div>
-
-            {/* Visual chain */}
-            {form.steps.length > 0 && (
-              <div className="mb-4 flex items-center gap-1 flex-wrap">
-                {form.steps.map((step, i) => {
-                  const a = allAgents.find(x => x.id === step.agent_id);
-                  return (
-                    <div key={i} className="flex items-center gap-1">
-                      <span className="text-[10px] px-2 py-1 bg-gray-800 border border-gray-700 rounded-lg text-gray-300">
-                        {a ? a.name : <span className="text-gray-600 italic">unset</span>}
-                      </span>
-                      {i < form.steps.length - 1 && <span className="text-gray-700 text-xs">→</span>}
-                    </div>
-                  );
-                })}
+          {/* Run tab */}
+          {!isNew && rightTab === "run" && (() => {
+            const pl: Pipeline = { id: selected!, ...form, created_at: "" };
+            return (
+              <div className="flex-1 min-h-0">
+                <PipelineRunPanel pipeline={pl} agents={allAgents} />
               </div>
-            )}
+            );
+          })()}
 
-            {form.steps.length === 0 && (
-              <p className="text-xs text-gray-600 italic py-2">No steps yet. Add agents to build the chain.</p>
-            )}
+          {/* Configure tab */}
+          {(isNew || rightTab === "configure") && (
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5">
+              {/* Name + Description + Scope */}
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Name</label>
+                  <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    placeholder="e.g. Full Analysis"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-teal-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Description</label>
+                  <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                    placeholder="What does this pipeline do?"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-teal-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Scope</label>
+                  <select value={form.scope} onChange={e => setForm(f => ({ ...f, scope: e.target.value }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-teal-500">
+                    <option value="per_call">Per Call — runs once per call</option>
+                    <option value="per_pair">Per Pair — runs on merged data for an agent/customer pair</option>
+                  </select>
+                </div>
+              </div>
 
-            <div className="space-y-3">
-              {form.steps.map((step, i) => (
-                <StepRow key={i} step={step} index={i} total={form.steps.length}
-                  agents={allAgents} allAgents={allAgents}
-                  onChange={s => updateStep(i, s)} onRemove={() => removeStep(i)} onMove={dir => moveStep(i, dir)} />
-              ))}
+              {/* Steps */}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <label className="text-xs text-gray-400 font-medium">Steps</label>
+                  <button onClick={addStep}
+                    className="flex items-center gap-1 text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors">
+                    <Plus className="w-3 h-3" /> Add Step
+                  </button>
+                </div>
+
+                {form.steps.length > 0 && (
+                  <div className="mb-4 flex items-center gap-1 flex-wrap">
+                    {form.steps.map((step, i) => {
+                      const a = allAgents.find(x => x.id === step.agent_id);
+                      return (
+                        <div key={i} className="flex items-center gap-1">
+                          <span className="text-[10px] px-2 py-1 bg-gray-800 border border-gray-700 rounded-lg text-gray-300">
+                            {a ? a.name : <span className="text-gray-600 italic">unset</span>}
+                          </span>
+                          {i < form.steps.length - 1 && <span className="text-gray-700 text-xs">→</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {form.steps.length === 0 && (
+                  <p className="text-xs text-gray-600 italic py-2">No steps yet. Add agents to build the chain.</p>
+                )}
+
+                <div className="space-y-3">
+                  {form.steps.map((step, i) => (
+                    <StepRow key={i} step={step} index={i} total={form.steps.length}
+                      agents={allAgents} allAgents={allAgents}
+                      onChange={s => updateStep(i, s)} onRemove={() => removeStep(i)} onMove={dir => moveStep(i, dir)} />
+                  ))}
+                </div>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center text-gray-600">

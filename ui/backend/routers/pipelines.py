@@ -1,13 +1,19 @@
 """Pipelines — ordered chains of universal agents."""
+import asyncio
 import json
+import queue as _queue
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlmodel import Session, select
 
 from ui.backend.config import settings
+from ui.backend.database import get_session
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
@@ -89,3 +95,183 @@ def delete_pipeline(pipeline_id: str):
     f, _ = _find_file(pipeline_id)
     f.unlink()
     return {"ok": True}
+
+
+class PipelineRunRequest(BaseModel):
+    sales_agent: str = ""
+    customer: str = ""
+    call_id: str = ""
+
+
+@router.post("/{pipeline_id}/run")
+async def run_pipeline(
+    pipeline_id: str, req: PipelineRunRequest, db: Session = Depends(get_session)
+):
+    """Execute a pipeline step-by-step, reusing cached AgentResult rows where available."""
+    from ui.backend.models.agent_result import AgentResult as AR
+    from ui.backend.routers.universal_agents import (
+        _sse, _FILE_SOURCES, _resolve_input,
+        _llm_call_with_files, _llm_call_anthropic_files_streaming,
+        _load_all as _load_agents,
+    )
+
+    _, pipeline_def = _find_file(pipeline_id)
+    steps = pipeline_def.get("steps", [])
+
+    agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
+
+    async def stream():
+        yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_def.get("name", "")})
+        loop = asyncio.get_event_loop()
+        prev_content = ""  # passed to next step as chain_previous
+
+        for step_idx, step in enumerate(steps):
+            agent_id = step.get("agent_id", "")
+            overrides = step.get("input_overrides", {})
+            agent_def = agent_map.get(agent_id)
+
+            if not agent_def:
+                yield _sse("error", {"msg": f"Step {step_idx + 1}: agent '{agent_id}' not found", "step": step_idx})
+                return
+
+            agent_name = agent_def.get("name", agent_id)
+            model = agent_def.get("model", "gpt-5.4")
+
+            yield _sse("step_start", {
+                "step": step_idx, "total": len(steps),
+                "agent_id": agent_id, "agent_name": agent_name,
+            })
+
+            # ── Check for cached result ──────────────────────────────────────
+            stmt = select(AR).where(
+                AR.agent_id == agent_id,
+                AR.sales_agent == req.sales_agent,
+                AR.customer == req.customer,
+            )
+            if req.call_id:
+                stmt = stmt.where(AR.call_id == req.call_id)
+            stmt = stmt.order_by(AR.created_at.desc())
+            cached = db.exec(stmt).first()
+
+            if cached:
+                prev_content = cached.content
+                yield _sse("step_cached", {
+                    "step": step_idx, "agent_name": agent_name,
+                    "result_id": cached.id, "content": cached.content,
+                })
+                continue
+
+            # ── Resolve inputs ───────────────────────────────────────────────
+            temperature = float(agent_def.get("temperature", 0.0))
+            system_prompt = agent_def.get("system_prompt", "")
+            user_template = agent_def.get("user_prompt", "")
+            manual_inputs = {"_chain_previous": prev_content}
+
+            db._agent_run_ctx = {
+                "sales_agent": req.sales_agent,
+                "customer":    req.customer,
+                "call_id":     req.call_id,
+                "source_for_key": {
+                    inp.get("key", ""): overrides.get(inp.get("key", ""), inp.get("source", ""))
+                    for inp in agent_def.get("inputs", [])
+                },
+            }
+
+            resolved: dict[str, str] = {}
+            for inp in agent_def.get("inputs", []):
+                key    = inp.get("key", "input")
+                source = overrides.get(key, inp.get("source", "manual"))
+                ref_id = inp.get("agent_id")
+                try:
+                    text = await loop.run_in_executor(
+                        None,
+                        lambda s=source, a=ref_id: _resolve_input(
+                            s, a, req.sales_agent, req.customer, req.call_id,
+                            manual_inputs, db,
+                        ),
+                    )
+                    resolved[key] = text
+                except Exception as exc:
+                    yield _sse("error", {"msg": str(exc), "step": step_idx})
+                    return
+
+            file_keys = {
+                inp.get("key", "")
+                for inp in agent_def.get("inputs", [])
+                if overrides.get(inp.get("key", ""), inp.get("source", "manual")) in _FILE_SOURCES
+            }
+            file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
+            inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
+
+            # ── Call LLM ─────────────────────────────────────────────────────
+            if model.startswith("claude-"):
+                q: _queue.Queue = _queue.Queue()
+                result_holder: list = []
+                error_holder:  list = []
+
+                def _do(fi=file_inputs, ii=inline_inputs, m=model, sp=system_prompt, ut=user_template):
+                    try:
+                        c, t = _llm_call_anthropic_files_streaming(
+                            sp, ut, fi, ii, m, db,
+                            on_text=lambda chunk: q.put(("stream", chunk)),
+                        )
+                        result_holder.append((c, t))
+                    except Exception as exc:
+                        error_holder.append(str(exc))
+                    finally:
+                        q.put(None)
+
+                threading.Thread(target=_do, daemon=True).start()
+
+                while True:
+                    item = await loop.run_in_executor(None, q.get)
+                    if item is None:
+                        break
+                    _, data = item
+                    yield _sse("stream", {"text": data, "step": step_idx})
+
+                if error_holder:
+                    yield _sse("error", {"msg": error_holder[0], "step": step_idx})
+                    return
+
+                content, thinking = result_holder[0]
+            else:
+                try:
+                    content, thinking = await loop.run_in_executor(
+                        None,
+                        lambda: _llm_call_with_files(
+                            system_prompt, user_template,
+                            file_inputs, inline_inputs,
+                            model, temperature, db,
+                        ),
+                    )
+                except Exception as exc:
+                    yield _sse("error", {"msg": str(exc), "step": step_idx})
+                    return
+
+            # ── Save & advance ────────────────────────────────────────────────
+            result_id = str(uuid.uuid4())
+            record = AR(
+                id=result_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                sales_agent=req.sales_agent,
+                customer=req.customer,
+                call_id=req.call_id,
+                content=content,
+                model=model,
+            )
+            db.add(record)
+            db.commit()
+
+            prev_content = content
+            if thinking:
+                yield _sse("thinking", {"content": thinking, "step": step_idx})
+            yield _sse("step_done", {
+                "step": step_idx, "agent_name": agent_name,
+                "result_id": result_id, "content": content,
+            })
+
+        yield _sse("pipeline_done", {})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")

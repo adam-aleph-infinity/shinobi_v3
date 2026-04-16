@@ -803,6 +803,9 @@ def _resolve_input(source: str, agent_id: Optional[str],
             raise RuntimeError(f"No stored result for agent {agent_id} in this context")
         return result.content
 
+    if source == "chain_previous":
+        return manual_inputs.get("_chain_previous", "")
+
     if source == "manual":
         return manual_inputs.get("manual", "")
 
