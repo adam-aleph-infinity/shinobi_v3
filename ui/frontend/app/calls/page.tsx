@@ -278,10 +278,24 @@ export default function CallsPage() {
     const localCall = _css("selectedCallId") || ctx.callId;
 
     _setSelectedAgent(localAgent);
-    try { const v = localCustomerRaw; if (v) _setSelectedCustomer(JSON.parse(v)); } catch {}
+    let restoredCustomer = "";
+    try {
+      const v = localCustomerRaw;
+      if (v) {
+        const parsed = JSON.parse(v);
+        _setSelectedCustomer(parsed);
+        restoredCustomer = parsed.customer ?? "";
+      }
+    } catch {}
     _setSelectedCallId(localCall);
     _setAgentSearch(_css("agentSearch"));
     _setCustomerSearch(_css("customerSearch"));
+
+    // Sync restored selections into the shared context so AgentSidePanel sees them.
+    // Order matters: setSalesAgent clears customer/call, so set agent first.
+    if (localAgent) ctx.setSalesAgent(localAgent);
+    if (restoredCustomer) ctx.setCustomer(restoredCustomer);
+    if (localCall) ctx.setCallId(localCall);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
