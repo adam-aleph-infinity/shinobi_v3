@@ -132,32 +132,49 @@ def _query_grok(file_ids: list[str], system_prompt: str, user_prompt: str, model
 
 # ── Content builders ───────────────────────────────────────────────────────────
 
-def _call_header(call_id: str, meta: dict) -> str:
-    h = f"CALL {call_id}"
+def _call_header(call_id: str, meta: dict, idx: int = 0, total: int = 0) -> str:
+    num = f"[{idx}/{total}] " if idx and total else ""
+    h = f"{num}CALL {call_id}"
     if meta.get("started_at"):
-        h += f"  |  {meta['started_at']}"
+        raw = meta["started_at"]
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(raw[:19])
+            h += f"  |  {dt.strftime('%d %b %Y  %H:%M')}"
+        except Exception:
+            h += f"  |  {raw}"
     if meta.get("duration_s"):
         d = int(meta["duration_s"])
         h += f"  |  {d // 60}m{d % 60:02d}s"
     return h
 
 
-def _get_net_deposits(agent: str, customer: str) -> Optional[float]:
-    """Look up net deposits for an agent/customer pair from the DB."""
+def _get_crm_pair_data(agent: str, customer: str) -> dict:
+    """Look up CRM fields for an agent/customer pair from the DB."""
     try:
         from sqlalchemy import text as _text
         from ui.backend.database import engine
         from sqlmodel import Session as _S
         with _S(engine) as db:
             rows = db.execute(
-                _text("SELECT net_deposits FROM crm_pair WHERE agent=:a AND customer=:c LIMIT 1"),
+                _text(
+                    "SELECT net_deposits, total_deposits, total_withdrawals, call_count, ftd_at "
+                    "FROM crm_pair WHERE agent=:a AND customer=:c LIMIT 1"
+                ),
                 {"a": agent, "c": customer},
             ).fetchall()
-            if rows and rows[0][0] is not None:
-                return float(rows[0][0])
+            if rows:
+                r = rows[0]
+                return {
+                    "net_deposits":      r[0],
+                    "total_deposits":    r[1],
+                    "total_withdrawals": r[2],
+                    "call_count":        r[3],
+                    "ftd_at":            r[4],
+                }
     except Exception as e:
-        print(f"[merge] net_deposits lookup: {e}")
-    return None
+        print(f"[merge] CRM data lookup: {e}")
+    return {}
 
 
 def _build_and_save_merged_transcript(
@@ -186,14 +203,18 @@ def _build_and_save_merged_transcript(
     calls_meta = _load_calls_meta(pair_dir)
     call_dirs = sorted([d for d in pair_dir.iterdir() if d.is_dir() and not d.name.startswith("_")])
 
+    # Pre-collect call dirs that have a transcript
+    valid_calls = [
+        (d, calls_meta.get(d.name, {}))
+        for d in call_dirs
+        if (d / "transcribed" / "llm_final" / "smoothed.txt").exists()
+    ]
+
     blocks: list[str] = []
-    for call_dir in call_dirs:
-        smoothed = call_dir / "transcribed" / "llm_final" / "smoothed.txt"
-        if not smoothed.exists():
-            continue
+    for idx, (call_dir, meta) in enumerate(valid_calls, 1):
         try:
-            text = smoothed.read_text(encoding="utf-8").strip()
-            header = _call_header(call_dir.name, calls_meta.get(call_dir.name, {}))
+            text = (call_dir / "transcribed" / "llm_final" / "smoothed.txt").read_text(encoding="utf-8").strip()
+            header = _call_header(call_dir.name, meta, idx=idx, total=len(valid_calls))
             blocks.append(f"{'─' * 60}\n{header}\n{'─' * 60}\n{text}")
         except Exception:
             pass
@@ -201,18 +222,23 @@ def _build_and_save_merged_transcript(
     if not blocks:
         return None
 
-    net_deposits = _get_net_deposits(agent, customer)
-    nd_line = f"Net Deposits: ${net_deposits:,.2f}\n" if net_deposits is not None else ""
+    crm = _get_crm_pair_data(agent, customer)
+    fmt_money = lambda v: f"${v:,.2f}" if v is not None else "—"
+    fmt_date  = lambda v: v[:10] if v else "—"
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     doc_header = (
         f"{'═' * 60}\n"
         f"MERGED TRANSCRIPTS\n"
-        f"Agent:    {agent}\n"
-        f"Customer: {customer}\n"
-        f"{nd_line}"
-        f"Calls:    {len(blocks)}\n"
-        f"Generated: {now}\n"
+        f"Agent:               {agent}\n"
+        f"Customer:            {customer}\n"
+        f"Calls (transcribed): {len(blocks)}\n"
+        f"CRM Call Count:      {crm.get('call_count') or '—'}\n"
+        f"Total Deposits:      {fmt_money(crm.get('total_deposits'))}\n"
+        f"Total Withdrawals:   {fmt_money(crm.get('total_withdrawals'))}\n"
+        f"Net Deposits:        {fmt_money(crm.get('net_deposits'))}\n"
+        f"First Deposit:       {fmt_date(crm.get('ftd_at'))}\n"
+        f"Generated:           {now}\n"
         f"{'═' * 60}\n\n"
     )
     content = doc_header + "\n\n".join(blocks)

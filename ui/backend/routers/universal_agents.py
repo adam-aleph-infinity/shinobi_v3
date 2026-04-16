@@ -685,20 +685,20 @@ def _resolve_input(source: str, agent_id: Optional[str],
         return path.read_text(encoding="utf-8").strip()
 
     if source == "merged_transcript":
+        from ui.backend.routers.agent_comparison import _build_and_save_merged_transcript
         merged = ui_data / "agents" / sales_agent / customer / "merged_transcript.txt"
+        # Use cache only if it's the rich format (contains the ═ header)
         if merged.exists():
-            return merged.read_text(encoding="utf-8").strip()
-        # Build on the fly
-        pair_dir = ui_data / "agents" / sales_agent / customer
-        parts = []
-        for call_dir in sorted(pair_dir.iterdir()):
-            s = call_dir / "transcribed" / "llm_final" / "smoothed.txt"
-            if s.exists():
-                parts.append(f"--- {call_dir.name} ---\n{s.read_text(encoding='utf-8').strip()}")
-        if not parts:
+            try:
+                text = merged.read_text(encoding="utf-8").strip()
+                if "═" in text[:400]:
+                    return text
+            except Exception:
+                pass
+        # Build rich version (saves to disk automatically for future cache)
+        content = _build_and_save_merged_transcript(sales_agent, customer, force=True)
+        if not content:
             raise RuntimeError(f"No transcripts found for {sales_agent}/{customer}")
-        content = "\n\n".join(parts)
-        merged.write_text(content, encoding="utf-8")
         return content
 
     if source == "notes":
