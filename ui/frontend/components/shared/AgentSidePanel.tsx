@@ -395,11 +395,13 @@ export function AgentSidePanel() {
   const [runError, setRunError] = useState("");
   const [runThinking, setRunThinking] = useState("");
   const [showThinking, setShowThinking] = useState(false);
+  const [runStream, setRunStream] = useState("");
+  const streamEndRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   async function runAgent() {
     if (!activeAgentId || !contextOk) return;
-    setRunning(true); setRunError(""); setRunProgress("Starting…"); setRunThinking(""); setShowThinking(false);
+    setRunning(true); setRunError(""); setRunProgress("Starting…"); setRunThinking(""); setShowThinking(false); setRunStream("");
     abortRef.current = new AbortController();
 
     const sourceOverrides: Record<string, string> = {};
@@ -429,6 +431,7 @@ export function AgentSidePanel() {
             const evt = JSON.parse(line.slice(5).trim());
             if (evt.type === "progress") setRunProgress(evt.data.msg ?? "");
             if (evt.type === "error")    setRunError(evt.data.msg ?? "Error");
+            if (evt.type === "stream")   { setRunStream(s => s + (evt.data.text ?? "")); streamEndRef.current?.scrollIntoView({ behavior: "smooth" }); }
             if (evt.type === "thinking") { setRunThinking(evt.data.content ?? ""); setShowThinking(true); }
             if (evt.type === "done")     { setRunProgress(""); mutateResults(); }
           } catch { /* skip */ }
@@ -542,6 +545,29 @@ export function AgentSidePanel() {
         </button>
         {runError && <p className="mt-1.5 text-[11px] text-red-400 text-center break-words">{runError}</p>}
       </div>
+
+      {/* Live stream panel */}
+      {(running || runStream) && (
+        <div className="border-b border-gray-800 shrink-0 max-h-72 overflow-y-auto">
+          <div className="px-3 pt-2 pb-1 flex items-center gap-2 sticky top-0 bg-gray-900/90 backdrop-blur-sm">
+            {running && !runStream && (
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse shrink-0" />
+            )}
+            <span className="text-[10px] text-gray-600 uppercase tracking-wide">
+              {running && !runStream ? (runProgress || "Waiting…") : "Live output"}
+            </span>
+            {running && runStream && (
+              <span className="inline-block w-1 h-3 bg-violet-400 animate-pulse ml-auto shrink-0" />
+            )}
+          </div>
+          {runStream && (
+            <pre className="px-3 pb-3 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">
+              {runStream}
+              <div ref={streamEndRef} />
+            </pre>
+          )}
+        </div>
+      )}
 
       {/* Thinking panel */}
       {(running || runThinking) && (

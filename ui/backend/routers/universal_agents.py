@@ -2,6 +2,8 @@
 import asyncio
 import json
 import os
+import queue as _queue
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -623,6 +625,66 @@ def _llm_call_anthropic_files(
     return _clean_result(text), thinking
 
 
+def _llm_call_anthropic_files_streaming(
+    system: str, user_template: str,
+    file_inputs: dict, inline_inputs: dict,
+    model: str, db: Session,
+    on_text: Any,
+) -> tuple[str, str]:
+    """Streaming variant of _llm_call_anthropic_files. Calls on_text(chunk) for each text delta."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content_blocks: list = []
+    user_text = user_template
+
+    ctx = getattr(db, "_agent_run_ctx", {})
+    for key, content in file_inputs.items():
+        user_text = user_text.replace(f"{{{key}}}", "")
+        file_id = _get_or_upload_anthropic(
+            content, key,
+            ctx.get("source_for_key", {}).get(key, ""),
+            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
+            db,
+        )
+        content_blocks.append({
+            "type": "document",
+            "source": {"type": "file", "file_id": file_id},
+            "title": key,
+        })
+
+    for key, val in inline_inputs.items():
+        user_text = user_text.replace(f"{{{key}}}", val)
+
+    content_blocks.append({"type": "text", "text": user_text.strip()})
+
+    text_acc: list[str] = []
+    thinking_acc: list[str] = []
+
+    with client.beta.messages.stream(
+        model=model,
+        max_tokens=16000,
+        system=system,
+        messages=[{"role": "user", "content": content_blocks}],
+        betas=["files-api-2025-04-14"],
+        thinking={"type": "enabled", "budget_tokens": 8000},
+        temperature=1,
+    ) as s:
+        for event in s:
+            if event.type == "content_block_delta":
+                if event.delta.type == "text_delta":
+                    text_acc.append(event.delta.text)
+                    on_text(event.delta.text)
+                elif event.delta.type == "thinking_delta":
+                    thinking_acc.append(event.delta.thinking)
+
+    return _clean_result("".join(text_acc)), "".join(thinking_acc).strip()
+
+
 def _llm_call_with_files(
     system: str, user_template: str,
     file_inputs: dict, inline_inputs: dict,
@@ -824,14 +886,50 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 "msg": f"Calling {model}… ({len(file_inputs)} file(s), {len(inline_inputs)} inline)"
             })
 
-            content, thinking = await loop.run_in_executor(
-                None,
-                lambda: _llm_call_with_files(
-                    system_prompt, user_template,
-                    file_inputs, inline_inputs,
-                    model, temperature, db,
-                ),
-            )
+            if model.startswith("claude-"):
+                # Stream Anthropic response token-by-token via a queue
+                q: _queue.Queue = _queue.Queue()
+                result_holder: list = []
+                error_holder: list = []
+
+                def _do_stream():
+                    try:
+                        c, t = _llm_call_anthropic_files_streaming(
+                            system_prompt, user_template,
+                            file_inputs, inline_inputs,
+                            model, db,
+                            on_text=lambda chunk: q.put(("stream", chunk)),
+                        )
+                        result_holder.append((c, t))
+                    except Exception as exc:
+                        error_holder.append(str(exc))
+                    finally:
+                        q.put(None)
+
+                threading.Thread(target=_do_stream, daemon=True).start()
+
+                while True:
+                    item = await loop.run_in_executor(None, q.get)
+                    if item is None:
+                        break
+                    kind, data = item
+                    if kind == "stream":
+                        yield _sse("stream", {"text": data})
+
+                if error_holder:
+                    yield _sse("error", {"msg": error_holder[0]})
+                    return
+
+                content, thinking = result_holder[0]
+            else:
+                content, thinking = await loop.run_in_executor(
+                    None,
+                    lambda: _llm_call_with_files(
+                        system_prompt, user_template,
+                        file_inputs, inline_inputs,
+                        model, temperature, db,
+                    ),
+                )
 
             # Save result (thinking not persisted — it's ephemeral reasoning)
             result_id = str(uuid.uuid4())
