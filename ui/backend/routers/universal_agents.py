@@ -514,7 +514,7 @@ def _llm_call_gemini_files(
     file_inputs: dict, inline_inputs: dict,
     model: str, temperature: float,
     db: Session,
-) -> str:
+) -> tuple[str, str]:
     import google.generativeai as genai
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -555,7 +555,7 @@ def _llm_call_gemini_files(
         generation_config=genai.GenerationConfig(**cfg) if cfg else None,
     )
     try:
-        return _clean_result(response.text)
+        return _clean_result(response.text), ""
     except ValueError as e:
         finish = ""
         try:
@@ -570,7 +570,7 @@ def _llm_call_anthropic_files(
     file_inputs: dict, inline_inputs: dict,
     model: str, temperature: float,
     db: Session,
-) -> str:
+) -> tuple[str, str]:
     import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -603,20 +603,24 @@ def _llm_call_anthropic_files(
 
     kwargs: dict = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": 16000,
         "system": system,
         "messages": [{"role": "user", "content": content_blocks}],
         "betas": ["files-api-2025-04-14"],
+        "thinking": {"type": "enabled", "budget_tokens": 8000},
+        "temperature": 1,  # Required when extended thinking is enabled
     }
-    if temperature is not None and temperature > 0:
-        kwargs["temperature"] = temperature
 
     response = client.beta.messages.create(**kwargs)
     text = "\n\n".join(
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
     )
-    return _clean_result(text)
+    thinking = "\n\n".join(
+        getattr(block, "thinking", "") for block in response.content
+        if getattr(block, "type", None) == "thinking"
+    ).strip()
+    return _clean_result(text), thinking
 
 
 def _llm_call_with_files(
@@ -624,8 +628,8 @@ def _llm_call_with_files(
     file_inputs: dict, inline_inputs: dict,
     model: str, temperature: float,
     db: Session,
-) -> str:
-    """Route to provider-specific file-upload implementation. Never inlines file inputs."""
+) -> tuple[str, str]:
+    """Route to provider-specific file-upload implementation. Returns (content, thinking)."""
     if model.startswith("gemini"):
         return _llm_call_gemini_files(
             system, user_template, file_inputs, inline_inputs, model, temperature, db)
@@ -666,7 +670,7 @@ def _llm_call_with_files(
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=temperature,
     )
-    return _clean_result(resp.choices[0].message.content or "")
+    return _clean_result(resp.choices[0].message.content or ""), ""
 
 
 def _resolve_input(source: str, agent_id: Optional[str],
@@ -820,7 +824,7 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 "msg": f"Calling {model}… ({len(file_inputs)} file(s), {len(inline_inputs)} inline)"
             })
 
-            content = await loop.run_in_executor(
+            content, thinking = await loop.run_in_executor(
                 None,
                 lambda: _llm_call_with_files(
                     system_prompt, user_template,
@@ -829,7 +833,7 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 ),
             )
 
-            # Save result
+            # Save result (thinking not persisted — it's ephemeral reasoning)
             result_id = str(uuid.uuid4())
             record = AR(
                 id=result_id,
@@ -844,6 +848,8 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
             db.add(record)
             db.commit()
 
+            if thinking:
+                yield _sse("thinking", {"content": thinking})
             yield _sse("done", {"content": content, "result_id": result_id})
 
         except Exception as e:

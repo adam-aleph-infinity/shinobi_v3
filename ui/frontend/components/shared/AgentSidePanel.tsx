@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import {
   Bot, Play, Loader2, AlertCircle, Clock,
   ChevronDown, ChevronUp, RefreshCw, Eye, EyeOff,
-  Copy, Check,
+  Copy, Check, Brain,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -393,11 +393,13 @@ export function AgentSidePanel() {
   const [running, setRunning] = useState(false);
   const [runProgress, setRunProgress] = useState("");
   const [runError, setRunError] = useState("");
+  const [runThinking, setRunThinking] = useState("");
+  const [showThinking, setShowThinking] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   async function runAgent() {
     if (!activeAgentId || !contextOk) return;
-    setRunning(true); setRunError(""); setRunProgress("Starting…");
+    setRunning(true); setRunError(""); setRunProgress("Starting…"); setRunThinking(""); setShowThinking(false);
     abortRef.current = new AbortController();
 
     const sourceOverrides: Record<string, string> = {};
@@ -427,6 +429,7 @@ export function AgentSidePanel() {
             const evt = JSON.parse(line.slice(5).trim());
             if (evt.type === "progress") setRunProgress(evt.data.msg ?? "");
             if (evt.type === "error")    setRunError(evt.data.msg ?? "Error");
+            if (evt.type === "thinking") { setRunThinking(evt.data.content ?? ""); setShowThinking(true); }
             if (evt.type === "done")     { setRunProgress(""); mutateResults(); }
           } catch { /* skip */ }
         }
@@ -539,6 +542,36 @@ export function AgentSidePanel() {
         </button>
         {runError && <p className="mt-1.5 text-[11px] text-red-400 text-center break-words">{runError}</p>}
       </div>
+
+      {/* Thinking panel */}
+      {(running || runThinking) && (
+        <div className="border-b border-gray-800 shrink-0">
+          <button
+            onClick={() => setShowThinking(o => !o)}
+            className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-800/40 transition-colors text-left"
+          >
+            <Brain className="w-3 h-3 text-violet-400 shrink-0" />
+            <span className="text-[11px] text-violet-300/70 flex-1">
+              {running && !runThinking ? "Thinking…" : "Thinking"}
+            </span>
+            {running && !runThinking && <Loader2 className="w-3 h-3 animate-spin text-violet-400/60 shrink-0" />}
+            {runThinking && (
+              showThinking
+                ? <ChevronUp className="w-3 h-3 text-gray-500 shrink-0" />
+                : <ChevronDown className="w-3 h-3 text-gray-500 shrink-0" />
+            )}
+          </button>
+          {showThinking && runThinking && (
+            <div className="px-3 pb-3">
+              <div className="rounded-lg border border-violet-700/30 bg-violet-950/20 p-3 max-h-64 overflow-y-auto">
+                <pre className="text-[10px] text-violet-300/70 font-mono whitespace-pre-wrap break-words leading-relaxed">
+                  {runThinking}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Results */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
