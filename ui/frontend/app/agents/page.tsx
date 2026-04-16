@@ -269,29 +269,46 @@ function groupAgents(agents: UniversalAgent[]): AgentGroup[] {
 function AgentRow({ agent, selected, onSelect }: {
   agent: UniversalAgent; selected: string | null; onSelect: (a: UniversalAgent) => void;
 }) {
+  const { setActiveAgent, activeAgentId } = useAppCtx();
+  const isActive = activeAgentId === agent.id;
+
   return (
-    <button
-      onClick={() => onSelect(agent)}
-      className={cn(
-        "w-full text-left px-2.5 py-2 rounded-lg text-xs transition-colors",
-        selected === agent.id
-          ? "bg-indigo-600/20 border border-indigo-600/30 text-white"
-          : "text-gray-400 hover:bg-gray-800 hover:text-white",
-      )}
-    >
-      <div className="flex items-center gap-1.5">
-        <Bot className="w-3 h-3 text-indigo-400 shrink-0" />
-        <span className="font-medium truncate flex-1">{agent.name}</span>
-        {agent.is_default && <span className="text-[9px] bg-indigo-900 text-indigo-400 px-1 rounded">default</span>}
-      </div>
-      <div className="mt-0.5 pl-[18px] flex flex-wrap gap-0.5">
-        {(agent.inputs ?? []).slice(0, 3).map(inp => {
-          const s = sourceBadge(inp.source);
-          return <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>{inp.key || s.label}</span>;
-        })}
-        {(agent.inputs ?? []).length > 3 && <span className="text-[9px] text-gray-600">+{agent.inputs.length - 3}</span>}
-      </div>
-    </button>
+    <div className={cn(
+      "group flex items-center rounded-lg text-xs transition-colors",
+      selected === agent.id
+        ? "bg-indigo-600/20 border border-indigo-600/30"
+        : "hover:bg-gray-800",
+    )}>
+      <button onClick={() => onSelect(agent)} className="flex-1 min-w-0 text-left px-2.5 py-2">
+        <div className="flex items-center gap-1.5">
+          <Bot className="w-3 h-3 text-indigo-400 shrink-0" />
+          <span className={cn("font-medium truncate flex-1", selected === agent.id ? "text-white" : "text-gray-400 group-hover:text-white")}>
+            {agent.name}
+          </span>
+          {isActive && <span className="text-[9px] bg-violet-900/60 text-violet-400 border border-violet-700/50 px-1 rounded shrink-0">active</span>}
+          {agent.is_default && !isActive && <span className="text-[9px] bg-indigo-900 text-indigo-400 px-1 rounded shrink-0">default</span>}
+        </div>
+        <div className="mt-0.5 pl-[18px] flex flex-wrap gap-0.5">
+          {(agent.inputs ?? []).slice(0, 3).map(inp => {
+            const s = sourceBadge(inp.source);
+            return <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>{inp.key || s.label}</span>;
+          })}
+          {(agent.inputs ?? []).length > 3 && <span className="text-[9px] text-gray-600">+{agent.inputs.length - 3}</span>}
+        </div>
+      </button>
+      <button
+        onClick={() => setActiveAgent(isActive ? "" : agent.id, isActive ? "" : agent.name, isActive ? "" : (agent.agent_class || ""))}
+        className={cn(
+          "shrink-0 mr-1.5 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border",
+          isActive
+            ? "opacity-100 bg-violet-900/60 border-violet-700/50 text-violet-300 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400"
+            : "opacity-0 group-hover:opacity-100 bg-gray-800 border-gray-700 text-gray-400 hover:bg-violet-900/40 hover:border-violet-700/50 hover:text-violet-300",
+        )}
+        title={isActive ? "Deselect agent" : "Set as active agent"}
+      >
+        {isActive ? "✓" : "use"}
+      </button>
+    </div>
   );
 }
 
@@ -942,6 +959,7 @@ function PipelineRunPanel({ pipeline, agents }: { pipeline: Pipeline; agents: Un
 
 function PipelinesTab() {
   const { mutate } = useSWRConfig();
+  const { setActivePipeline, activePipelineId } = useAppCtx();
   const { data: pipelines, isLoading } = useSWR<Pipeline[]>(`${API}/pipelines`, fetcher);
   const { data: agents } = useSWR<UniversalAgent[]>(`${API}/universal-agents`, fetcher);
   const [selected, setSelected] = useState<string | null>(null);
@@ -1023,19 +1041,40 @@ function PipelinesTab() {
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {isLoading && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-          {(pipelines ?? []).map(p => (
-            <button key={p.id} onClick={() => openEdit(p)}
-              className={cn("w-full text-left px-3 py-2.5 rounded-lg text-xs transition-colors",
-                selected === p.id ? "bg-teal-600/20 border border-teal-600/30 text-white" : "text-gray-400 hover:bg-gray-800 hover:text-white")}>
-              <div className="flex items-center gap-1.5">
-                <Workflow className="w-3 h-3 text-teal-400 shrink-0" />
-                <span className="font-medium truncate flex-1">{p.name}</span>
+          {(pipelines ?? []).map(p => {
+            const isActive = activePipelineId === p.id;
+            return (
+              <div key={p.id} className={cn(
+                "group flex items-center rounded-lg text-xs transition-colors",
+                selected === p.id ? "bg-teal-600/20 border border-teal-600/30" : "hover:bg-gray-800",
+              )}>
+                <button onClick={() => openEdit(p)} className="flex-1 min-w-0 text-left px-3 py-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <Workflow className="w-3 h-3 text-teal-400 shrink-0" />
+                    <span className={cn("font-medium truncate flex-1", selected === p.id ? "text-white" : "text-gray-400 group-hover:text-white")}>
+                      {p.name}
+                    </span>
+                    {isActive && <span className="text-[9px] bg-teal-900/60 text-teal-400 border border-teal-700/50 px-1 rounded shrink-0">active</span>}
+                  </div>
+                  <p className="text-[10px] text-gray-600 mt-0.5 pl-[18px]">
+                    {(p.steps ?? []).length} step{(p.steps ?? []).length !== 1 ? "s" : ""} · {p.scope}
+                  </p>
+                </button>
+                <button
+                  onClick={() => setActivePipeline(isActive ? "" : p.id, isActive ? "" : p.name)}
+                  className={cn(
+                    "shrink-0 mr-1.5 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border",
+                    isActive
+                      ? "opacity-100 bg-teal-900/60 border-teal-700/50 text-teal-300 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400"
+                      : "opacity-0 group-hover:opacity-100 bg-gray-800 border-gray-700 text-gray-400 hover:bg-teal-900/40 hover:border-teal-700/50 hover:text-teal-300",
+                  )}
+                  title={isActive ? "Deselect pipeline" : "Set as active pipeline"}
+                >
+                  {isActive ? "✓" : "use"}
+                </button>
               </div>
-              <p className="text-[10px] text-gray-600 mt-0.5 pl-[18px]">
-                {(p.steps ?? []).length} step{(p.steps ?? []).length !== 1 ? "s" : ""} · {p.scope}
-              </p>
-            </button>
-          ))}
+            );
+          })}
           {!isLoading && (pipelines ?? []).length === 0 && (
             <p className="text-xs text-gray-600 text-center py-4">No pipelines yet</p>
           )}

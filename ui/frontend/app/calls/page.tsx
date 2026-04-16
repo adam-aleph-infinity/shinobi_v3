@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -13,6 +13,7 @@ import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
 import { DragHandle } from "@/components/shared/DragHandle";
 import { AgentSidePanel } from "@/components/shared/AgentSidePanel";
+import { PipelineSidePanel } from "@/components/shared/PipelineSidePanel";
 import { useResize } from "@/lib/useResize";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
@@ -230,6 +231,16 @@ function _cssSet(k: string, v: string) { try { sessionStorage.setItem(`calls_${k
 
 export default function CallsPage() {
   const ctx = useAppCtx();
+  const [sidePanel, setSidePanel] = useState<"agent" | "pipeline">("agent");
+
+  // Auto-switch to pipeline tab when a pipeline becomes active
+  const prevPipelineId = useRef(ctx.activePipelineId);
+  useEffect(() => {
+    if (ctx.activePipelineId && ctx.activePipelineId !== prevPipelineId.current) {
+      setSidePanel("pipeline");
+    }
+    prevPipelineId.current = ctx.activePipelineId;
+  }, [ctx.activePipelineId]);
 
   const [agentW, agentDrag]       = useResize(180, 120, 360);
   const [customerW, customerDrag] = useResize(180, 120, 360);
@@ -699,11 +710,31 @@ export default function CallsPage() {
           )}
         </div>
 
-        {/* Agent side panel — always visible */}
+        {/* Agent / Pipeline side panel */}
         <>
           <DragHandle onMouseDown={notesDrag} />
           <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col shrink-0" style={{ width: notesW }}>
-            <AgentSidePanel />
+            {/* Tab toggle — only when both are set */}
+            {ctx.activeAgentId && ctx.activePipelineId && (
+              <div className="flex border-b border-gray-800 shrink-0">
+                {(["agent", "pipeline"] as const).map(tab => (
+                  <button
+                    key={tab}
+                    onClick={() => setSidePanel(tab)}
+                    className={cn(
+                      "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
+                      sidePanel === tab
+                        ? tab === "pipeline" ? "bg-teal-900/30 text-teal-300 border-b-2 border-teal-500" : "bg-violet-900/30 text-violet-300 border-b-2 border-violet-500"
+                        : "text-gray-500 hover:text-white hover:bg-gray-800/60",
+                    )}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* Panel content */}
+            {(sidePanel === "pipeline" && ctx.activePipelineId) ? <PipelineSidePanel /> : <AgentSidePanel />}
           </div>
         </>
       </div>

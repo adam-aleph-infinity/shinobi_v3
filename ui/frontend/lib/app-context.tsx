@@ -17,6 +17,9 @@ export interface AppCtxType {
   activeAgentId: string;
   activeAgentName: string;
   activeAgentClass: string;
+  // Active pipeline
+  activePipelineId: string;
+  activePipelineName: string;
 
   setSalesAgent: (v: string) => void;
   setCustomer: (v: string, agentOverride?: string) => void;
@@ -24,6 +27,7 @@ export interface AppCtxType {
   setLlmAgent: (name: string, type: LLMAgentType) => void;
   setPersonaAgent: (id: string, name: string) => void;
   setActiveAgent: (id: string, name: string, cls: string) => void;
+  setActivePipeline: (id: string, name: string) => void;
   clearAll: () => void;
 }
 
@@ -32,8 +36,10 @@ const AppCtx = createContext<AppCtxType>({
   llmAgentName: "", llmAgentType: "",
   personaAgentId: "", personaAgentName: "",
   activeAgentId: "", activeAgentName: "", activeAgentClass: "",
+  activePipelineId: "", activePipelineName: "",
   setSalesAgent: () => {}, setCustomer: () => {}, setCallId: () => {},
-  setLlmAgent: () => {}, setPersonaAgent: () => {}, setActiveAgent: () => {}, clearAll: () => {},
+  setLlmAgent: () => {}, setPersonaAgent: () => {}, setActiveAgent: () => {},
+  setActivePipeline: () => {}, clearAll: () => {},
 });
 
 function ss(k: string) { try { return sessionStorage.getItem(k) ?? ""; } catch { return ""; } }
@@ -49,9 +55,11 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const [llmType,         _setLT] = useState<LLMAgentType>("");
   const [personaId,       _setPI] = useState("");
   const [personaNm,       _setPN] = useState("");
-  const [activeAgentId,   _setAAI] = useState("");
-  const [activeAgentName, _setAAN] = useState("");
-  const [activeAgentClass,_setAAC] = useState("");
+  const [activeAgentId,    _setAAI] = useState("");
+  const [activeAgentName,  _setAAN] = useState("");
+  const [activeAgentClass, _setAAC] = useState("");
+  const [activePipelineId,   _setAPI] = useState("");
+  const [activePipelineName, _setAPN] = useState("");
 
   useEffect(() => {
     _setSA(ss("ctx_agent"));
@@ -64,6 +72,8 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     _setAAI(ss("ctx_active_agent_id"));
     _setAAN(ss("ctx_active_agent_name"));
     _setAAC(ss("ctx_active_agent_class"));
+    _setAPI(ss("ctx_active_pipeline_id"));
+    _setAPN(ss("ctx_active_pipeline_name"));
   }, []);
 
   const setSalesAgent = useCallback((v: string) => {
@@ -98,13 +108,19 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     _setAAC(cls);  ssSet("ctx_active_agent_class", cls);
   }, []);
 
+  const setActivePipeline = useCallback((id: string, name: string) => {
+    _setAPI(id);   ssSet("ctx_active_pipeline_id",   id);
+    _setAPN(name); ssSet("ctx_active_pipeline_name", name);
+  }, []);
+
   const clearAll = useCallback(() => {
     _setSA(""); _setCu(""); _setCa(""); _setLN(""); _setLT(""); _setPI(""); _setPN("");
-    _setAAI(""); _setAAN(""); _setAAC("");
+    _setAAI(""); _setAAN(""); _setAAC(""); _setAPI(""); _setAPN("");
     [
       "ctx_agent","ctx_customer","ctx_call","ctx_llm_name","ctx_llm_type",
       "ctx_persona_id","ctx_persona_name",
       "ctx_active_agent_id","ctx_active_agent_name","ctx_active_agent_class",
+      "ctx_active_pipeline_id","ctx_active_pipeline_name",
     ].forEach(k => ssSet(k, ""));
   }, []);
 
@@ -114,7 +130,9 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
       llmAgentName: llmName, llmAgentType: llmType,
       personaAgentId: personaId, personaAgentName: personaNm,
       activeAgentId, activeAgentName, activeAgentClass,
-      setSalesAgent, setCustomer, setCallId, setLlmAgent, setPersonaAgent, setActiveAgent, clearAll,
+      activePipelineId, activePipelineName,
+      setSalesAgent, setCustomer, setCallId, setLlmAgent, setPersonaAgent, setActiveAgent,
+      setActivePipeline, clearAll,
     }}>
       {children}
     </AppCtx.Provider>

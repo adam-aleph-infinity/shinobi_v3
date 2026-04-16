@@ -1,7 +1,7 @@
 "use client";
 import { useAppCtx } from "@/lib/app-context";
 import useSWR from "swr";
-import { User, ChevronRight, X, ChevronDown, Bot } from "lucide-react";
+import { User, ChevronRight, X, ChevronDown, Bot, Workflow } from "lucide-react";
 import { useRef, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +12,13 @@ interface UniversalAgent {
   name: string;
   agent_class: string;
   is_default: boolean;
+}
+
+interface Pipeline {
+  id: string;
+  name: string;
+  scope: string;
+  steps: { agent_id: string }[];
 }
 
 // ── Universal Agent Picker ─────────────────────────────────────────────────────
@@ -116,18 +123,103 @@ function AgentPicker({
   );
 }
 
+// ── Pipeline Picker ────────────────────────────────────────────────────────────
+function PipelinePicker({
+  value,
+  pipelines,
+  onSelect,
+  onClear,
+}: {
+  value: string;
+  pipelines: Pipeline[] | undefined;
+  onSelect: (p: Pipeline) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  return (
+    <div className="relative shrink-0 flex items-center gap-1" ref={ref}>
+      <span className="text-[10px] text-gray-600 font-medium">Pipeline</span>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={cn(
+          "flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition-colors",
+          value
+            ? "bg-teal-900/50 border-teal-700/60 text-teal-300 hover:bg-teal-900/70"
+            : "bg-gray-800/60 border-gray-700/60 text-gray-500 hover:text-gray-300 hover:bg-gray-800"
+        )}
+      >
+        <Workflow className="w-2.5 h-2.5 shrink-0" />
+        <span className="max-w-[120px] truncate">{value || "none"}</span>
+        <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
+      </button>
+      {value && (
+        <button onClick={onClear} className="text-gray-600 hover:text-gray-400 transition-colors -ml-0.5">
+          <X className="w-2.5 h-2.5" />
+        </button>
+      )}
+
+      {open && (
+        <div className="absolute right-0 top-full mt-1 w-56 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 py-1 overflow-hidden max-h-72 overflow-y-auto">
+          <p className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-semibold border-b border-gray-800 sticky top-0 bg-gray-900">
+            Active Pipeline
+          </p>
+          {value && (
+            <button
+              onClick={() => { onClear(); setOpen(false); }}
+              className="w-full px-3 py-2 text-left text-xs text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
+            >
+              — Clear
+            </button>
+          )}
+          {(pipelines ?? []).length === 0 && (
+            <p className="px-3 py-3 text-xs text-gray-600 text-center">
+              No pipelines yet. Create one in <span className="text-teal-400">Pipelines</span>.
+            </p>
+          )}
+          {(pipelines ?? []).map(p => (
+            <button
+              key={p.id}
+              onClick={() => { onSelect(p); setOpen(false); }}
+              className={cn(
+                "w-full px-3 py-1.5 text-left text-xs flex items-center justify-between transition-colors",
+                value === p.name
+                  ? "bg-teal-900/40 text-teal-300"
+                  : "text-gray-300 hover:bg-gray-800 hover:text-white"
+              )}
+            >
+              <span className="truncate">{p.name}</span>
+              <span className="text-[9px] text-gray-600 shrink-0 ml-1">{p.steps?.length ?? 0}s</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ContextBar ─────────────────────────────────────────────────────────────────
 export function ContextBar() {
   const {
     salesAgent, customer, callId,
-    activeAgentName,
+    activeAgentName, activePipelineName,
     setSalesAgent, setCustomer, setCallId,
-    setActiveAgent,
+    setActiveAgent, setActivePipeline,
   } = useAppCtx();
 
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
+  const { data: pipelines } = useSWR<Pipeline[]>("/api/pipelines", fetcher);
 
-  const hasCtx = !!(salesAgent || activeAgentName);
+  const hasCtx = !!(salesAgent || activeAgentName || activePipelineName);
 
   return (
     <div className={cn(
@@ -164,8 +256,14 @@ export function ContextBar() {
         </span>
       )}
 
-      {/* ── Agent picker — right-aligned ── */}
+      {/* ── Pickers — right-aligned ── */}
       <div className="ml-auto flex items-center gap-3">
+        <PipelinePicker
+          value={activePipelineName}
+          pipelines={pipelines}
+          onSelect={p => setActivePipeline(p.id, p.name)}
+          onClear={() => setActivePipeline("", "")}
+        />
         <AgentPicker
           value={activeAgentName}
           agents={agents}
