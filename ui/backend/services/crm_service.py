@@ -2,6 +2,7 @@
 import json
 import re
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -418,49 +419,83 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
         if (crm_url, str(account_id)) not in {(c, a) for c, a in all_pairs}:
             all_pairs.insert(0, (crm_url, str(account_id)))
 
-        # Step 2: for any configured CRM not covered by the cache, actively
-        # query the CRM API with each alias to discover account IDs there.
+        # Step 2: for any configured CRM not covered by the cache, discover
+        # account IDs with a single batched request (all aliases at once).
         covered_crms = {p[0] for p in all_pairs}
+        discovery_cache: dict[str, list[dict]] = {}  # crm_url -> raw API data (reused in step 3)
         for crm in creds.crm_urls:
             if crm in covered_crms:
                 continue
-            for name in query_names:
-                try:
-                    discovered = list_agent_customer_pairs(
-                        crm, creds,
-                        agent_filter=name,
-                        customer_filter=customer,
-                        min_calls=1,
-                    )
-                    for p in discovered:
-                        if p.get("customer", "").lower() == customer.lower():
-                            acc = str(p.get("account_id", ""))
-                            if acc and (crm, acc) not in {(c, a) for c, a in all_pairs}:
-                                all_pairs.append((crm, acc))
-                                covered_crms.add(crm)
-                                print(f"[crm_service] Discovered account {acc} on {crm} "
-                                      f"for {name}/{customer}")
-                except Exception as _e:
-                    print(f"[crm_service] Discovery {crm}/{name}: {_e}")
+            try:
+                data = fetch_accounts(crm, creds, callers=query_names)
+                discovery_cache[crm] = data
+                seen_pairs = {(c, a) for c, a in all_pairs}
+                for agent_entry in data:
+                    for acc in agent_entry.get("accounts", []):
+                        cname = f'{acc["fname"]} {acc.get("mname", "")} {acc["lname"]}'.strip()
+                        cname = " ".join(cname.split())
+                        if cname.lower() != customer.lower():
+                            continue
+                        acc_id = str(acc["id"])
+                        if (crm, acc_id) not in seen_pairs:
+                            all_pairs.append((crm, acc_id))
+                            seen_pairs.add((crm, acc_id))
+                            covered_crms.add(crm)
+                            print(f"[crm_service] Discovered account {acc_id} on {crm} "
+                                  f"for {customer}")
+            except Exception as _e:
+                print(f"[crm_service] Discovery {crm}: {_e}")
+
+        # Step 3: fetch calls — group pairs by CRM so we make one HTTP request
+        # per unique CRM (all aliases batched into callers[] in a single call).
+        pairs_by_crm: dict[str, set[int]] = defaultdict(set)
+        for pair_crm, pair_acc in all_pairs:
+            try:
+                pairs_by_crm[pair_crm].add(int(pair_acc))
+            except (ValueError, TypeError):
+                pass
 
         all_calls: list[dict] = []
         existing_ids: set[str] = set()
 
-        for pair_crm, pair_acc in all_pairs:
-            for name in query_names:
-                try:
-                    found = get_calls_for_pair(
-                        pair_crm, creds,
-                        agent_name=name, account_id=int(pair_acc),
-                    )
-                    for c in found:
-                        cid = str(c.get("call_id", ""))
-                        if cid and cid not in existing_ids:
-                            c["agent"] = agent   # normalize to canonical name
-                            all_calls.append(c)
-                            existing_ids.add(cid)
-                except Exception as _e:
-                    print(f"[crm_service] refresh_calls {pair_crm}/{name}/{pair_acc}: {_e}")
+        for pair_crm, pair_acc_ints in pairs_by_crm.items():
+            try:
+                # Reuse discovery data if already fetched; otherwise fetch now
+                data = discovery_cache.get(pair_crm) or fetch_accounts(
+                    pair_crm, creds, callers=query_names
+                )
+                for agent_entry in data:
+                    fallback_aname = f'{agent_entry["fname"]} {agent_entry["lname"]}'.strip()
+                    for acc in agent_entry.get("accounts", []):
+                        if acc["id"] not in pair_acc_ints:
+                            continue
+                        cname = f'{acc["fname"]} {acc.get("mname", "")} {acc["lname"]}'.strip()
+                        cname = " ".join(cname.split())
+                        for c in acc.get("calls", []):
+                            if not isinstance(c, dict):
+                                continue
+                            user = c.get("user") or {}
+                            if user and user.get("fname"):
+                                caller_name = f'{user["fname"]} {user["lname"]}'.strip()
+                            else:
+                                caller_name = fallback_aname
+                            if not any(qn.lower() in caller_name.lower()
+                                       for qn in query_names):
+                                continue
+                            cid = str(c.get("id", ""))
+                            if cid and cid not in existing_ids:
+                                all_calls.append({
+                                    "call_id":     c["id"],
+                                    "account_id":  acc["id"],
+                                    "customer":    cname,
+                                    "agent":       agent,
+                                    "duration_s":  c.get("duration"),
+                                    "started_at":  c.get("call_started_at"),
+                                    "record_path": c.get("record_path"),
+                                })
+                                existing_ids.add(cid)
+            except Exception as _e:
+                print(f"[crm_service] refresh_calls {pair_crm}: {_e}")
 
         if not all_calls and not existing_ids:
             # Nothing found at all — return a soft error so the caller can surface it
@@ -509,7 +544,8 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
             print(f"[crm_service] Warning: DB update failed after refresh_calls: {db_err}")
 
         print(f"[crm_service] refresh_calls {agent}/{customer}: "
-              f"{len(all_calls)} calls from {len(all_pairs)} CRM(s) × {len(query_names)} name(s)")
+              f"{len(all_calls)} calls from {len(pairs_by_crm)} CRM(s) "
+              f"({len(query_names)} name(s) batched)")
 
         return {"count": len(all_calls), "error": None}
 

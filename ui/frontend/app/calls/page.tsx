@@ -245,6 +245,9 @@ export default function CallsPage() {
   const [selectedCallId, _setSelectedCallId]     = useState("");
   const [agentSearch, _setAgentSearch]           = useState("");
   const [customerSearch, _setCustomerSearch]     = useState("");
+  const [checkedCallIds, setCheckedCallIds]       = useState<Set<string>>(new Set());
+  const [batchTranscribing, setBatchTranscribing] = useState(false);
+  const [batchError, setBatchError]               = useState("");
 
   const setSelectedAgent = (v: string) => {
     _setSelectedAgent(v); _cssSet("selectedAgent", v);
@@ -253,6 +256,7 @@ export default function CallsPage() {
   const setSelectedCustomer = (v: Customer | null) => {
     _setSelectedCustomer(v); _cssSet("selectedCustomer", v ? JSON.stringify(v) : "");
     if (v) ctx.setCustomer(v.customer);
+    setCheckedCallIds(new Set());
   };
   const setSelectedCallId = (v: string) => {
     _setSelectedCallId(v); _cssSet("selectedCallId", v);
@@ -368,6 +372,53 @@ export default function CallsPage() {
     }
   }
 
+  // ── Batch transcribe ──────────────────────────────────────────────────────
+  function toggleCheck(callId: string) {
+    setCheckedCallIds(prev => {
+      const next = new Set(prev);
+      if (next.has(callId)) next.delete(callId);
+      else next.add(callId);
+      return next;
+    });
+  }
+
+  function selectUntranscribed() {
+    const ids = calls
+      .filter(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path)
+      .map(c => c.call_id);
+    setCheckedCallIds(new Set(ids));
+  }
+
+  async function handleBatchTranscribe() {
+    if (!selectedCustomer || checkedCallIds.size === 0) return;
+    setBatchTranscribing(true);
+    setBatchError("");
+    try {
+      await Promise.all([...checkedCallIds].map(async (callId) => {
+        const callData = calls.find(c => c.call_id === callId);
+        if (!callData?.record_path) return;
+        await fetch("/api/transcription/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            crm_url:     selectedCustomer.crm_url,
+            account_id:  selectedCustomer.account_id,
+            agent:       selectedAgent,
+            customer:    selectedCustomer.customer,
+            call_id:     callId,
+            record_path: callData.record_path,
+          }),
+        });
+      }));
+      setCheckedCallIds(new Set());
+      mutateTx();
+    } catch (e: any) {
+      setBatchError(e.message ?? "Failed to queue some transcriptions");
+    } finally {
+      setBatchTranscribing(false);
+    }
+  }
+
   // ── Filtered lists ────────────────────────────────────────────────────────
   const filteredAgents    = (agents ?? []).filter(a => a.agent.toLowerCase().includes(agentSearch.toLowerCase()));
   const filteredCustomers = (customers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
@@ -476,12 +527,42 @@ export default function CallsPage() {
 
       {/* Panel 3 — Calls */}
       <CollapsiblePanel title="Calls" width={callsW} collapsed={callsCollapsed} onToggle={() => setCallsCollapsed(c => !c)}>
-        <div className="px-3 py-2 border-b border-gray-800 shrink-0">
+        <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
           {calls.length > 0 && (
             <p className="text-[10px] text-gray-500">
               {calls.length} calls · {calls.filter(c => c.tx?.has_llm_smoothed || c.tx?.has_llm_voted).length} transcribed
             </p>
           )}
+          {calls.some(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path) && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={selectUntranscribed}
+                className="text-[10px] text-gray-500 hover:text-gray-300 underline transition-colors"
+              >
+                Select untranscribed
+              </button>
+              {checkedCallIds.size > 0 && (
+                <>
+                  <span className="text-[10px] text-gray-700">·</span>
+                  <button
+                    onClick={handleBatchTranscribe}
+                    disabled={batchTranscribing}
+                    className="flex items-center gap-1 px-2 py-0.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[10px] rounded transition-colors"
+                  >
+                    {batchTranscribing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Mic2 className="w-3 h-3" />}
+                    {batchTranscribing ? "Queuing…" : `Transcribe ${checkedCallIds.size}`}
+                  </button>
+                  <button
+                    onClick={() => setCheckedCallIds(new Set())}
+                    className="text-[10px] text-gray-600 hover:text-gray-400 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+          {batchError && <p className="text-[10px] text-red-400">{batchError}</p>}
         </div>
         <div className="flex-1 overflow-y-auto">
           {!selectedCustomer && (
@@ -500,27 +581,49 @@ export default function CallsPage() {
             const hasTranscript = call.tx?.has_llm_smoothed || call.tx?.has_llm_voted || call.tx?.has_pipeline_final;
             const hasNotes = notesCallIds.has(call.call_id);
             const isSelected = selectedCallId === call.call_id;
+            const isChecked = checkedCallIds.has(call.call_id);
             return (
-              <button key={call.call_id} onClick={() => setSelectedCallId(selectedCallId === call.call_id ? "" : call.call_id)}
-                className={cn(
-                  "w-full text-left px-3 py-2.5 border-b border-gray-800/50 hover:bg-gray-800/40 transition-colors",
-                  isSelected && "bg-teal-500/5 border-l-2 border-l-teal-500"
-                )}>
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
-                  <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
-                  <span className="ml-auto flex items-center gap-1 shrink-0">
-                    {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
-                    {hasTranscript
-                      ? <CheckCircle2 className="w-3 h-3 text-teal-400" />
-                      : <Circle className="w-3 h-3 text-gray-700" />}
-                  </span>
+              <div key={call.call_id} className={cn(
+                "flex items-stretch border-b border-gray-800/50",
+                isSelected && "bg-teal-500/5 border-l-2 border-l-teal-500"
+              )}>
+                {/* Checkbox column */}
+                <div
+                  onClick={() => toggleCheck(call.call_id)}
+                  className="flex items-center px-2 cursor-pointer hover:bg-gray-700/20 transition-colors shrink-0"
+                >
+                  <div className={cn(
+                    "w-3.5 h-3.5 rounded border flex items-center justify-center",
+                    isChecked ? "border-teal-500 bg-teal-600" : "border-gray-700"
+                  )}>
+                    {isChecked && (
+                      <svg className="w-2 h-2 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </div>
                 </div>
-                <div className="pl-[18px] flex items-center gap-2 text-[10px] text-gray-500">
-                  {call.duration > 0 && <span className="text-teal-500/80">{formatDuration(call.duration)}</span>}
-                  {call.date && <span>{formatDate(call.date)}</span>}
-                </div>
-              </button>
+                {/* Row content */}
+                <button
+                  onClick={() => setSelectedCallId(selectedCallId === call.call_id ? "" : call.call_id)}
+                  className="flex-1 min-w-0 text-left px-2 py-2.5 hover:bg-gray-800/40 transition-colors"
+                >
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
+                    <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
+                    <span className="ml-auto flex items-center gap-1 shrink-0">
+                      {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
+                      {hasTranscript
+                        ? <CheckCircle2 className="w-3 h-3 text-teal-400" />
+                        : <Circle className="w-3 h-3 text-gray-700" />}
+                    </span>
+                  </div>
+                  <div className="pl-[18px] flex items-center gap-2 text-[10px] text-gray-500">
+                    {call.duration > 0 && <span className="text-teal-500/80">{formatDuration(call.duration)}</span>}
+                    {call.date && <span>{formatDate(call.date)}</span>}
+                  </div>
+                </button>
+              </div>
             );
           })}
           {selectedCustomer && crmCalls?.length === 0 && (
