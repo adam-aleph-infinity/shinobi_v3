@@ -201,6 +201,156 @@ function VariableHint({ inputs }: { inputs: AgentInput[] }) {
   );
 }
 
+// ── Agent class grouping ──────────────────────────────────────────────────────
+
+/** Which classes are sub-classes of which parent. */
+const CLASS_PARENT: Record<string, string> = {
+  scorer:     "persona",
+  compliance: "notes",
+};
+
+const CLASS_META: Record<string, { label: string; textColor: string; borderColor: string; dotColor: string }> = {
+  persona:    { label: "Persona",       textColor: "text-violet-300", borderColor: "border-violet-700/40", dotColor: "bg-violet-400" },
+  scorer:     { label: "Scorer",        textColor: "text-violet-400", borderColor: "border-violet-700/30", dotColor: "bg-violet-500/70" },
+  notes:      { label: "Notes",         textColor: "text-teal-300",   borderColor: "border-teal-700/40",   dotColor: "bg-teal-400" },
+  compliance: { label: "Compliance",    textColor: "text-teal-400",   borderColor: "border-teal-700/30",   dotColor: "bg-teal-500/70" },
+  general:    { label: "General",       textColor: "text-sky-300",    borderColor: "border-sky-700/40",    dotColor: "bg-sky-400" },
+  "":         { label: "Uncategorized", textColor: "text-gray-400",   borderColor: "border-gray-700/40",   dotColor: "bg-gray-500" },
+};
+
+function classMeta(cls: string) {
+  return CLASS_META[cls.toLowerCase()] ?? {
+    label: cls, textColor: "text-gray-400", borderColor: "border-gray-700/40", dotColor: "bg-gray-500",
+  };
+}
+
+interface AgentGroup {
+  cls: string;
+  agents: UniversalAgent[];
+  subGroups: { cls: string; agents: UniversalAgent[] }[];
+}
+
+function groupAgents(agents: UniversalAgent[]): AgentGroup[] {
+  const byClass: Record<string, UniversalAgent[]> = {};
+  for (const a of agents) {
+    const cls = (a.agent_class ?? "").toLowerCase().trim();
+    if (!byClass[cls]) byClass[cls] = [];
+    byClass[cls].push(a);
+  }
+
+  const PARENT_ORDER = ["persona", "notes", "general"];
+  const usedClasses = new Set<string>();
+  const result: AgentGroup[] = [];
+
+  for (const parentCls of PARENT_ORDER) {
+    const children = Object.entries(CLASS_PARENT)
+      .filter(([, p]) => p === parentCls)
+      .map(([child]) => ({ cls: child, agents: byClass[child] ?? [] }))
+      .filter(g => g.agents.length > 0);
+    const direct = byClass[parentCls] ?? [];
+    if (direct.length === 0 && children.length === 0) continue;
+    result.push({ cls: parentCls, agents: direct, subGroups: children });
+    usedClasses.add(parentCls);
+    children.forEach(c => usedClasses.add(c.cls));
+  }
+
+  // Any remaining classes not in the hierarchy
+  for (const [cls, list] of Object.entries(byClass)) {
+    if (!usedClasses.has(cls)) result.push({ cls, agents: list, subGroups: [] });
+  }
+
+  return result;
+}
+
+function AgentRow({ agent, selected, onSelect }: {
+  agent: UniversalAgent; selected: string | null; onSelect: (a: UniversalAgent) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSelect(agent)}
+      className={cn(
+        "w-full text-left px-2.5 py-2 rounded-lg text-xs transition-colors",
+        selected === agent.id
+          ? "bg-indigo-600/20 border border-indigo-600/30 text-white"
+          : "text-gray-400 hover:bg-gray-800 hover:text-white",
+      )}
+    >
+      <div className="flex items-center gap-1.5">
+        <Bot className="w-3 h-3 text-indigo-400 shrink-0" />
+        <span className="font-medium truncate flex-1">{agent.name}</span>
+        {agent.is_default && <span className="text-[9px] bg-indigo-900 text-indigo-400 px-1 rounded">default</span>}
+      </div>
+      <div className="mt-0.5 pl-[18px] flex flex-wrap gap-0.5">
+        {(agent.inputs ?? []).slice(0, 3).map(inp => {
+          const s = sourceBadge(inp.source);
+          return <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>{inp.key || s.label}</span>;
+        })}
+        {(agent.inputs ?? []).length > 3 && <span className="text-[9px] text-gray-600">+{agent.inputs.length - 3}</span>}
+      </div>
+    </button>
+  );
+}
+
+function SubGroupSection({ sub, selected, onSelect }: {
+  sub: { cls: string; agents: UniversalAgent[] };
+  selected: string | null;
+  onSelect: (a: UniversalAgent) => void;
+}) {
+  const meta = classMeta(sub.cls);
+  const [open, setOpen] = useState(true);
+  return (
+    <div className={cn("ml-2.5 pl-2.5 border-l border-dashed mt-1.5", meta.borderColor)}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-1.5 px-1 py-0.5 rounded hover:bg-gray-800/40 transition-colors text-left mb-0.5"
+      >
+        <div className={cn("w-1 h-1 rounded-full shrink-0", meta.dotColor)} />
+        <span className={cn("flex-1 text-[9px] font-semibold uppercase tracking-wider", meta.textColor)}>
+          {meta.label}
+        </span>
+        <span className="text-[9px] text-gray-600 mr-0.5">{sub.agents.length}</span>
+        {open ? <ChevronUp className="w-3 h-3 text-gray-600" /> : <ChevronDown className="w-3 h-3 text-gray-600" />}
+      </button>
+      {open && (
+        <div className="space-y-0.5">
+          {sub.agents.map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentGroupSection({ group, selected, onSelect }: {
+  group: AgentGroup; selected: string | null; onSelect: (a: UniversalAgent) => void;
+}) {
+  const meta = classMeta(group.cls);
+  const total = group.agents.length + group.subGroups.reduce((s, g) => s + g.agents.length, 0);
+  const [open, setOpen] = useState(total > 0);
+  return (
+    <div className="mb-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-800/60 transition-colors text-left"
+      >
+        <div className={cn("w-1.5 h-1.5 rounded-full shrink-0", meta.dotColor)} />
+        <span className={cn("flex-1 text-[10px] font-semibold uppercase tracking-wider", meta.textColor)}>
+          {meta.label}
+        </span>
+        <span className="text-[9px] text-gray-600 tabular-nums mr-0.5">{total}</span>
+        {open ? <ChevronUp className="w-3 h-3 text-gray-600" /> : <ChevronDown className="w-3 h-3 text-gray-600" />}
+      </button>
+      {open && (
+        <div className="space-y-0.5 ml-1 mt-0.5">
+          {group.agents.map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
+          {group.subGroups.map(sub => (
+            <SubGroupSection key={sub.cls} sub={sub} selected={selected} onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Universal Agents Tab ──────────────────────────────────────────────────────
 
 function AgentsTab() {
@@ -320,29 +470,14 @@ function AgentsTab() {
             </div>
           )}
         </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div className="flex-1 overflow-y-auto p-2">
           {isLoading && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-          {(agents ?? []).map(a => (
-            <button key={a.id} onClick={() => openEdit(a)}
-              className={cn("w-full text-left px-3 py-2.5 rounded-lg text-xs transition-colors",
-                selected === a.id ? "bg-indigo-600/20 border border-indigo-600/30 text-white" : "text-gray-400 hover:bg-gray-800 hover:text-white")}>
-              <div className="flex items-center gap-1.5">
-                <Bot className="w-3 h-3 text-indigo-400 shrink-0" />
-                <span className="font-medium truncate flex-1">{a.name}</span>
-                {a.is_default && <span className="text-[9px] bg-indigo-900 text-indigo-400 px-1 rounded">default</span>}
-              </div>
-              <div className="mt-1 pl-[18px] flex flex-wrap gap-0.5">
-                {(a.inputs ?? []).slice(0, 3).map(inp => {
-                  const s = sourceBadge(inp.source);
-                  return <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>{inp.key || s.label}</span>;
-                })}
-                {(a.inputs ?? []).length > 3 && <span className="text-[9px] text-gray-600">+{a.inputs.length - 3}</span>}
-              </div>
-            </button>
-          ))}
           {!isLoading && (agents ?? []).length === 0 && (
             <p className="text-xs text-gray-600 text-center py-4">No agents yet</p>
           )}
+          {groupAgents(agents ?? []).map(group => (
+            <AgentGroupSection key={group.cls} group={group} selected={selected} onSelect={openEdit} />
+          ))}
         </div>
       </div>
 
