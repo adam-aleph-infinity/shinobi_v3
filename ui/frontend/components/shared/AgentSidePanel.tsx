@@ -151,14 +151,57 @@ function InputViewer({
 interface Section { heading: string; level: number; body: string; }
 
 function parseSections(content: string): Section[] {
-  const parts = content.split(/^(#{1,6}\s+.+)$/m);
-  if (parts.length <= 1) return [];
-  const sections: Section[] = [];
-  for (let i = 1; i < parts.length; i += 2) {
-    const m = parts[i].match(/^(#{1,6})\s+(.*)/);
-    if (m) sections.push({ level: m[1].length, heading: m[2].trim(), body: (parts[i + 1] ?? "").trim() });
+  // Strategy 1: markdown headings (## Title)
+  const mdParts = content.split(/^(#{1,6}\s+.+)$/m);
+  if (mdParts.length > 1) {
+    const out: Section[] = [];
+    for (let i = 1; i < mdParts.length; i += 2) {
+      const m = mdParts[i].match(/^(#{1,6})\s+(.*)/);
+      if (m) out.push({ level: m[1].length, heading: m[2].trim(), body: (mdParts[i + 1] ?? "").trim() });
+    }
+    return out;
   }
-  return sections;
+
+  // Strategy 2: numbered sections + titled blocks (no # syntax)
+  const lines = content.split("\n");
+  const out: Section[] = [];
+  let h = "", lv = 0, buf: string[] = [], open = false;
+  const flush = () => { if (open) out.push({ heading: h, level: lv, body: buf.join("\n").trim() }); };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = raw.trim();
+    const prev = (lines[i - 1] ?? "").trim();
+    const next = (lines[i + 1] ?? "").trim();
+    if (!t) { if (open) buf.push(raw); continue; }
+
+    let head = false, headTxt = t, headLv = 2;
+
+    // "1. Title" at column 0
+    const numM = raw.match(/^(\d+)\.\s+(.+)/);
+    if (numM && t.length < 120) {
+      head = true; headTxt = numM[2].trim(); headLv = 1;
+    }
+    // "Call N" at column 0
+    else if (/^Call \d+$/.test(raw)) {
+      head = true; headTxt = t; headLv = 2;
+    }
+    // Standalone non-list title line at column 0
+    else if (
+      !raw.match(/^\s/) &&
+      !t.startsWith("-") && !t.startsWith("*") &&
+      t.length < 120 &&
+      !t.endsWith(".") && !t.endsWith(",") &&
+      (prev === "" || next.startsWith("-") || next.startsWith("*"))
+    ) {
+      head = true; headTxt = t; headLv = 2;
+    }
+
+    if (head) { flush(); h = headTxt; lv = headLv; buf = []; open = true; }
+    else if (open) buf.push(raw);
+  }
+  flush();
+  return out.length > 0 ? out : [];
 }
 
 const SECTION_COLORS = [
