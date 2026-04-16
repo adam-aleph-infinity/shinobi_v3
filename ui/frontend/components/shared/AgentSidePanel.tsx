@@ -1,11 +1,12 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Bot, Play, Loader2, AlertCircle, Clock,
   ChevronDown, ChevronUp, RefreshCw, Eye, EyeOff,
+  Copy, Check,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -145,36 +146,137 @@ function InputViewer({
   );
 }
 
+// ── Section parsing ───────────────────────────────────────────────────────────
+
+interface Section { heading: string; level: number; body: string; }
+
+function parseSections(content: string): Section[] {
+  const parts = content.split(/^(#{1,6}\s+.+)$/m);
+  if (parts.length <= 1) return [];
+  const sections: Section[] = [];
+  for (let i = 1; i < parts.length; i += 2) {
+    const m = parts[i].match(/^(#{1,6})\s+(.*)/);
+    if (m) sections.push({ level: m[1].length, heading: m[2].trim(), body: (parts[i + 1] ?? "").trim() });
+  }
+  return sections;
+}
+
+const SECTION_COLORS = [
+  { border: "border-teal-700/40",   header: "bg-teal-900/25",   text: "text-teal-300",   badge: "bg-teal-800/40 border-teal-600/40" },
+  { border: "border-violet-700/40", header: "bg-violet-900/25", text: "text-violet-300", badge: "bg-violet-800/40 border-violet-600/40" },
+  { border: "border-sky-700/40",    header: "bg-sky-900/25",    text: "text-sky-300",    badge: "bg-sky-800/40 border-sky-600/40" },
+  { border: "border-amber-700/40",  header: "bg-amber-900/25",  text: "text-amber-300",  badge: "bg-amber-800/40 border-amber-600/40" },
+  { border: "border-rose-700/40",   header: "bg-rose-900/25",   text: "text-rose-300",   badge: "bg-rose-800/40 border-rose-600/40" },
+  { border: "border-indigo-700/40", header: "bg-indigo-900/25", text: "text-indigo-300", badge: "bg-indigo-800/40 border-indigo-600/40" },
+];
+
+function SectionCard({ section, index, expandTick, collapseTick }: {
+  section: Section; index: number; expandTick: number; collapseTick: number;
+}) {
+  const [open, setOpen] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const color = SECTION_COLORS[index % SECTION_COLORS.length];
+  const isTop = section.level <= 2;
+
+  useEffect(() => { if (expandTick > 0) setOpen(true); }, [expandTick]);
+  useEffect(() => { if (collapseTick > 0) setOpen(false); }, [collapseTick]);
+
+  function copy() {
+    navigator.clipboard.writeText(`${"#".repeat(section.level)} ${section.heading}\n\n${section.body}`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <div className={cn(
+      isTop
+        ? cn("border rounded-xl overflow-hidden", color.border)
+        : cn("border-l-2 ml-3", color.border),
+    )}>
+      <div className={cn("flex items-center gap-2 px-3 py-1.5", isTop ? color.header : "")}>
+        <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left">
+          <span className={cn("text-[10px] font-bold font-mono tabular-nums shrink-0", color.text)}>§{index + 1}</span>
+          <span className={cn("flex-1 truncate text-[11px] font-semibold", color.text)}>{section.heading}</span>
+        </button>
+        <span className={cn("text-[9px] px-1 py-0.5 rounded border font-mono shrink-0", color.text, color.badge)}>h{section.level}</span>
+        <button onClick={copy} className={cn("p-1 rounded transition-colors hover:bg-gray-700/40 shrink-0", copied ? color.text : "text-gray-600")} title="Copy section">
+          {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+        </button>
+        <button onClick={() => setOpen(o => !o)} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0">
+          {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        </button>
+      </div>
+      {open && section.body && (
+        <div className={cn("px-3 pb-2 text-xs text-gray-300", isTop ? "bg-gray-950 pt-2" : "pt-1 pl-4")}>
+          <div className="prose prose-invert prose-xs max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Result card ───────────────────────────────────────────────────────────────
 
 function ResultCard({ result, format }: { result: AgentResult; format: string }) {
   const [expanded, setExpanded] = useState(true);
+  const [copiedAll, setCopiedAll] = useState(false);
+  const [expandTick, setExpandTick] = useState(0);
+  const [collapseTick, setCollapseTick] = useState(0);
+
+  const sections = format !== "json" ? parseSections(result.content) : [];
+
+  function copyAll() {
+    navigator.clipboard.writeText(result.content);
+    setCopiedAll(true);
+    setTimeout(() => setCopiedAll(false), 1500);
+  }
+
   return (
     <div className="border border-gray-800 rounded-xl overflow-hidden">
-      <button
-        onClick={() => setExpanded(e => !e)}
-        className="w-full flex items-center justify-between px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-xs"
-      >
-        <div className="flex items-center gap-2 text-gray-400 min-w-0">
+      <div className="flex items-center px-3 py-2 bg-gray-900">
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="flex items-center gap-2 flex-1 min-w-0 text-xs text-gray-400"
+        >
           <Clock className="w-3 h-3 shrink-0 text-gray-600" />
           <span className="truncate">{new Date(result.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
           {result.call_id && (
             <span className="text-[10px] text-gray-600 font-mono truncate max-w-[80px]">{result.call_id}</span>
           )}
+        </button>
+        <div className="flex items-center gap-1 ml-2 shrink-0">
+          <span className="text-[10px] text-gray-600 mr-1">{result.model}</span>
+          {sections.length > 0 && expanded && (
+            <>
+              <button onClick={() => setExpandTick(t => t + 1)} className="text-[9px] text-gray-600 hover:text-gray-300 transition-colors uppercase tracking-wide px-1" title="Expand all">open</button>
+              <span className="text-gray-700 text-[10px]">·</span>
+              <button onClick={() => setCollapseTick(t => t + 1)} className="text-[9px] text-gray-600 hover:text-gray-300 transition-colors uppercase tracking-wide px-1 mr-0.5" title="Collapse all">fold</button>
+            </>
+          )}
+          <button onClick={copyAll} className={cn("p-1 rounded transition-colors hover:bg-gray-700/40", copiedAll ? "text-teal-400" : "text-gray-600")} title="Copy all">
+            {copiedAll ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+          </button>
+          <button onClick={() => setExpanded(e => !e)} className="text-gray-600 hover:text-gray-400 transition-colors">
+            {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0 ml-2">
-          <span className="text-[10px] text-gray-600">{result.model}</span>
-          {expanded ? <ChevronUp className="w-3 h-3 text-gray-600" /> : <ChevronDown className="w-3 h-3 text-gray-600" />}
-        </div>
-      </button>
+      </div>
       {expanded && (
-        <div className="p-3 bg-gray-950 text-xs text-gray-300">
+        <div className="p-3 bg-gray-950">
           {format === "json" ? (
             <pre className="text-[11px] font-mono whitespace-pre-wrap break-words text-green-300 overflow-x-auto">
               {result.content}
             </pre>
+          ) : sections.length > 0 ? (
+            <div className="space-y-2">
+              {sections.map((s, i) => (
+                <SectionCard key={i} section={s} index={i} expandTick={expandTick} collapseTick={collapseTick} />
+              ))}
+            </div>
           ) : (
-            <div className="prose prose-invert prose-xs max-w-none">
+            <div className="prose prose-invert prose-xs max-w-none text-xs text-gray-300">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.content}</ReactMarkdown>
             </div>
           )}
