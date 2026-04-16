@@ -148,60 +148,63 @@ function InputViewer({
 
 // ── Section parsing ───────────────────────────────────────────────────────────
 
-interface Section { heading: string; level: number; body: string; }
+interface Section { heading: string; level: number; body: string; children: Section[]; }
 
 function parseSections(content: string): Section[] {
+  const flat: Section[] = [];
+
   // Strategy 1: markdown headings (## Title)
   const mdParts = content.split(/^(#{1,6}\s+.+)$/m);
   if (mdParts.length > 1) {
-    const out: Section[] = [];
     for (let i = 1; i < mdParts.length; i += 2) {
       const m = mdParts[i].match(/^(#{1,6})\s+(.*)/);
-      if (m) out.push({ level: m[1].length, heading: m[2].trim(), body: (mdParts[i + 1] ?? "").trim() });
+      if (m) flat.push({ level: m[1].length, heading: m[2].trim(), body: (mdParts[i + 1] ?? "").trim(), children: [] });
     }
-    return out;
+  } else {
+    // Strategy 2: numbered sections + titled blocks (no # syntax)
+    const lines = content.split("\n");
+    let h = "", lv = 0, buf: string[] = [], open = false;
+    const flush = () => { if (open) flat.push({ heading: h, level: lv, body: buf.join("\n").trim(), children: [] }); };
+
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      const t = raw.trim();
+      const prev = (lines[i - 1] ?? "").trim();
+      const next = (lines[i + 1] ?? "").trim();
+      if (!t) { if (open) buf.push(raw); continue; }
+
+      let head = false, headTxt = t, headLv = 2;
+      const numM = raw.match(/^(\d+)\.\s+(.+)/);
+      if (numM && t.length < 120) {
+        head = true; headTxt = numM[2].trim(); headLv = 1;
+      } else if (/^Call \d+$/.test(raw)) {
+        head = true; headTxt = t; headLv = 2;
+      } else if (
+        !raw.match(/^\s/) &&
+        !t.startsWith("-") && !t.startsWith("*") &&
+        t.length < 120 && !t.endsWith(".") && !t.endsWith(",") &&
+        (prev === "" || next.startsWith("-") || next.startsWith("*"))
+      ) {
+        head = true; headTxt = t; headLv = 2;
+      }
+      if (head) { flush(); h = headTxt; lv = headLv; buf = []; open = true; }
+      else if (open) buf.push(raw);
+    }
+    flush();
   }
 
-  // Strategy 2: numbered sections + titled blocks (no # syntax)
-  const lines = content.split("\n");
-  const out: Section[] = [];
-  let h = "", lv = 0, buf: string[] = [], open = false;
-  const flush = () => { if (open) out.push({ heading: h, level: lv, body: buf.join("\n").trim() }); };
+  if (flat.length === 0) return [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    const t = raw.trim();
-    const prev = (lines[i - 1] ?? "").trim();
-    const next = (lines[i + 1] ?? "").trim();
-    if (!t) { if (open) buf.push(raw); continue; }
-
-    let head = false, headTxt = t, headLv = 2;
-
-    // "1. Title" at column 0
-    const numM = raw.match(/^(\d+)\.\s+(.+)/);
-    if (numM && t.length < 120) {
-      head = true; headTxt = numM[2].trim(); headLv = 1;
-    }
-    // "Call N" at column 0
-    else if (/^Call \d+$/.test(raw)) {
-      head = true; headTxt = t; headLv = 2;
-    }
-    // Standalone non-list title line at column 0
-    else if (
-      !raw.match(/^\s/) &&
-      !t.startsWith("-") && !t.startsWith("*") &&
-      t.length < 120 &&
-      !t.endsWith(".") && !t.endsWith(",") &&
-      (prev === "" || next.startsWith("-") || next.startsWith("*"))
-    ) {
-      head = true; headTxt = t; headLv = 2;
-    }
-
-    if (head) { flush(); h = headTxt; lv = headLv; buf = []; open = true; }
-    else if (open) buf.push(raw);
+  // Build tree — each section is nested under the nearest ancestor with a lower level number
+  const roots: Section[] = [];
+  const stack: Section[] = [];
+  for (const s of flat) {
+    while (stack.length > 0 && stack[stack.length - 1].level >= s.level) stack.pop();
+    if (stack.length === 0) roots.push(s);
+    else stack[stack.length - 1].children.push(s);
+    stack.push(s);
   }
-  flush();
-  return out.length > 0 ? out : [];
+  return roots;
 }
 
 const SECTION_COLORS = [
@@ -213,47 +216,70 @@ const SECTION_COLORS = [
   { border: "border-indigo-700/40", header: "bg-indigo-900/25", text: "text-indigo-300", badge: "bg-indigo-800/40 border-indigo-600/40" },
 ];
 
-function SectionCard({ section, index, expandTick, collapseTick }: {
-  section: Section; index: number; expandTick: number; collapseTick: number;
+function SectionCard({ section, colorIdx, depth, expandTick, collapseTick }: {
+  section: Section; colorIdx: number; depth: number; expandTick: number; collapseTick: number;
 }) {
   const [open, setOpen] = useState(true);
   const [copied, setCopied] = useState(false);
-  const color = SECTION_COLORS[index % SECTION_COLORS.length];
-  const isTop = section.level <= 2;
+  const color = SECTION_COLORS[colorIdx % SECTION_COLORS.length];
+  const isRoot = depth === 0;
+  const hasContent = !!(section.body || section.children.length > 0);
 
   useEffect(() => { if (expandTick > 0) setOpen(true); }, [expandTick]);
   useEffect(() => { if (collapseTick > 0) setOpen(false); }, [collapseTick]);
 
   function copy() {
-    navigator.clipboard.writeText(`${"#".repeat(section.level)} ${section.heading}\n\n${section.body}`);
+    navigator.clipboard.writeText(`${"#".repeat(Math.max(1, section.level))} ${section.heading}\n\n${section.body}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
 
   return (
     <div className={cn(
-      isTop
+      isRoot
         ? cn("border rounded-xl overflow-hidden", color.border)
-        : cn("border-l-2 ml-3", color.border),
+        : cn("border-l-2", color.border),
     )}>
-      <div className={cn("flex items-center gap-2 px-3 py-1.5", isTop ? color.header : "")}>
+      {/* Header */}
+      <div className={cn("flex items-center gap-2 px-3 py-1.5", isRoot ? color.header : "")}>
         <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left">
-          <span className={cn("text-[10px] font-bold font-mono tabular-nums shrink-0", color.text)}>§{index + 1}</span>
-          <span className={cn("flex-1 truncate text-[11px] font-semibold", color.text)}>{section.heading}</span>
+          <span className={cn("text-[10px] font-bold font-mono tabular-nums shrink-0", color.text)}>§{colorIdx + 1}</span>
+          <span className={cn("flex-1 truncate font-semibold", isRoot ? "text-[11px]" : "text-[10px]", color.text)}>{section.heading}</span>
         </button>
         <span className={cn("text-[9px] px-1 py-0.5 rounded border font-mono shrink-0", color.text, color.badge)}>h{section.level}</span>
         <button onClick={copy} className={cn("p-1 rounded transition-colors hover:bg-gray-700/40 shrink-0", copied ? color.text : "text-gray-600")} title="Copy section">
           {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
         </button>
-        <button onClick={() => setOpen(o => !o)} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0">
-          {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        </button>
+        {hasContent && (
+          <button onClick={() => setOpen(o => !o)} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0">
+            {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+        )}
       </div>
-      {open && section.body && (
-        <div className={cn("px-3 pb-2 text-xs text-gray-300", isTop ? "bg-gray-950 pt-2" : "pt-1 pl-4")}>
-          <div className="prose prose-invert prose-xs max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
-          </div>
+      {/* Body + nested children */}
+      {open && hasContent && (
+        <div className={cn(isRoot && "bg-gray-950")}>
+          {section.body && (
+            <div className={cn("px-3 text-xs text-gray-300", isRoot ? "pt-2 pb-2" : "pt-1 pb-1")}>
+              <div className="prose prose-invert prose-xs max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+          {section.children.length > 0 && (
+            <div className={cn("space-y-1.5", isRoot ? "px-3 pb-3" : "pl-3 pb-2")}>
+              {section.children.map((child, ci) => (
+                <SectionCard
+                  key={ci}
+                  section={child}
+                  colorIdx={colorIdx + ci + 1}
+                  depth={depth + 1}
+                  expandTick={expandTick}
+                  collapseTick={collapseTick}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -315,7 +341,7 @@ function ResultCard({ result, format }: { result: AgentResult; format: string })
           ) : sections.length > 0 ? (
             <div className="space-y-2">
               {sections.map((s, i) => (
-                <SectionCard key={i} section={s} index={i} expandTick={expandTick} collapseTick={collapseTick} />
+                <SectionCard key={i} section={s} colorIdx={i} depth={0} expandTick={expandTick} collapseTick={collapseTick} />
               ))}
             </div>
           ) : (
