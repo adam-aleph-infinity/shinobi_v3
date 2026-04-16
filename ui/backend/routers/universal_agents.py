@@ -258,6 +258,16 @@ def import_presets():
             score_name = f"{preset_name} Scorer"
 
             if gen_name in existing and score_name in existing:
+                # Patch existing generator if it was imported without {transcript} placeholder
+                for ag_f in _DIR.glob("*.json"):
+                    try:
+                        ag = json.loads(ag_f.read_text(encoding="utf-8"))
+                        if ag.get("name") == gen_name and "{transcript}" not in ag.get("user_prompt", ""):
+                            ag["user_prompt"] = ag["user_prompt"].rstrip() + "\n\n{transcript}"
+                            ag_f.write_text(json.dumps(ag, indent=2, ensure_ascii=False), encoding="utf-8")
+                            created_agents.append(f"{gen_name} (patched)")
+                    except Exception:
+                        pass
                 skipped.append(preset_name)
                 continue
 
@@ -639,8 +649,16 @@ def _llm_call_with_files(
         raise RuntimeError(f"API key not set for provider '{provider}'")
 
     user = user_template
+    orphaned: list[str] = []  # file inputs whose placeholder is absent from the template
     for k, v in {**file_inputs, **inline_inputs}.items():
-        user = user.replace(f"{{{k}}}", v)
+        placeholder = f"{{{k}}}"
+        if placeholder in user:
+            user = user.replace(placeholder, v)
+        elif k in file_inputs and v.strip():
+            # No placeholder — append content so the model always receives it
+            orphaned.append(f"--- {k} ---\n{v}")
+    if orphaned:
+        user = user.strip() + "\n\n" + "\n\n".join(orphaned)
 
     client = LLMClient(provider=provider, api_key=key)
     resp = client.chat_completion(
