@@ -1,14 +1,13 @@
 "use client";
 import { useState, useRef } from "react";
 import useSWR from "swr";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   Workflow, Play, Loader2, AlertCircle,
   ChevronDown, ChevronUp, CheckCircle2, SkipForward,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
+import { SectionContent } from "./SectionCards";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -216,9 +215,7 @@ export function PipelineSidePanel() {
             {/* Completed content */}
             {st.expanded && (st.status === "done" || st.status === "cached") && st.content && (
               <div className="px-3 pb-3 bg-gray-950">
-                <div className="prose prose-invert prose-xs max-w-none text-xs text-gray-300">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{st.content}</ReactMarkdown>
-                </div>
+                <SectionContent content={st.content} />
               </div>
             )}
           </div>
