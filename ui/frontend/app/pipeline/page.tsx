@@ -3,9 +3,9 @@
 import { useCallback, useRef, useState } from "react";
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
-  addEdge, useNodesState, useEdgesState, useReactFlow,
+  useNodesState, useEdgesState, useReactFlow,
   Handle, Position, MarkerType,
-  type Node, type Edge, type Connection, type NodeTypes,
+  type Node, type Edge, type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
@@ -16,41 +16,41 @@ import {
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
 
-type NodeKind        = "input" | "processing" | "output";
-type InputSubType    = "transcript" | "recording" | "crm_data" | "notes" | "metadata";
-type ProcessSubType  = "summarizer" | "classifier" | "extractor" | "analyzer" | "scorer";
-type OutputSubType   = "json" | "text" | "markdown" | "structured";
+type NodeKind       = "input" | "processing" | "output";
+type InputSubType   = "transcript" | "recording" | "crm_data" | "notes" | "metadata";
+type ProcessSubType = "summarizer" | "classifier" | "extractor" | "analyzer" | "scorer";
+type OutputSubType  = "json" | "text" | "markdown" | "structured";
 
 interface Meta {
-  label: string;
-  icon:  React.ReactNode;
-  color: string;   // header bg
+  label:  string;
+  icon:   React.ReactNode;
+  color:  string;  // header bg
   border: string;  // node border
-  text:  string;   // accent text
-  desc:  string;
+  text:   string;  // accent text
+  desc:   string;
 }
 
 const INPUT_META: Record<InputSubType, Meta> = {
-  transcript: { label: "Transcript", icon: <FileText    className="w-3.5 h-3.5" />, color: "bg-blue-700",   border: "border-blue-600",   text: "text-blue-300",   desc: "Call transcript text" },
-  recording:  { label: "Recording",  icon: <Mic         className="w-3.5 h-3.5" />, color: "bg-cyan-700",   border: "border-cyan-600",   text: "text-cyan-300",   desc: "Audio recording file" },
-  crm_data:   { label: "CRM Data",   icon: <Database    className="w-3.5 h-3.5" />, color: "bg-green-700",  border: "border-green-600",  text: "text-green-300",  desc: "CRM contact & account data" },
-  notes:      { label: "Notes",      icon: <StickyNote  className="w-3.5 h-3.5" />, color: "bg-amber-700",  border: "border-amber-600",  text: "text-amber-300",  desc: "Agent or customer notes" },
-  metadata:   { label: "Metadata",   icon: <Info        className="w-3.5 h-3.5" />, color: "bg-slate-600",  border: "border-slate-500",  text: "text-slate-300",  desc: "Call metadata & attributes" },
+  transcript: { label: "Transcript", icon: <FileText    className="w-4 h-4" />, color: "bg-blue-700",   border: "border-blue-600",   text: "text-blue-400",   desc: "Call transcript text" },
+  recording:  { label: "Recording",  icon: <Mic         className="w-4 h-4" />, color: "bg-cyan-700",   border: "border-cyan-600",   text: "text-cyan-400",   desc: "Audio recording file" },
+  crm_data:   { label: "CRM Data",   icon: <Database    className="w-4 h-4" />, color: "bg-green-700",  border: "border-green-600",  text: "text-green-400",  desc: "CRM contact & account data" },
+  notes:      { label: "Notes",      icon: <StickyNote  className="w-4 h-4" />, color: "bg-amber-700",  border: "border-amber-600",  text: "text-amber-400",  desc: "Agent or customer notes" },
+  metadata:   { label: "Metadata",   icon: <Info        className="w-4 h-4" />, color: "bg-slate-600",  border: "border-slate-500",  text: "text-slate-400",  desc: "Call metadata & attributes" },
 };
 
 const PROCESS_META: Record<ProcessSubType, Meta> = {
-  summarizer: { label: "Summarizer", icon: <AlignLeft      className="w-3.5 h-3.5" />, color: "bg-indigo-700", border: "border-indigo-600", text: "text-indigo-300", desc: "Condenses content into a summary" },
-  classifier: { label: "Classifier", icon: <List           className="w-3.5 h-3.5" />, color: "bg-violet-700", border: "border-violet-600", text: "text-violet-300", desc: "Categorises into predefined classes" },
-  extractor:  { label: "Extractor",  icon: <Code2          className="w-3.5 h-3.5" />, color: "bg-blue-700",   border: "border-blue-600",   text: "text-blue-300",   desc: "Pulls structured data from text" },
-  analyzer:   { label: "Analyzer",   icon: <Zap            className="w-3.5 h-3.5" />, color: "bg-cyan-700",   border: "border-cyan-600",   text: "text-cyan-300",   desc: "Deep analysis and insights" },
-  scorer:     { label: "Scorer",     icon: <LayoutTemplate className="w-3.5 h-3.5" />, color: "bg-teal-700",   border: "border-teal-600",   text: "text-teal-300",   desc: "Assigns numeric or categorical scores" },
+  summarizer: { label: "Summarizer", icon: <AlignLeft      className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-500", text: "text-indigo-400", desc: "Condenses content into a summary" },
+  classifier: { label: "Classifier", icon: <List           className="w-4 h-4" />, color: "bg-violet-700", border: "border-violet-500", text: "text-violet-400", desc: "Categorises into predefined classes" },
+  extractor:  { label: "Extractor",  icon: <Code2          className="w-4 h-4" />, color: "bg-blue-700",   border: "border-blue-500",   text: "text-blue-400",   desc: "Pulls structured data from text" },
+  analyzer:   { label: "Analyzer",   icon: <Zap            className="w-4 h-4" />, color: "bg-cyan-700",   border: "border-cyan-500",   text: "text-cyan-400",   desc: "Deep analysis and insights" },
+  scorer:     { label: "Scorer",     icon: <LayoutTemplate className="w-4 h-4" />, color: "bg-teal-700",   border: "border-teal-500",   text: "text-teal-400",   desc: "Assigns numeric or categorical scores" },
 };
 
 const OUTPUT_META: Record<OutputSubType, Meta> = {
-  json:       { label: "JSON",       icon: <FileJson  className="w-3.5 h-3.5" />, color: "bg-yellow-700", border: "border-yellow-600", text: "text-yellow-300", desc: "Structured JSON output" },
-  text:       { label: "Plain Text", icon: <AlignLeft className="w-3.5 h-3.5" />, color: "bg-slate-600",  border: "border-slate-500",  text: "text-slate-300",  desc: "Unformatted plain text" },
-  markdown:   { label: "Markdown",   icon: <Code2     className="w-3.5 h-3.5" />, color: "bg-indigo-700", border: "border-indigo-600", text: "text-indigo-300", desc: "Markdown formatted output" },
-  structured: { label: "Structured", icon: <List      className="w-3.5 h-3.5" />, color: "bg-purple-700", border: "border-purple-600", text: "text-purple-300", desc: "Structured report format" },
+  json:       { label: "JSON",       icon: <FileJson  className="w-4 h-4" />, color: "bg-yellow-700", border: "border-yellow-600", text: "text-yellow-400", desc: "Structured JSON output" },
+  text:       { label: "Plain Text", icon: <AlignLeft className="w-4 h-4" />, color: "bg-slate-600",  border: "border-slate-500",  text: "text-slate-400",  desc: "Unformatted plain text" },
+  markdown:   { label: "Markdown",   icon: <Code2     className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-600", text: "text-indigo-400", desc: "Markdown formatted output" },
+  structured: { label: "Structured", icon: <List      className="w-4 h-4" />, color: "bg-purple-700", border: "border-purple-600", text: "text-purple-400", desc: "Structured report format" },
 };
 
 function getMeta(kind: NodeKind, subType: string): Meta {
@@ -67,68 +67,216 @@ interface PipelineNodeData extends Record<string, unknown> {
   prompt:  string;
 }
 
+// ── Layout constants ──────────────────────────────────────────────────────────
+
+const NODE_W   = 200;  // node width (matches min-w in CSS)
+const NODE_H   = 72;   // approximate node height
+const H_GAP    = 56;   // horizontal gap between nodes
+const V_GAP    = 24;   // vertical gap between stacked nodes
+const Y_CENTER = 180;  // vertical center for processing row
+
+// ── Auto-placement ────────────────────────────────────────────────────────────
+
+function computePosition(kind: NodeKind, nodes: Node[]): { x: number; y: number } {
+  const inputs = nodes.filter(n => n.type === "input");
+  const procs  = nodes.filter(n => n.type === "processing");
+  const outs   = nodes.filter(n => n.type === "output");
+
+  if (kind === "input") {
+    // Place to the LEFT of the first processing node, or at a default start
+    const firstProcX = procs.length > 0
+      ? Math.min(...procs.map(n => n.position.x))
+      : NODE_W + H_GAP * 2;
+    return {
+      x: firstProcX - NODE_W - H_GAP,
+      y: Y_CENTER + inputs.length * (NODE_H + V_GAP),
+    };
+  }
+
+  if (kind === "processing") {
+    if (procs.length === 0) {
+      // Place to the right of any inputs, or at default
+      const afterInputX = inputs.length > 0
+        ? Math.max(...inputs.map(n => n.position.x)) + NODE_W + H_GAP
+        : NODE_W + H_GAP;
+      return { x: afterInputX, y: Y_CENTER };
+    }
+    // Chain to the right of the rightmost processing node
+    const maxProcX = Math.max(...procs.map(n => n.position.x));
+    return { x: maxProcX + NODE_W + H_GAP, y: Y_CENTER };
+  }
+
+  if (kind === "output") {
+    // Place to the RIGHT of the rightmost processing (or input if no processing)
+    const rightmostX = procs.length > 0
+      ? Math.max(...procs.map(n => n.position.x))
+      : inputs.length > 0
+        ? Math.max(...inputs.map(n => n.position.x))
+        : 0;
+    return {
+      x: rightmostX + NODE_W + H_GAP,
+      y: Y_CENTER + outs.length * (NODE_H + V_GAP),
+    };
+  }
+
+  return { x: 200, y: Y_CENTER };
+}
+
+// ── Auto-connect ──────────────────────────────────────────────────────────────
+// Rules:
+//   input      → processing ✓
+//   processing → processing ✓
+//   processing → output     ✓
+//   output     → processing ✓ (feedback loops)
+//   input      → output     ✗
+//   *          → input      ✗
+
+function findAutoConnect(
+  newNode: Node,
+  nodes:   Node[],
+  edges:   Edge[],
+): { source: string; target: string } | null {
+  const kind = newNode.type as NodeKind;
+
+  // ── Adding an INPUT: try to connect it → an unconnected processing node
+  if (kind === "input") {
+    const unconnectedProcs = nodes
+      .filter(n => n.type === "processing" && !edges.some(e => e.target === n.id))
+      .sort((a, b) => a.position.x - b.position.x);
+    if (unconnectedProcs.length > 0)
+      return { source: newNode.id, target: unconnectedProcs[0].id };
+    return null;
+  }
+
+  // ── Adding a PROCESSING node: find the best open source
+  if (kind === "processing") {
+    // 1. Rightmost processing with no outgoing edge
+    const openProcs = nodes
+      .filter(n => n.type === "processing" && n.id !== newNode.id && !edges.some(e => e.source === n.id))
+      .sort((a, b) => b.position.x - a.position.x);
+    if (openProcs.length > 0) return { source: openProcs[0].id, target: newNode.id };
+
+    // 2. Any input with no outgoing edge
+    const openInputs = nodes.filter(n => n.type === "input" && !edges.some(e => e.source === n.id));
+    if (openInputs.length > 0) return { source: openInputs[0].id, target: newNode.id };
+
+    // 3. Output with no outgoing edge (feedback loop)
+    const openOutputs = nodes
+      .filter(n => n.type === "output" && !edges.some(e => e.source === n.id))
+      .sort((a, b) => b.position.x - a.position.x);
+    if (openOutputs.length > 0) return { source: openOutputs[0].id, target: newNode.id };
+
+    return null;
+  }
+
+  // ── Adding an OUTPUT: find the rightmost processing not already feeding an output
+  if (kind === "output") {
+    const openProcs = nodes
+      .filter(n => {
+        if (n.type !== "processing") return false;
+        // Has no outgoing edge to an output node
+        return !edges.some(e => e.source === n.id && nodes.find(x => x.id === e.target)?.type === "output");
+      })
+      .sort((a, b) => b.position.x - a.position.x);
+    if (openProcs.length > 0) return { source: openProcs[0].id, target: newNode.id };
+    return null;
+  }
+
+  return null;
+}
+
 // ── Custom node components ────────────────────────────────────────────────────
+
+// Shared card shell
+function NodeCard({
+  children, meta, selected, kind,
+}: {
+  children: React.ReactNode;
+  meta:     Meta;
+  selected: boolean;
+  kind:     NodeKind;
+}) {
+  const ringColor =
+    kind === "input"      ? "ring-blue-400/50" :
+    kind === "processing" ? "ring-indigo-400/50" :
+                            "ring-yellow-400/50";
+
+  return (
+    <div className={`w-[200px] rounded-xl border-2 shadow-2xl overflow-hidden transition-all duration-150
+      ${meta.border} bg-gray-900
+      ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40 scale-105` : "opacity-90 hover:opacity-100 hover:scale-[1.02]"}`}>
+      {children}
+    </div>
+  );
+}
 
 function InputNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
   const m = getMeta("input", data.subType);
   return (
-    <div className={`rounded-xl border-2 min-w-[170px] shadow-xl overflow-hidden transition-all
-      ${selected ? `${m.border} ring-2 ring-white/25` : `${m.border} opacity-85 hover:opacity-100`}`}>
-      <div className={`${m.color} flex items-center gap-2 px-3 py-2`}>
+    <NodeCard meta={m} selected={!!selected} kind="input">
+      {/* No incoming handle — input is source only */}
+      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
-        <span className="text-xs font-bold text-white truncate">{data.label}</span>
+        <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
-      <div className="bg-gray-900/90 px-3 py-1.5">
-        <span className={`text-[10px] font-semibold ${m.text} uppercase tracking-wider`}>Input · {m.label}</span>
+      <div className="px-4 py-1.5 bg-gray-900">
+        <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
+          ⬤ Input · {m.label}
+        </span>
       </div>
-      <Handle type="source" position={Position.Right}
-        className="!w-3.5 !h-3.5 !bg-gray-400 !border-2 !border-gray-700 hover:!bg-white transition-colors" />
-    </div>
+      <Handle type="source" position={Position.Right} isConnectable={false}
+        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+    </NodeCard>
   );
 }
 
 function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
   const m = getMeta("processing", data.subType);
   return (
-    <div className={`rounded-xl border-2 min-w-[170px] shadow-xl overflow-hidden transition-all
-      ${selected ? `${m.border} ring-2 ring-white/25` : `${m.border} opacity-85 hover:opacity-100`}`}>
-      <Handle type="target" position={Position.Left}
-        className="!w-3.5 !h-3.5 !bg-gray-400 !border-2 !border-gray-700 hover:!bg-white transition-colors" />
-      <div className={`${m.color} flex items-center gap-2 px-3 py-2`}>
+    <NodeCard meta={m} selected={!!selected} kind="processing">
+      <Handle type="target" position={Position.Left} isConnectable={false}
+        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
-        <span className="text-xs font-bold text-white truncate">{data.label}</span>
+        <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
-      <div className="bg-gray-900/90 px-3 py-1.5">
-        <span className={`text-[10px] font-semibold ${m.text} uppercase tracking-wider`}>Process · {m.label}</span>
+      <div className="px-4 py-1.5 bg-gray-900">
+        <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
+          ⬡ Process · {m.label}
+        </span>
         {data.prompt && (
-          <p className="text-[10px] text-gray-500 mt-0.5 truncate max-w-[150px]">{data.prompt as string}</p>
+          <p className="text-[10px] text-gray-600 mt-0.5 truncate">{data.prompt as string}</p>
         )}
       </div>
-      <Handle type="source" position={Position.Right}
-        className="!w-3.5 !h-3.5 !bg-gray-400 !border-2 !border-gray-700 hover:!bg-white transition-colors" />
-    </div>
+      <Handle type="source" position={Position.Right} isConnectable={false}
+        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+    </NodeCard>
   );
 }
 
 function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
   const m = getMeta("output", data.subType);
   return (
-    <div className={`rounded-xl border-2 min-w-[170px] shadow-xl overflow-hidden transition-all
-      ${selected ? `${m.border} ring-2 ring-white/25` : `${m.border} opacity-85 hover:opacity-100`}`}>
-      <Handle type="target" position={Position.Left}
-        className="!w-3.5 !h-3.5 !bg-gray-400 !border-2 !border-gray-700 hover:!bg-white transition-colors" />
-      <div className={`${m.color} flex items-center gap-2 px-3 py-2`}>
+    <NodeCard meta={m} selected={!!selected} kind="output">
+      <Handle type="target" position={Position.Left} isConnectable={false}
+        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
-        <span className="text-xs font-bold text-white truncate">{data.label}</span>
+        <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
-      <div className="bg-gray-900/90 px-3 py-1.5">
-        <span className={`text-[10px] font-semibold ${m.text} uppercase tracking-wider`}>Output · {m.label}</span>
+      <div className="px-4 py-1.5 bg-gray-900">
+        <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
+          ■ Output · {m.label}
+        </span>
       </div>
-    </div>
+      {/* Output can also emit to processing — source handle on right */}
+      <Handle type="source" position={Position.Right} isConnectable={false}
+        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+    </NodeCard>
   );
 }
 
-// Defined outside component — prevents React re-creating on every render
+// Defined outside component to prevent type recreation on every render
 const NODE_TYPES: NodeTypes = {
   input:      InputNode,
   processing: ProcessingNode,
@@ -138,49 +286,28 @@ const NODE_TYPES: NodeTypes = {
 // ── Palette groups ────────────────────────────────────────────────────────────
 
 const PALETTE_GROUPS: Array<{
-  kind: NodeKind;
+  kind:  NodeKind;
   label: string;
   items: Array<{ subType: string; meta: Meta }>;
 }> = [
   {
-    kind: "input",
+    kind:  "input",
     label: "Inputs",
-    items: (Object.entries(INPUT_META) as [InputSubType, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
+    items: (Object.entries(INPUT_META)   as [InputSubType,   Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
   },
   {
-    kind: "processing",
+    kind:  "processing",
     label: "Processing",
     items: (Object.entries(PROCESS_META) as [ProcessSubType, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
   },
   {
-    kind: "output",
+    kind:  "output",
     label: "Outputs",
-    items: (Object.entries(OUTPUT_META) as [OutputSubType, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
+    items: (Object.entries(OUTPUT_META)  as [OutputSubType,  Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
   },
 ];
 
-// ── Connection validation ─────────────────────────────────────────────────────
-// input → processing  ✓
-// processing → processing ✓
-// processing → output ✓
-// output → processing ✓ (feedback loops ok)
-// input → output ✗ (must pass through processing)
-// * → input ✗ (input nodes have no target handle)
-// output → output ✗
-
-function checkConnectionValid(conn: Connection | Edge, nodes: Node[]): boolean {
-  const src = nodes.find(n => n.id === conn.source);
-  const tgt = nodes.find(n => n.id === conn.target);
-  if (!src || !tgt) return false;
-  const sk = src.type as NodeKind;
-  const tk = tgt.type as NodeKind;
-  if (tk === "input")                         return false; // nothing flows into input
-  if (sk === "input"  && tk === "output")     return false; // must pass through processing
-  if (sk === "output" && tk === "output")     return false; // two outputs can't connect
-  return true;
-}
-
-// ── Pipeline completeness check ───────────────────────────────────────────────
+// ── Pipeline validation ───────────────────────────────────────────────────────
 
 function validatePipeline(nodes: Node[], edges: Edge[]): string | null {
   if (nodes.length === 0) return "Canvas is empty.";
@@ -191,46 +318,108 @@ function validatePipeline(nodes: Node[], edges: Edge[]): string | null {
   const edgeMap: Record<string, string[]> = {};
   edges.forEach(e => { (edgeMap[e.source] ??= []).push(e.target); });
 
-  function canReach(id: string, seen = new Set<string>()): boolean {
+  function canReachOutput(id: string, seen = new Set<string>()): boolean {
     if (seen.has(id)) return false;
     seen.add(id);
     const n = nodes.find(x => x.id === id);
     if (n?.type === "output") return true;
-    return (edgeMap[id] ?? []).some(nxt => canReach(nxt, seen));
+    return (edgeMap[id] ?? []).some(nxt => canReachOutput(nxt, seen));
   }
 
   for (const inp of nodes.filter(n => n.type === "input")) {
-    if (!canReach(inp.id)) {
-      const d = inp.data as PipelineNodeData;
-      return `"${d.label}" does not have a path to any Output.`;
-    }
+    if (!canReach(inp.id, nodes, edgeMap))
+      return `"${(inp.data as PipelineNodeData).label}" has no path to any Output.`;
   }
   return null;
 }
 
-// ── Inner canvas (needs useReactFlow so must live inside Provider) ────────────
+function canReach(startId: string, nodes: Node[], edgeMap: Record<string, string[]>): boolean {
+  const visited = new Set<string>();
+  const queue   = [startId];
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const n = nodes.find(x => x.id === id);
+    if (n?.type === "output") return true;
+    (edgeMap[id] ?? []).forEach(nxt => queue.push(nxt));
+  }
+  return false;
+}
+
+// ── Inner canvas ──────────────────────────────────────────────────────────────
 
 let nodeSeq = 1;
 function nextId() { return `pn${nodeSeq++}`; }
 
+function makeEdge(source: string, target: string): Edge {
+  return {
+    id:        `e_${source}_${target}`,
+    source,
+    target,
+    animated:  true,
+    markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 20, height: 20 },
+    style:     { stroke: "#818cf8", strokeWidth: 2.5 },
+  };
+}
+
 function PipelineCanvas() {
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  // Keep a ref so validation callback always sees latest nodes without re-creating
+  // Refs so addNodeToCanvas always reads fresh state (no stale closure)
   const nodesRef = useRef<Node[]>([]);
+  const edgesRef = useRef<Edge[]>([]);
   nodesRef.current = nodes;
+  edgesRef.current = edges;
 
   function showToast(msg: string, ok = false) {
     setToast({ ok, msg });
     setTimeout(() => setToast(null), 3500);
   }
 
-  // ── Drag from palette → drop onto canvas ──────────────────────────────────
+  // ── Core: add a node, auto-place, auto-connect ────────────────────────────
+
+  const addNodeToCanvas = useCallback((
+    kind:    NodeKind,
+    subType: string,
+    dropPos?: { x: number; y: number },
+  ) => {
+    const currentNodes = nodesRef.current;
+    const currentEdges = edgesRef.current;
+
+    const meta     = getMeta(kind, subType);
+    const id       = nextId();
+    const position = dropPos ?? computePosition(kind, currentNodes);
+
+    const newNode: Node = {
+      id,
+      type:           kind,
+      position,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      data: {
+        label:   `${meta.label} ${nodeSeq - 1}`,
+        subType,
+        prompt:  "",
+      } satisfies PipelineNodeData,
+    };
+
+    const conn = findAutoConnect(newNode, currentNodes, currentEdges);
+
+    setNodes(ns => [...ns, newNode]);
+    if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
+    setSelectedNodeId(id);
+
+    // Fit view after render so new node is visible
+    setTimeout(() => fitView({ padding: 0.25, duration: 350 }), 60);
+  }, [setNodes, setEdges, fitView]);
+
+  // ── Drag from palette ─────────────────────────────────────────────────────
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -242,56 +431,17 @@ function PipelineCanvas() {
     const kind    = e.dataTransfer.getData("application/nodeKind")    as NodeKind | "";
     const subType = e.dataTransfer.getData("application/nodeSubType") as string   | "";
     if (!kind || !subType) return;
+    const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    addNodeToCanvas(kind, subType, pos);
+  }, [screenToFlowPosition, addNodeToCanvas]);
 
-    const meta     = getMeta(kind, subType);
-    const position = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-    const id       = nextId();
-
-    const newNode: Node = {
-      id,
-      type: kind,
-      position,
-      data: {
-        label:   `${meta.label} ${nodeSeq - 1}`,
-        subType,
-        prompt:  "",
-      } satisfies PipelineNodeData,
-    };
-
-    setNodes(ns => [...ns, newNode]);
-    setSelectedNodeId(id);
-  }, [screenToFlowPosition, setNodes]);
-
-  // ── Connect with validation ───────────────────────────────────────────────
-
-  // Passed as prop to ReactFlow — gives visual feedback while dragging edge
-  const isValidConnection = useCallback((conn: Connection | Edge): boolean => {
-    return checkConnectionValid(conn, nodesRef.current);
-  }, []);
-
-  const onConnect = useCallback((conn: Connection) => {
-    setEdges(eds => addEdge(
-      {
-        ...conn,
-        animated: true,
-        markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8" },
-        style:     { stroke: "#818cf8", strokeWidth: 2 },
-      },
-      eds
-    ));
-  }, [setEdges]);
-
-  // ── Node click → show in right panel ─────────────────────────────────────
+  // ── Node selection & updates ──────────────────────────────────────────────
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNodeId(node.id);
   }, []);
 
-  const onPaneClick = useCallback(() => {
-    setSelectedNodeId(null);
-  }, []);
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  const onPaneClick = useCallback(() => setSelectedNodeId(null), []);
 
   function updateNodeData(id: string, patch: Partial<PipelineNodeData>) {
     setNodes(ns => ns.map(n =>
@@ -305,15 +455,16 @@ function PipelineCanvas() {
     if (selectedNodeId === id) setSelectedNodeId(null);
   }
 
-  function handleSave() {
-    const err = validatePipeline(nodes, edges);
-    if (err) { showToast(err, false); } else { showToast(`Pipeline valid — ${nodes.length} nodes, ${edges.length} edges.`, true); }
-  }
-
   function handleClear() {
     setNodes([]);
     setEdges([]);
     setSelectedNodeId(null);
+  }
+
+  function handleSave() {
+    const err = validatePipeline(nodes, edges);
+    if (err) showToast(err, false);
+    else showToast(`Pipeline valid — ${nodes.length} nodes, ${edges.length} connections.`, true);
   }
 
   // ── Right panel ───────────────────────────────────────────────────────────
@@ -326,11 +477,11 @@ function PipelineCanvas() {
   function renderPanel() {
     if (!selectedNode || !selData || !selKind || !selMeta) {
       return (
-        <div className="flex flex-col items-center justify-center h-full gap-3 p-6 text-center text-gray-600">
-          <div className="w-12 h-12 rounded-xl border-2 border-dashed border-gray-700 flex items-center justify-center">
-            <span className="text-2xl text-gray-700">→</span>
+        <div className="flex flex-col items-center justify-center h-full gap-3 p-6 text-center text-gray-700">
+          <div className="w-14 h-14 rounded-xl border-2 border-dashed border-gray-800 flex items-center justify-center text-2xl">
+            ↖
           </div>
-          <p className="text-sm">Click a node on the canvas to edit its settings</p>
+          <p className="text-sm font-medium text-gray-600">Click a node on the canvas to edit its properties</p>
         </div>
       );
     }
@@ -342,34 +493,34 @@ function PipelineCanvas() {
 
     return (
       <div className="p-4 space-y-4">
-        {/* Header */}
-        <div className={`flex items-center gap-2.5 p-2.5 rounded-lg ${selMeta.color}`}>
-          <span className="text-white shrink-0">{selMeta.icon}</span>
+        {/* Type badge */}
+        <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
+          <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
           <div className="min-w-0">
-            <p className="text-[10px] text-white/60 uppercase tracking-wider">{selKind}</p>
+            <p className="text-[10px] text-white/60 uppercase tracking-widest font-bold">{selKind}</p>
             <p className="text-sm font-bold text-white truncate">{selData.label}</p>
           </div>
         </div>
 
-        {/* Label */}
-        <div className="space-y-1">
-          <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Name</label>
+        {/* Name */}
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Name</label>
           <input
             value={selData.label}
             onChange={e => updateNodeData(selectedNode.id, { label: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
           />
         </div>
 
-        {/* Sub-type picker */}
-        <div className="space-y-1">
-          <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
-            {selKind === "input" ? "Source" : selKind === "processing" ? "Agent Type" : "Format"}
+        {/* Sub-type */}
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
+            {selKind === "input" ? "Data Source" : selKind === "processing" ? "Agent Type" : "Output Format"}
           </label>
           <select
             value={selData.subType}
             onChange={e => updateNodeData(selectedNode.id, { subType: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
           >
             {subTypeOptions.map(([k, m]) => (
               <option key={k} value={k}>{m.label}</option>
@@ -378,16 +529,16 @@ function PipelineCanvas() {
           <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
         </div>
 
-        {/* Prompt — only for processing nodes */}
+        {/* Prompt — processing only */}
         {selKind === "processing" && (
-          <div className="space-y-1">
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">System Prompt</label>
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">System Prompt</label>
             <textarea
               rows={5}
               value={selData.prompt}
               onChange={e => updateNodeData(selectedNode.id, { prompt: e.target.value })}
               placeholder="Describe what this agent should do…"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 resize-none"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 resize-none transition-colors"
             />
           </div>
         )}
@@ -395,7 +546,7 @@ function PipelineCanvas() {
         {/* Delete */}
         <button
           onClick={() => deleteNode(selectedNode.id)}
-          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/30 hover:border-red-700 text-sm transition-colors"
+          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-sm transition-colors"
         >
           <Trash2 className="w-3.5 h-3.5" />
           Delete node
@@ -413,13 +564,13 @@ function PipelineCanvas() {
       <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden">
         <div className="p-3 border-b border-gray-800">
           <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Elements</p>
-          <p className="text-[10px] text-gray-600 mt-0.5">Drag onto canvas</p>
+          <p className="text-[10px] text-gray-600 mt-0.5">Click to add · Drag to position</p>
         </div>
 
         <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
           {PALETTE_GROUPS.map(group => (
             <div key={group.kind}>
-              <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest px-1 mb-1">
+              <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest px-1 mb-1.5">
                 {group.label}
               </p>
               <div className="space-y-1">
@@ -427,12 +578,14 @@ function PipelineCanvas() {
                   <div
                     key={subType}
                     draggable
+                    onClick={() => addNodeToCanvas(group.kind, subType)}
                     onDragStart={e => {
                       e.dataTransfer.setData("application/nodeKind",    group.kind);
                       e.dataTransfer.setData("application/nodeSubType", subType);
                       e.dataTransfer.effectAllowed = "move";
                     }}
-                    className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border cursor-grab active:cursor-grabbing select-none transition-all hover:scale-[1.02] ${meta.border} bg-gray-900/60 hover:bg-gray-800`}
+                    className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border cursor-pointer select-none transition-all
+                      hover:scale-[1.02] active:scale-[0.98] ${meta.border} bg-gray-900/60 hover:bg-gray-800`}
                   >
                     <span className={`p-1 rounded-md ${meta.color} text-white shrink-0`}>{meta.icon}</span>
                     <span className={`text-xs font-semibold ${meta.text}`}>{meta.label}</span>
@@ -443,14 +596,14 @@ function PipelineCanvas() {
           ))}
         </div>
 
-        {/* Connection rules reference */}
+        {/* Flow rules */}
         <div className="p-3 border-t border-gray-800">
-          <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">Flow rules</p>
+          <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-2">Flow rules</p>
           <div className="space-y-0.5 text-[10px] text-gray-600">
-            <div><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span></div>
-            <div><span className="text-indigo-400">Processing</span> → <span className="text-indigo-400">Processing</span></div>
-            <div><span className="text-indigo-400">Processing</span> → <span className="text-yellow-400">Output</span></div>
-            <div><span className="text-yellow-400">Output</span> → <span className="text-indigo-400">Processing</span></div>
+            <p><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span></p>
+            <p><span className="text-indigo-400">Processing</span> → <span className="text-indigo-400">Processing</span></p>
+            <p><span className="text-indigo-400">Processing</span> → <span className="text-yellow-400">Output</span></p>
+            <p><span className="text-yellow-400">Output</span> → <span className="text-indigo-400">Processing</span></p>
           </div>
         </div>
 
@@ -458,14 +611,14 @@ function PipelineCanvas() {
         <div className="p-2.5 space-y-2 border-t border-gray-800">
           <button
             onClick={handleSave}
-            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wider transition-colors"
+            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wide transition-colors"
           >
             <ChevronRight className="w-3.5 h-3.5" />
             Validate &amp; Save
           </button>
           <button
             onClick={handleClear}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-gray-700 text-gray-500 hover:text-red-400 hover:border-red-800 text-xs transition-colors"
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors"
           >
             <Trash2 className="w-3 h-3" />
             Clear canvas
@@ -481,49 +634,67 @@ function PipelineCanvas() {
           nodeTypes={NODE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
-          isValidConnection={isValidConnection}
+          nodesConnectable={false}   // disables manual edge drawing
           fitView
+          fitViewOptions={{ padding: 0.3 }}
           deleteKeyCode="Delete"
           proOptions={{ hideAttribution: true }}
           className="bg-gray-950"
         >
-          <Background color="#1f2937" gap={24} size={1.5} />
+          <Background color="#1f2937" gap={28} size={1.5} />
           <Controls
-            className="[&>button]:bg-gray-800 [&>button]:border-gray-700 [&>button]:text-gray-300 [&>button:hover]:bg-gray-700 [&>button:hover]:text-white"
+            className="[&>button]:bg-gray-800 [&>button]:border-gray-700 [&>button]:text-gray-400 [&>button:hover]:bg-gray-700 [&>button:hover]:text-white"
           />
           <MiniMap
             nodeColor={n => {
               const d = n.data as PipelineNodeData;
               const m = getMeta(n.type as NodeKind, d?.subType ?? "");
-              return m.color.replace("bg-", "").replace("-700", "").replace("-600", "");
+              // Extract tailwind color name for minimap
+              return m.color.replace("bg-", "#").includes("blue")    ? "#1d4ed8" :
+                     m.color.includes("cyan")    ? "#0e7490" :
+                     m.color.includes("green")   ? "#15803d" :
+                     m.color.includes("amber")   ? "#b45309" :
+                     m.color.includes("indigo")  ? "#4338ca" :
+                     m.color.includes("violet")  ? "#6d28d9" :
+                     m.color.includes("teal")    ? "#0f766e" :
+                     m.color.includes("yellow")  ? "#a16207" :
+                     m.color.includes("purple")  ? "#7e22ce" :
+                                                    "#374151";
             }}
-            maskColor="rgba(0,0,0,0.7)"
-            className="!bg-gray-900 !border !border-gray-700 !rounded-lg"
+            maskColor="rgba(0,0,0,0.75)"
+            className="!bg-gray-900 !border !border-gray-700 !rounded-xl"
           />
         </ReactFlow>
 
         {/* Empty state */}
         {nodes.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none">
-            <div className="text-center text-gray-700">
-              <p className="text-5xl mb-4 tracking-widest">· · ·</p>
-              <p className="text-base font-semibold">Drag elements from the left panel</p>
-              <p className="text-sm mt-1">Input → Processing → Output</p>
+            <div className="text-center space-y-3">
+              <div className="flex items-center justify-center gap-4 text-gray-800">
+                <div className="w-16 h-10 rounded-lg border-2 border-dashed border-gray-800 flex items-center justify-center text-xs">In</div>
+                <span className="text-2xl">→</span>
+                <div className="w-16 h-10 rounded-lg border-2 border-dashed border-gray-800 flex items-center justify-center text-xs">Proc</div>
+                <span className="text-2xl">→</span>
+                <div className="w-16 h-10 rounded-lg border-2 border-dashed border-gray-800 flex items-center justify-center text-xs">Out</div>
+              </div>
+              <p className="text-sm font-semibold text-gray-700">Click elements on the left to build your pipeline</p>
+              <p className="text-xs text-gray-800">Nodes auto-connect as you add them</p>
             </div>
           </div>
         )}
 
         {/* Toast */}
         {toast && (
-          <div className={`absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium shadow-2xl
+          <div className={`absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 px-5 py-3 rounded-xl border text-sm font-medium shadow-2xl whitespace-nowrap
             ${toast.ok
-              ? "bg-emerald-950 border-emerald-600 text-emerald-200"
-              : "bg-red-950 border-red-700 text-red-200"}`}>
+              ? "bg-emerald-950 border-emerald-700 text-emerald-200"
+              : "bg-red-950 border-red-800 text-red-300"}`}>
             {toast.msg}
-            <button onClick={() => setToast(null)}><X className="w-3.5 h-3.5 opacity-60" /></button>
+            <button onClick={() => setToast(null)} className="opacity-60 hover:opacity-100 transition-opacity">
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
       </div>
@@ -531,9 +702,10 @@ function PipelineCanvas() {
       {/* ── Right panel ───────────────────────────────────────────────── */}
       <aside className="w-60 shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col">
         <div className="p-3 border-b border-gray-800 flex items-center justify-between">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Properties</p>
+          <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Properties</p>
           {selectedNodeId && (
-            <button onClick={() => setSelectedNodeId(null)} className="text-gray-600 hover:text-gray-400 transition-colors">
+            <button onClick={() => setSelectedNodeId(null)}
+              className="text-gray-600 hover:text-gray-400 transition-colors">
               <X className="w-3.5 h-3.5" />
             </button>
           )}
@@ -547,7 +719,7 @@ function PipelineCanvas() {
   );
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ── Page wrapper ──────────────────────────────────────────────────────────────
 
 export default function PipelinePage() {
   return (
@@ -555,7 +727,7 @@ export default function PipelinePage() {
       <div className="px-5 py-2.5 border-b border-gray-800 bg-gray-900/80 flex items-center gap-3 shrink-0">
         <h1 className="text-sm font-bold text-white">Pipeline Workflow</h1>
         <span className="text-xs text-gray-600">
-          Drag nodes · Connect via edge handles · Click node to edit · Delete key removes selection
+          Click or drag elements to add · Nodes auto-connect · Delete key removes selection
         </span>
       </div>
       <div className="flex-1 min-h-0">
