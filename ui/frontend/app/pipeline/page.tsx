@@ -107,10 +107,14 @@ function nodeXY(si: number, slotIdx: number): { x: number; y: number } {
 // ── Handle CSS (hover states) ─────────────────────────────────────────────────
 
 const HANDLE_CSS = `
+  /* Sleeve nodes must never intercept pointer events */
+  .react-flow__node-sleeve { pointer-events: none !important; }
+  /* Source handle (+ connect) */
   .rf-src {
     position:relative!important;width:22px!important;height:22px!important;
     border-radius:50%!important;background:#111827!important;
     border:2px solid #4b5563!important;cursor:crosshair!important;
+    overflow:visible!important;
     transition:width .15s,height .15s,background .15s,border-color .15s!important;
   }
   .rf-src::after {
@@ -121,6 +125,7 @@ const HANDLE_CSS = `
   .rf-src:hover { width:30px!important;height:30px!important;
     background:#064e3b!important;border-color:#10b981!important; }
   .rf-src:hover::after { color:#34d399;font-size:18px; }
+  /* Target handle */
   .rf-tgt {
     width:12px!important;height:12px!important;border-radius:50%!important;
     background:#111827!important;border:2px solid #374151!important;
@@ -185,34 +190,44 @@ function findAutoConnect(
   const kind      = newNode.type as NodeKind;
   const realNodes = nodes.filter(n => !String(n.id).startsWith("sleeve_"));
 
+  const newStage = (newNode.data as PipelineNodeData).stageIndex;
+
   if (kind === "input") {
+    // Connect to the nearest unconnected processing below (input is always stage 0)
     const procs = realNodes
-      .filter(n => n.type === "processing")
+      .filter(n => n.type === "processing" && (n.data as PipelineNodeData).stageIndex > newStage)
       .sort((a, b) => (a.data as PipelineNodeData).stageIndex - (b.data as PipelineNodeData).stageIndex);
-    const noInputYet = procs.filter(n => !edges.some(e => e.target === n.id));
-    const target = noInputYet[0] ?? procs[0];
+    const unconnected = procs.filter(n => !edges.some(e => e.target === n.id));
+    const target = unconnected[0] ?? procs[0];
     if (target) return { source: newNode.id, target: target.id };
     return null;
   }
 
   if (kind === "processing") {
-    const openInputs = realNodes.filter(n => n.type === "input" && !edges.some(e => e.source === n.id));
+    // Connect from the nearest input strictly above (lower stage index)
+    const openInputs = realNodes.filter(n =>
+      n.type === "input" &&
+      (n.data as PipelineNodeData).stageIndex < newStage &&
+      !edges.some(e => e.source === n.id)
+    );
     if (openInputs.length > 0) return { source: openInputs[0].id, target: newNode.id };
-    const openOutputs = realNodes
-      .filter(n => n.type === "output" && !edges.some(e => e.source === n.id))
-      .sort((a, b) => (b.data as PipelineNodeData).stageIndex - (a.data as PipelineNodeData).stageIndex);
-    if (openOutputs.length > 0) return { source: openOutputs[0].id, target: newNode.id };
-    const anyInput = realNodes.filter(n => n.type === "input");
+    // Fallback: any input above
+    const anyInput = realNodes.filter(n =>
+      n.type === "input" && (n.data as PipelineNodeData).stageIndex < newStage
+    );
     if (anyInput.length > 0) return { source: anyInput[0].id, target: newNode.id };
     return null;
+    // NOTE: never connect output → processing (that would be upward within the same stage pair)
   }
 
   if (kind === "output") {
+    // Connect from the nearest processing strictly above (lower stage index) that has no output yet
     const openProcs = realNodes
-      .filter(n => {
-        if (n.type !== "processing") return false;
-        return !edges.some(e => e.source === n.id && realNodes.find(x => x.id === e.target)?.type === "output");
-      })
+      .filter(n =>
+        n.type === "processing" &&
+        (n.data as PipelineNodeData).stageIndex < newStage &&
+        !edges.some(e => e.source === n.id && realNodes.find(x => x.id === e.target)?.type === "output")
+      )
       .sort((a, b) => (b.data as PipelineNodeData).stageIndex - (a.data as PipelineNodeData).stageIndex);
     if (openProcs.length > 0) return { source: openProcs[0].id, target: newNode.id };
     return null;
@@ -236,7 +251,7 @@ function NodeCard({
     kind === "processing" ? "ring-indigo-400/50" :
                             "ring-yellow-400/50";
   return (
-    <div className={`w-[200px] rounded-xl border-2 shadow-2xl overflow-hidden transition-all duration-150
+    <div className={`w-[200px] rounded-xl border-2 shadow-2xl transition-all duration-150
       ${meta.border} bg-gray-900
       ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40 scale-105` : "opacity-90 hover:opacity-100 hover:scale-[1.02]"}`}>
       {children}
@@ -248,11 +263,11 @@ function InputNode({ data, selected }: { data: PipelineNodeData; selected?: bool
   const m = getMeta("input", data.subType);
   return (
     <NodeCard meta={m} selected={!!selected} kind="input">
-      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
+      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
-      <div className="px-4 py-1.5 bg-gray-900">
+      <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
           ⬤ Input · {m.label}
         </span>
@@ -267,11 +282,11 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
   return (
     <NodeCard meta={m} selected={!!selected} kind="processing">
       <Handle type="target" position={Position.Top} className="rf-tgt" />
-      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
+      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
-      <div className="px-4 py-1.5 bg-gray-900">
+      <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
           ⬡ Process · {m.label}
         </span>
@@ -289,16 +304,15 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
   return (
     <NodeCard meta={m} selected={!!selected} kind="output">
       <Handle type="target" position={Position.Top} className="rf-tgt" />
-      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
+      <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
-      <div className="px-4 py-1.5 bg-gray-900">
+      <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
           ■ Output · {m.label}
         </span>
       </div>
-      {/* Can also feed back into a processing node */}
       <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
   );
@@ -556,11 +570,13 @@ function PipelineCanvas() {
     const tk = tn.type as NodeKind;
     const sStage = (sn.data as PipelineNodeData).stageIndex;
     const tStage = (tn.data as PipelineNodeData).stageIndex;
-    // Only top-to-bottom: target must be in a lower lane
+    // Only top-to-bottom: target must be in a strictly lower lane
     if (tStage <= sStage) return false;
     if (tk === "input") return false;
     if (sk === "input" && tk === "output") return false;
     if (sk === "processing" && tk === "processing") return false;
+    // Output may only receive from one processing node
+    if (tk === "output" && edgesRef.current.some(e => e.target === tgt)) return false;
     return true;
   }, []);
 
