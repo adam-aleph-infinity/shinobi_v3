@@ -124,10 +124,10 @@ function computePosition(kind: NodeKind, nodes: Node[]): { x: number; y: number 
 
 // ── Auto-connect ──────────────────────────────────────────────────────────────
 // Rules:
-//   input      → processing ✓
-//   processing → processing ✓
-//   processing → output     ✓
-//   output     → processing ✓ (feedback loops)
+//   input      → processing ✓  (multiple inputs allowed per processing)
+//   output     → processing ✓  (feedback loops)
+//   processing → output     ✓  (each processing MUST have at least one output)
+//   processing → processing ✗  (not allowed)
 //   input      → output     ✗
 //   *          → input      ✗
 
@@ -138,33 +138,34 @@ function findAutoConnect(
 ): { source: string; target: string } | null {
   const kind = newNode.type as NodeKind;
 
-  // ── Adding an INPUT: try to connect it → an unconnected processing node
+  // ── Adding an INPUT: connect to leftmost processing (multiple inputs allowed)
   if (kind === "input") {
-    const unconnectedProcs = nodes
-      .filter(n => n.type === "processing" && !edges.some(e => e.target === n.id))
+    const procs = nodes
+      .filter(n => n.type === "processing")
       .sort((a, b) => a.position.x - b.position.x);
-    if (unconnectedProcs.length > 0)
-      return { source: newNode.id, target: unconnectedProcs[0].id };
+    // Prefer processing with no inputs yet, then any processing
+    const noInputYet = procs.filter(n => !edges.some(e => e.target === n.id));
+    const target = noInputYet[0] ?? procs[0];
+    if (target) return { source: newNode.id, target: target.id };
     return null;
   }
 
-  // ── Adding a PROCESSING node: find the best open source
+  // ── Adding a PROCESSING node: connect FROM open input OR open output (NOT processing)
   if (kind === "processing") {
-    // 1. Rightmost processing with no outgoing edge
-    const openProcs = nodes
-      .filter(n => n.type === "processing" && n.id !== newNode.id && !edges.some(e => e.source === n.id))
-      .sort((a, b) => b.position.x - a.position.x);
-    if (openProcs.length > 0) return { source: openProcs[0].id, target: newNode.id };
-
-    // 2. Any input with no outgoing edge
-    const openInputs = nodes.filter(n => n.type === "input" && !edges.some(e => e.source === n.id));
+    // 1. Any input with no outgoing edge
+    const openInputs = nodes
+      .filter(n => n.type === "input" && !edges.some(e => e.source === n.id));
     if (openInputs.length > 0) return { source: openInputs[0].id, target: newNode.id };
 
-    // 3. Output with no outgoing edge (feedback loop)
+    // 2. Output with no outgoing edge (feedback loop: output → processing)
     const openOutputs = nodes
       .filter(n => n.type === "output" && !edges.some(e => e.source === n.id))
       .sort((a, b) => b.position.x - a.position.x);
     if (openOutputs.length > 0) return { source: openOutputs[0].id, target: newNode.id };
+
+    // 3. Any input at all (even if already connected — add another path)
+    const anyInput = nodes.filter(n => n.type === "input");
+    if (anyInput.length > 0) return { source: anyInput[0].id, target: newNode.id };
 
     return null;
   }
@@ -174,7 +175,6 @@ function findAutoConnect(
     const openProcs = nodes
       .filter(n => {
         if (n.type !== "processing") return false;
-        // Has no outgoing edge to an output node
         return !edges.some(e => e.source === n.id && nodes.find(x => x.id === e.target)?.type === "output");
       })
       .sort((a, b) => b.position.x - a.position.x);
@@ -318,14 +318,16 @@ function validatePipeline(nodes: Node[], edges: Edge[]): string | null {
   const edgeMap: Record<string, string[]> = {};
   edges.forEach(e => { (edgeMap[e.source] ??= []).push(e.target); });
 
-  function canReachOutput(id: string, seen = new Set<string>()): boolean {
-    if (seen.has(id)) return false;
-    seen.add(id);
-    const n = nodes.find(x => x.id === id);
-    if (n?.type === "output") return true;
-    return (edgeMap[id] ?? []).some(nxt => canReachOutput(nxt, seen));
+  // Every processing node must have at least one direct output connection
+  for (const proc of nodes.filter(n => n.type === "processing")) {
+    const hasOutput = edges.some(
+      e => e.source === proc.id && nodes.find(x => x.id === e.target)?.type === "output"
+    );
+    if (!hasOutput)
+      return `Processing "${(proc.data as PipelineNodeData).label}" has no Output connected.`;
   }
 
+  // Every input must reach an output
   for (const inp of nodes.filter(n => n.type === "input")) {
     if (!canReach(inp.id, nodes, edgeMap))
       return `"${(inp.data as PipelineNodeData).label}" has no path to any Output.`;
@@ -402,6 +404,8 @@ function PipelineCanvas() {
       position,
       sourcePosition: Position.Right,
       targetPosition: Position.Left,
+      // Remove the default white ReactFlow node wrapper background
+      style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
       data: {
         label:   `${meta.label} ${nodeSeq - 1}`,
         subType,
@@ -599,11 +603,13 @@ function PipelineCanvas() {
         {/* Flow rules */}
         <div className="p-3 border-t border-gray-800">
           <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-2">Flow rules</p>
-          <div className="space-y-0.5 text-[10px] text-gray-600">
-            <p><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span></p>
-            <p><span className="text-indigo-400">Processing</span> → <span className="text-indigo-400">Processing</span></p>
-            <p><span className="text-indigo-400">Processing</span> → <span className="text-yellow-400">Output</span></p>
-            <p><span className="text-yellow-400">Output</span> → <span className="text-indigo-400">Processing</span></p>
+          <div className="space-y-0.5 text-[10px]">
+            <p className="text-gray-500"><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span> ✓</p>
+            <p className="text-gray-500"><span className="text-yellow-400">Output</span> → <span className="text-indigo-400">Processing</span> ✓</p>
+            <p className="text-gray-500"><span className="text-indigo-400">Processing</span> → <span className="text-yellow-400">Output</span> ✓</p>
+            <p className="text-gray-700 line-through"><span>Processing</span> → <span>Processing</span></p>
+            <p className="text-gray-600 mt-1 text-[9px]">Each processing must have an output</p>
+            <p className="text-gray-600 text-[9px]">Multiple inputs per processing allowed</p>
           </div>
         </div>
 
