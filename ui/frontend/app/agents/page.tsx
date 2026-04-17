@@ -424,11 +424,23 @@ function StepCard({
     <div className="flex items-start shrink-0">
       {/* Node column — drag-drop target */}
       <div
-        className="flex flex-col items-center shrink-0"
+        className="flex flex-col items-center shrink-0 relative"
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
+        {/* Transparent overlay during any drag — sits on top of all children so
+            dragover/drop always hit this element directly, not buried children
+            that have no handlers. Without this, browsers silently reject drops
+            over inner elements that never called preventDefault. */}
+        {isAnyDragActive && (
+          <div
+            className="absolute inset-0 z-40"
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+          />
+        )}
 
         {/* Controls pill */}
         <div className="flex items-center bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm mb-1">
