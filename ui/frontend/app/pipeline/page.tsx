@@ -120,35 +120,11 @@ const TARGET_HANDLE_STYLE: React.CSSProperties = {
 
 // ── Sleeve background node ────────────────────────────────────────────────────
 
-// Each lane kind maps to a distinct visible color scheme
-const LANE_CFG: Record<NodeKind, {
-  bg:        string;  // lane body background (solid, not transparent)
-  topBorder: string;  // top divider line color
-  stripe:    string;  // left accent stripe
-  stepClr:   string;
-  labelClr:  string;
-}> = {
-  input: {
-    bg:        "#0d1f3c",   // deep blue
-    topBorder: "#1e40af",   // blue-700
-    stripe:    "#3b82f6",   // blue-500
-    stepClr:   "#60a5fa",   // blue-400
-    labelClr:  "#93c5fd",   // blue-300
-  },
-  processing: {
-    bg:        "#13103a",   // deep indigo
-    topBorder: "#4338ca",   // indigo-700
-    stripe:    "#6366f1",   // indigo-500
-    stepClr:   "#a5b4fc",   // indigo-300
-    labelClr:  "#c7d2fe",   // indigo-200
-  },
-  output: {
-    bg:        "#1f1500",   // deep amber
-    topBorder: "#b45309",   // amber-700
-    stripe:    "#f59e0b",   // amber-500
-    stepClr:   "#fbbf24",   // amber-400
-    labelClr:  "#fde68a",   // amber-200
-  },
+// Colorless lane config — just divider lines and muted labels
+const LANE_CFG: Record<NodeKind, { stepClr: string; labelClr: string }> = {
+  input:      { stepClr: "#6b7280", labelClr: "#9ca3af" },
+  processing: { stepClr: "#6b7280", labelClr: "#9ca3af" },
+  output:     { stepClr: "#6b7280", labelClr: "#9ca3af" },
 };
 
 function SleeveNode({ data }: { data: Record<string, unknown> }) {
@@ -160,21 +136,19 @@ function SleeveNode({ data }: { data: Record<string, unknown> }) {
         width:           LANE_WIDTH,
         height:          LANE_VISIBLE_H,
         pointerEvents:   "none",
-        backgroundColor: cfg.bg,
-        borderTop:       `2px solid ${cfg.topBorder}`,
-        borderBottom:    `1px solid ${cfg.topBorder}40`,
+        backgroundColor: "transparent",
+        borderTop:       "1px solid #374151",
+        borderBottom:    "1px solid #2d3748",
         display:         "flex",
         overflow:        "hidden",
       }}
     >
-      {/* Left accent stripe */}
-      <div style={{ width: 5, backgroundColor: cfg.stripe, flexShrink: 0 }} />
       {/* Lane label */}
-      <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 14px", width: 140, flexShrink: 0, borderRight: `1px solid ${cfg.topBorder}50` }}>
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: cfg.stepClr }}>
+      <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 14px", width: 140, flexShrink: 0, borderRight: "1px solid #2d3748" }}>
+        <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: cfg.stepClr }}>
           Step {d.step}
         </span>
-        <span style={{ fontSize: 13, fontWeight: 700, color: cfg.labelClr, marginTop: 2 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: cfg.labelClr, marginTop: 2 }}>
           {d.label}
         </span>
       </div>
@@ -877,9 +851,9 @@ function PipelineCanvas() {
           defaultViewport={{ x: 220, y: 10, zoom: 0.85 }}
           deleteKeyCode="Delete"
           proOptions={{ hideAttribution: true }}
-          className="bg-gray-950"
+          className="bg-gray-900"
         >
-          <Background color="#1f2937" gap={28} size={1.5} />
+          <Background color="#374151" gap={24} size={1} />
           <Controls
             className="[&>button]:bg-gray-800 [&>button]:border-gray-700 [&>button]:text-gray-400 [&>button:hover]:bg-gray-700 [&>button:hover]:text-white"
           />
