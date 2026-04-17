@@ -120,27 +120,34 @@ const TARGET_HANDLE_STYLE: React.CSSProperties = {
 
 // ── Sleeve background node ────────────────────────────────────────────────────
 
-const LANE_CFG: Record<NodeKind, { stripe: string; bg: string; border: string; stepClr: string; labelClr: string }> = {
+// Each lane kind maps to a distinct visible color scheme
+const LANE_CFG: Record<NodeKind, {
+  bg:        string;  // lane body background (solid, not transparent)
+  topBorder: string;  // top divider line color
+  stripe:    string;  // left accent stripe
+  stepClr:   string;
+  labelClr:  string;
+}> = {
   input: {
-    stripe:   "bg-blue-500",
-    bg:       "bg-blue-950/30",
-    border:   "border-blue-800/60",
-    stepClr:  "text-blue-500",
-    labelClr: "text-blue-300",
+    bg:        "#0d1f3c",   // deep blue
+    topBorder: "#1e40af",   // blue-700
+    stripe:    "#3b82f6",   // blue-500
+    stepClr:   "#60a5fa",   // blue-400
+    labelClr:  "#93c5fd",   // blue-300
   },
   processing: {
-    stripe:   "bg-indigo-500",
-    bg:       "bg-indigo-950/30",
-    border:   "border-indigo-800/60",
-    stepClr:  "text-indigo-400",
-    labelClr: "text-indigo-200",
+    bg:        "#13103a",   // deep indigo
+    topBorder: "#4338ca",   // indigo-700
+    stripe:    "#6366f1",   // indigo-500
+    stepClr:   "#a5b4fc",   // indigo-300
+    labelClr:  "#c7d2fe",   // indigo-200
   },
   output: {
-    stripe:   "bg-yellow-500",
-    bg:       "bg-yellow-950/30",
-    border:   "border-yellow-800/60",
-    stepClr:  "text-yellow-500",
-    labelClr: "text-yellow-300",
+    bg:        "#1f1500",   // deep amber
+    topBorder: "#b45309",   // amber-700
+    stripe:    "#f59e0b",   // amber-500
+    stepClr:   "#fbbf24",   // amber-400
+    labelClr:  "#fde68a",   // amber-200
   },
 };
 
@@ -149,17 +156,27 @@ function SleeveNode({ data }: { data: Record<string, unknown> }) {
   const cfg = LANE_CFG[d.kind as NodeKind] ?? LANE_CFG.input;
   return (
     <div
-      style={{ width: LANE_WIDTH, height: LANE_VISIBLE_H, pointerEvents: "none" }}
-      className={`flex overflow-hidden rounded-r-2xl border ${cfg.bg} ${cfg.border}`}
+      style={{
+        width:           LANE_WIDTH,
+        height:          LANE_VISIBLE_H,
+        pointerEvents:   "none",
+        backgroundColor: cfg.bg,
+        borderTop:       `2px solid ${cfg.topBorder}`,
+        borderBottom:    `1px solid ${cfg.topBorder}40`,
+        display:         "flex",
+        overflow:        "hidden",
+      }}
     >
-      {/* Solid left stripe — acts as the visual lane divider */}
-      <div className={`w-2 shrink-0 ${cfg.stripe}`} />
-      {/* Label block — always visible at the left edge */}
-      <div className={`flex flex-col justify-center px-3 w-36 shrink-0 border-r ${cfg.border}`}>
-        <span className={`text-[10px] font-bold uppercase tracking-widest ${cfg.stepClr}`}>
+      {/* Left accent stripe */}
+      <div style={{ width: 5, backgroundColor: cfg.stripe, flexShrink: 0 }} />
+      {/* Lane label */}
+      <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 14px", width: 140, flexShrink: 0, borderRight: `1px solid ${cfg.topBorder}50` }}>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: cfg.stepClr }}>
           Step {d.step}
         </span>
-        <span className={`text-sm font-bold ${cfg.labelClr} mt-0.5`}>{d.label}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: cfg.labelClr, marginTop: 2 }}>
+          {d.label}
+        </span>
       </div>
     </div>
   );
@@ -855,7 +872,7 @@ function PipelineCanvas() {
           onConnect={onConnect}
           onNodeDragStop={onNodeDragStop}
           isValidConnection={isValidConnectionFn}
-          defaultViewport={{ x: 230, y: 40, zoom: 1.0 }}
+          defaultViewport={{ x: 220, y: 10, zoom: 0.85 }}
           deleteKeyCode="Delete"
           proOptions={{ hideAttribution: true }}
           className="bg-gray-950"
