@@ -50,16 +50,20 @@ const INPUT_SOURCES = [
 
 type SourceValue = typeof INPUT_SOURCES[number]["value"];
 
-function sourceBadge(source: string) {
+function sourceMeta(source: string) {
   return INPUT_SOURCES.find(s => s.value === source) ?? INPUT_SOURCES[6];
 }
 
 // ── Output format metadata ────────────────────────────────────────────────────
 
-const OUTPUT_FMT: Record<string, { label: string; desc: string; icon: React.ComponentType<{ className?: string }>; bg: string; text: string; border: string }> = {
-  markdown: { label: "Markdown", desc: "Structured text with headers", icon: FileText, bg: "bg-indigo-900/50", text: "text-indigo-300", border: "border-indigo-700/40" },
-  json:     { label: "JSON",     desc: "Machine-readable data",        icon: Braces,   bg: "bg-yellow-900/50", text: "text-yellow-300", border: "border-yellow-700/40" },
-  text:     { label: "Text",     desc: "Plain unformatted text",       icon: AlignLeft, bg: "bg-gray-700/50",  text: "text-gray-300",   border: "border-gray-600/40" },
+const OUTPUT_FMT: Record<string, {
+  label: string; desc: string;
+  icon: React.ComponentType<{ className?: string }>;
+  bg: string; text: string; border: string;
+}> = {
+  markdown: { label: "Markdown", desc: "Structured text with headers", icon: FileText,  bg: "bg-indigo-900/50", text: "text-indigo-300",  border: "border-indigo-700/40" },
+  json:     { label: "JSON",     desc: "Machine-readable data",        icon: Braces,    bg: "bg-yellow-900/50", text: "text-yellow-300", border: "border-yellow-700/40" },
+  text:     { label: "Text",     desc: "Plain unformatted text",       icon: AlignLeft, bg: "bg-gray-700/50",   text: "text-gray-300",   border: "border-gray-600/40" },
 };
 
 // ── Agent class metadata ──────────────────────────────────────────────────────
@@ -72,26 +76,26 @@ const CLASS_ICON_BG: Record<string, string> = {
   notes: "bg-teal-900/60", compliance: "bg-teal-800/40", general: "bg-sky-900/60",
 };
 const CLASS_REQUIRES_PREV: Record<string, string> = { scorer: "persona", compliance: "notes" };
-const CLASS_META: Record<string, { label: string; textColor: string; borderColor: string; dotColor: string }> = {
-  persona:    { label: "Persona",       textColor: "text-violet-300", borderColor: "border-violet-700/40", dotColor: "bg-violet-400" },
-  scorer:     { label: "Scorer",        textColor: "text-violet-400", borderColor: "border-violet-700/30", dotColor: "bg-violet-500/70" },
-  notes:      { label: "Notes",         textColor: "text-teal-300",   borderColor: "border-teal-700/40",   dotColor: "bg-teal-400" },
-  compliance: { label: "Compliance",    textColor: "text-teal-400",   borderColor: "border-teal-700/30",   dotColor: "bg-teal-500/70" },
-  general:    { label: "General",       textColor: "text-sky-300",    borderColor: "border-sky-700/40",    dotColor: "bg-sky-400" },
-  "":         { label: "Uncategorized", textColor: "text-gray-400",   borderColor: "border-gray-700/40",   dotColor: "bg-gray-500" },
+const CLASS_META: Record<string, { label: string; textColor: string; borderColor: string }> = {
+  persona:    { label: "Persona",    textColor: "text-violet-300", borderColor: "border-violet-700/40" },
+  scorer:     { label: "Scorer",     textColor: "text-violet-400", borderColor: "border-violet-700/30" },
+  notes:      { label: "Notes",      textColor: "text-teal-300",   borderColor: "border-teal-700/40"   },
+  compliance: { label: "Compliance", textColor: "text-teal-400",   borderColor: "border-teal-700/30"   },
+  general:    { label: "General",    textColor: "text-sky-300",    borderColor: "border-sky-700/40"    },
+  "":         { label: "—",          textColor: "text-gray-400",   borderColor: "border-gray-700/40"   },
 };
 
 function classMeta(cls: string) {
-  return CLASS_META[cls.toLowerCase()] ?? { label: cls, textColor: "text-gray-400", borderColor: "border-gray-700/40", dotColor: "bg-gray-500" };
+  return CLASS_META[cls.toLowerCase()] ?? { label: cls, textColor: "text-gray-400", borderColor: "border-gray-700/40" };
 }
 
-function AgentClassIcon({ cls, size = "md" }: { cls: string; size?: "sm" | "md" | "lg" }) {
+function AgentClassIcon({ cls, size = "md" }: { cls: string; size?: "sm" | "md" }) {
   const norm = cls.toLowerCase();
   const Icon = CLASS_ICON[norm] ?? Bot;
   const bg   = CLASS_ICON_BG[norm] ?? "bg-gray-800";
   const meta = classMeta(norm);
-  const dims     = { sm: "w-6 h-6", md: "w-10 h-10", lg: "w-12 h-12" }[size];
-  const iconDims = { sm: "w-3 h-3", md: "w-5 h-5",   lg: "w-6 h-6" }[size];
+  const dims     = size === "sm" ? "w-6 h-6" : "w-10 h-10";
+  const iconDims = size === "sm" ? "w-3 h-3" : "w-5 h-5";
   return (
     <div className={cn("rounded-xl flex items-center justify-center shrink-0", bg, dims)}>
       <Icon className={cn(iconDims, meta.textColor)} />
@@ -138,6 +142,21 @@ type NodeSelection =
   | { type: "output"; stepIdx: number }
   | null;
 
+// ── Scope inference ───────────────────────────────────────────────────────────
+
+function inferScope(steps: PipelineStep[], allAgents: UniversalAgent[]): string {
+  const callSources = new Set(["transcript", "merged_transcript"]);
+  for (const s of steps) {
+    const agent = allAgents.find(a => a.id === s.agent_id);
+    if (!agent) continue;
+    for (const inp of agent.inputs ?? []) {
+      const src = s.input_overrides[inp.key] ?? inp.source;
+      if (callSources.has(src)) return "per_call";
+    }
+  }
+  return "per_pair";
+}
+
 // ── Class palette cards ───────────────────────────────────────────────────────
 
 const CLASS_TYPES = [
@@ -156,15 +175,15 @@ function ClassPaletteCard({ cls, label, desc, onAdd }: {
   const bg   = CLASS_ICON_BG[cls] ?? "bg-gray-800";
   return (
     <button onClick={onAdd}
-      className="w-full flex items-center gap-2.5 p-2.5 rounded-xl border border-gray-800 hover:border-gray-600 bg-gray-900 hover:bg-gray-800 transition-all text-left group">
-      <div className={cn("w-9 h-9 rounded-xl flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform", bg)}>
-        <Icon className={cn("w-[18px] h-[18px]", meta.textColor)} />
+      className="w-full flex items-center gap-2 p-2 rounded-xl border border-gray-800 hover:border-gray-600 bg-gray-900 hover:bg-gray-800 transition-all text-left group">
+      <div className={cn("w-7 h-7 rounded-lg flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform", bg)}>
+        <Icon className={cn("w-3.5 h-3.5", meta.textColor)} />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-semibold text-gray-200">{label}</p>
+        <p className="text-[11px] font-semibold text-gray-200">{label}</p>
         <p className="text-[9px] text-gray-600 leading-tight">{desc}</p>
       </div>
-      <Plus className="w-3.5 h-3.5 text-gray-600 group-hover:text-teal-400 transition-colors shrink-0" />
+      <Plus className="w-3 h-3 text-gray-600 group-hover:text-teal-400 transition-colors shrink-0" />
     </button>
   );
 }
@@ -239,56 +258,9 @@ function AgentPickerGrid({ value, allAgents, prevStepClass, onPick }: {
   );
 }
 
-// ── Input node (canvas) ───────────────────────────────────────────────────────
+// ── Step card (canvas node) ───────────────────────────────────────────────────
 
-function InputNode({ inp, step, isSelected, onClick }: {
-  inp: AgentInput; step: PipelineStep; isSelected: boolean; onClick: () => void;
-}) {
-  const src  = sourceBadge(step.input_overrides[inp.key] ?? inp.source);
-  const Icon = src.icon;
-  return (
-    <button onClick={onClick}
-      className={cn(
-        "flex flex-col items-center gap-1 px-2.5 py-2 rounded-xl border text-[9px] font-medium transition-all",
-        isSelected
-          ? cn(src.badge, "ring-2 ring-white/20 shadow-lg scale-105")
-          : cn(src.badge, "opacity-70 hover:opacity-100"),
-      )}>
-      <Icon className="w-4 h-4 shrink-0" />
-      <span className="font-mono leading-tight truncate max-w-[64px]">{inp.key}</span>
-      <span className="opacity-70 leading-tight truncate max-w-[64px]">{src.label}</span>
-    </button>
-  );
-}
-
-// ── Output node (canvas) ──────────────────────────────────────────────────────
-
-function OutputNode({ agent, isSelected, onClick }: {
-  agent: UniversalAgent; isSelected: boolean; onClick: () => void;
-}) {
-  const fmt  = agent.output_format ?? "markdown";
-  const meta = OUTPUT_FMT[fmt] ?? OUTPUT_FMT.markdown;
-  const Icon = meta.icon;
-  return (
-    <button onClick={onClick}
-      className={cn(
-        "flex flex-col items-center gap-1.5 px-3 py-2.5 rounded-xl border-2 text-[9px] transition-all",
-        isSelected
-          ? cn("shadow-lg scale-105", meta.border, "bg-gray-800")
-          : "border-gray-800 bg-gray-900/60 hover:border-gray-700",
-      )}>
-      <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center", meta.bg)}>
-        <Icon className={cn("w-4 h-4", meta.text)} />
-      </div>
-      <span className="text-gray-400 font-medium">Output</span>
-      <span className={cn("px-1.5 py-0.5 rounded-full border font-semibold", meta.text, meta.border)}>{meta.label}</span>
-    </button>
-  );
-}
-
-// ── Step group (canvas) ───────────────────────────────────────────────────────
-
-function StepGroup({ step, index, total, allAgents, prevStepClass, selection, onSelect, onRemove, onMoveLeft, onMoveRight }: {
+function StepCard({ step, index, total, allAgents, prevStepClass, selection, onSelect, onRemove, onMoveLeft, onMoveRight }: {
   step: PipelineStep; index: number; total: number;
   allAgents: UniversalAgent[]; prevStepClass?: string;
   selection: NodeSelection;
@@ -305,17 +277,18 @@ function StepGroup({ step, index, total, allAgents, prevStepClass, selection, on
   const agentSel  = selection?.type === "agent"  && selection.stepIdx === index;
   const outputSel = selection?.type === "output" && selection.stepIdx === index;
   const inputSel  = (key: string) =>
-    selection?.type === "input" && selection.stepIdx === index && (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey === key;
+    selection?.type === "input" && selection.stepIdx === index &&
+    (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey === key;
+
+  const fmt     = agent?.output_format ?? "markdown";
+  const fmtMeta = OUTPUT_FMT[fmt] ?? OUTPUT_FMT.markdown;
+  const FmtIcon = fmtMeta.icon;
 
   return (
     <div className="flex items-center shrink-0">
-      {/* Step group card */}
-      <div className={cn(
-        "relative flex flex-col items-center rounded-2xl border bg-gray-900/60 pt-6 pb-3 px-3 gap-0 w-48 transition-all",
-        agentSel ? cn("border-2", meta.borderColor, "shadow-xl shadow-black/40") : "border-gray-800",
-      )}>
-        {/* Step controls — top pill */}
-        <div className="absolute -top-3 flex items-center gap-0.5 bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm">
+      <div className="relative flex flex-col items-center">
+        {/* Controls pill */}
+        <div className="absolute -top-3 z-10 flex items-center gap-0 bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm">
           <button onClick={onMoveLeft} disabled={index === 0}
             className="p-0.5 text-gray-700 hover:text-gray-400 disabled:opacity-20 transition-colors">
             <ChevronRight className="w-3 h-3 rotate-180" />
@@ -330,75 +303,80 @@ function StepGroup({ step, index, total, allAgents, prevStepClass, selection, on
           </button>
         </div>
 
-        {/* Compat warning */}
-        {!compat && (
-          <div className="flex items-center gap-1 text-[9px] text-amber-400 mb-2 bg-amber-900/20 border border-amber-700/30 rounded-full px-2 py-0.5">
-            <TriangleAlert className="w-3 h-3 shrink-0" /> needs {reqPrev}
-          </div>
-        )}
-
-        {/* Input nodes */}
-        {agent && (agent.inputs ?? []).length > 0 && (
-          <>
-            <div className="flex flex-wrap justify-center gap-1.5 w-full">
-              {agent.inputs.map(inp => (
-                <InputNode
-                  key={inp.key}
-                  inp={inp}
-                  step={step}
-                  isSelected={inputSel(inp.key)}
-                  onClick={() => onSelect(
-                    inputSel(inp.key) ? null : { type: "input", stepIdx: index, inputKey: inp.key }
-                  )}
-                />
-              ))}
+        {/* Main card */}
+        <div className={cn(
+          "rounded-2xl border-2 bg-gray-900/60 overflow-hidden w-44 transition-all mt-1",
+          agentSel ? cn(meta.borderColor, "shadow-xl shadow-black/40") : "border-gray-800",
+        )}>
+          {/* Compat warning */}
+          {!compat && (
+            <div className="flex items-center gap-1 text-[9px] text-amber-400 px-3 py-1.5 bg-amber-900/20 border-b border-amber-700/30">
+              <TriangleAlert className="w-3 h-3 shrink-0" /> needs {reqPrev}
             </div>
-            {/* Arrow down */}
-            <div className="flex flex-col items-center my-1">
-              <div className="w-px h-3 bg-gray-700" />
-              <ChevronDown className="w-3 h-3 text-gray-700 -mt-1" />
-            </div>
-          </>
-        )}
-
-        {/* Agent card */}
-        <button
-          onClick={() => onSelect(agentSel ? null : { type: "agent", stepIdx: index })}
-          className={cn(
-            "w-full rounded-xl border-2 p-3 flex flex-col items-center gap-1.5 transition-all",
-            agentSel
-              ? cn(meta.borderColor, "bg-gray-800 shadow-md")
-              : "border-gray-700/40 hover:border-gray-600 bg-gray-900",
           )}
-        >
-          <AgentClassIcon cls={cls} size="md" />
-          <p className="text-[11px] font-semibold text-white text-center truncate w-full">
-            {agent?.name ?? "Tap to configure"}
-          </p>
-          <span className={cn("text-[8px] px-1.5 py-0.5 rounded-full border", meta.textColor, meta.borderColor)}>
-            {meta.label}
-          </span>
-        </button>
 
-        {/* Arrow down to output */}
-        {agent && (
-          <div className="flex flex-col items-center my-1">
-            <div className="w-px h-3 bg-gray-700" />
-            <ChevronDown className="w-3 h-3 text-gray-700 -mt-1" />
+          {/* Agent body — click opens agent settings */}
+          <div
+            onClick={() => onSelect(agentSel ? null : { type: "agent", stepIdx: index })}
+            className="flex flex-col items-center gap-1.5 p-3 cursor-pointer hover:bg-gray-800/30 transition-colors"
+          >
+            <AgentClassIcon cls={cls} size="md" />
+            <p className="text-[11px] font-semibold text-white text-center truncate w-full">
+              {agent?.name ?? "Tap to configure"}
+            </p>
+            <span className={cn("text-[8px] px-1.5 py-0.5 rounded-full border", meta.textColor, meta.borderColor)}>
+              {meta.label}
+            </span>
           </div>
-        )}
 
-        {/* Output node */}
-        {agent && (
-          <OutputNode
-            agent={agent}
-            isSelected={outputSel}
-            onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
-          />
-        )}
+          {/* Input badges section */}
+          {agent && (agent.inputs ?? []).length > 0 && (
+            <div className="px-2.5 pb-2 pt-1 border-t border-gray-800/60">
+              <p className="text-[8px] text-gray-700 uppercase tracking-wide mb-1">Inputs</p>
+              <div className="flex flex-wrap gap-1">
+                {agent.inputs.map(inp => {
+                  const src    = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
+                  const SrcIco = src.icon;
+                  const isSel  = inputSel(inp.key);
+                  return (
+                    <button
+                      key={inp.key}
+                      onClick={() => onSelect(isSel ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
+                      title={`${inp.key}: ${src.label}`}
+                      className={cn(
+                        "flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] border transition-all",
+                        isSel ? cn(src.badge, "ring-1 ring-white/20 scale-105") : cn(src.badge, "opacity-60 hover:opacity-100"),
+                      )}
+                    >
+                      <SrcIco className="w-2.5 h-2.5 shrink-0" />
+                      <span className="font-mono truncate max-w-[52px]">{inp.key}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Output format badge */}
+          {agent && (
+            <div className="px-2.5 pb-2.5 pt-1 border-t border-gray-800/60">
+              <p className="text-[8px] text-gray-700 uppercase tracking-wide mb-1">Output</p>
+              <button
+                onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
+                className={cn(
+                  "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-[9px] transition-all",
+                  outputSel ? cn(fmtMeta.border, "bg-gray-800") : "border-gray-700/40 bg-gray-900/60 hover:border-gray-600",
+                )}
+              >
+                <FmtIcon className={cn("w-3 h-3 shrink-0", fmtMeta.text)} />
+                <span className={cn("font-medium", fmtMeta.text)}>{fmtMeta.label}</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Horizontal arrow to next group */}
+      {/* Arrow to next */}
       {index < total - 1 && (
         <div className="flex items-center px-2 shrink-0 text-gray-700">
           <div className="w-5 h-px bg-gray-800" />
@@ -411,7 +389,6 @@ function StepGroup({ step, index, total, allAgents, prevStepClass, selection, on
 
 // ── Settings panels ───────────────────────────────────────────────────────────
 
-/** Agent settings (prompts, model, picker) */
 function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSaveAgent, onClose }: {
   step: PipelineStep; allAgents: UniversalAgent[]; prevStepClass?: string;
   onChangeStep: (s: PipelineStep) => void;
@@ -535,22 +512,11 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
                   <label className="block text-[9px] text-gray-500 mb-1">Model</label>
                   <ModelSelect value={draft.model} onChange={v => setDraft(f => ({ ...f, model: v }))} />
                 </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[9px] text-gray-500 mb-1">Temperature</label>
-                    <input type="number" min={0} max={2} step={0.1} value={draft.temperature}
-                      onChange={e => setDraft(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
-                  </div>
-                  <div>
-                    <label className="block text-[9px] text-gray-500 mb-1">Output format</label>
-                    <select value={draft.output_format} onChange={e => setDraft(f => ({ ...f, output_format: e.target.value }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500">
-                      <option value="markdown">Markdown</option>
-                      <option value="json">JSON</option>
-                      <option value="text">Plain text</option>
-                    </select>
-                  </div>
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-1">Temperature</label>
+                  <input type="number" min={0} max={2} step={0.1} value={draft.temperature}
+                    onChange={e => setDraft(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
                 </div>
               </div>
             )}
@@ -569,14 +535,15 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
   );
 }
 
-/** Input source settings */
-function InputSettingsPanel({ inp, step, onChangeStep, onClose }: {
-  inp: AgentInput; step: PipelineStep;
+// ── Input settings panel ──────────────────────────────────────────────────────
+
+function InputSettingsPanel({ inp, step, agent, onChangeStep, onClose }: {
+  inp: AgentInput; step: PipelineStep; agent: UniversalAgent;
   onChangeStep: (s: PipelineStep) => void; onClose: () => void;
 }) {
   const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
-  const src             = sourceBadge(effectiveSource);
-  const defaultSrc      = sourceBadge(inp.source);
+  const src             = sourceMeta(effectiveSource);
+  const defaultSrc      = sourceMeta(inp.source);
   const isOverridden    = !!step.input_overrides[inp.key] && step.input_overrides[inp.key] !== inp.source;
   const Icon            = src.icon;
   const DefaultIcon     = defaultSrc.icon;
@@ -584,42 +551,67 @@ function InputSettingsPanel({ inp, step, onChangeStep, onClose }: {
   return (
     <div className="w-80 shrink-0 border-l border-gray-800 flex flex-col bg-gray-950">
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
-        <div className={cn("w-6 h-6 rounded-lg flex items-center justify-center border shrink-0", src.badge)}>
-          <Icon className="w-3 h-3 shrink-0" />
+        <div className={cn("w-7 h-7 rounded-lg flex items-center justify-center border shrink-0", src.badge)}>
+          <Icon className="w-3.5 h-3.5 shrink-0" />
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-xs font-semibold text-white font-mono">{`{${inp.key}}`}</p>
-          <p className="text-[9px] text-gray-500">Input · {src.label}</p>
+          <p className="text-[9px] text-gray-500">{agent.name} · input</p>
         </div>
         <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors"><X className="w-4 h-4" /></button>
       </div>
-      <div className="p-3 space-y-3">
-        <p className="text-[9px] text-gray-600 uppercase tracking-wide">Select source</p>
-        <SourcePillGrid value={effectiveSource} onChange={val => {
-          const overrides = { ...step.input_overrides };
-          if (val === inp.source) delete overrides[inp.key];
-          else overrides[inp.key] = val;
-          onChangeStep({ ...step, input_overrides: overrides });
-        }} />
-        <div className="flex items-center gap-1.5 text-[9px] text-gray-600">
+
+      <div className="p-3 space-y-4 overflow-y-auto">
+        <div>
+          <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2.5">Select source</p>
+          <SourcePillGrid value={effectiveSource} onChange={val => {
+            const overrides = { ...step.input_overrides };
+            if (val === inp.source) delete overrides[inp.key];
+            else overrides[inp.key] = val;
+            onChangeStep({ ...step, input_overrides: overrides });
+          }} />
+        </div>
+
+        <div className="flex items-center gap-1.5 text-[9px] text-gray-600 pt-1 border-t border-gray-800">
           <span>Default:</span>
           <span className={cn("flex items-center gap-1 px-1.5 py-0.5 rounded-full border", defaultSrc.badge)}>
             <DefaultIcon className="w-2.5 h-2.5 shrink-0" />{defaultSrc.label}
           </span>
-          {isOverridden && <span className="text-amber-500 ml-1">overridden</span>}
+          {isOverridden && <span className="text-amber-500 ml-1">overridden for this pipeline</span>}
+        </div>
+
+        {/* Quick info about each source */}
+        <div className="space-y-1.5 pt-1 border-t border-gray-800">
+          <p className="text-[9px] text-gray-600 uppercase tracking-wide">Sources</p>
+          {INPUT_SOURCES.map(s => {
+            const SIcon = s.icon;
+            return (
+              <div key={s.value} className={cn(
+                "flex items-center gap-2 px-2 py-1.5 rounded-lg text-[10px]",
+                effectiveSource === s.value ? cn(s.badge, "border") : "text-gray-600",
+              )}>
+                <SIcon className="w-3 h-3 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <span className="font-medium">{s.label}</span>
+                  <span className="ml-1.5 opacity-60">{s.desc}</span>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
   );
 }
 
-/** Output format settings */
+// ── Output settings panel ─────────────────────────────────────────────────────
+
 function OutputSettingsPanel({ agent, onSaveAgent, onClose }: {
   agent: UniversalAgent;
   onSaveAgent: (id: string, form: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
   onClose: () => void;
 }) {
-  const [fmt, setFmt]   = useState(agent.output_format ?? "markdown");
+  const [fmt, setFmt]       = useState(agent.output_format ?? "markdown");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved]   = useState(false);
 
@@ -627,15 +619,14 @@ function OutputSettingsPanel({ agent, onSaveAgent, onClose }: {
     setSaving(true);
     try {
       await onSaveAgent(agent.id, { ...agent, output_format: fmt });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      setSaved(true); setTimeout(() => setSaved(false), 2000);
     } finally { setSaving(false); }
   }
 
   return (
     <div className="w-72 shrink-0 border-l border-gray-800 flex flex-col bg-gray-950">
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
-        <div className="w-6 h-6 rounded-lg bg-gray-800 flex items-center justify-center shrink-0">
+        <div className="w-7 h-7 rounded-lg bg-gray-800 flex items-center justify-center shrink-0">
           <FileText className="w-3.5 h-3.5 text-gray-400" />
         </div>
         <div className="flex-1 min-w-0">
@@ -644,7 +635,7 @@ function OutputSettingsPanel({ agent, onSaveAgent, onClose }: {
         </div>
         <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors"><X className="w-4 h-4" /></button>
       </div>
-      <div className="p-3 space-y-2">
+      <div className="p-3 space-y-2 overflow-y-auto">
         <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Response format</p>
         {Object.entries(OUTPUT_FMT).map(([key, m]) => {
           const FmtIcon = m.icon;
@@ -682,20 +673,17 @@ export default function AgentsPage() {
   const { mutate } = useSWRConfig();
   const { activePipelineId, setActivePipeline } = useAppCtx();
 
-  const { data: agents } = useSWR<UniversalAgent[]>(`${API}/universal-agents`, fetcher);
+  const { data: agents }    = useSWR<UniversalAgent[]>(`${API}/universal-agents`, fetcher);
   const { data: pipelines } = useSWR<Pipeline[]>(`${API}/pipelines`, fetcher);
 
-  // Pipeline state
   const [selectedPipeline, setSelectedPipeline] = useState<string | null>(null);
-  const [pipelineForm, setPipelineForm] = useState({ ...EMPTY_PIPELINE });
-  const [pipelineIsNew, setPipelineIsNew] = useState(false);
-  const [pipelineSaving, setPipelineSaving] = useState(false);
-  const [pipelineSaved, setPipelineSaved]   = useState(false);
+  const [pipelineForm, setPipelineForm]         = useState({ ...EMPTY_PIPELINE });
+  const [pipelineIsNew, setPipelineIsNew]       = useState(false);
+  const [pipelineSaving, setPipelineSaving]     = useState(false);
+  const [pipelineSaved, setPipelineSaved]       = useState(false);
 
-  // Canvas selection
   const [selection, setSelection] = useState<NodeSelection>(null);
 
-  // Import
   const [importing, setImporting]       = useState(false);
   const [importResult, setImportResult] = useState<{ created_agents: string[]; created_pipelines: string[]; skipped: string[] } | null>(null);
 
@@ -721,7 +709,8 @@ export default function AgentsPage() {
     try {
       const method  = pipelineIsNew ? "POST" : "PUT";
       const url     = pipelineIsNew ? `${API}/pipelines` : `${API}/pipelines/${selectedPipeline}`;
-      const payload = { ...pipelineForm, steps: pipelineForm.steps.map(({ _cls: _c, ...rest }) => rest) };
+      const scope   = inferScope(pipelineForm.steps, allAgents);
+      const payload = { ...pipelineForm, scope, steps: pipelineForm.steps.map(({ _cls: _c, ...rest }) => rest) };
       const res     = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const data    = await res.json();
       mutate(`${API}/pipelines`);
@@ -737,6 +726,7 @@ export default function AgentsPage() {
     mutate(`${API}/pipelines`);
     if (activePipelineId === selectedPipeline) setActivePipeline("", "");
     setSelectedPipeline(null); setPipelineIsNew(false); setSelection(null);
+    setPipelineForm({ ...EMPTY_PIPELINE });
   }
 
   // ── Steps ──────────────────────────────────────────────────────────────────
@@ -778,16 +768,12 @@ export default function AgentsPage() {
     });
   }
 
-  // ── Agent save ─────────────────────────────────────────────────────────────
-
   async function saveNodeAgent(agentId: string, form: Omit<UniversalAgent, "id" | "created_at">) {
     await fetch(`${API}/universal-agents/${agentId}`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form),
     });
     mutate(`${API}/universal-agents`);
   }
-
-  // ── Import ─────────────────────────────────────────────────────────────────
 
   async function importPresets() {
     setImporting(true); setImportResult(null);
@@ -803,42 +789,42 @@ export default function AgentsPage() {
   const isActivePipeline = selectedPipeline === activePipelineId;
   const showCanvas        = pipelineIsNew || !!selectedPipeline;
 
-  // Resolve selection for settings panel
   const selStep    = selection !== null ? pipelineForm.steps[selection.stepIdx] : null;
   const selAgent   = selStep ? allAgents.find(a => a.id === selStep.agent_id) : undefined;
   const selInpMeta = selection?.type === "input" && selStep && selAgent
     ? selAgent.inputs.find(inp => inp.key === (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey)
     : undefined;
 
+  // Inferred scope badge
+  const inferredScope = showCanvas ? inferScope(pipelineForm.steps, allAgents) : null;
+
   return (
     <div className="min-h-[calc(100vh-5.25rem)] flex flex-col -m-6">
 
-      {/* Top bar */}
-      <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0 bg-gray-950 flex-wrap">
+      {/* Top bar — minimal: just pipeline name + actions */}
+      <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2 shrink-0 bg-gray-950">
         <Workflow className="w-4 h-4 text-teal-400 shrink-0" />
-        <select value={selectedPipeline ?? ""}
-          onChange={e => { const p = (pipelines ?? []).find(x => x.id === e.target.value); if (p) openPipeline(p); }}
-          className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white outline-none focus:border-teal-500">
-          <option value="">— Select pipeline —</option>
-          {(pipelines ?? []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <button onClick={newPipeline}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 bg-teal-800 hover:bg-teal-700 text-teal-100 text-xs rounded-lg border border-teal-700/60 transition-colors">
-          <Plus className="w-3 h-3" /> New
-        </button>
 
-        {showCanvas && (
-          <>
-            <input value={pipelineForm.name}
-              onChange={e => setPipelineForm(f => ({ ...f, name: e.target.value }))}
-              placeholder="Pipeline name…"
-              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs font-semibold text-white placeholder-gray-600 outline-none focus:border-teal-500 w-44" />
-            <select value={pipelineForm.scope} onChange={e => setPipelineForm(f => ({ ...f, scope: e.target.value }))}
-              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white outline-none focus:border-teal-500">
-              <option value="per_call">Per call</option>
-              <option value="per_pair">Per pair</option>
-            </select>
-          </>
+        {showCanvas ? (
+          <input
+            value={pipelineForm.name}
+            onChange={e => setPipelineForm(f => ({ ...f, name: e.target.value }))}
+            placeholder="Pipeline name…"
+            className="bg-transparent border-b border-gray-700 focus:border-teal-500 px-1 py-0.5 text-sm font-semibold text-white placeholder-gray-600 outline-none w-48 transition-colors"
+          />
+        ) : (
+          <span className="text-sm text-gray-600">Pipeline builder</span>
+        )}
+
+        {inferredScope && (
+          <span className={cn(
+            "text-[9px] px-1.5 py-0.5 rounded-full border font-medium",
+            inferredScope === "per_call"
+              ? "bg-blue-900/30 border-blue-700/40 text-blue-400"
+              : "bg-gray-800 border-gray-700 text-gray-500",
+          )}>
+            {inferredScope === "per_call" ? "per call" : "per pair"}
+          </span>
         )}
 
         <div className="flex-1" />
@@ -849,13 +835,11 @@ export default function AgentsPage() {
           Import presets
         </button>
         {importResult && (
-          <span className="text-[10px] text-green-500">
-            + {importResult.created_agents.length} agents
-          </span>
+          <span className="text-[10px] text-green-500">+{importResult.created_agents.length} agents</span>
         )}
 
         {showCanvas && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             {selectedPipeline && (
               <button
                 onClick={() => setActivePipeline(isActivePipeline ? "" : selectedPipeline, isActivePipeline ? "" : pipelineForm.name)}
@@ -884,12 +868,48 @@ export default function AgentsPage() {
       {/* Main layout */}
       <div className="flex-1 min-h-0 flex bg-gray-950">
 
-        {/* Left: class palette */}
-        <div className="w-44 shrink-0 border-r border-gray-800 flex flex-col p-3 gap-2 overflow-y-auto">
-          <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold px-0.5 mb-1">Add element</p>
-          {CLASS_TYPES.map(t => (
-            <ClassPaletteCard key={t.cls} cls={t.cls} label={t.label} desc={t.desc} onAdd={() => addStep(t.cls)} />
-          ))}
+        {/* Left panel: pipeline list + class palette */}
+        <div className="w-44 shrink-0 border-r border-gray-800 flex flex-col">
+
+          {/* Pipeline list */}
+          <div className="p-2 border-b border-gray-800">
+            <div className="flex items-center justify-between mb-2 px-0.5">
+              <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold">Pipelines</p>
+              <button onClick={newPipeline}
+                className="flex items-center gap-0.5 text-[9px] text-teal-500 hover:text-teal-300 transition-colors font-medium">
+                <Plus className="w-3 h-3" /> New
+              </button>
+            </div>
+            <div className="space-y-0.5 max-h-36 overflow-y-auto">
+              {(pipelines ?? []).length === 0 && (
+                <p className="text-[9px] text-gray-700 italic px-1 py-2">No pipelines yet</p>
+              )}
+              {(pipelines ?? []).map(p => (
+                <button key={p.id} onClick={() => openPipeline(p)}
+                  className={cn(
+                    "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-left text-[10px] transition-colors",
+                    selectedPipeline === p.id
+                      ? "bg-teal-900/30 text-teal-200 border border-teal-700/30"
+                      : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/60",
+                  )}>
+                  <Workflow className="w-3 h-3 shrink-0 opacity-60" />
+                  <span className="truncate flex-1">{p.name}</span>
+                  {p.id === activePipelineId && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-teal-400 shrink-0" />
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Class palette */}
+          <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+            <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold px-0.5 mb-1">Add element</p>
+            {CLASS_TYPES.map(t => (
+              <ClassPaletteCard key={t.cls} cls={t.cls} label={t.label} desc={t.desc}
+                onAdd={() => addStep(t.cls)} />
+            ))}
+          </div>
         </div>
 
         {/* Center: canvas */}
@@ -900,7 +920,7 @@ export default function AgentsPage() {
           {!showCanvas ? (
             <div className="flex-1 flex flex-col items-center justify-center min-h-full gap-3 text-gray-700 pointer-events-none">
               <Workflow className="w-14 h-14 opacity-10" />
-              <p className="text-sm">Select a pipeline above or click New</p>
+              <p className="text-sm">Select a pipeline or click New</p>
               <p className="text-xs text-gray-800">Then click an element on the left to add it</p>
             </div>
           ) : pipelineForm.steps.length === 0 ? (
@@ -913,7 +933,7 @@ export default function AgentsPage() {
           ) : (
             <div className="flex items-start flex-nowrap">
               {pipelineForm.steps.map((step, i) => (
-                <StepGroup
+                <StepCard
                   key={i}
                   step={step} index={i} total={pipelineForm.steps.length}
                   allAgents={allAgents}
@@ -929,7 +949,7 @@ export default function AgentsPage() {
           )}
         </div>
 
-        {/* Right: settings panel — changes by selection type */}
+        {/* Right: settings panel */}
         {selection !== null && selStep !== null && (
           <>
             {selection.type === "agent" && (
@@ -950,6 +970,7 @@ export default function AgentsPage() {
                 key={`input-${selection.stepIdx}-${(selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey}`}
                 inp={selInpMeta}
                 step={selStep}
+                agent={selAgent}
                 onChangeStep={s => updateStep(selection.stepIdx, s)}
                 onClose={() => setSelection(null)}
               />
