@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import useSWR, { useSWRConfig } from "swr";
 import {
   ReactFlow, ReactFlowProvider, Background,
   useNodesState, useEdgesState, useReactFlow,
@@ -12,16 +13,19 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
-  User, Star, StickyNote, Shield, Zap,
-  Plus, Trash2, ChevronRight, X,
+  Bot, User, Star, StickyNote, Shield, Zap, BadgeCheck, ShieldCheck,
+  Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
+  Mic2, Layers, BookOpen, Link2, PenLine, FileText, Braces, AlignLeft,
+  Plus, Trash2, ChevronRight, X, Download,
 } from "lucide-react";
+
+const fetcher = (url: string) => fetch(url).then(r => r.json());
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
 
 type NodeKind = "input" | "processing" | "output";  // "output" = artifact internally
-
-// ── Processing subtypes (agent classes) ──
-type ProcessSubType = "persona" | "scorer" | "notes" | "compliance" | "general";
+type ProcessSubType = "agent";
+type ArtifactSubType = "persona" | "persona_score" | "notes" | "notes_compliance";
 
 interface Meta {
   label:  string;
@@ -37,13 +41,21 @@ const INPUT_META: Record<string, Meta> = {
   input: { label: "Input", icon: <Zap className="w-4 h-4" />, color: "bg-blue-700", border: "border-blue-600", text: "text-blue-400", desc: "Data source input" },
 };
 
-// ── Processing (agent classes) ────────────────────────────────────────────────
+// ── Processing ────────────────────────────────────────────────────────────────
 const PROCESS_META: Record<ProcessSubType, Meta> = {
-  persona:    { label: "Persona",    icon: <User      className="w-4 h-4" />, color: "bg-violet-700",  border: "border-violet-600",  text: "text-violet-300", desc: "Personality & behaviour analysis agent" },
-  scorer:     { label: "Scorer",     icon: <Star      className="w-4 h-4" />, color: "bg-violet-800",  border: "border-violet-700",  text: "text-violet-400", desc: "Score based on a prior persona agent" },
-  notes:      { label: "Notes",      icon: <StickyNote className="w-4 h-4" />, color: "bg-teal-700",   border: "border-teal-600",    text: "text-teal-300",   desc: "Extract key call notes" },
-  compliance: { label: "Compliance", icon: <Shield    className="w-4 h-4" />, color: "bg-teal-800",    border: "border-teal-700",    text: "text-teal-400",   desc: "Check compliance requirements" },
-  general:    { label: "General",    icon: <Zap       className="w-4 h-4" />, color: "bg-sky-700",     border: "border-sky-600",     text: "text-sky-300",    desc: "Custom analysis agent" },
+  agent: { label: "Agent", icon: <Bot className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-500", text: "text-indigo-400", desc: "AI agent — select and configure below" },
+};
+
+// ── Artifacts ────────────────────────────────────────────────────────────────
+const ARTIFACT_REQUIRES: Partial<Record<ArtifactSubType, ArtifactSubType>> = {
+  persona_score:    "persona",
+  notes_compliance: "notes",
+};
+const ARTIFACT_META: Record<ArtifactSubType, Meta> = {
+  persona:          { label: "Persona",          icon: <User        className="w-4 h-4" />, color: "bg-violet-700",  border: "border-violet-600",  text: "text-violet-400",  desc: "Customer or agent persona profile" },
+  persona_score:    { label: "Persona Score",    icon: <BadgeCheck  className="w-4 h-4" />, color: "bg-violet-800",  border: "border-violet-700",  text: "text-violet-300",  desc: "Scored persona — requires Persona in the pipeline" },
+  notes:            { label: "Notes",            icon: <StickyNote  className="w-4 h-4" />, color: "bg-amber-700",   border: "border-amber-600",   text: "text-amber-400",   desc: "Structured call notes" },
+  notes_compliance: { label: "Compliance Notes", icon: <ShieldCheck className="w-4 h-4" />, color: "bg-emerald-700", border: "border-emerald-600", text: "text-emerald-400", desc: "Compliance notes — requires Notes in the pipeline" },
 };
 
 // Module-level registry for user-defined custom artifacts (persists across renders)
@@ -55,8 +67,147 @@ const GENERIC_ARTIFACT_META: Meta = {
 
 function getMeta(kind: NodeKind, subType: string): Meta {
   if (kind === "input")      return INPUT_META.input;
-  if (kind === "processing") return (PROCESS_META as Record<string, Meta>)[subType] ?? PROCESS_META.general;
-  return CUSTOM_ARTIFACT_REGISTRY[subType] ?? GENERIC_ARTIFACT_META;
+  if (kind === "processing") return PROCESS_META.agent;
+  return (ARTIFACT_META as Record<string, Meta>)[subType]
+    ?? CUSTOM_ARTIFACT_REGISTRY[subType]
+    ?? GENERIC_ARTIFACT_META;
+}
+
+// ── Universal agent types & constants ────────────────────────────────────────
+
+interface AgentInput { key: string; source: string; agent_id?: string; }
+
+interface UniversalAgent {
+  id: string; name: string; description: string; agent_class: string;
+  model: string; temperature: number; system_prompt: string; user_prompt: string;
+  inputs: AgentInput[]; output_format: string; tags: string[];
+  is_default: boolean; created_at: string;
+}
+
+const MODEL_GROUPS = [
+  { provider: "OpenAI",    models: ["gpt-5.4", "gpt-4.1", "gpt-4.1-mini"] },
+  { provider: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-6"] },
+  { provider: "Google",    models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+  { provider: "xAI",       models: ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"] },
+];
+
+const INPUT_SOURCES = [
+  { value: "transcript",        label: "Transcript",   shortLabel: "Transcript", icon: Mic2,
+    badge: "bg-blue-900/50 text-blue-300 border-blue-700/50", desc: "Single call transcript" },
+  { value: "merged_transcript", label: "Merged",       shortLabel: "Merged",     icon: Layers,
+    badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50", desc: "All calls merged" },
+  { value: "notes",             label: "Notes",        shortLabel: "Notes",      icon: StickyNote,
+    badge: "bg-green-900/50 text-green-300 border-green-700/50", desc: "Call notes" },
+  { value: "merged_notes",      label: "Merged Notes", shortLabel: "All Notes",  icon: BookOpen,
+    badge: "bg-teal-900/50 text-teal-300 border-teal-700/50", desc: "All notes aggregated" },
+  { value: "agent_output",      label: "Agent Output", shortLabel: "Agent",      icon: Bot,
+    badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", desc: "Output of another agent" },
+  { value: "chain_previous",    label: "Prev Step",    shortLabel: "Prev",       icon: Link2,
+    badge: "bg-amber-900/50 text-amber-300 border-amber-700/50", desc: "Previous pipeline step" },
+  { value: "manual",            label: "Manual",       shortLabel: "Manual",     icon: PenLine,
+    badge: "bg-gray-700/50 text-gray-300 border-gray-600/50", desc: "Provided at run time" },
+] as const;
+
+const OUTPUT_FMT: Record<string, {
+  label: string; desc: string;
+  icon: React.ComponentType<{ className?: string }>;
+  bg: string; text: string; border: string;
+}> = {
+  markdown: { label: "Markdown", desc: "Structured text",   icon: FileText,  bg: "bg-indigo-900/50", text: "text-indigo-300",  border: "border-indigo-700/40" },
+  json:     { label: "JSON",     desc: "Machine-readable",  icon: Braces,    bg: "bg-yellow-900/50", text: "text-yellow-300", border: "border-yellow-700/40" },
+  text:     { label: "Text",     desc: "Plain unformatted", icon: AlignLeft, bg: "bg-gray-700/50",   text: "text-gray-300",   border: "border-gray-600/40"   },
+};
+
+const CLASS_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
+  persona: User, scorer: Star, notes: StickyNote, compliance: Shield, general: Zap,
+};
+const CLASS_ICON_BG: Record<string, string> = {
+  persona: "bg-violet-900/60", scorer: "bg-violet-800/40",
+  notes: "bg-teal-900/60", compliance: "bg-teal-800/40", general: "bg-sky-900/60",
+};
+const CLASS_META: Record<string, { label: string; textColor: string; borderColor: string }> = {
+  persona:    { label: "Persona",    textColor: "text-violet-300", borderColor: "border-violet-700/40" },
+  scorer:     { label: "Scorer",     textColor: "text-violet-400", borderColor: "border-violet-700/30" },
+  notes:      { label: "Notes",      textColor: "text-teal-300",   borderColor: "border-teal-700/40"   },
+  compliance: { label: "Compliance", textColor: "text-teal-400",   borderColor: "border-teal-700/30"   },
+  general:    { label: "General",    textColor: "text-sky-300",    borderColor: "border-sky-700/40"    },
+  "":         { label: "Agent",      textColor: "text-gray-400",   borderColor: "border-gray-700/40"   },
+};
+const CLASS_REQUIRES_PREV: Record<string, string> = { scorer: "persona", compliance: "notes" };
+
+function classMeta(cls: string) {
+  return CLASS_META[cls.toLowerCase()] ?? { label: cls, textColor: "text-gray-400", borderColor: "border-gray-700/40" };
+}
+
+// ── Agent sub-components ──────────────────────────────────────────────────────
+
+function ModelSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500">
+      {MODEL_GROUPS.map(g => (
+        <optgroup key={g.provider} label={g.provider}>
+          {g.models.map(m => <option key={m} value={m}>{m}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+function AgentClassIcon({ cls, size = "md" }: { cls: string; size?: "sm" | "md" }) {
+  const norm = cls.toLowerCase();
+  const Icon = CLASS_ICON[norm] ?? Bot;
+  const bg   = CLASS_ICON_BG[norm] ?? "bg-gray-800";
+  const meta = classMeta(norm);
+  const dims     = size === "sm" ? "w-6 h-6" : "w-10 h-10";
+  const iconDims = size === "sm" ? "w-3 h-3" : "w-5 h-5";
+  return (
+    <div className={`rounded-xl flex items-center justify-center shrink-0 ${bg} ${dims}`}>
+      <Icon className={`${iconDims} ${meta.textColor}`} />
+    </div>
+  );
+}
+
+function AgentPickerGrid({ value, allAgents, onChange }: {
+  value: string; allAgents: UniversalAgent[];
+  onChange: (agent: UniversalAgent) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const filtered = allAgents.filter(a =>
+    a.name.toLowerCase().includes(search.toLowerCase()) ||
+    (a.agent_class ?? "").toLowerCase().includes(search.toLowerCase())
+  );
+  return (
+    <div className="space-y-1.5">
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search agents…"
+        className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+      <div className="grid grid-cols-2 gap-1 max-h-52 overflow-y-auto">
+        {filtered.map(a => {
+          const meta  = classMeta(a.agent_class ?? "");
+          const isSel = value === a.id;
+          const req   = CLASS_REQUIRES_PREV[a.agent_class?.toLowerCase() ?? ""];
+          return (
+            <button key={a.id} onClick={() => onChange(a)} title={a.description}
+              className={`flex items-center gap-1.5 p-2 rounded-lg border text-left transition-colors
+                ${isSel ? `${meta.borderColor} bg-gray-800` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 hover:border-gray-600"}`}>
+              <AgentClassIcon cls={a.agent_class ?? ""} size="sm" />
+              <div className="min-w-0 flex-1">
+                <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : "text-gray-300"}`}>{a.name}</p>
+                <p className={`text-[9px] ${meta.textColor}`}>{meta.label}</p>
+              </div>
+              {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
+              {req && !isSel && (
+                <span title={`Should follow a ${req} step`}><TriangleAlert className="w-3 h-3 text-amber-600/60 shrink-0" /></span>
+              )}
+            </button>
+          );
+        })}
+        {filtered.length === 0 && (
+          <p className="col-span-2 text-xs text-gray-600 italic text-center py-3">No agents match</p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ── Node data interfaces ──────────────────────────────────────────────────────
@@ -72,6 +223,10 @@ interface PipelineNodeData extends Record<string, unknown> {
   subType:    string;
   prompt:     string;
   stageIndex: number;
+  // agent node — linked backend agent
+  agentId:    string;
+  agentClass: string;
+  agentName:  string;
 }
 
 // ── Layout constants & helpers ────────────────────────────────────────────────
@@ -275,20 +430,29 @@ function InputNode({ data, selected }: { data: PipelineNodeData; selected?: bool
 }
 
 function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
-  const m = getMeta("processing", data.subType);
+  const m   = getMeta("processing", data.subType);
+  const cls = (data.agentClass as string) ?? "";
+  const cm  = classMeta(cls);
+  const Icon = CLASS_ICON[cls.toLowerCase()] ?? Bot;
+  const hasAgent = !!(data.agentId as string);
   return (
     <NodeCard meta={m} selected={!!selected} kind="processing">
       <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
-        <span className="text-white/90 shrink-0">{m.icon}</span>
-        <span className="text-sm font-bold text-white truncate">{data.label}</span>
+        <span className="text-white/90 shrink-0">
+          {hasAgent ? <Icon className="w-4 h-4" /> : m.icon}
+        </span>
+        <span className="text-sm font-bold text-white truncate">
+          {hasAgent ? (data.agentName as string) : data.label}
+        </span>
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
-        <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
-          ⬡ Process · {m.label}
-        </span>
-        {data.prompt && (
-          <p className="text-[10px] text-gray-600 mt-0.5 truncate">{data.prompt as string}</p>
+        {hasAgent ? (
+          <span className={`text-[11px] font-semibold ${cm.textColor} uppercase tracking-wide`}>
+            ⬡ Agent · {cm.label}
+          </span>
+        ) : (
+          <span className="text-[11px] text-gray-600 italic">tap to configure</span>
         )}
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
@@ -480,6 +644,13 @@ function PaletteItem({ kind, subType, meta, onAdd }: {
 function PipelineCanvas() {
   const { screenToFlowPosition, setViewport } = useReactFlow();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
+  const { mutate } = useSWRConfig();
+
+  // Backend data
+  const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
+  const { data: pipelinesData } = useSWR<{ id: string; name: string; description: string; steps: {agent_id: string; input_overrides: Record<string,string>}[] }[]>("/api/pipelines", fetcher);
+  const allAgents   = agentsData   ?? [];
+  const allPipelines = pipelinesData ?? [];
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -489,6 +660,15 @@ function PipelineCanvas() {
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
   const [addingArtifact, setAddingArtifact] = useState(false);
   const [newArtifactName, setNewArtifactName] = useState("");
+  // Pipeline save state
+  const [pipelineName, setPipelineName]     = useState("");
+  const [pipelineId,   setPipelineId]       = useState<string | null>(null);
+  const [pipelineSaving, setPipelineSaving] = useState(false);
+  // Agent config panel state (for selected processing node)
+  const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
+  const [agentSaving, setAgentSaving]   = useState(false);
+  const [agentSaved,  setAgentSaved]    = useState(false);
+  const [showModel,   setShowModel]     = useState(false);
 
   // Refs for fresh state in callbacks (avoid stale closures)
   const nodesRef  = useRef<Node[]>([]);
@@ -675,6 +855,9 @@ function PipelineCanvas() {
         subType,
         prompt:     "",
         stageIndex,
+        agentId:    "",
+        agentClass: "",
+        agentName:  "",
       } satisfies PipelineNodeData,
     };
 
@@ -758,6 +941,46 @@ function PipelineCanvas() {
     setSelectedNodeId(null);
   }
 
+  async function handleSavePipeline() {
+    if (!pipelineName.trim()) { showToast("Enter a pipeline name first", false); return; }
+    const err = validatePipeline(nodes, edges);
+    if (err) { showToast(err, false); return; }
+    const steps = nodes
+      .filter(n => n.type === "processing" && (n.data as PipelineNodeData).agentId)
+      .sort((a, b) => {
+        const da = a.data as PipelineNodeData, db = b.data as PipelineNodeData;
+        return da.stageIndex !== db.stageIndex ? da.stageIndex - db.stageIndex : a.position.x - b.position.x;
+      })
+      .map(n => ({ agent_id: (n.data as PipelineNodeData).agentId, input_overrides: {} }));
+    setPipelineSaving(true);
+    try {
+      const url    = pipelineId ? `/api/pipelines/${pipelineId}` : `/api/pipelines`;
+      const method = pipelineId ? "PUT" : "POST";
+      const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: pipelineName, description: "", scope: "per_pair", steps }) });
+      const data   = await res.json();
+      if (!pipelineId && data.id) setPipelineId(data.id);
+      mutate("/api/pipelines");
+      showToast(`Pipeline "${pipelineName}" saved`, true);
+    } catch { showToast("Failed to save pipeline", false); }
+    finally  { setPipelineSaving(false); }
+  }
+
+  async function handleSaveAgent() {
+    if (!selectedNodeId || !agentDraft) return;
+    const nd = (nodes.find(n => n.id === selectedNodeId)?.data as PipelineNodeData | undefined);
+    if (!nd?.agentId) return;
+    setAgentSaving(true);
+    try {
+      await fetch(`/api/universal-agents/${nd.agentId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(agentDraft),
+      });
+      mutate("/api/universal-agents");
+      setAgentSaved(true); setTimeout(() => setAgentSaved(false), 2000);
+    } finally { setAgentSaving(false); }
+  }
+
   function handleSave() {
     const err = validatePipeline(nodes, edges);
     if (err) showToast(err, false);
@@ -771,6 +994,22 @@ function PipelineCanvas() {
   const selKind      = selectedNode?.type as NodeKind | undefined;
   const selMeta      = selData && selKind ? getMeta(selKind, selData.subType) : null;
 
+  // Sync agentDraft when selected node changes
+  useEffect(() => {
+    if (!selData || selKind !== "processing") { setAgentDraft(null); return; }
+    const agId = selData.agentId as string;
+    if (!agId) { setAgentDraft(null); return; }
+    const a = allAgents.find(x => x.id === agId);
+    if (a) setAgentDraft({
+      name: a.name, description: a.description ?? "", agent_class: a.agent_class ?? "",
+      model: a.model ?? "gpt-5.4", temperature: a.temperature ?? 0,
+      system_prompt: a.system_prompt ?? "", user_prompt: a.user_prompt ?? "",
+      inputs: a.inputs ?? [], output_format: a.output_format ?? "markdown",
+      tags: a.tags ?? [], is_default: a.is_default ?? false,
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedNodeId, allAgents.length]);
+
   function renderPanel() {
     if (!selectedNode || !selData || !selKind || !selMeta) {
       return (
@@ -783,6 +1022,168 @@ function PipelineCanvas() {
       );
     }
 
+    // ── Agent configurator panel ──────────────────────────────────────────
+    if (selKind === "processing") {
+      const agId  = selData.agentId as string;
+      const agCls = selData.agentClass as string;
+      const cm    = classMeta(agCls);
+      const varKeys = agentDraft?.inputs?.filter(i => i.key) ?? [];
+
+      return (
+        <div className="flex flex-col h-full">
+          {/* Header */}
+          <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+            <AgentClassIcon cls={agCls} size="sm" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-white truncate">
+                {agId ? (selData.agentName as string || "Agent") : "Configure Agent"}
+              </p>
+              <p className={`text-[9px] ${cm.textColor}`}>{agId ? cm.label : "No agent selected"}</p>
+            </div>
+            <button onClick={() => setSelectedNodeId(null)} className="p-1 text-gray-600 hover:text-white transition-colors shrink-0">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {/* Agent picker */}
+            <div className="p-3 border-b border-gray-800">
+              <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Select Agent</p>
+              {allAgents.length === 0 ? (
+                <p className="text-xs text-gray-600 italic">Loading agents…</p>
+              ) : (
+                <AgentPickerGrid
+                  value={agId}
+                  allAgents={allAgents}
+                  onChange={agent => {
+                    updateNodeData(selectedNode.id, {
+                      agentId: agent.id, agentClass: agent.agent_class, agentName: agent.name,
+                    });
+                    setAgentDraft({
+                      name: agent.name, description: agent.description ?? "",
+                      agent_class: agent.agent_class ?? "", model: agent.model ?? "gpt-5.4",
+                      temperature: agent.temperature ?? 0, system_prompt: agent.system_prompt ?? "",
+                      user_prompt: agent.user_prompt ?? "", inputs: agent.inputs ?? [],
+                      output_format: agent.output_format ?? "markdown",
+                      tags: agent.tags ?? [], is_default: agent.is_default ?? false,
+                    });
+                    setAgentSaved(false);
+                  }}
+                />
+              )}
+            </div>
+
+            {/* Configure — only shown when an agent is selected */}
+            {agId && agentDraft && (
+              <div className="p-3 space-y-3">
+                <p className="text-[9px] text-gray-600 uppercase tracking-wide">Configure</p>
+
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-1">Name</label>
+                  <input value={agentDraft.name}
+                    onChange={e => setAgentDraft(f => f ? { ...f, name: e.target.value } : f)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-1">System Prompt</label>
+                  {varKeys.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-1.5">
+                      {varKeys.map(inp => (
+                        <button key={inp.key} type="button"
+                          onClick={() => setAgentDraft(f => f ? { ...f, system_prompt: f.system_prompt + `{${inp.key}}` } : f)}
+                          className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 font-mono transition-colors">
+                          {`{${inp.key}}`}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <textarea value={agentDraft.system_prompt}
+                    onChange={e => setAgentDraft(f => f ? { ...f, system_prompt: e.target.value } : f)}
+                    rows={4} placeholder="You are a…"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-1">User Prompt</label>
+                  {varKeys.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-1.5">
+                      {varKeys.map(inp => (
+                        <button key={inp.key} type="button"
+                          onClick={() => setAgentDraft(f => f ? { ...f, user_prompt: f.user_prompt + `{${inp.key}}` } : f)}
+                          className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 font-mono transition-colors">
+                          {`{${inp.key}}`}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <textarea value={agentDraft.user_prompt}
+                    onChange={e => setAgentDraft(f => f ? { ...f, user_prompt: e.target.value } : f)}
+                    rows={4} placeholder={"Analyse this:\n\n{transcript}"}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
+                </div>
+
+                {/* Model & settings (collapsible) */}
+                <div className="border border-gray-800 rounded-xl overflow-hidden">
+                  <button onClick={() => setShowModel(s => !s)}
+                    className="w-full flex items-center justify-between px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-xs">
+                    <span className="text-gray-400">Model & settings</span>
+                    {showModel ? <ChevronUp className="w-3.5 h-3.5 text-gray-600" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-600" />}
+                  </button>
+                  {showModel && (
+                    <div className="p-3 space-y-2.5 border-t border-gray-800">
+                      <div>
+                        <label className="block text-[9px] text-gray-500 mb-1">Model</label>
+                        <ModelSelect value={agentDraft.model} onChange={v => setAgentDraft(f => f ? { ...f, model: v } : f)} />
+                      </div>
+                      <div>
+                        <label className="block text-[9px] text-gray-500 mb-1">Temperature</label>
+                        <input type="number" min={0} max={2} step={0.1} value={agentDraft.temperature}
+                          onChange={e => setAgentDraft(f => f ? { ...f, temperature: parseFloat(e.target.value) || 0 } : f)}
+                          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
+                      </div>
+                      <div>
+                        <label className="block text-[9px] text-gray-500 mb-1">Output format</label>
+                        <div className="flex gap-1.5">
+                          {Object.entries(OUTPUT_FMT).map(([k, m]) => {
+                            const FmtIcon = m.icon;
+                            const sel = agentDraft.output_format === k;
+                            return (
+                              <button key={k} onClick={() => setAgentDraft(f => f ? { ...f, output_format: k } : f)}
+                                className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg border text-[9px] transition-all
+                                  ${sel ? `${m.border} ${m.bg}` : "border-gray-800 bg-gray-900 hover:border-gray-700"}`}>
+                                <FmtIcon className={`w-3.5 h-3.5 ${sel ? m.text : "text-gray-600"}`} />
+                                <span className={sel ? m.text : "text-gray-500"}>{m.label}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <button onClick={handleSaveAgent} disabled={agentSaving || !agentDraft.name.trim()}
+                  className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50">
+                  {agentSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : agentSaved ? <Check className="w-3 h-3" /> : null}
+                  {agentSaved ? "Saved" : "Save agent"}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Footer: delete */}
+          <div className="p-3 border-t border-gray-800 shrink-0">
+            <button onClick={() => deleteNode(selectedNode.id)}
+              className="w-full flex items-center justify-center gap-2 py-1.5 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-xs transition-colors">
+              <Trash2 className="w-3.5 h-3.5" /> Delete node
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Input / Artifact panel ────────────────────────────────────────────
     return (
       <div className="p-4 space-y-4">
         <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
@@ -797,34 +1198,16 @@ function PipelineCanvas() {
 
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Name</label>
-          <input
-            value={selData.label}
+          <input value={selData.label}
             onChange={e => updateNodeData(selectedNode.id, { label: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
-          />
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors" />
         </div>
 
         <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
 
-        {selKind === "processing" && (
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">System Prompt</label>
-            <textarea
-              rows={5}
-              value={selData.prompt}
-              onChange={e => updateNodeData(selectedNode.id, { prompt: e.target.value })}
-              placeholder="Describe what this agent should do…"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 resize-none transition-colors"
-            />
-          </div>
-        )}
-
-        <button
-          onClick={() => deleteNode(selectedNode.id)}
-          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-sm transition-colors"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-          Delete node
+        <button onClick={() => deleteNode(selectedNode.id)}
+          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-sm transition-colors">
+          <Trash2 className="w-3.5 h-3.5" /> Delete node
         </button>
       </div>
     );
@@ -880,6 +1263,26 @@ function PipelineCanvas() {
           <div>
             <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">Artifacts</p>
             <div className="space-y-1">
+              {/* Fixed artifact types with dependency checks */}
+              {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
+                const req     = ARTIFACT_REQUIRES[k];
+                const blocked = req != null && !nodes.some(
+                  n => n.type === "output" && (n.data as PipelineNodeData).subType === req
+                );
+                return blocked ? (
+                  <div key={k}
+                    title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
+                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-not-allowed opacity-40 select-none ${m.border} bg-gray-900/60`}>
+                    <span className={`p-1 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                    <div className="min-w-0 flex-1">
+                      <span className={`text-[11px] font-semibold ${m.text} leading-tight block`}>{m.label}</span>
+                      <span className="text-[9px] text-gray-600 leading-tight block">Needs {ARTIFACT_META[req!].label}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
+                );
+              })}
               {/* Custom artifacts from registry */}
               {Object.entries(CUSTOM_ARTIFACT_REGISTRY).map(([k, m]) => (
                 <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
@@ -938,27 +1341,38 @@ function PipelineCanvas() {
           </div>
         </div>
 
-        {/* Actions */}
+        {/* Pipeline name + save */}
         <div className="p-2.5 space-y-2 border-t border-gray-800">
-          <button
-            onClick={handleAddStage}
-            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-indigo-800 text-indigo-400 hover:bg-indigo-950/60 hover:border-indigo-600 text-xs font-semibold transition-colors"
-          >
-            + Add Processing Stage
+          <div className="space-y-1">
+            <label className="text-[9px] font-bold text-gray-600 uppercase tracking-widest">Pipeline name</label>
+            <input value={pipelineName} onChange={e => setPipelineName(e.target.value)}
+              placeholder="My pipeline…"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors" />
+          </div>
+          {allPipelines.length > 0 && (
+            <select
+              value=""
+              onChange={e => {
+                const p = allPipelines.find(x => x.id === e.target.value);
+                if (p) { setPipelineName(p.name); setPipelineId(p.id); }
+              }}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors">
+              <option value="" disabled>Load pipeline…</option>
+              {allPipelines.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
+          <button onClick={handleAddStage}
+            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-indigo-800 text-indigo-400 hover:bg-indigo-950/60 hover:border-indigo-600 text-xs font-semibold transition-colors">
+            + Add Stage
           </button>
-          <button
-            onClick={handleSave}
-            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wide transition-colors"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-            Validate &amp; Save
+          <button onClick={handleSavePipeline} disabled={pipelineSaving}
+            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wide transition-colors disabled:opacity-60">
+            {pipelineSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            Save Pipeline
           </button>
-          <button
-            onClick={handleClear}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors"
-          >
-            <Trash2 className="w-3 h-3" />
-            Clear canvas
+          <button onClick={handleClear}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors">
+            <Trash2 className="w-3 h-3" /> Clear canvas
           </button>
         </div>
       </aside>
@@ -1012,17 +1426,18 @@ function PipelineCanvas() {
       </div>
 
       {/* ── Right properties panel ─────────────────────────────────────── */}
-      <aside className="w-60 shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col">
-        <div className="p-3 border-b border-gray-800 flex items-center justify-between">
-          <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Properties</p>
-          {selectedNodeId && (
-            <button onClick={() => setSelectedNodeId(null)}
-              className="text-gray-600 hover:text-gray-400 transition-colors">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-        <div className="flex-1 overflow-y-auto">
+      <aside className={`shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col transition-all ${selKind === "processing" ? "w-80" : "w-60"}`}>
+        {selKind !== "processing" && (
+          <div className="p-3 border-b border-gray-800 flex items-center justify-between">
+            <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Properties</p>
+            {selectedNodeId && (
+              <button onClick={() => setSelectedNodeId(null)} className="text-gray-600 hover:text-gray-400 transition-colors">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+        <div className="flex-1 overflow-y-auto min-h-0">
           {renderPanel()}
         </div>
       </aside>
