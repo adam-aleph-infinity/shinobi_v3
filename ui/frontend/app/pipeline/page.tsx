@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
+  ReactFlow, ReactFlowProvider, Background,
   useNodesState, useEdgesState, useReactFlow,
   addEdge,
-  getSmoothStepPath, BaseEdge, EdgeLabelRenderer,
+  getBezierPath, BaseEdge, EdgeLabelRenderer,
   Handle, Position, MarkerType,
   type Node, type Edge, type Connection, type NodeChange, type NodeTypes,
   type EdgeProps, type EdgeTypes,
@@ -120,38 +120,20 @@ const TARGET_HANDLE_STYLE: React.CSSProperties = {
 
 // ── Sleeve background node ────────────────────────────────────────────────────
 
-// Colorless lane config — just divider lines and muted labels
-const LANE_CFG: Record<NodeKind, { stepClr: string; labelClr: string }> = {
-  input:      { stepClr: "#6b7280", labelClr: "#9ca3af" },
-  processing: { stepClr: "#6b7280", labelClr: "#9ca3af" },
-  output:     { stepClr: "#6b7280", labelClr: "#9ca3af" },
-};
-
 function SleeveNode({ data }: { data: Record<string, unknown> }) {
-  const d   = data as SleeveData;
-  const cfg = LANE_CFG[d.kind as NodeKind] ?? LANE_CFG.input;
+  const d = data as SleeveData;
   return (
-    <div
-      style={{
-        width:           LANE_WIDTH,
-        height:          LANE_VISIBLE_H,
-        pointerEvents:   "none",
-        backgroundColor: "transparent",
-        borderTop:       "1px solid #374151",
-        borderBottom:    "1px solid #2d3748",
-        display:         "flex",
-        overflow:        "hidden",
-      }}
-    >
-      {/* Lane label */}
-      <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 14px", width: 140, flexShrink: 0, borderRight: "1px solid #2d3748" }}>
-        <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: cfg.stepClr }}>
-          Step {d.step}
-        </span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: cfg.labelClr, marginTop: 2 }}>
-          {d.label}
-        </span>
-      </div>
+    <div style={{ width: LANE_WIDTH, height: LANE_VISIBLE_H, pointerEvents: "none", position: "relative" }}>
+      {/* Hairline separator at top of each lane */}
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, backgroundColor: "#1f2937" }} />
+      {/* Label text — floats on the background */}
+      <span style={{
+        position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)",
+        fontSize: 10, fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase",
+        color: "#374151", userSelect: "none", whiteSpace: "nowrap",
+      }}>
+        {d.label}
+      </span>
     </div>
   );
 }
@@ -170,7 +152,7 @@ function makeSleeves(stages: NodeKind[]): Node[] {
     zIndex:     0,
     width:      LANE_WIDTH,
     height:     LANE_VISIBLE_H,
-    style:      { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
+    style:      { background: "transparent", padding: 0, border: "none", boxShadow: "none", pointerEvents: "none" },
     data:       { step: i + 1, label: labelMap[kind], kind } satisfies SleeveData,
   }));
 }
@@ -318,10 +300,8 @@ function DeletableEdge({
   style, markerEnd, selected,
 }: EdgeProps) {
   const { setEdges } = useReactFlow();
-  const [path, labelX, labelY] = getSmoothStepPath({
+  const [path, labelX, labelY] = getBezierPath({
     sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition,
-    borderRadius: 12,
-    offset: 40,
   });
   return (
     <>
@@ -440,7 +420,8 @@ function makeEdge(source: string, target: string): Edge {
 }
 
 function PipelineCanvas() {
-  const { screenToFlowPosition, fitView } = useReactFlow();
+  const { screenToFlowPosition, setViewport } = useReactFlow();
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -456,6 +437,26 @@ function PipelineCanvas() {
   nodesRef.current  = nodes;
   edgesRef.current  = edges;
   stagesRef.current = stages;
+
+  // Reactive fit: auto-zoom so all lanes fill the canvas height
+  useEffect(() => {
+    const el = canvasContainerRef.current;
+    if (!el) return;
+    const update = () => {
+      const { height } = el.getBoundingClientRect();
+      if (!height) return;
+      const totalH = Y_INIT + stagesRef.current.length * SLEEVE_H + 20;
+      const zoom   = height / totalH;
+      const x      = (-SLEEVE_START_X) * zoom + 8;
+      const y      = 8 - Y_INIT * zoom;
+      setViewport({ x, y, zoom }, { duration: 200 });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stages.length, setViewport]);
 
   // Combine sleeve backgrounds with real nodes for rendering
   const allNodes = useMemo(() => [...makeSleeves(stages), ...nodes], [stages, nodes]);
@@ -564,13 +565,13 @@ function PipelineCanvas() {
     if (kind === "input") {
       stageIndex = 0; // inputs always in the top lane
     } else {
-      // Walk backwards to find the last lane of this kind
-      let lastIdx = -1;
-      for (let i = newStages.length - 1; i >= 0; i--) {
-        if (newStages[i] === kind) { lastIdx = i; break; }
+      // Walk forward to find the FIRST lane of this kind (top-to-bottom order)
+      let firstIdx = -1;
+      for (let i = 0; i < newStages.length; i++) {
+        if (newStages[i] === kind) { firstIdx = i; break; }
       }
-      if (lastIdx !== -1) {
-        stageIndex = lastIdx; // place in existing lane
+      if (firstIdx !== -1) {
+        stageIndex = firstIdx; // place in topmost matching lane
       } else {
         newStages.push(kind); // no lane of this kind yet — create one
         stageIndex = newStages.length - 1;
@@ -611,10 +612,7 @@ function PipelineCanvas() {
     setNodes(ns => [...ns, newNode]);
     if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
     setSelectedNodeId(id);
-
-    // Pan/zoom to show just the new node — don't refit the whole (wide) canvas
-    setTimeout(() => fitView({ padding: 1.2, duration: 300, nodes: [{ id }] }), 60);
-  }, [setNodes, setEdges, setStages, fitView]);
+  }, [setNodes, setEdges, setStages]);
 
   // ── Drag from palette ─────────────────────────────────────────────────────
 
@@ -835,7 +833,7 @@ function PipelineCanvas() {
       </aside>
 
       {/* ── Canvas ────────────────────────────────────────────────────── */}
-      <div className="flex-1 relative" onDrop={onDrop} onDragOver={onDragOver}>
+      <div className="flex-1 relative" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
         <ReactFlow
           nodes={allNodes}
           edges={edges}
@@ -848,34 +846,15 @@ function PipelineCanvas() {
           onConnect={onConnect}
           onNodeDragStop={onNodeDragStop}
           isValidConnection={isValidConnectionFn}
-          defaultViewport={{ x: 220, y: 10, zoom: 0.85 }}
+          zoomOnScroll={false}
+          zoomOnPinch={false}
+          zoomOnDoubleClick={false}
+          panOnScroll={false}
           deleteKeyCode="Delete"
           proOptions={{ hideAttribution: true }}
           className="bg-gray-900"
         >
           <Background color="#374151" gap={24} size={1} />
-          <Controls
-            className="[&>button]:bg-gray-800 [&>button]:border-gray-700 [&>button]:text-gray-400 [&>button:hover]:bg-gray-700 [&>button:hover]:text-white"
-          />
-          <MiniMap
-            nodeColor={n => {
-              if (String(n.id).startsWith("sleeve_")) return "transparent";
-              const d = n.data as PipelineNodeData;
-              const m = getMeta(n.type as NodeKind, d?.subType ?? "");
-              return m.color.includes("cyan")    ? "#0e7490" :
-                     m.color.includes("green")   ? "#15803d" :
-                     m.color.includes("amber")   ? "#b45309" :
-                     m.color.includes("indigo")  ? "#4338ca" :
-                     m.color.includes("violet")  ? "#6d28d9" :
-                     m.color.includes("teal")    ? "#0f766e" :
-                     m.color.includes("yellow")  ? "#a16207" :
-                     m.color.includes("purple")  ? "#7e22ce" :
-                     m.color.includes("blue")    ? "#1d4ed8" :
-                                                    "#374151";
-            }}
-            maskColor="rgba(0,0,0,0.75)"
-            className="!bg-gray-900 !border !border-gray-700 !rounded-xl"
-          />
         </ReactFlow>
 
         {/* Hint text inside first lane when canvas is empty */}
