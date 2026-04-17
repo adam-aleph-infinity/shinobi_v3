@@ -5,7 +5,7 @@ import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
   useNodesState, useEdgesState, useReactFlow,
   addEdge,
-  getBezierPath, BaseEdge, EdgeLabelRenderer,
+  getSmoothStepPath, BaseEdge, EdgeLabelRenderer,
   Handle, Position, MarkerType,
   type Node, type Edge, type Connection, type NodeChange, type NodeTypes,
   type EdgeProps, type EdgeTypes,
@@ -81,18 +81,20 @@ interface PipelineNodeData extends Record<string, unknown> {
 
 const NODE_W         = 200;   // node width
 const X_GAP          = 40;    // horizontal gap between nodes in same stage
-const SLEEVE_H       = 160;   // vertical height per lane
-const SLEEVE_INNER   = 45;    // top padding within lane for node placement
+const SLEEVE_H       = 180;   // vertical height per lane (includes 20px gap below)
+const SLEEVE_INNER   = 52;    // top padding within lane for node placement
+const LANE_VISIBLE_H = 155;   // rendered height of the sleeve strip
 const LANE_WIDTH     = 2400;  // width of sleeve background strip
-const SLEEVE_START_X = -60;   // left edge of sleeve strip
+const SLEEVE_START_X = -200;  // left edge — room for the label bar
 const Y_INIT         = 20;    // top offset
 
 function laneY(si: number): number {
   return Y_INIT + si * SLEEVE_H;
 }
 
+// Nodes start at x=0 (to the right of the label bar which ends near x=−200+2+144=−54)
 function nodeXY(si: number, idx: number): { x: number; y: number } {
-  return { x: 60 + idx * (NODE_W + X_GAP), y: laneY(si) + SLEEVE_INNER };
+  return { x: 20 + idx * (NODE_W + X_GAP), y: laneY(si) + SLEEVE_INNER };
 }
 
 // ── Handle styles ─────────────────────────────────────────────────────────────
@@ -118,21 +120,47 @@ const TARGET_HANDLE_STYLE: React.CSSProperties = {
 
 // ── Sleeve background node ────────────────────────────────────────────────────
 
+const LANE_CFG: Record<NodeKind, { stripe: string; bg: string; border: string; stepClr: string; labelClr: string }> = {
+  input: {
+    stripe:   "bg-blue-500",
+    bg:       "bg-blue-950/30",
+    border:   "border-blue-800/60",
+    stepClr:  "text-blue-500",
+    labelClr: "text-blue-300",
+  },
+  processing: {
+    stripe:   "bg-indigo-500",
+    bg:       "bg-indigo-950/30",
+    border:   "border-indigo-800/60",
+    stepClr:  "text-indigo-400",
+    labelClr: "text-indigo-200",
+  },
+  output: {
+    stripe:   "bg-yellow-500",
+    bg:       "bg-yellow-950/30",
+    border:   "border-yellow-800/60",
+    stepClr:  "text-yellow-500",
+    labelClr: "text-yellow-300",
+  },
+};
+
 function SleeveNode({ data }: { data: Record<string, unknown> }) {
-  const d = data as SleeveData;
-  const colors: Record<NodeKind, string> = {
-    input:      "border-blue-900/40 bg-blue-950/20 text-blue-700",
-    processing: "border-indigo-900/40 bg-indigo-950/20 text-indigo-700",
-    output:     "border-yellow-900/40 bg-yellow-950/20 text-yellow-700",
-  };
-  const cls = colors[d.kind as NodeKind] ?? colors.input;
+  const d   = data as SleeveData;
+  const cfg = LANE_CFG[d.kind as NodeKind] ?? LANE_CFG.input;
   return (
     <div
-      style={{ width: LANE_WIDTH, height: SLEEVE_H - 25, pointerEvents: "none" }}
-      className={`rounded-2xl border ${cls} flex items-center pl-5 gap-3`}
+      style={{ width: LANE_WIDTH, height: LANE_VISIBLE_H, pointerEvents: "none" }}
+      className={`flex overflow-hidden rounded-r-2xl border ${cfg.bg} ${cfg.border}`}
     >
-      <span className="text-[11px] font-bold opacity-50">Step {d.step}</span>
-      <span className="text-[10px] font-bold uppercase tracking-widest opacity-40">{d.label}</span>
+      {/* Solid left stripe — acts as the visual lane divider */}
+      <div className={`w-2 shrink-0 ${cfg.stripe}`} />
+      {/* Label block — always visible at the left edge */}
+      <div className={`flex flex-col justify-center px-3 w-36 shrink-0 border-r ${cfg.border}`}>
+        <span className={`text-[10px] font-bold uppercase tracking-widest ${cfg.stepClr}`}>
+          Step {d.step}
+        </span>
+        <span className={`text-sm font-bold ${cfg.labelClr} mt-0.5`}>{d.label}</span>
+      </div>
     </div>
   );
 }
@@ -297,8 +325,10 @@ function DeletableEdge({
   style, markerEnd, selected,
 }: EdgeProps) {
   const { setEdges } = useReactFlow();
-  const [path, labelX, labelY] = getBezierPath({
+  const [path, labelX, labelY] = getSmoothStepPath({
     sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition,
+    borderRadius: 12,
+    offset: 40,
   });
   return (
     <>
@@ -411,9 +441,8 @@ function makeEdge(source: string, target: string): Edge {
     id:        `e_${source}_${target}`,
     source,
     target,
-    animated:  true,
-    markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 20, height: 20 },
-    style:     { stroke: "#818cf8", strokeWidth: 2.5 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
+    style:     { stroke: "#818cf8", strokeWidth: 2 },
   };
 }
 
@@ -437,15 +466,15 @@ function PipelineCanvas() {
   // Combine sleeve backgrounds with real nodes for rendering
   const allNodes = useMemo(() => [...makeSleeves(stages), ...nodes], [stages, nodes]);
 
-  // Prevent removal of sleeve nodes; lock all real nodes to their lane's Y axis
+  // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
     const processed = changes
       .filter(c => !(c.type === "remove" && c.id.startsWith("sleeve_")))
       .map(c => {
         if (c.type === "position" && c.position && !c.id.startsWith("sleeve_")) {
           const node = nodesRef.current.find(n => n.id === c.id);
-          if (node) {
-            const snapY = laneY((node.data as PipelineNodeData).stageIndex) + SLEEVE_INNER;
+          if (node && node.type === "input") {
+            const snapY = laneY(0) + SLEEVE_INNER;
             return {
               ...c,
               position:         { x: c.position.x, y: snapY },
@@ -459,6 +488,35 @@ function PipelineCanvas() {
       });
     onNodesChange(processed as NodeChange[]);
   }, [onNodesChange]);
+
+  // Snap processing/output nodes to the nearest same-type lane on drag end
+  const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
+    if (String(node.id).startsWith("sleeve_")) return;
+    const kind = node.type as NodeKind;
+    if (kind === "input") return; // inputs are already Y-locked during drag
+
+    const currentStages = stagesRef.current;
+    const matchingLanes = currentStages
+      .map((s, i) => ({ kind: s, index: i }))
+      .filter(s => s.kind === kind);
+    if (matchingLanes.length === 0) return;
+
+    const closest = matchingLanes.reduce<{ index: number; dist: number }>(
+      (best, lane) => {
+        const dist = Math.abs(node.position.y - (laneY(lane.index) + SLEEVE_INNER));
+        return dist < best.dist ? { index: lane.index, dist } : best;
+      },
+      { index: matchingLanes[0].index, dist: Infinity },
+    );
+
+    const newStageIndex = closest.index;
+    const snapY         = laneY(newStageIndex) + SLEEVE_INNER;
+    setNodes(ns => ns.map(n =>
+      n.id === node.id
+        ? { ...n, position: { x: n.position.x, y: snapY }, data: { ...(n.data as PipelineNodeData), stageIndex: newStageIndex } }
+        : n
+    ));
+  }, [setNodes]);
 
   // Validates connections drawn manually by the user
   const isValidConnectionFn = useCallback((conn: Connection | Edge): boolean => {
@@ -481,9 +539,8 @@ function PipelineCanvas() {
   const onConnect = useCallback((conn: Connection) => {
     setEdges(es => addEdge({
       ...conn,
-      animated:  true,
-      markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 20, height: 20 },
-      style:     { stroke: "#818cf8", strokeWidth: 2.5 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
+      style:     { stroke: "#818cf8", strokeWidth: 2 },
     }, es));
   }, [setEdges]);
 
@@ -791,6 +848,7 @@ function PipelineCanvas() {
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
           onConnect={onConnect}
+          onNodeDragStop={onNodeDragStop}
           isValidConnection={isValidConnectionFn}
           fitView
           fitViewOptions={{ padding: 0.3 }}
