@@ -167,6 +167,7 @@ type NodeSelection =
   | { type: "agent"; stepIdx: number }
   | { type: "input"; stepIdx: number; inputKey: string }
   | { type: "output"; stepIdx: number }
+  | { type: "add_input"; stepIdx: number }
   | null;
 
 // ── Scope inference ───────────────────────────────────────────────────────────
@@ -382,14 +383,13 @@ function StepCard({
   step, index, total, allAgents, prevStepClass,
   selection, onSelect,
   onRemove, onMoveLeft, onMoveRight,
-  onAddInput, onRemoveInput,
+  onRemoveInput,
 }: {
   step: PipelineStep; index: number; total: number;
   allAgents: UniversalAgent[]; prevStepClass?: string;
   selection: NodeSelection;
   onSelect: (s: NodeSelection) => void;
   onRemove: () => void; onMoveLeft: () => void; onMoveRight: () => void;
-  onAddInput: () => void;
   onRemoveInput: (key: string) => void;
 }) {
   const agent = allAgents.find(a => a.id === step.agent_id);
@@ -444,7 +444,7 @@ function StepCard({
             />
           ))}
           {/* + Add input card */}
-          <AddInputCard onClick={onAddInput} />
+          <AddInputCard onClick={() => onSelect({ type: "add_input", stepIdx: index })} />
         </div>
 
         {/* ── Agent card body ── */}
@@ -857,6 +857,57 @@ function OutputSettingsPanel({ agent, onSaveAgent, onClose }: {
   );
 }
 
+// ── Add-input picker panel ────────────────────────────────────────────────────
+// Shown in the right panel when the user clicks the + card on a canvas node.
+// The user picks a source type, then the colored mini-card is created.
+
+function AddInputPickerPanel({ stepIdx, step, allAgents, onAdd, onClose }: {
+  stepIdx: number; step: PipelineStep; allAgents: UniversalAgent[];
+  onAdd: (src: SourceValue) => void; onClose: () => void;
+}) {
+  const agent = allAgents.find(a => a.id === step.agent_id);
+  return (
+    <div className="w-72 shrink-0 border-l border-gray-800 flex flex-col bg-gray-950">
+      <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+        <div className="w-7 h-7 rounded-lg bg-teal-900/60 border border-teal-700/50 flex items-center justify-center shrink-0">
+          <Plus className="w-3.5 h-3.5 text-teal-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-semibold text-white">Add input</p>
+          <p className="text-[9px] text-gray-500">
+            {agent?.name ?? `Step ${stepIdx + 1}`} · choose source type
+          </p>
+        </div>
+        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+      <div className="p-3 space-y-1.5 overflow-y-auto flex-1">
+        <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2.5">Choose source type</p>
+        {INPUT_SOURCES.map(s => {
+          const Icon = s.icon;
+          return (
+            <button key={s.value} onClick={() => onAdd(s.value)}
+              className={cn(
+                "w-full flex items-center gap-3 p-2.5 rounded-xl border transition-all text-left group",
+                "border-gray-800 bg-gray-900 hover:bg-gray-800/80 hover:border-gray-700",
+              )}>
+              <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border", s.badge)}>
+                <Icon className="w-4 h-4 shrink-0" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-gray-200 group-hover:text-white transition-colors">{s.label}</p>
+                <p className="text-[9px] text-gray-600 leading-tight">{s.desc}</p>
+              </div>
+              <Plus className="w-3 h-3 text-gray-700 group-hover:text-teal-400 transition-colors shrink-0" />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function AgentsPage() {
@@ -961,8 +1012,8 @@ export default function AgentsPage() {
     mutate(`${API}/universal-agents`);
   }
 
-  // Add a new input directly from the canvas + button
-  async function addInputToStep(stepIdx: number) {
+  // Called after the user picks a source type in AddInputPickerPanel
+  async function addInputToStep(stepIdx: number, sourceType: SourceValue) {
     const step  = pipelineForm.steps[stepIdx];
     const agent = allAgents.find(a => a.id === step.agent_id);
     if (!agent) {
@@ -971,7 +1022,7 @@ export default function AgentsPage() {
       return;
     }
     const newKey    = `input_${agent.inputs.length + 1}`;
-    const newInputs = [...agent.inputs, { key: newKey, source: "transcript" as SourceValue }];
+    const newInputs = [...agent.inputs, { key: newKey, source: sourceType }];
     await saveNodeAgent(agent.id, { ...agent, inputs: newInputs });
     setSelection({ type: "input", stepIdx, inputKey: newKey });
   }
@@ -1132,7 +1183,6 @@ export default function AgentsPage() {
                   onRemove={() => removeStep(i)}
                   onMoveLeft={() => moveStep(i, -1)}
                   onMoveRight={() => moveStep(i, 1)}
-                  onAddInput={() => addInputToStep(i)}
                   onRemoveInput={key => removeInputFromStep(i, key)}
                 />
               ))}
@@ -1143,6 +1193,16 @@ export default function AgentsPage() {
         {/* Right: settings panel */}
         {selection !== null && selStep !== null && (
           <>
+            {selection.type === "add_input" && (
+              <AddInputPickerPanel
+                key={`add_input-${selection.stepIdx}`}
+                stepIdx={selection.stepIdx}
+                step={selStep}
+                allAgents={allAgents}
+                onAdd={src => addInputToStep(selection.stepIdx, src)}
+                onClose={() => setSelection(null)}
+              />
+            )}
             {selection.type === "agent" && (
               <AgentSettingsPanel
                 key={`agent-${selection.stepIdx}`}
