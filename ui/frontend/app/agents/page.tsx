@@ -123,7 +123,7 @@ const EMPTY_AGENT: Omit<UniversalAgent, "id" | "created_at"> = {
 interface PipelineStep {
   agent_id: string;
   input_overrides: Record<string, string>;
-  _cls?: string; // frontend-only class hint
+  _cls?: string;
 }
 
 interface Pipeline {
@@ -135,7 +135,6 @@ const EMPTY_PIPELINE: Omit<Pipeline, "id" | "created_at"> = {
   name: "", description: "", scope: "per_pair", steps: [],
 };
 
-// Selection state
 type NodeSelection =
   | { type: "agent"; stepIdx: number }
   | { type: "input"; stepIdx: number; inputKey: string }
@@ -157,7 +156,7 @@ function inferScope(steps: PipelineStep[], allAgents: UniversalAgent[]): string 
   return "per_pair";
 }
 
-// ── Class palette cards ───────────────────────────────────────────────────────
+// ── Class palette ─────────────────────────────────────────────────────────────
 
 const CLASS_TYPES = [
   { cls: "persona",    label: "Persona",    desc: "Personality analysis" },
@@ -227,7 +226,7 @@ function AgentPickerGrid({ value, allAgents, prevStepClass, onPick }: {
         className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
       <div className="grid grid-cols-2 gap-1 max-h-44 overflow-y-auto">
         {filtered.map(a => {
-          const meta   = classMeta(a.agent_class ?? "");
+          const meta    = classMeta(a.agent_class ?? "");
           const reqPrev = CLASS_REQUIRES_PREV[a.agent_class?.toLowerCase() ?? ""];
           const compat  = !reqPrev || !prevStepClass || reqPrev === prevStepClass.toLowerCase();
           const isSel   = value === a.id;
@@ -258,7 +257,14 @@ function AgentPickerGrid({ value, allAgents, prevStepClass, onPick }: {
   );
 }
 
-// ── Step card (canvas node with ports) ───────────────────────────────────────
+// ── Step card (aligned node with ports) ──────────────────────────────────────
+//
+// To keep connecting arrows aligned regardless of how many input ports each
+// node has, we use fixed-height containers for both the input-port region and
+// the output-port region. All card bodies therefore sit at the same Y offset.
+
+const INPUT_PORT_AREA_H  = 56; // px  – space above card body for ports + wire
+const OUTPUT_PORT_AREA_H = 44; // px  – space below card body for wire + port
 
 function StepCard({ step, index, total, allAgents, prevStepClass, selection, onSelect, onRemove, onMoveLeft, onMoveRight }: {
   step: PipelineStep; index: number; total: number;
@@ -287,11 +293,11 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
 
   return (
     <div className="flex items-center shrink-0">
-      {/* Node column */}
+      {/* Node column ─────────────────────────── */}
       <div className="flex flex-col items-center shrink-0">
 
         {/* Controls pill */}
-        <div className="flex items-center gap-0 bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm mb-1.5">
+        <div className="flex items-center bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm mb-1">
           <button onClick={onMoveLeft} disabled={index === 0}
             className="p-0.5 text-gray-700 hover:text-gray-400 disabled:opacity-20 transition-colors">
             <ChevronRight className="w-3 h-3 rotate-180" />
@@ -306,55 +312,49 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
           </button>
         </div>
 
-        {/* Input ports row */}
-        {inputs.length > 0 && (
-          <div className="flex justify-center gap-3 mb-0">
-            {inputs.map(inp => {
-              const src    = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
-              const SrcIco = src.icon;
-              const isSel  = inputSel(inp.key);
-              return (
-                <button
-                  key={inp.key}
-                  onClick={() => onSelect(isSel ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
-                  title={`${inp.key} — ${src.label}`}
-                  className="flex flex-col items-center gap-0 group"
-                >
-                  {/* Label */}
-                  <span className={cn(
-                    "text-[8px] font-mono mb-0.5 transition-colors",
-                    isSel ? "text-white" : "text-gray-600 group-hover:text-gray-400",
-                  )}>
-                    {inp.key}
-                  </span>
-                  {/* Port circle */}
-                  <div className={cn(
-                    "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
-                    isSel ? cn(src.badge, "shadow-md scale-110") : cn("border-gray-700 bg-gray-900 group-hover:border-gray-500"),
-                  )}>
-                    <SrcIco className={cn("w-2 h-2", isSel ? "" : "text-gray-600 group-hover:text-gray-400")} />
-                  </div>
-                  {/* Wire down to card */}
-                  <div className={cn("w-px h-3 transition-colors", isSel ? "bg-gray-500" : "bg-gray-800")} />
-                </button>
-              );
-            })}
-          </div>
-        )}
+        {/* ── Input-port region (fixed height) ── */}
+        <div
+          className="flex items-end justify-center gap-3 w-full"
+          style={{ height: INPUT_PORT_AREA_H }}
+        >
+          {inputs.map(inp => {
+            const src    = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
+            const SrcIco = src.icon;
+            const isSel  = inputSel(inp.key);
+            return (
+              <button
+                key={inp.key}
+                onClick={() => onSelect(isSel ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
+                title={`${inp.key} — ${src.label}`}
+                className="flex flex-col items-center gap-0 group"
+              >
+                <span className={cn("text-[8px] font-mono mb-1 transition-colors leading-none",
+                  isSel ? "text-white" : "text-gray-600 group-hover:text-gray-400")}>
+                  {inp.key}
+                </span>
+                <div className={cn(
+                  "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
+                  isSel ? cn(src.badge, "shadow-md scale-110") : "border-gray-700 bg-gray-900 group-hover:border-gray-500",
+                )}>
+                  <SrcIco className={cn("w-2 h-2 shrink-0", isSel ? "" : "text-gray-600 group-hover:text-gray-400")} />
+                </div>
+                {/* wire to card top */}
+                <div className={cn("w-px flex-1 min-h-[6px] transition-colors", isSel ? "bg-gray-500" : "bg-gray-800")} />
+              </button>
+            );
+          })}
+        </div>
 
-        {/* Card body */}
+        {/* ── Card body ── */}
         <div className={cn(
-          "rounded-2xl border-2 bg-gray-900/60 w-44 overflow-hidden transition-all",
+          "rounded-2xl border-2 bg-gray-900/60 w-48 overflow-hidden transition-all",
           agentSel ? cn(meta.borderColor, "shadow-xl shadow-black/40") : "border-gray-800",
         )}>
-          {/* Compat warning */}
           {!compat && (
             <div className="flex items-center gap-1 text-[9px] text-amber-400 px-3 py-1.5 bg-amber-900/20 border-b border-amber-700/30">
               <TriangleAlert className="w-3 h-3 shrink-0" /> needs {reqPrev}
             </div>
           )}
-
-          {/* Agent body — click opens agent settings */}
           <div
             onClick={() => onSelect(agentSel ? null : { type: "agent", stepIdx: index })}
             className="flex flex-col items-center gap-1.5 p-4 cursor-pointer hover:bg-gray-800/30 transition-colors"
@@ -369,38 +369,45 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
           </div>
         </div>
 
-        {/* Output port */}
-        {agent && (
-          <button
-            onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
-            title={`Output — ${fmtMeta.label}`}
-            className="flex flex-col items-center gap-0 group mt-0"
-          >
-            {/* Wire up from card */}
-            <div className={cn("w-px h-3 transition-colors", outputSel ? "bg-gray-500" : "bg-gray-800")} />
-            {/* Port circle */}
-            <div className={cn(
-              "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
-              outputSel ? cn(fmtMeta.border, fmtMeta.bg, "shadow-md scale-110") : "border-gray-700 bg-gray-900 group-hover:border-gray-500",
-            )}>
-              <FmtIcon className={cn("w-2 h-2", outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400")} />
-            </div>
-            {/* Label */}
-            <span className={cn(
-              "text-[8px] mt-0.5 transition-colors",
-              outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400",
-            )}>
-              {fmtMeta.label}
-            </span>
-          </button>
-        )}
+        {/* ── Output-port region (fixed height) ── */}
+        <div
+          className="flex items-start justify-center w-full"
+          style={{ height: OUTPUT_PORT_AREA_H }}
+        >
+          {agent && (
+            <button
+              onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
+              title={`Output — ${fmtMeta.label}`}
+              className="flex flex-col items-center gap-0 group"
+            >
+              {/* wire from card bottom */}
+              <div className={cn("w-px h-3 transition-colors", outputSel ? "bg-gray-500" : "bg-gray-800")} />
+              <div className={cn(
+                "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
+                outputSel
+                  ? cn(fmtMeta.border, fmtMeta.bg, "shadow-md scale-110")
+                  : "border-gray-700 bg-gray-900 group-hover:border-gray-500",
+              )}>
+                <FmtIcon className={cn("w-2 h-2 shrink-0", outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400")} />
+              </div>
+              <span className={cn("text-[8px] mt-1 leading-none transition-colors",
+                outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400")}>
+                {fmtMeta.label}
+              </span>
+            </button>
+          )}
+        </div>
+
       </div>
 
-      {/* Arrow to next — vertically centered on card body */}
+      {/* Arrow between nodes — self-center aligns to vertical midpoint of column */}
       {index < total - 1 && (
-        <div className="flex items-center self-center px-2 shrink-0 text-gray-700 mt-8">
-          <div className="w-5 h-px bg-gray-800" />
-          <ChevronRight className="w-4 h-4 -ml-1" />
+        <div
+          className="flex items-center px-2 shrink-0 text-gray-700"
+          style={{ marginTop: -(OUTPUT_PORT_AREA_H - INPUT_PORT_AREA_H) / 2 + 24 }}
+        >
+          <div className="w-6 h-px bg-gray-700" />
+          <ChevronRight className="w-3.5 h-3.5 -ml-1" />
         </div>
       )}
     </div>
@@ -450,20 +457,41 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
     finally { setSaving(false); }
   }
 
+  function addInput() {
+    const key = `input_${draft.inputs.length + 1}`;
+    setDraft(f => ({ ...f, inputs: [...f.inputs, { key, source: "transcript" }] }));
+  }
+
+  function removeInput(i: number) {
+    setDraft(f => ({ ...f, inputs: f.inputs.filter((_, j) => j !== i) }));
+  }
+
+  function updateInputKey(i: number, key: string) {
+    setDraft(f => { const inputs = [...f.inputs]; inputs[i] = { ...inputs[i], key }; return { ...f, inputs }; });
+  }
+
+  function updateInputSource(i: number, source: SourceValue) {
+    setDraft(f => { const inputs = [...f.inputs]; inputs[i] = { ...inputs[i], source }; return { ...f, inputs }; });
+  }
+
   const varKeys = draft.inputs.filter(i => i.key);
 
   return (
     <div className="w-80 shrink-0 border-l border-gray-800 flex flex-col bg-gray-950">
+      {/* Header */}
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
         <AgentClassIcon cls={cls} size="sm" />
         <div className="flex-1 min-w-0">
           <p className="text-xs font-semibold text-white truncate">{agent?.name ?? "Configure agent"}</p>
           <p className={cn("text-[9px]", meta.textColor)}>{meta.label}</p>
         </div>
-        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors shrink-0"><X className="w-4 h-4" /></button>
+        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors shrink-0">
+          <X className="w-4 h-4" />
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto">
+
         {/* Agent picker */}
         <div className="p-3 border-b border-gray-800">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Agent</p>
@@ -471,7 +499,79 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
             onPick={id => onChangeStep({ ...step, agent_id: id, input_overrides: {} })} />
         </div>
 
-        {/* Configure */}
+        {/* ── Inputs ─────────────────────────────────────────────── */}
+        <div className="p-3 border-b border-gray-800">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[9px] text-gray-600 uppercase tracking-wide">Inputs</p>
+            <button onClick={addInput}
+              className="flex items-center gap-0.5 text-[9px] text-teal-400 hover:text-teal-300 transition-colors font-medium">
+              <Plus className="w-3 h-3" /> Add
+            </button>
+          </div>
+
+          {draft.inputs.length === 0 && (
+            <p className="text-[9px] text-gray-700 italic text-center py-2">
+              No inputs — click + Add to define one
+            </p>
+          )}
+
+          <div className="space-y-2">
+            {draft.inputs.map((inp, i) => {
+              const src    = sourceMeta(inp.source);
+              const SrcIco = src.icon;
+              return (
+                <div key={i} className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
+                  {/* Key row */}
+                  <div className="flex items-center gap-1.5 px-2.5 py-2 border-b border-gray-800/60">
+                    <span className="text-[10px] text-gray-600 font-mono shrink-0">{"{"}</span>
+                    <input
+                      value={inp.key}
+                      onChange={e => updateInputKey(i, e.target.value)}
+                      placeholder="variable_name"
+                      className="flex-1 bg-transparent text-[11px] font-mono text-white outline-none placeholder-gray-600 min-w-0"
+                    />
+                    <span className="text-[10px] text-gray-600 font-mono shrink-0">{"}"}</span>
+                    <button onClick={() => removeInput(i)}
+                      className="p-0.5 text-gray-600 hover:text-red-400 transition-colors shrink-0 ml-1">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+
+                  {/* Source type — shown as element pills */}
+                  <div className="px-2.5 py-2">
+                    <p className="text-[8px] text-gray-700 uppercase tracking-wide mb-1.5">Source type</p>
+                    <div className="flex flex-wrap gap-1">
+                      {INPUT_SOURCES.map(s => {
+                        const Ico   = s.icon;
+                        const isSel = inp.source === s.value;
+                        return (
+                          <button key={s.value}
+                            onClick={() => updateInputSource(i, s.value)}
+                            title={s.desc}
+                            className={cn(
+                              "flex items-center gap-1 px-1.5 py-1 rounded-lg text-[9px] border transition-all",
+                              isSel ? cn(s.badge, "shadow-sm") : "border-gray-700/50 bg-gray-800/30 text-gray-500 hover:text-gray-300 hover:border-gray-600",
+                            )}>
+                            <Ico className="w-2.5 h-2.5 shrink-0" />
+                            {s.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {/* Active source chip */}
+                    <div className={cn("mt-2 inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[9px]", src.badge)}>
+                      <SrcIco className="w-2.5 h-2.5 shrink-0" />
+                      <span className="font-medium">{src.label}</span>
+                      <span className="opacity-60 ml-0.5">— {src.desc}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Configure ─────────────────────────────────────────── */}
         <div className="p-3 space-y-3">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide">Configure</p>
 
@@ -486,17 +586,17 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
             <label className="block text-[9px] text-gray-500 mb-1">System Prompt</label>
             {varKeys.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-1.5">
-                {varKeys.map(i => (
-                  <button key={i.key} type="button"
-                    onClick={() => setDraft(f => ({ ...f, system_prompt: f.system_prompt + `{${i.key}}` }))}
+                {varKeys.map(inp => (
+                  <button key={inp.key} type="button"
+                    onClick={() => setDraft(f => ({ ...f, system_prompt: f.system_prompt + `{${inp.key}}` }))}
                     className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 font-mono transition-colors">
-                    {`{${i.key}}`}
+                    {`{${inp.key}}`}
                   </button>
                 ))}
               </div>
             )}
             <textarea value={draft.system_prompt} onChange={e => setDraft(f => ({ ...f, system_prompt: e.target.value }))}
-              rows={6} placeholder="You are a…"
+              rows={5} placeholder="You are a…"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
           </div>
 
@@ -505,17 +605,17 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
             <label className="block text-[9px] text-gray-500 mb-1">User Prompt</label>
             {varKeys.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-1.5">
-                {varKeys.map(i => (
-                  <button key={i.key} type="button"
-                    onClick={() => setDraft(f => ({ ...f, user_prompt: f.user_prompt + `{${i.key}}` }))}
+                {varKeys.map(inp => (
+                  <button key={inp.key} type="button"
+                    onClick={() => setDraft(f => ({ ...f, user_prompt: f.user_prompt + `{${inp.key}}` }))}
                     className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 font-mono transition-colors">
-                    {`{${i.key}}`}
+                    {`{${inp.key}}`}
                   </button>
                 ))}
               </div>
             )}
             <textarea value={draft.user_prompt} onChange={e => setDraft(f => ({ ...f, user_prompt: e.target.value }))}
-              rows={6} placeholder={"Analyse this:\n\n{transcript}"}
+              rows={5} placeholder={"Analyse this:\n\n{transcript}"}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
           </div>
 
@@ -578,7 +678,9 @@ function InputSettingsPanel({ inp, step, agent, onChangeStep, onClose }: {
           <p className="text-xs font-semibold text-white font-mono">{`{${inp.key}}`}</p>
           <p className="text-[9px] text-gray-500">{agent.name} · input</p>
         </div>
-        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors"><X className="w-4 h-4" /></button>
+        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors">
+          <X className="w-4 h-4" />
+        </button>
       </div>
 
       <div className="p-3 space-y-4 overflow-y-auto">
@@ -597,12 +699,11 @@ function InputSettingsPanel({ inp, step, agent, onChangeStep, onClose }: {
           <span className={cn("flex items-center gap-1 px-1.5 py-0.5 rounded-full border", defaultSrc.badge)}>
             <DefaultIcon className="w-2.5 h-2.5 shrink-0" />{defaultSrc.label}
           </span>
-          {isOverridden && <span className="text-amber-500 ml-1">overridden for this pipeline</span>}
+          {isOverridden && <span className="text-amber-500 ml-1">overridden</span>}
         </div>
 
-        {/* Quick info about each source */}
-        <div className="space-y-1.5 pt-1 border-t border-gray-800">
-          <p className="text-[9px] text-gray-600 uppercase tracking-wide">Sources</p>
+        <div className="space-y-1 pt-1 border-t border-gray-800">
+          <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-1.5">Sources</p>
           {INPUT_SOURCES.map(s => {
             const SIcon = s.icon;
             return (
@@ -653,7 +754,9 @@ function OutputSettingsPanel({ agent, onSaveAgent, onClose }: {
           <p className="text-xs font-semibold text-white">Output format</p>
           <p className="text-[9px] text-gray-500">{agent.name}</p>
         </div>
-        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors"><X className="w-4 h-4" /></button>
+        <button onClick={onClose} className="p-1 text-gray-600 hover:text-white transition-colors">
+          <X className="w-4 h-4" />
+        </button>
       </div>
       <div className="p-3 space-y-2 overflow-y-auto">
         <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Response format</p>
@@ -709,8 +812,6 @@ export default function AgentsPage() {
 
   const allAgents = agents ?? [];
 
-  // ── Pipeline CRUD ──────────────────────────────────────────────────────────
-
   function openPipeline(p: Pipeline) {
     setSelectedPipeline(p.id);
     setPipelineForm({ name: p.name, description: p.description ?? "", scope: p.scope, steps: p.steps ?? [] });
@@ -748,8 +849,6 @@ export default function AgentsPage() {
     setSelectedPipeline(null); setPipelineIsNew(false); setSelection(null);
     setPipelineForm({ ...EMPTY_PIPELINE });
   }
-
-  // ── Steps ──────────────────────────────────────────────────────────────────
 
   function addStep(cls: string) {
     const newIdx = pipelineForm.steps.length;
@@ -818,10 +917,9 @@ export default function AgentsPage() {
   return (
     <div className="min-h-[calc(100vh-5.25rem)] flex flex-col -m-6">
 
-      {/* Top bar — minimal: just pipeline name + actions */}
+      {/* Top bar */}
       <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2 shrink-0 bg-gray-950">
         <Workflow className="w-4 h-4 text-teal-400 shrink-0" />
-
         {showCanvas ? (
           <input
             value={pipelineForm.name}
@@ -832,18 +930,13 @@ export default function AgentsPage() {
         ) : (
           <span className="text-sm text-gray-600">Pipeline builder</span>
         )}
-
         <div className="flex-1" />
-
         <button onClick={importPresets} disabled={importing}
           className="flex items-center gap-1.5 px-2 py-1.5 text-gray-500 hover:text-white text-xs transition-colors disabled:opacity-50">
           {importing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
           Import presets
         </button>
-        {importResult && (
-          <span className="text-[10px] text-green-500">+{importResult.created_agents.length} agents</span>
-        )}
-
+        {importResult && <span className="text-[10px] text-green-500">+{importResult.created_agents.length} agents</span>}
         {showCanvas && (
           <div className="flex items-center gap-1.5">
             {selectedPipeline && (
@@ -874,10 +967,8 @@ export default function AgentsPage() {
       {/* Main layout */}
       <div className="flex-1 min-h-0 flex bg-gray-950">
 
-        {/* Left panel: pipeline list + class palette */}
+        {/* Left: pipeline list + palette */}
         <div className="w-44 shrink-0 border-r border-gray-800 flex flex-col">
-
-          {/* Pipeline list */}
           <div className="p-2 border-b border-gray-800">
             <div className="flex items-center justify-between mb-2 px-0.5">
               <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold">Pipelines</p>
@@ -900,20 +991,15 @@ export default function AgentsPage() {
                   )}>
                   <Workflow className="w-3 h-3 shrink-0 opacity-60" />
                   <span className="truncate flex-1">{p.name}</span>
-                  {p.id === activePipelineId && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-teal-400 shrink-0" />
-                  )}
+                  {p.id === activePipelineId && <span className="w-1.5 h-1.5 rounded-full bg-teal-400 shrink-0" />}
                 </button>
               ))}
             </div>
           </div>
-
-          {/* Class palette */}
           <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
             <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold px-0.5 mb-1">Add element</p>
             {CLASS_TYPES.map(t => (
-              <ClassPaletteCard key={t.cls} cls={t.cls} label={t.label} desc={t.desc}
-                onAdd={() => addStep(t.cls)} />
+              <ClassPaletteCard key={t.cls} cls={t.cls} label={t.label} desc={t.desc} onAdd={() => addStep(t.cls)} />
             ))}
           </div>
         </div>
@@ -937,7 +1023,10 @@ export default function AgentsPage() {
               </div>
             </div>
           ) : (
-            <div className="flex items-start flex-nowrap">
+            // items-end aligns all node columns to their bottom edge;
+            // because INPUT_PORT_AREA_H and OUTPUT_PORT_AREA_H are fixed,
+            // card bodies land at the same vertical position across all nodes.
+            <div className="flex items-end flex-nowrap">
               {pipelineForm.steps.map((step, i) => (
                 <StepCard
                   key={i}
