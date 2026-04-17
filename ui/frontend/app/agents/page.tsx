@@ -500,6 +500,8 @@ function StepCard({
           )}
           <div
             onClick={() => onSelect(agentSel ? null : { type: "agent", stepIdx: index })}
+            onDragOver={e => e.preventDefault()}
+            onDrop={onDrop}
             className="flex flex-col items-center gap-1.5 p-4 cursor-pointer hover:bg-gray-800/30 transition-colors"
           >
             <AgentClassIcon cls={cls} size="md" />
@@ -992,8 +994,9 @@ export default function AgentsPage() {
       setSelection({ type: "agent", stepIdx });
       return;
     }
-    const newKey    = `input_${agent.inputs.length + 1}`;
-    const newInputs = [...agent.inputs, { key: newKey, source: sourceType }];
+    const existing  = agent.inputs ?? [];
+    const newKey    = `input_${existing.length + 1}`;
+    const newInputs = [...existing, { key: newKey, source: sourceType }];
     await saveNodeAgent(agent.id, { ...agent, inputs: newInputs });
     setSelection({ type: "input", stepIdx, inputKey: newKey });
   }
@@ -1021,7 +1024,7 @@ export default function AgentsPage() {
     const step  = pipelineForm.steps[stepIdx];
     const agent = allAgents.find(a => a.id === step.agent_id);
     if (!agent) return;
-    const newInputs = agent.inputs.filter(i => i.key !== inputKey);
+    const newInputs = (agent.inputs ?? []).filter(i => i.key !== inputKey);
     await saveNodeAgent(agent.id, { ...agent, inputs: newInputs });
     // Clear selection if this input was selected
     if (
@@ -1048,7 +1051,7 @@ export default function AgentsPage() {
   const selStep    = selection !== null ? pipelineForm.steps[selection.stepIdx] : null;
   const selAgent   = selStep ? allAgents.find(a => a.id === selStep.agent_id) : undefined;
   const selInpMeta = selection?.type === "input" && selStep && selAgent
-    ? selAgent.inputs.find(inp => inp.key === (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey)
+    ? (selAgent.inputs ?? []).find(inp => inp.key === (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey)
     : undefined;
 
   return (
