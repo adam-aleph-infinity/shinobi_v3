@@ -451,14 +451,15 @@ function PipelineCanvas() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [stages, setStages]              = useState<NodeKind[]>(["input"]);
+  const INIT_STAGES: NodeKind[] = ["input", "processing", "output"];
+  const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Refs for fresh state in callbacks (avoid stale closures)
   const nodesRef  = useRef<Node[]>([]);
   const edgesRef  = useRef<Edge[]>([]);
-  const stagesRef = useRef<NodeKind[]>(["input"]);
+  const stagesRef = useRef<NodeKind[]>([...INIT_STAGES]);
   nodesRef.current  = nodes;
   edgesRef.current  = edges;
   stagesRef.current = stages;
@@ -563,31 +564,22 @@ function PipelineCanvas() {
     const meta = getMeta(kind, subType);
     const id   = nextId();
 
-    // ── Determine stageIndex and whether stages array grows ─────────────────
+    // ── Determine stageIndex: find the LAST lane of matching kind ─────────────
     let stageIndex: number;
     const newStages = [...currentStages];
 
     if (kind === "input") {
-      // All inputs always go in the top sleeve (stage 0)
-      stageIndex = 0;
-    } else if (kind === "processing") {
-      const lastStage = newStages[newStages.length - 1];
-      if (lastStage === "processing") {
-        // Add to existing processing sleeve (parallel agents)
-        stageIndex = newStages.length - 1;
-      } else {
-        // Start a new processing sleeve after input or output
-        newStages.push("processing");
-        stageIndex = newStages.length - 1;
+      stageIndex = 0; // inputs always in the top lane
+    } else {
+      // Walk backwards to find the last lane of this kind
+      let lastIdx = -1;
+      for (let i = newStages.length - 1; i >= 0; i--) {
+        if (newStages[i] === kind) { lastIdx = i; break; }
       }
-    } else { // output
-      const lastStage = newStages[newStages.length - 1];
-      if (lastStage === "output") {
-        // Add to existing output sleeve (multiple outputs)
-        stageIndex = newStages.length - 1;
+      if (lastIdx !== -1) {
+        stageIndex = lastIdx; // place in existing lane
       } else {
-        // Start a new output sleeve after processing
-        newStages.push("output");
+        newStages.push(kind); // no lane of this kind yet — create one
         stageIndex = newStages.length - 1;
       }
     }
@@ -627,7 +619,8 @@ function PipelineCanvas() {
     if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
     setSelectedNodeId(id);
 
-    setTimeout(() => fitView({ padding: 0.25, duration: 350 }), 60);
+    // Pan/zoom to show just the new node — don't refit the whole (wide) canvas
+    setTimeout(() => fitView({ padding: 1.2, duration: 300, nodes: [{ id }] }), 60);
   }, [setNodes, setEdges, setStages, fitView]);
 
   // ── Drag from palette ─────────────────────────────────────────────────────
@@ -666,11 +659,17 @@ function PipelineCanvas() {
     if (selectedNodeId === id) setSelectedNodeId(null);
   }
 
+  function handleAddStage() {
+    const next: NodeKind[] = [...stagesRef.current, "processing", "output"];
+    setStages(next);
+    stagesRef.current = next;
+  }
+
   function handleClear() {
     setNodes([]);
     setEdges([]);
-    setStages(["input"]);
-    stagesRef.current = ["input"];
+    setStages([...INIT_STAGES]);
+    stagesRef.current = [...INIT_STAGES];
     setSelectedNodeId(null);
   }
 
@@ -820,6 +819,12 @@ function PipelineCanvas() {
         {/* Actions */}
         <div className="p-2.5 space-y-2 border-t border-gray-800">
           <button
+            onClick={handleAddStage}
+            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-indigo-800 text-indigo-400 hover:bg-indigo-950/60 hover:border-indigo-600 text-xs font-semibold transition-colors"
+          >
+            + Add Processing Stage
+          </button>
+          <button
             onClick={handleSave}
             className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wide transition-colors"
           >
@@ -850,8 +855,7 @@ function PipelineCanvas() {
           onConnect={onConnect}
           onNodeDragStop={onNodeDragStop}
           isValidConnection={isValidConnectionFn}
-          fitView
-          fitViewOptions={{ padding: 0.3 }}
+          defaultViewport={{ x: 230, y: 40, zoom: 1.0 }}
           deleteKeyCode="Delete"
           proOptions={{ hideAttribution: true }}
           className="bg-gray-950"
@@ -881,20 +885,11 @@ function PipelineCanvas() {
           />
         </ReactFlow>
 
-        {/* Empty state hint */}
+        {/* Hint text inside first lane when canvas is empty */}
         {nodes.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none">
-            <div className="text-center space-y-3">
-              <div className="flex flex-col items-center gap-1 text-gray-800">
-                <div className="w-32 h-8 rounded border border-dashed border-gray-800 flex items-center justify-center text-xs">Inputs</div>
-                <span className="text-xl">↓</span>
-                <div className="w-32 h-8 rounded border border-dashed border-gray-800 flex items-center justify-center text-xs">Processing</div>
-                <span className="text-xl">↓</span>
-                <div className="w-32 h-8 rounded border border-dashed border-gray-800 flex items-center justify-center text-xs">Output</div>
-              </div>
-              <p className="text-sm font-semibold text-gray-700">Click elements on the left to build your pipeline</p>
-              <p className="text-xs text-gray-800">Nodes auto-connect · Drag a handle to connect manually</p>
-            </div>
+          <div className="absolute pointer-events-none select-none"
+            style={{ left: 240, top: 40 + 52 + 22 }}>
+            <p className="text-xs text-gray-700 italic">← click or drag elements from the left panel</p>
           </div>
         )}
 
