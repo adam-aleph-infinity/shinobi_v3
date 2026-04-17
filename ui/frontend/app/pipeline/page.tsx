@@ -5,8 +5,10 @@ import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
   useNodesState, useEdgesState, useReactFlow,
   addEdge,
+  getBezierPath, BaseEdge, EdgeLabelRenderer,
   Handle, Position, MarkerType,
   type Node, type Edge, type Connection, type NodeChange, type NodeTypes,
+  type EdgeProps, type EdgeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
@@ -92,6 +94,27 @@ function laneY(si: number): number {
 function nodeXY(si: number, idx: number): { x: number; y: number } {
   return { x: 60 + idx * (NODE_W + X_GAP), y: laneY(si) + SLEEVE_INNER };
 }
+
+// ── Handle styles ─────────────────────────────────────────────────────────────
+
+const plusSvg = encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">` +
+  `<path d="M5 2v6M2 5h6" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>` +
+  `</svg>`
+);
+
+const SOURCE_HANDLE_STYLE: React.CSSProperties = {
+  width: 20, height: 20, borderRadius: "50%",
+  background: "#1f2937", border: "2px solid #4b5563",
+  cursor: "crosshair",
+  backgroundImage: `url("data:image/svg+xml,${plusSvg}")`,
+  backgroundRepeat: "no-repeat", backgroundPosition: "center",
+};
+
+const TARGET_HANDLE_STYLE: React.CSSProperties = {
+  width: 12, height: 12, borderRadius: "50%",
+  background: "#1f2937", border: "2px solid #374151",
+};
 
 // ── Sleeve background node ────────────────────────────────────────────────────
 
@@ -219,9 +242,7 @@ function InputNode({ data, selected }: { data: PipelineNodeData; selected?: bool
           ⬤ Input · {m.label}
         </span>
       </div>
-      {/* Top-to-bottom: source exits from the bottom */}
-      <Handle type="source" position={Position.Bottom}
-        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <Handle type="source" position={Position.Bottom} style={SOURCE_HANDLE_STYLE} />
     </NodeCard>
   );
 }
@@ -230,9 +251,7 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
   const m = getMeta("processing", data.subType);
   return (
     <NodeCard meta={m} selected={!!selected} kind="processing">
-      {/* Receives from top */}
-      <Handle type="target" position={Position.Top}
-        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <Handle type="target" position={Position.Top} style={TARGET_HANDLE_STYLE} />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
@@ -245,9 +264,7 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
           <p className="text-[10px] text-gray-600 mt-0.5 truncate">{data.prompt as string}</p>
         )}
       </div>
-      {/* Emits from bottom */}
-      <Handle type="source" position={Position.Bottom}
-        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <Handle type="source" position={Position.Bottom} style={SOURCE_HANDLE_STYLE} />
     </NodeCard>
   );
 }
@@ -256,9 +273,7 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
   const m = getMeta("output", data.subType);
   return (
     <NodeCard meta={m} selected={!!selected} kind="output">
-      {/* Receives from top */}
-      <Handle type="target" position={Position.Top}
-        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <Handle type="target" position={Position.Top} style={TARGET_HANDLE_STYLE} />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
@@ -269,11 +284,50 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
         </span>
       </div>
       {/* Can also feed back into a processing node */}
-      <Handle type="source" position={Position.Bottom}
-        className="!w-3 !h-3 !bg-gray-500 !border-2 !border-gray-700" />
+      <Handle type="source" position={Position.Bottom} style={SOURCE_HANDLE_STYLE} />
     </NodeCard>
   );
 }
+
+// ── Custom edge with delete button ────────────────────────────────────────────
+
+function DeletableEdge({
+  id, sourceX, sourceY, targetX, targetY,
+  sourcePosition, targetPosition,
+  style, markerEnd, selected,
+}: EdgeProps) {
+  const { setEdges } = useReactFlow();
+  const [path, labelX, labelY] = getBezierPath({
+    sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition,
+  });
+  return (
+    <>
+      <BaseEdge path={path} markerEnd={markerEnd} style={style} />
+      {selected && (
+        <EdgeLabelRenderer>
+          <div
+            className="absolute nodrag nopan"
+            style={{
+              transform:     `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+              pointerEvents: "all",
+            }}
+          >
+            <button
+              onClick={e => { e.stopPropagation(); setEdges(es => es.filter(e => e.id !== id)); }}
+              className="w-5 h-5 rounded-full bg-red-900/90 border border-red-600 text-red-300 hover:bg-red-700 hover:border-red-500 flex items-center justify-center text-xs font-bold shadow-lg transition-colors"
+              title="Remove connection"
+            >×</button>
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  );
+}
+
+// Defined outside the component to prevent type recreation on every render
+const EDGE_TYPES: EdgeTypes = {
+  default: DeletableEdge as EdgeTypes[string],
+};
 
 // Defined outside the component to prevent NodeTypes recreation on every render
 const NODE_TYPES: NodeTypes = {
@@ -383,13 +437,27 @@ function PipelineCanvas() {
   // Combine sleeve backgrounds with real nodes for rendering
   const allNodes = useMemo(() => [...makeSleeves(stages), ...nodes], [stages, nodes]);
 
-  // Prevent keyboard Delete from removing sleeve nodes
+  // Prevent removal of sleeve nodes; lock all real nodes to their lane's Y axis
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
-    const filtered = changes.filter(c => {
-      if (c.type === "remove") return !c.id.startsWith("sleeve_");
-      return true;
-    });
-    onNodesChange(filtered);
+    const processed = changes
+      .filter(c => !(c.type === "remove" && c.id.startsWith("sleeve_")))
+      .map(c => {
+        if (c.type === "position" && c.position && !c.id.startsWith("sleeve_")) {
+          const node = nodesRef.current.find(n => n.id === c.id);
+          if (node) {
+            const snapY = laneY((node.data as PipelineNodeData).stageIndex) + SLEEVE_INNER;
+            return {
+              ...c,
+              position:         { x: c.position.x, y: snapY },
+              positionAbsolute: c.positionAbsolute
+                ? { x: c.positionAbsolute.x, y: snapY }
+                : undefined,
+            };
+          }
+        }
+        return c;
+      });
+    onNodesChange(processed as NodeChange[]);
   }, [onNodesChange]);
 
   // Validates connections drawn manually by the user
@@ -717,6 +785,7 @@ function PipelineCanvas() {
           nodes={allNodes}
           edges={edges}
           nodeTypes={NODE_TYPES}
+          edgeTypes={EDGE_TYPES}
           onNodesChange={onNodesChangeFiltered}
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
