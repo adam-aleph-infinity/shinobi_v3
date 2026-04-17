@@ -16,8 +16,9 @@ import {
   Bot, User, Star, StickyNote, Shield, Zap, BadgeCheck, ShieldCheck,
   Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
   Mic2, Layers, BookOpen, Link2, PenLine, FileText, Braces, AlignLeft,
-  Plus, Trash2, ChevronRight, X, Download,
+  Plus, Trash2, ChevronRight, X, Download, Workflow,
 } from "lucide-react";
+import { useAppCtx } from "@/lib/app-context";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -227,6 +228,8 @@ interface PipelineNodeData extends Record<string, unknown> {
   agentId:    string;
   agentClass: string;
   agentName:  string;
+  // input node — data source type
+  inputSource: string;
 }
 
 // ── Layout constants & helpers ────────────────────────────────────────────────
@@ -263,7 +266,7 @@ const HANDLE_CSS = `
   .react-flow__node-sleeve { pointer-events: none !important; }
   /* Source handle (+ connect) */
   .rf-src {
-    position:relative!important;width:22px!important;height:22px!important;
+    width:22px!important;height:22px!important;
     border-radius:50%!important;background:#111827!important;
     border:2px solid #4b5563!important;cursor:crosshair!important;
     overflow:visible!important;
@@ -412,16 +415,18 @@ function NodeCard({
 }
 
 function InputNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
-  const m = getMeta("input", data.subType);
+  const m   = getMeta("input", data.subType);
+  const src = INPUT_SOURCES.find(s => s.value === (data.inputSource as string)) ?? null;
+  const SrcIcon = src?.icon ?? null;
   return (
     <NodeCard meta={m} selected={!!selected} kind="input">
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
-        <span className="text-white/90 shrink-0">{m.icon}</span>
+        <span className="text-white/90 shrink-0">{SrcIcon ? <SrcIcon className="w-4 h-4" /> : m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
-          ⬤ Input · {m.label}
+          ⬤ {src ? src.label : "Input"}
         </span>
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
@@ -645,6 +650,7 @@ function PipelineCanvas() {
   const { screenToFlowPosition, setViewport } = useReactFlow();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const { mutate } = useSWRConfig();
+  const { activePipelineId, setActivePipeline } = useAppCtx();
 
   // Backend data
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
@@ -855,9 +861,10 @@ function PipelineCanvas() {
         subType,
         prompt:     "",
         stageIndex,
-        agentId:    "",
-        agentClass: "",
-        agentName:  "",
+        agentId:     "",
+        agentClass:  "",
+        agentName:   "",
+        inputSource: "",
       } satisfies PipelineNodeData,
     };
 
@@ -939,6 +946,17 @@ function PipelineCanvas() {
     setStages([...INIT_STAGES]);
     stagesRef.current = [...INIT_STAGES];
     setSelectedNodeId(null);
+    setPipelineName("");
+    setPipelineId(null);
+  }
+
+  async function importPresets() {
+    try {
+      await fetch("/api/universal-agents/import-presets", { method: "POST" });
+      mutate("/api/universal-agents");
+      mutate("/api/pipelines");
+      showToast("Presets imported", true);
+    } catch { showToast("Import failed", false); }
   }
 
   async function handleSavePipeline() {
@@ -958,8 +976,9 @@ function PipelineCanvas() {
       const method = pipelineId ? "PUT" : "POST";
       const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: pipelineName, description: "", scope: "per_pair", steps }) });
-      const data   = await res.json();
-      if (!pipelineId && data.id) setPipelineId(data.id);
+      const saved  = await res.json();
+      const newId  = pipelineId ?? saved.id;
+      if (newId) { setPipelineId(newId); }
       mutate("/api/pipelines");
       showToast(`Pipeline "${pipelineName}" saved`, true);
     } catch { showToast("Failed to save pipeline", false); }
@@ -1072,6 +1091,40 @@ function PipelineCanvas() {
                 />
               )}
             </div>
+
+            {/* Connected inputs — auto-derived from canvas connections */}
+            {(() => {
+              const connectedSources = edges
+                .filter(e => e.target === selectedNode.id)
+                .map(e => {
+                  const src = nodes.find(n => n.id === e.source);
+                  if (!src || src.type !== "input") return null;
+                  const srcData = src.data as PipelineNodeData;
+                  const srcMeta = INPUT_SOURCES.find(s => s.value === srcData.inputSource) ?? null;
+                  return { nodeId: src.id, source: srcData.inputSource, label: srcData.label as string, srcMeta };
+                })
+                .filter(Boolean) as { nodeId: string; source: string; label: string; srcMeta: typeof INPUT_SOURCES[number] | null }[];
+
+              if (connectedSources.length === 0) return null;
+              return (
+                <div className="p-3 border-b border-gray-800">
+                  <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Connected Inputs</p>
+                  <div className="space-y-1">
+                    {connectedSources.map(cs => {
+                      const Icon = cs.srcMeta?.icon ?? Zap;
+                      const badge = cs.srcMeta?.badge ?? "bg-gray-700/50 text-gray-300 border-gray-600/50";
+                      return (
+                        <div key={cs.nodeId} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[10px] ${badge}`}>
+                          <Icon className="w-3 h-3 shrink-0" />
+                          <span className="font-medium">{cs.srcMeta?.label ?? "Input"}</span>
+                          <span className="opacity-60 truncate ml-auto">{cs.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Configure — only shown when an agent is selected */}
             {agId && agentDraft && (
@@ -1203,6 +1256,30 @@ function PipelineCanvas() {
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors" />
         </div>
 
+        {selKind === "input" && (
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Source Type</label>
+            <div className="grid grid-cols-2 gap-1">
+              {INPUT_SOURCES.map(s => {
+                const SrcIcon = s.icon;
+                const isSel = selData.inputSource === s.value;
+                return (
+                  <button key={s.value}
+                    onClick={() => updateNodeData(selectedNode.id, { inputSource: s.value })}
+                    className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left transition-colors
+                      ${isSel ? `${s.badge} border` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 text-gray-400"}`}>
+                    <SrcIcon className="w-3 h-3 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-medium leading-tight truncate">{s.shortLabel}</p>
+                      <p className="text-[9px] opacity-60 leading-tight">{s.desc}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
 
         <button onClick={() => deleteNode(selectedNode.id)}
@@ -1215,233 +1292,261 @@ function PipelineCanvas() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  const isActivePipeline = !!(pipelineId && pipelineId === activePipelineId);
+
   return (
-    <div className="flex h-full w-full">
+    <div className="flex flex-col h-full w-full">
 
-      {/* ── Left palette ──────────────────────────────────────────────── */}
-      <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden">
-        <div className="p-3 border-b border-gray-800">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Elements</p>
-          <p className="text-[10px] text-gray-600 mt-0.5">Click to add · Drag to position</p>
-        </div>
+      {/* ── Top toolbar ───────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900 shrink-0">
+        <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
+        <span className="text-sm font-bold text-white shrink-0">Pipeline</span>
+        <input
+          value={pipelineName}
+          onChange={e => setPipelineName(e.target.value)}
+          placeholder="Name your pipeline…"
+          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors min-w-0"
+        />
+        {pipelineId && (
+          <button
+            onClick={() => isActivePipeline ? setActivePipeline("", "") : setActivePipeline(pipelineId, pipelineName)}
+            title={isActivePipeline ? "Deactivate this pipeline" : "Set as active pipeline for all executions"}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors shrink-0
+              ${isActivePipeline
+                ? "bg-emerald-900/50 border-emerald-700 text-emerald-300 hover:bg-emerald-900/80"
+                : "border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-white"}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${isActivePipeline ? "bg-emerald-400" : "bg-gray-600"}`} />
+            {isActivePipeline ? "Active" : "Set active"}
+          </button>
+        )}
+        <button onClick={importPresets} title="Import agent presets"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0">
+          <Download className="w-3 h-3" /> Presets
+        </button>
+        <button onClick={handleSavePipeline} disabled={pipelineSaving}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-60 shrink-0">
+          {pipelineSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+          Save
+        </button>
+        <button onClick={handleClear} title="New pipeline / clear canvas"
+          className="p-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 transition-colors shrink-0">
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
 
-        <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
-          {PALETTE_GROUPS.map(group => (
-            <div key={group.kind}>
-              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">
-                {group.label}
-              </p>
+      {/* ── Main content ──────────────────────────────────────────────── */}
+      <div className="flex flex-1 min-h-0">
 
-              {/* flat items (processing) */}
-              {group.items && (
-                <div className="space-y-1">
-                  {group.items.map(({ subType, meta }) => (
-                    <PaletteItem key={subType} kind={group.kind} subType={subType} meta={meta} onAdd={addNodeToCanvas} />
-                  ))}
-                </div>
-              )}
+        {/* ── Left panel ──────────────────────────────────────────────── */}
+        <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden">
 
-              {/* sub-grouped items (data sources) */}
-              {group.subGroups && (
-                <div className="space-y-2">
-                  {group.subGroups.map(sg => (
-                    <div key={sg.label}>
-                      <p className="text-[9px] font-bold text-gray-700 uppercase tracking-wider px-1 mb-1">{sg.label}</p>
-                      <div className="space-y-1">
-                        {sg.items.map(({ subType, meta }) => (
-                          <PaletteItem key={subType} kind={group.kind} subType={subType} meta={meta} onAdd={addNodeToCanvas} />
-                        ))}
+          {/* Pipelines list */}
+          <div className="border-b border-gray-800 shrink-0">
+            <div className="px-3 py-2 flex items-center justify-between">
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
+              <button onClick={handleClear} title="New pipeline"
+                className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
+                <Plus className="w-3 h-3" />
+              </button>
+            </div>
+            <div className="max-h-36 overflow-y-auto px-2 pb-2 space-y-0.5">
+              {allPipelines.length === 0 ? (
+                <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
+              ) : allPipelines.map(p => (
+                <button key={p.id}
+                  onClick={() => { setPipelineName(p.name); setPipelineId(p.id); }}
+                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
+                    ${pipelineId === p.id
+                      ? "bg-indigo-900/40 text-white"
+                      : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
+                  <span className="truncate flex-1">{p.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Elements header */}
+          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Elements</p>
+            <p className="text-[9px] text-gray-700 mt-0.5">Click to add · Drag to position</p>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
+            {PALETTE_GROUPS.map(group => (
+              <div key={group.kind}>
+                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">
+                  {group.label}
+                </p>
+
+                {/* flat items (processing) */}
+                {group.items && (
+                  <div className="space-y-1">
+                    {group.items.map(({ subType, meta }) => (
+                      <PaletteItem key={subType} kind={group.kind} subType={subType} meta={meta} onAdd={addNodeToCanvas} />
+                    ))}
+                  </div>
+                )}
+
+                {/* sub-grouped items (data sources) */}
+                {group.subGroups && (
+                  <div className="space-y-2">
+                    {group.subGroups.map(sg => (
+                      <div key={sg.label}>
+                        <p className="text-[9px] font-bold text-gray-700 uppercase tracking-wider px-1 mb-1">{sg.label}</p>
+                        <div className="space-y-1">
+                          {sg.items.map(({ subType, meta }) => (
+                            <PaletteItem key={subType} kind={group.kind} subType={subType} meta={meta} onAdd={addNodeToCanvas} />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {/* ── Artifacts section ────────────────────────────────────── */}
+            <div>
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">Artifacts</p>
+              <div className="space-y-1">
+                {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
+                  const req     = ARTIFACT_REQUIRES[k];
+                  const blocked = req != null && !nodes.some(
+                    n => n.type === "output" && (n.data as PipelineNodeData).subType === req
+                  );
+                  return blocked ? (
+                    <div key={k}
+                      title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
+                      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-not-allowed opacity-40 select-none ${m.border} bg-gray-900/60`}>
+                      <span className={`p-1 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                      <div className="min-w-0 flex-1">
+                        <span className={`text-[11px] font-semibold ${m.text} leading-tight block`}>{m.label}</span>
+                        <span className="text-[9px] text-gray-600 leading-tight block">Needs {ARTIFACT_META[req!].label}</span>
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
+                  ) : (
+                    <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
+                  );
+                })}
+                {Object.entries(CUSTOM_ARTIFACT_REGISTRY).map(([k, m]) => (
+                  <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
+                ))}
 
-          {/* ── Artifacts section ────────────────────────────────────── */}
-          <div>
-            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">Artifacts</p>
-            <div className="space-y-1">
-              {/* Fixed artifact types with dependency checks */}
-              {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
-                const req     = ARTIFACT_REQUIRES[k];
-                const blocked = req != null && !nodes.some(
-                  n => n.type === "output" && (n.data as PipelineNodeData).subType === req
-                );
-                return blocked ? (
-                  <div key={k}
-                    title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
-                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-not-allowed opacity-40 select-none ${m.border} bg-gray-900/60`}>
-                    <span className={`p-1 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <span className={`text-[11px] font-semibold ${m.text} leading-tight block`}>{m.label}</span>
-                      <span className="text-[9px] text-gray-600 leading-tight block">Needs {ARTIFACT_META[req!].label}</span>
-                    </div>
+                {addingArtifact ? (
+                  <div className="flex gap-1.5 mt-1">
+                    <input
+                      autoFocus
+                      value={newArtifactName}
+                      onChange={e => setNewArtifactName(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter") handleAddCustomArtifact();
+                        if (e.key === "Escape") { setAddingArtifact(false); setNewArtifactName(""); }
+                      }}
+                      placeholder="Artifact name…"
+                      className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                    <button onClick={handleAddCustomArtifact}
+                      className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors">
+                      Add
+                    </button>
+                    <button onClick={() => { setAddingArtifact(false); setNewArtifactName(""); }}
+                      className="px-1.5 py-1 rounded-lg border border-gray-700 text-gray-500 hover:text-gray-300 text-xs transition-colors">
+                      <X className="w-3 h-3" />
+                    </button>
                   </div>
                 ) : (
-                  <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
-                );
-              })}
-              {/* Custom artifacts from registry */}
-              {Object.entries(CUSTOM_ARTIFACT_REGISTRY).map(([k, m]) => (
-                <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
-              ))}
+                  <button onClick={() => setAddingArtifact(true)}
+                    className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-dashed border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 text-[11px] transition-colors mt-1">
+                    <Plus className="w-3 h-3" /> Add Artifact
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
 
-              {/* + Add Artifact */}
-              {addingArtifact ? (
-                <div className="flex gap-1.5 mt-1">
-                  <input
-                    autoFocus
-                    value={newArtifactName}
-                    onChange={e => setNewArtifactName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === "Enter") handleAddCustomArtifact();
-                      if (e.key === "Escape") { setAddingArtifact(false); setNewArtifactName(""); }
-                    }}
-                    placeholder="Artifact name…"
-                    className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
-                  />
-                  <button
-                    onClick={handleAddCustomArtifact}
-                    className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors"
-                  >
-                    Add
-                  </button>
-                  <button
-                    onClick={() => { setAddingArtifact(false); setNewArtifactName(""); }}
-                    className="px-1.5 py-1 rounded-lg border border-gray-700 text-gray-500 hover:text-gray-300 text-xs transition-colors"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => setAddingArtifact(true)}
-                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-dashed border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 text-[11px] transition-colors mt-1"
-                >
-                  <Plus className="w-3 h-3" />
-                  Add Artifact
+          {/* Flow rules + Add Stage */}
+          <div className="p-2.5 border-t border-gray-800 shrink-0">
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">Flow rules</p>
+              <button onClick={handleAddStage}
+                className="text-[10px] text-indigo-500 hover:text-indigo-400 font-semibold transition-colors">
+                + Stage
+              </button>
+            </div>
+            <div className="space-y-0.5 text-[10px]">
+              <p className="text-gray-500"><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span> ✓</p>
+              <p className="text-gray-500"><span className="text-indigo-400">Processing</span> → <span className="text-violet-400">Artifact</span> ✓</p>
+              <p className="text-gray-700 line-through text-[9px]">Processing → Processing</p>
+              <p className="text-gray-600 text-[9px]">Flows top-to-bottom only</p>
+            </div>
+          </div>
+        </aside>
+
+        {/* ── Canvas ────────────────────────────────────────────────────── */}
+        <style>{HANDLE_CSS}</style>
+        <div className="flex-1 relative" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
+          <ReactFlow
+            nodes={allNodes}
+            edges={edges}
+            nodeTypes={NODE_TYPES}
+            edgeTypes={EDGE_TYPES}
+            onNodesChange={onNodesChangeFiltered}
+            onEdgesChange={onEdgesChange}
+            onNodeClick={onNodeClick}
+            onPaneClick={onPaneClick}
+            onConnect={onConnect}
+            onNodeDragStop={onNodeDragStop}
+            isValidConnection={isValidConnectionFn}
+            zoomOnScroll={false}
+            zoomOnPinch={false}
+            zoomOnDoubleClick={false}
+            panOnScroll={false}
+            deleteKeyCode="Delete"
+            proOptions={{ hideAttribution: true }}
+            className="bg-gray-900"
+          >
+            <Background color="#374151" gap={24} size={1} />
+          </ReactFlow>
+
+          {nodes.length === 0 && (
+            <div className="absolute pointer-events-none select-none"
+              style={{ left: 240, top: 40 + 52 + 22 }}>
+              <p className="text-xs text-gray-700 italic">← click or drag elements from the left panel</p>
+            </div>
+          )}
+
+          {toast && (
+            <div className={`absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 px-5 py-3 rounded-xl border text-sm font-medium shadow-2xl whitespace-nowrap
+              ${toast.ok
+                ? "bg-emerald-950 border-emerald-700 text-emerald-200"
+                : "bg-red-950 border-red-800 text-red-300"}`}>
+              {toast.msg}
+              <button onClick={() => setToast(null)} className="opacity-60 hover:opacity-100 transition-opacity">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* ── Right properties panel ────────────────────────────────────── */}
+        <aside className={`shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col transition-all ${selKind === "processing" ? "w-80" : "w-60"}`}>
+          {selKind !== "processing" && (
+            <div className="p-3 border-b border-gray-800 flex items-center justify-between">
+              <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Properties</p>
+              {selectedNodeId && (
+                <button onClick={() => setSelectedNodeId(null)} className="text-gray-600 hover:text-gray-400 transition-colors">
+                  <X className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
-          </div>
-        </div>
-
-        {/* Flow rules */}
-        <div className="p-3 border-t border-gray-800">
-          <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-2">Flow rules</p>
-          <div className="space-y-0.5 text-[10px]">
-            <p className="text-gray-500"><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span> ✓</p>
-            <p className="text-gray-500"><span className="text-indigo-400">Processing</span> → <span className="text-violet-400">Artifact</span> ✓</p>
-            <p className="text-gray-700 line-through text-[9px]">Processing → Processing</p>
-            <p className="text-gray-700 line-through text-[9px]">Backward connections</p>
-            <p className="text-gray-600 mt-1 text-[9px]">Flows top-to-bottom only</p>
-            <p className="text-gray-600 text-[9px]">One processing source per artifact</p>
-          </div>
-        </div>
-
-        {/* Pipeline name + save */}
-        <div className="p-2.5 space-y-2 border-t border-gray-800">
-          <div className="space-y-1">
-            <label className="text-[9px] font-bold text-gray-600 uppercase tracking-widest">Pipeline name</label>
-            <input value={pipelineName} onChange={e => setPipelineName(e.target.value)}
-              placeholder="My pipeline…"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors" />
-          </div>
-          {allPipelines.length > 0 && (
-            <select
-              value=""
-              onChange={e => {
-                const p = allPipelines.find(x => x.id === e.target.value);
-                if (p) { setPipelineName(p.name); setPipelineId(p.id); }
-              }}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors">
-              <option value="" disabled>Load pipeline…</option>
-              {allPipelines.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
           )}
-          <button onClick={handleAddStage}
-            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-indigo-800 text-indigo-400 hover:bg-indigo-950/60 hover:border-indigo-600 text-xs font-semibold transition-colors">
-            + Add Stage
-          </button>
-          <button onClick={handleSavePipeline} disabled={pipelineSaving}
-            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wide transition-colors disabled:opacity-60">
-            {pipelineSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            Save Pipeline
-          </button>
-          <button onClick={handleClear}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors">
-            <Trash2 className="w-3 h-3" /> Clear canvas
-          </button>
-        </div>
-      </aside>
-
-      {/* ── Canvas ────────────────────────────────────────────────────── */}
-      <style>{HANDLE_CSS}</style>
-      <div className="flex-1 relative" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
-        <ReactFlow
-          nodes={allNodes}
-          edges={edges}
-          nodeTypes={NODE_TYPES}
-          edgeTypes={EDGE_TYPES}
-          onNodesChange={onNodesChangeFiltered}
-          onEdgesChange={onEdgesChange}
-          onNodeClick={onNodeClick}
-          onPaneClick={onPaneClick}
-          onConnect={onConnect}
-          onNodeDragStop={onNodeDragStop}
-          isValidConnection={isValidConnectionFn}
-          zoomOnScroll={false}
-          zoomOnPinch={false}
-          zoomOnDoubleClick={false}
-          panOnScroll={false}
-          deleteKeyCode="Delete"
-          proOptions={{ hideAttribution: true }}
-          className="bg-gray-900"
-        >
-          <Background color="#374151" gap={24} size={1} />
-        </ReactFlow>
-
-        {/* Hint text inside first lane when canvas is empty */}
-        {nodes.length === 0 && (
-          <div className="absolute pointer-events-none select-none"
-            style={{ left: 240, top: 40 + 52 + 22 }}>
-            <p className="text-xs text-gray-700 italic">← click or drag elements from the left panel</p>
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {renderPanel()}
           </div>
-        )}
+        </aside>
 
-        {/* Toast */}
-        {toast && (
-          <div className={`absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 px-5 py-3 rounded-xl border text-sm font-medium shadow-2xl whitespace-nowrap
-            ${toast.ok
-              ? "bg-emerald-950 border-emerald-700 text-emerald-200"
-              : "bg-red-950 border-red-800 text-red-300"}`}>
-            {toast.msg}
-            <button onClick={() => setToast(null)} className="opacity-60 hover:opacity-100 transition-opacity">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
       </div>
-
-      {/* ── Right properties panel ─────────────────────────────────────── */}
-      <aside className={`shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col transition-all ${selKind === "processing" ? "w-80" : "w-60"}`}>
-        {selKind !== "processing" && (
-          <div className="p-3 border-b border-gray-800 flex items-center justify-between">
-            <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Properties</p>
-            {selectedNodeId && (
-              <button onClick={() => setSelectedNodeId(null)} className="text-gray-600 hover:text-gray-400 transition-colors">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        )}
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {renderPanel()}
-        </div>
-      </aside>
-
     </div>
   );
 }
@@ -1450,18 +1555,10 @@ function PipelineCanvas() {
 
 export default function PipelinePage() {
   return (
-    <div className="-m-6 h-[calc(100vh-5rem)] flex flex-col">
-      <div className="px-5 py-2.5 border-b border-gray-800 bg-gray-900/80 flex items-center gap-3 shrink-0">
-        <h1 className="text-sm font-bold text-white">Pipeline Workflow</h1>
-        <span className="text-xs text-gray-600">
-          Click or drag elements · Auto-connects as you add · Drag handles to connect manually · Delete removes selection
-        </span>
-      </div>
-      <div className="flex-1 min-h-0">
-        <ReactFlowProvider>
-          <PipelineCanvas />
-        </ReactFlowProvider>
-      </div>
+    <div className="-m-6 h-[calc(100vh-5rem)]">
+      <ReactFlowProvider>
+        <PipelineCanvas />
+      </ReactFlowProvider>
     </div>
   );
 }
