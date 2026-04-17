@@ -12,17 +12,34 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
-  FileText, Mic, Database, StickyNote, Info,
-  AlignLeft, List, Code2, Zap, LayoutTemplate,
-  FileJson, Trash2, ChevronRight, X,
+  FileText, Files, GitMerge, Clock,
+  Building2, User, Headphones,
+  AlignLeft, Code2, List, Zap, TrendingUp, Star, Shield, Award, BookOpen, Lightbulb, Tag,
+  StickyNote, ShieldCheck, MessageSquare, BadgeCheck, ListChecks,
+  Trash2, ChevronRight, X,
 } from "lucide-react";
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
 
-type NodeKind       = "input" | "processing" | "output";
-type InputSubType   = "transcript" | "recording" | "crm_data" | "notes" | "metadata";
-type ProcessSubType = "summarizer" | "classifier" | "extractor" | "analyzer" | "scorer";
-type OutputSubType  = "json" | "text" | "markdown" | "structured";
+type NodeKind       = "input" | "processing" | "output";  // "output" = artifact internally
+
+// ── Input subtypes ──
+type InputSubType =
+  | "call_single" | "call_multi" | "call_merged" | "call_meta"
+  | "crm_info"    | "crm_customer" | "crm_agent";
+
+// ── Processing subtypes ──
+type ProcessSubType =
+  | "summarizer" | "extractor"  | "classifier" | "analyzer"
+  | "sentiment"  | "scorer"     | "compliance" | "qa_eval"
+  | "coach"      | "topic";
+
+// ── Artifact subtypes (formerly output) ──
+type ArtifactSubType =
+  | "persona"    | "persona_score"
+  | "notes"      | "notes_compliance"
+  | "response"   | "summary"
+  | "action_items" | "coaching_plan";
 
 interface Meta {
   label:  string;
@@ -33,33 +50,56 @@ interface Meta {
   desc:   string;
 }
 
-const INPUT_META: Record<InputSubType, Meta> = {
-  transcript: { label: "Transcript", icon: <FileText    className="w-4 h-4" />, color: "bg-blue-700",   border: "border-blue-600",   text: "text-blue-400",   desc: "Call transcript text" },
-  recording:  { label: "Recording",  icon: <Mic         className="w-4 h-4" />, color: "bg-cyan-700",   border: "border-cyan-600",   text: "text-cyan-400",   desc: "Audio recording file" },
-  crm_data:   { label: "CRM Data",   icon: <Database    className="w-4 h-4" />, color: "bg-green-700",  border: "border-green-600",  text: "text-green-400",  desc: "CRM contact & account data" },
-  notes:      { label: "Notes",      icon: <StickyNote  className="w-4 h-4" />, color: "bg-amber-700",  border: "border-amber-600",  text: "text-amber-400",  desc: "Agent or customer notes" },
-  metadata:   { label: "Metadata",   icon: <Info        className="w-4 h-4" />, color: "bg-slate-600",  border: "border-slate-500",  text: "text-slate-400",  desc: "Call metadata & attributes" },
+// ── Calls ─────────────────────────────────────────────────────────────────────
+const CALLS_META: Record<string, Meta> = {
+  call_single: { label: "Single Call",    icon: <FileText  className="w-4 h-4" />, color: "bg-blue-700",  border: "border-blue-600",  text: "text-blue-400",  desc: "Transcript of one call" },
+  call_multi:  { label: "Multi-Call",     icon: <Files     className="w-4 h-4" />, color: "bg-blue-800",  border: "border-blue-700",  text: "text-blue-300",  desc: "Batch of call transcripts" },
+  call_merged: { label: "Merged Call",    icon: <GitMerge  className="w-4 h-4" />, color: "bg-cyan-700",  border: "border-cyan-600",  text: "text-cyan-400",  desc: "Combined customer + agent transcript" },
+  call_meta:   { label: "Call Metadata",  icon: <Clock     className="w-4 h-4" />, color: "bg-slate-600", border: "border-slate-500", text: "text-slate-400", desc: "Duration, date, agent ID, disposition" },
 };
 
+// ── CRM ───────────────────────────────────────────────────────────────────────
+const CRM_META: Record<string, Meta> = {
+  crm_info:     { label: "Account Info", icon: <Building2  className="w-4 h-4" />, color: "bg-emerald-700", border: "border-emerald-600", text: "text-emerald-400", desc: "Company / account-level CRM data" },
+  crm_customer: { label: "Customer",     icon: <User       className="w-4 h-4" />, color: "bg-violet-700",  border: "border-violet-600",  text: "text-violet-400",  desc: "Customer profile from CRM" },
+  crm_agent:    { label: "Agent",        icon: <Headphones className="w-4 h-4" />, color: "bg-indigo-700",  border: "border-indigo-600",  text: "text-indigo-400",  desc: "Agent profile and performance data" },
+};
+
+const INPUT_META: Record<InputSubType, Meta> = { ...CALLS_META, ...CRM_META } as Record<InputSubType, Meta>;
+
+// ── Processing ────────────────────────────────────────────────────────────────
 const PROCESS_META: Record<ProcessSubType, Meta> = {
-  summarizer: { label: "Summarizer", icon: <AlignLeft      className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-500", text: "text-indigo-400", desc: "Condenses content into a summary" },
-  classifier: { label: "Classifier", icon: <List           className="w-4 h-4" />, color: "bg-violet-700", border: "border-violet-500", text: "text-violet-400", desc: "Categorises into predefined classes" },
-  extractor:  { label: "Extractor",  icon: <Code2          className="w-4 h-4" />, color: "bg-blue-700",   border: "border-blue-500",   text: "text-blue-400",   desc: "Pulls structured data from text" },
-  analyzer:   { label: "Analyzer",   icon: <Zap            className="w-4 h-4" />, color: "bg-cyan-700",   border: "border-cyan-500",   text: "text-cyan-400",   desc: "Deep analysis and insights" },
-  scorer:     { label: "Scorer",     icon: <LayoutTemplate className="w-4 h-4" />, color: "bg-teal-700",   border: "border-teal-500",   text: "text-teal-400",   desc: "Assigns numeric or categorical scores" },
+  summarizer:  { label: "Summarizer",    icon: <AlignLeft     className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-500", text: "text-indigo-400", desc: "Condenses calls into a summary" },
+  extractor:   { label: "Extractor",     icon: <Code2         className="w-4 h-4" />, color: "bg-blue-700",   border: "border-blue-500",   text: "text-blue-400",   desc: "Pulls structured data from transcripts" },
+  classifier:  { label: "Classifier",    icon: <List          className="w-4 h-4" />, color: "bg-violet-700", border: "border-violet-500", text: "text-violet-400", desc: "Categorises calls into defined classes" },
+  analyzer:    { label: "Analyzer",      icon: <Zap           className="w-4 h-4" />, color: "bg-cyan-700",   border: "border-cyan-500",   text: "text-cyan-400",   desc: "Deep behavioural analysis" },
+  sentiment:   { label: "Sentiment",     icon: <TrendingUp    className="w-4 h-4" />, color: "bg-pink-700",   border: "border-pink-500",   text: "text-pink-400",   desc: "Emotion and tone detection" },
+  scorer:      { label: "Scorer",        icon: <Star          className="w-4 h-4" />, color: "bg-teal-700",   border: "border-teal-500",   text: "text-teal-400",   desc: "Assigns numeric or categorical scores" },
+  compliance:  { label: "Compliance",    icon: <Shield        className="w-4 h-4" />, color: "bg-emerald-700",border: "border-emerald-500",text: "text-emerald-400",desc: "Flags compliance and policy issues" },
+  qa_eval:     { label: "QA Evaluator",  icon: <Award         className="w-4 h-4" />, color: "bg-amber-700",  border: "border-amber-500",  text: "text-amber-400",  desc: "Quality assurance evaluation" },
+  coach:       { label: "Coach",         icon: <BookOpen      className="w-4 h-4" />, color: "bg-orange-700", border: "border-orange-500", text: "text-orange-400", desc: "Generates coaching recommendations" },
+  topic:       { label: "Topic Modeler", icon: <Tag           className="w-4 h-4" />, color: "bg-purple-700", border: "border-purple-500", text: "text-purple-400", desc: "Identifies key topics and themes" },
 };
 
-const OUTPUT_META: Record<OutputSubType, Meta> = {
-  json:       { label: "JSON",       icon: <FileJson  className="w-4 h-4" />, color: "bg-yellow-700", border: "border-yellow-600", text: "text-yellow-400", desc: "Structured JSON output" },
-  text:       { label: "Plain Text", icon: <AlignLeft className="w-4 h-4" />, color: "bg-slate-600",  border: "border-slate-500",  text: "text-slate-400",  desc: "Unformatted plain text" },
-  markdown:   { label: "Markdown",   icon: <Code2     className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-600", text: "text-indigo-400", desc: "Markdown formatted output" },
-  structured: { label: "Structured", icon: <List      className="w-4 h-4" />, color: "bg-purple-700", border: "border-purple-600", text: "text-purple-400", desc: "Structured report format" },
+// ── Artifacts (formerly output) ───────────────────────────────────────────────
+const ARTIFACT_META: Record<ArtifactSubType, Meta> = {
+  persona:          { label: "Persona",           icon: <User          className="w-4 h-4" />, color: "bg-violet-700",  border: "border-violet-600",  text: "text-violet-400",  desc: "Customer or agent persona profile" },
+  persona_score:    { label: "Persona Score",     icon: <BadgeCheck    className="w-4 h-4" />, color: "bg-violet-800",  border: "border-violet-700",  text: "text-violet-300",  desc: "Scored persona with trait ratings" },
+  notes:            { label: "Notes",             icon: <StickyNote    className="w-4 h-4" />, color: "bg-amber-700",   border: "border-amber-600",   text: "text-amber-400",   desc: "Structured call notes" },
+  notes_compliance: { label: "Compliance Notes",  icon: <ShieldCheck   className="w-4 h-4" />, color: "bg-emerald-700", border: "border-emerald-600", text: "text-emerald-400", desc: "Notes flagging compliance findings" },
+  response:         { label: "Response",          icon: <MessageSquare className="w-4 h-4" />, color: "bg-blue-700",    border: "border-blue-600",    text: "text-blue-400",    desc: "AI-generated response or reply" },
+  summary:          { label: "Summary",           icon: <AlignLeft     className="w-4 h-4" />, color: "bg-slate-600",   border: "border-slate-500",   text: "text-slate-400",   desc: "Condensed call or batch summary" },
+  action_items:     { label: "Action Items",      icon: <ListChecks    className="w-4 h-4" />, color: "bg-teal-700",    border: "border-teal-600",    text: "text-teal-400",    desc: "Follow-up tasks extracted from calls" },
+  coaching_plan:    { label: "Coaching Plan",     icon: <Lightbulb     className="w-4 h-4" />, color: "bg-orange-700",  border: "border-orange-600",  text: "text-orange-400",  desc: "Personalised coaching recommendations" },
 };
+
+// Unified lookup — keeps getMeta's single-arg signature
+const OUTPUT_META = ARTIFACT_META as unknown as Record<string, Meta>;
 
 function getMeta(kind: NodeKind, subType: string): Meta {
-  if (kind === "input")      return (INPUT_META   as Record<string, Meta>)[subType] ?? INPUT_META.transcript;
+  if (kind === "input")      return (INPUT_META   as Record<string, Meta>)[subType] ?? INPUT_META.call_single;
   if (kind === "processing") return (PROCESS_META as Record<string, Meta>)[subType] ?? PROCESS_META.summarizer;
-  return (OUTPUT_META as Record<string, Meta>)[subType] ?? OUTPUT_META.json;
+  return (OUTPUT_META as Record<string, Meta>)[subType] ?? ARTIFACT_META.response;
 }
 
 // ── Node data interfaces ──────────────────────────────────────────────────────
@@ -157,7 +197,7 @@ function SleeveNode({ data }: { data: Record<string, unknown> }) {
 
 function makeSleeves(stages: NodeKind[]): Node[] {
   const labelMap: Record<NodeKind, string> = {
-    input: "Inputs", processing: "Processing", output: "Output",
+    input: "Inputs", processing: "Processing", output: "Artifacts",
   };
   return stages.map((kind, i) => ({
     id:         `sleeve_${i}`,
@@ -310,7 +350,7 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
-          ■ Output · {m.label}
+          ◆ Artifact · {m.label}
         </span>
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
@@ -378,15 +418,29 @@ const NODE_TYPES: NodeTypes = {
 
 // ── Palette groups ────────────────────────────────────────────────────────────
 
-const PALETTE_GROUPS: Array<{
-  kind:  NodeKind;
-  label: string;
-  items: Array<{ subType: string; meta: Meta }>;
-}> = [
+interface PaletteItem { subType: string; meta: Meta }
+interface PaletteSubGroup { label: string; items: PaletteItem[] }
+interface PaletteGroup {
+  kind:       NodeKind;
+  label:      string;
+  subGroups?: PaletteSubGroup[];
+  items?:     PaletteItem[];
+}
+
+const PALETTE_GROUPS: PaletteGroup[] = [
   {
     kind:  "input",
-    label: "Inputs",
-    items: (Object.entries(INPUT_META)   as [InputSubType,   Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
+    label: "Data Sources",
+    subGroups: [
+      {
+        label: "Calls",
+        items: (Object.entries(CALLS_META) as [string, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
+      },
+      {
+        label: "CRM",
+        items: (Object.entries(CRM_META) as [string, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
+      },
+    ],
   },
   {
     kind:  "processing",
@@ -395,8 +449,8 @@ const PALETTE_GROUPS: Array<{
   },
   {
     kind:  "output",
-    label: "Outputs",
-    items: (Object.entries(OUTPUT_META)  as [OutputSubType,  Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
+    label: "Artifacts",
+    items: (Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
   },
 ];
 
@@ -406,7 +460,7 @@ function validatePipeline(nodes: Node[], edges: Edge[]): string | null {
   if (nodes.length === 0) return "Canvas is empty.";
   if (!nodes.some(n => n.type === "input"))      return "Add at least one Input node.";
   if (!nodes.some(n => n.type === "processing")) return "Add at least one Processing node.";
-  if (!nodes.some(n => n.type === "output"))     return "Pipeline must end with an Output node.";
+  if (!nodes.some(n => n.type === "output"))     return "Pipeline must end with an Artifact node.";
 
   const edgeMap: Record<string, string[]> = {};
   edges.forEach(e => { (edgeMap[e.source] ??= []).push(e.target); });
@@ -416,12 +470,12 @@ function validatePipeline(nodes: Node[], edges: Edge[]): string | null {
       e => e.source === proc.id && nodes.find(x => x.id === e.target)?.type === "output"
     );
     if (!hasOutput)
-      return `Processing "${(proc.data as PipelineNodeData).label}" has no Output connected.`;
+      return `Processing "${(proc.data as PipelineNodeData).label}" has no Artifact connected.`;
   }
 
   for (const inp of nodes.filter(n => n.type === "input")) {
     if (!canReach(inp.id, nodes, edgeMap))
-      return `"${(inp.data as PipelineNodeData).label}" has no path to any Output.`;
+      return `"${(inp.data as PipelineNodeData).label}" has no path to any Artifact.`;
   }
   return null;
 }
@@ -453,6 +507,31 @@ function makeEdge(source: string, target: string): Edge {
     markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
     style:     { stroke: "#818cf8", strokeWidth: 2 },
   };
+}
+
+// Extracted so addNodeToCanvas can be passed down without recreating JSX in the map
+function PaletteItem({ kind, subType, meta, onAdd }: {
+  kind:    NodeKind;
+  subType: string;
+  meta:    Meta;
+  onAdd:   (kind: NodeKind, subType: string) => void;
+}) {
+  return (
+    <div
+      draggable
+      onClick={() => onAdd(kind, subType)}
+      onDragStart={e => {
+        e.dataTransfer.setData("application/nodeKind",    kind);
+        e.dataTransfer.setData("application/nodeSubType", subType);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer select-none transition-all
+        hover:scale-[1.02] active:scale-[0.98] ${meta.border} bg-gray-900/60 hover:bg-gray-800`}
+    >
+      <span className={`p-1 rounded-md ${meta.color} text-white shrink-0`}>{meta.icon}</span>
+      <span className={`text-[11px] font-semibold ${meta.text} leading-tight`}>{meta.label}</span>
+    </div>
+  );
 }
 
 function PipelineCanvas() {
@@ -743,16 +822,18 @@ function PipelineCanvas() {
     }
 
     const subTypeOptions =
-      selKind === "input"      ? Object.entries(INPUT_META)   as [string, Meta][] :
-      selKind === "processing" ? Object.entries(PROCESS_META) as [string, Meta][] :
-                                  Object.entries(OUTPUT_META)  as [string, Meta][];
+      selKind === "input"      ? Object.entries(INPUT_META)    as [string, Meta][] :
+      selKind === "processing" ? Object.entries(PROCESS_META)  as [string, Meta][] :
+                                  Object.entries(ARTIFACT_META) as [string, Meta][];
 
     return (
       <div className="p-4 space-y-4">
         <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
           <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
           <div className="min-w-0">
-            <p className="text-[10px] text-white/60 uppercase tracking-widest font-bold">{selKind}</p>
+            <p className="text-[10px] text-white/60 uppercase tracking-widest font-bold">
+              {selKind === "output" ? "artifact" : selKind}
+            </p>
             <p className="text-sm font-bold text-white truncate">{selData.label}</p>
           </div>
         </div>
@@ -768,7 +849,7 @@ function PipelineCanvas() {
 
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
-            {selKind === "input" ? "Data Source" : selKind === "processing" ? "Agent Type" : "Output Format"}
+            {selKind === "input" ? "Data Source" : selKind === "processing" ? "Agent Type" : "Artifact Type"}
           </label>
           <select
             value={selData.subType}
@@ -821,28 +902,34 @@ function PipelineCanvas() {
         <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
           {PALETTE_GROUPS.map(group => (
             <div key={group.kind}>
-              <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest px-1 mb-1.5">
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">
                 {group.label}
               </p>
-              <div className="space-y-1">
-                {group.items.map(({ subType, meta }) => (
-                  <div
-                    key={subType}
-                    draggable
-                    onClick={() => addNodeToCanvas(group.kind, subType)}
-                    onDragStart={e => {
-                      e.dataTransfer.setData("application/nodeKind",    group.kind);
-                      e.dataTransfer.setData("application/nodeSubType", subType);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border cursor-pointer select-none transition-all
-                      hover:scale-[1.02] active:scale-[0.98] ${meta.border} bg-gray-900/60 hover:bg-gray-800`}
-                  >
-                    <span className={`p-1 rounded-md ${meta.color} text-white shrink-0`}>{meta.icon}</span>
-                    <span className={`text-xs font-semibold ${meta.text}`}>{meta.label}</span>
-                  </div>
-                ))}
-              </div>
+
+              {/* flat items (processing / artifacts) */}
+              {group.items && (
+                <div className="space-y-1">
+                  {group.items.map(({ subType, meta }) => (
+                    <PaletteItem key={subType} kind={group.kind} subType={subType} meta={meta} onAdd={addNodeToCanvas} />
+                  ))}
+                </div>
+              )}
+
+              {/* sub-grouped items (data sources) */}
+              {group.subGroups && (
+                <div className="space-y-2">
+                  {group.subGroups.map(sg => (
+                    <div key={sg.label}>
+                      <p className="text-[9px] font-bold text-gray-700 uppercase tracking-wider px-1 mb-1">{sg.label}</p>
+                      <div className="space-y-1">
+                        {sg.items.map(({ subType, meta }) => (
+                          <PaletteItem key={subType} kind={group.kind} subType={subType} meta={meta} onAdd={addNodeToCanvas} />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -852,11 +939,11 @@ function PipelineCanvas() {
           <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-2">Flow rules</p>
           <div className="space-y-0.5 text-[10px]">
             <p className="text-gray-500"><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span> ✓</p>
-            <p className="text-gray-500"><span className="text-yellow-400">Output</span> → <span className="text-indigo-400">Processing</span> ✓</p>
-            <p className="text-gray-500"><span className="text-indigo-400">Processing</span> → <span className="text-yellow-400">Output</span> ✓</p>
-            <p className="text-gray-700 line-through"><span>Processing</span> → <span>Processing</span></p>
-            <p className="text-gray-600 mt-1 text-[9px]">Each processing must have an output</p>
-            <p className="text-gray-600 text-[9px]">Multiple inputs per processing allowed</p>
+            <p className="text-gray-500"><span className="text-indigo-400">Processing</span> → <span className="text-violet-400">Artifact</span> ✓</p>
+            <p className="text-gray-700 line-through text-[9px]">Processing → Processing</p>
+            <p className="text-gray-700 line-through text-[9px]">Backward connections</p>
+            <p className="text-gray-600 mt-1 text-[9px]">Flows top-to-bottom only</p>
+            <p className="text-gray-600 text-[9px]">One processing source per artifact</p>
           </div>
         </div>
 
