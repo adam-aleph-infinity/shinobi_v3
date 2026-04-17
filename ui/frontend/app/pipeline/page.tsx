@@ -5,7 +5,7 @@ import {
   ReactFlow, ReactFlowProvider, Background,
   useNodesState, useEdgesState, useReactFlow,
   addEdge,
-  getBezierPath, BaseEdge, EdgeLabelRenderer,
+  getBezierPath, EdgeLabelRenderer,
   Handle, Position, MarkerType,
   type Node, type Edge, type Connection, type NodeChange, type NodeTypes,
   type EdgeProps, type EdgeTypes,
@@ -80,43 +80,55 @@ interface PipelineNodeData extends Record<string, unknown> {
 // ── Layout constants & helpers ────────────────────────────────────────────────
 
 const NODE_W         = 200;   // node width
-const X_GAP          = 40;    // horizontal gap between nodes in same stage
-const SLEEVE_H       = 180;   // vertical height per lane (includes 20px gap below)
+const X_GAP          = 40;    // horizontal gap between slot columns
+const SLEEVE_H       = 180;   // vertical height per lane
 const SLEEVE_INNER   = 52;    // top padding within lane for node placement
 const LANE_VISIBLE_H = 155;   // rendered height of the sleeve strip
 const LANE_WIDTH     = 2400;  // width of sleeve background strip
 const SLEEVE_START_X = -200;  // left edge — room for the label bar
 const Y_INIT         = 20;    // top offset
+const MAX_PER_LANE   = 4;     // maximum nodes per lane (4 X slots)
+
+// 4 fixed X slots within every lane
+const X_SLOTS = [0, 1, 2, 3].map(i => 20 + i * (NODE_W + X_GAP)); // [20, 260, 500, 740]
+
+function snapXToSlot(x: number): number {
+  return X_SLOTS.reduce((best, s) => Math.abs(s - x) < Math.abs(best - x) ? s : best, X_SLOTS[0]);
+}
 
 function laneY(si: number): number {
   return Y_INIT + si * SLEEVE_H;
 }
 
-// Nodes start at x=0 (to the right of the label bar which ends near x=−200+2+144=−54)
-function nodeXY(si: number, idx: number): { x: number; y: number } {
-  return { x: 20 + idx * (NODE_W + X_GAP), y: laneY(si) + SLEEVE_INNER };
+function nodeXY(si: number, slotIdx: number): { x: number; y: number } {
+  return { x: X_SLOTS[Math.min(slotIdx, MAX_PER_LANE - 1)], y: laneY(si) + SLEEVE_INNER };
 }
 
-// ── Handle styles ─────────────────────────────────────────────────────────────
+// ── Handle CSS (hover states) ─────────────────────────────────────────────────
 
-const plusSvg = encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">` +
-  `<path d="M5 2v6M2 5h6" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>` +
-  `</svg>`
-);
-
-const SOURCE_HANDLE_STYLE: React.CSSProperties = {
-  width: 20, height: 20, borderRadius: "50%",
-  background: "#1f2937", border: "2px solid #4b5563",
-  cursor: "crosshair",
-  backgroundImage: `url("data:image/svg+xml,${plusSvg}")`,
-  backgroundRepeat: "no-repeat", backgroundPosition: "center",
-};
-
-const TARGET_HANDLE_STYLE: React.CSSProperties = {
-  width: 12, height: 12, borderRadius: "50%",
-  background: "#1f2937", border: "2px solid #374151",
-};
+const HANDLE_CSS = `
+  .rf-src {
+    position:relative!important;width:22px!important;height:22px!important;
+    border-radius:50%!important;background:#111827!important;
+    border:2px solid #4b5563!important;cursor:crosshair!important;
+    transition:width .15s,height .15s,background .15s,border-color .15s!important;
+  }
+  .rf-src::after {
+    content:'+';position:absolute;top:50%;left:50%;
+    transform:translate(-50%,-50%);color:#6b7280;
+    font-size:13px;font-weight:900;line-height:1;pointer-events:none;
+  }
+  .rf-src:hover { width:30px!important;height:30px!important;
+    background:#064e3b!important;border-color:#10b981!important; }
+  .rf-src:hover::after { color:#34d399;font-size:18px; }
+  .rf-tgt {
+    width:12px!important;height:12px!important;border-radius:50%!important;
+    background:#111827!important;border:2px solid #374151!important;
+    transition:all .15s!important;
+  }
+  .rf-tgt:hover { width:16px!important;height:16px!important;
+    background:#1e1b4b!important;border-color:#6366f1!important; }
+`;
 
 // ── Sleeve background node ────────────────────────────────────────────────────
 
@@ -245,7 +257,7 @@ function InputNode({ data, selected }: { data: PipelineNodeData; selected?: bool
           ⬤ Input · {m.label}
         </span>
       </div>
-      <Handle type="source" position={Position.Bottom} style={SOURCE_HANDLE_STYLE} />
+      <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
   );
 }
@@ -254,7 +266,7 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
   const m = getMeta("processing", data.subType);
   return (
     <NodeCard meta={m} selected={!!selected} kind="processing">
-      <Handle type="target" position={Position.Top} style={TARGET_HANDLE_STYLE} />
+      <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
@@ -267,7 +279,7 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
           <p className="text-[10px] text-gray-600 mt-0.5 truncate">{data.prompt as string}</p>
         )}
       </div>
-      <Handle type="source" position={Position.Bottom} style={SOURCE_HANDLE_STYLE} />
+      <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
   );
 }
@@ -276,7 +288,7 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
   const m = getMeta("output", data.subType);
   return (
     <NodeCard meta={m} selected={!!selected} kind="output">
-      <Handle type="target" position={Position.Top} style={TARGET_HANDLE_STYLE} />
+      <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
@@ -287,7 +299,7 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
         </span>
       </div>
       {/* Can also feed back into a processing node */}
-      <Handle type="source" position={Position.Bottom} style={SOURCE_HANDLE_STYLE} />
+      <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
   );
 }
@@ -300,26 +312,36 @@ function DeletableEdge({
   style, markerEnd, selected,
 }: EdgeProps) {
   const { setEdges } = useReactFlow();
+  const [hovered, setHovered] = useState(false);
   const [path, labelX, labelY] = getBezierPath({
     sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition,
   });
+  const showBtn   = selected || hovered;
+  const edgeColor = (style?.stroke as string) ?? "#818cf8";
+  const edgeW     = showBtn ? 3 : ((style?.strokeWidth as number) ?? 2);
   return (
     <>
-      <BaseEdge path={path} markerEnd={markerEnd} style={style} />
-      {selected && (
+      {/* Wide transparent hit area so hover is easy to trigger */}
+      <path d={path} fill="none" stroke="transparent" strokeWidth={20}
+        style={{ cursor: "pointer" }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      />
+      {/* Visible bezier line */}
+      <path d={path} fill="none" stroke={edgeColor} strokeWidth={edgeW}
+        markerEnd={markerEnd as string}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      />
+      {showBtn && (
         <EdgeLabelRenderer>
-          <div
-            className="absolute nodrag nopan"
-            style={{
-              transform:     `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
-              pointerEvents: "all",
-            }}
-          >
+          <div className="absolute nodrag nopan"
+            style={{ transform: `translate(-50%,-50%) translate(${labelX}px,${labelY}px)`, pointerEvents: "all" }}>
             <button
-              onClick={e => { e.stopPropagation(); setEdges(es => es.filter(e => e.id !== id)); }}
-              className="w-5 h-5 rounded-full bg-red-900/90 border border-red-600 text-red-300 hover:bg-red-700 hover:border-red-500 flex items-center justify-center text-xs font-bold shadow-lg transition-colors"
+              onClick={e => { e.stopPropagation(); setEdges(es => es.filter(x => x.id !== id)); }}
+              className="w-6 h-6 rounded-full bg-red-950 border border-red-600 text-red-300 hover:bg-red-800 hover:border-red-400 flex items-center justify-center text-base font-bold shadow-xl transition-colors"
               title="Remove connection"
-            >×</button>
+            >−</button>
           </div>
         </EdgeLabelRenderer>
       )}
@@ -488,7 +510,14 @@ function PipelineCanvas() {
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
     if (String(node.id).startsWith("sleeve_")) return;
     const kind = node.type as NodeKind;
-    if (kind === "input") return; // inputs are already Y-locked during drag
+    if (kind === "input") {
+      // Y is locked during drag; just snap X to nearest slot
+      const snapX = snapXToSlot(node.position.x);
+      if (snapX !== node.position.x) {
+        setNodes(ns => ns.map(n => n.id === node.id ? { ...n, position: { x: snapX, y: n.position.y } } : n));
+      }
+      return;
+    }
 
     const currentStages = stagesRef.current;
     const matchingLanes = currentStages
@@ -506,9 +535,10 @@ function PipelineCanvas() {
 
     const newStageIndex = closest.index;
     const snapY         = laneY(newStageIndex) + SLEEVE_INNER;
+    const snapX         = snapXToSlot(node.position.x);
     setNodes(ns => ns.map(n =>
       n.id === node.id
-        ? { ...n, position: { x: n.position.x, y: snapY }, data: { ...(n.data as PipelineNodeData), stageIndex: newStageIndex } }
+        ? { ...n, position: { x: snapX, y: snapY }, data: { ...(n.data as PipelineNodeData), stageIndex: newStageIndex } }
         : n
     ));
   }, [setNodes]);
@@ -524,10 +554,13 @@ function PipelineCanvas() {
     if (!sn || !tn) return false;
     const sk = sn.type as NodeKind;
     const tk = tn.type as NodeKind;
+    const sStage = (sn.data as PipelineNodeData).stageIndex;
+    const tStage = (tn.data as PipelineNodeData).stageIndex;
+    // Only top-to-bottom: target must be in a lower lane
+    if (tStage <= sStage) return false;
     if (tk === "input") return false;
     if (sk === "input" && tk === "output") return false;
     if (sk === "processing" && tk === "processing") return false;
-    if (sk === "output" && tk === "output") return false;
     return true;
   }, []);
 
@@ -565,26 +598,30 @@ function PipelineCanvas() {
     if (kind === "input") {
       stageIndex = 0; // inputs always in the top lane
     } else {
-      // Walk forward to find the FIRST lane of this kind (top-to-bottom order)
+      // Walk forward: first lane of this kind that still has free slots
       let firstIdx = -1;
       for (let i = 0; i < newStages.length; i++) {
-        if (newStages[i] === kind) { firstIdx = i; break; }
+        if (newStages[i] === kind) {
+          const count = currentNodes.filter(n => (n.data as PipelineNodeData).stageIndex === i).length;
+          if (count < MAX_PER_LANE) { firstIdx = i; break; }
+        }
       }
       if (firstIdx !== -1) {
-        stageIndex = firstIdx; // place in topmost matching lane
+        stageIndex = firstIdx;
       } else {
-        newStages.push(kind); // no lane of this kind yet — create one
+        newStages.push(kind); // all matching lanes full — create new one
         stageIndex = newStages.length - 1;
       }
     }
 
-    // ── Position: X from drop or auto-computed, Y always snaps to lane ──────
-    const indexInStage = currentNodes.filter(
-      n => (n.data as PipelineNodeData).stageIndex === stageIndex
-    ).length;
+    // ── Position: snap X to first free slot, Y locked to lane ───────────────
+    const nodesInStage = currentNodes.filter(n => (n.data as PipelineNodeData).stageIndex === stageIndex);
+    const usedX        = new Set(nodesInStage.map(n => snapXToSlot(n.position.x)));
+    const freeSlot     = X_SLOTS.findIndex(x => !usedX.has(x));
+    const slotX        = freeSlot >= 0 ? X_SLOTS[freeSlot] : X_SLOTS[Math.min(nodesInStage.length, MAX_PER_LANE - 1)];
     const position = dropPos
-      ? { x: dropPos.x, y: laneY(stageIndex) + SLEEVE_INNER }
-      : nodeXY(stageIndex, indexInStage);
+      ? { x: snapXToSlot(dropPos.x), y: laneY(stageIndex) + SLEEVE_INNER }
+      : { x: slotX, y: laneY(stageIndex) + SLEEVE_INNER };
 
     const newNode: Node = {
       id,
@@ -833,6 +870,7 @@ function PipelineCanvas() {
       </aside>
 
       {/* ── Canvas ────────────────────────────────────────────────────── */}
+      <style>{HANDLE_CSS}</style>
       <div className="flex-1 relative" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
         <ReactFlow
           nodes={allNodes}
