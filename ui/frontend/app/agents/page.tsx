@@ -528,33 +528,36 @@ function AgentsTab() {
             </div>
           </div>
 
-          {/* Name + Class + Description */}
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Name</label>
-              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                placeholder="e.g. Persona Scorer"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Class</label>
-              <input value={form.agent_class} onChange={e => setForm(f => ({ ...f, agent_class: e.target.value }))}
-                placeholder="persona / notes / compliance…"
-                list="agent-class-list"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-              <datalist id="agent-class-list">
-                <option value="persona" />
-                <option value="notes" />
-                <option value="compliance" />
-                <option value="scorer" />
-                <option value="general" />
-              </datalist>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Description</label>
-              <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-                placeholder="What does this agent do?"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+          {/* Identity section */}
+          <div className="border border-gray-800 rounded-xl p-4">
+            <label className="block text-[10px] text-gray-600 font-semibold uppercase tracking-wider mb-3">Identity</label>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Name</label>
+                <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                  placeholder="e.g. Persona Scorer"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Class</label>
+                <input value={form.agent_class} onChange={e => setForm(f => ({ ...f, agent_class: e.target.value }))}
+                  placeholder="persona / notes / compliance…"
+                  list="agent-class-list"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+                <datalist id="agent-class-list">
+                  <option value="persona" />
+                  <option value="notes" />
+                  <option value="compliance" />
+                  <option value="scorer" />
+                  <option value="general" />
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Description</label>
+                <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                  placeholder="What does this agent do?"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+              </div>
             </div>
           </div>
 
@@ -579,20 +582,59 @@ function AgentsTab() {
             <div className="mt-1.5"><VariableHint inputs={form.inputs} /></div>
           </div>
 
-          {/* Side-by-side prompts */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="flex flex-col">
-              <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
-              <textarea value={form.system_prompt} onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
-                rows={14} placeholder="You are a…"
-                className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
-            </div>
-            <div className="flex flex-col">
-              <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
-              <textarea value={form.user_prompt} onChange={e => setForm(f => ({ ...f, user_prompt: e.target.value }))}
-                rows={14} placeholder={"Analyse this:\n\n{transcript}"}
-                className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
-              <div className="mt-1"><VariableHint inputs={form.inputs} /></div>
+          {/* Prompts section */}
+          <div className="border border-gray-800 rounded-xl p-4">
+            <label className="block text-[10px] text-gray-600 font-semibold uppercase tracking-wider mb-3">Prompts</label>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="flex flex-col">
+                <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
+                {/* Variable hint chips */}
+                {form.inputs.filter(i => i.key).length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-1.5">
+                    {form.inputs.filter(i => i.key).map(i => (
+                      <button
+                        key={i.key}
+                        type="button"
+                        onClick={() => setForm(f => ({ ...f, system_prompt: f.system_prompt + `{${i.key}}` }))}
+                        className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 transition-colors font-mono"
+                      >
+                        {`{${i.key}}`}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <textarea
+                  value={form.system_prompt}
+                  onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                  rows={14} placeholder="You are a…"
+                  className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                />
+              </div>
+              <div className="flex flex-col">
+                <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
+                {/* Variable hint chips */}
+                {form.inputs.filter(i => i.key).length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-1.5">
+                    {form.inputs.filter(i => i.key).map(i => (
+                      <button
+                        key={i.key}
+                        type="button"
+                        onClick={() => setForm(f => ({ ...f, user_prompt: f.user_prompt + `{${i.key}}` }))}
+                        className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 transition-colors font-mono"
+                      >
+                        {`{${i.key}}`}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <textarea
+                  value={form.user_prompt}
+                  onChange={e => setForm(f => ({ ...f, user_prompt: e.target.value }))}
+                  rows={14} placeholder={"Analyse this:\n\n{transcript}"}
+                  className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                />
+                <div className="mt-1"><VariableHint inputs={form.inputs} /></div>
+              </div>
             </div>
           </div>
 
@@ -649,98 +691,179 @@ function AgentsTab() {
   );
 }
 
-// ── Pipeline Step Row ─────────────────────────────────────────────────────────
+// ── StepConnector — visual arrow between cards ────────────────────────────────
 
-function StepRow({
-  step, index, total, agents, allAgents,
+function StepConnector() {
+  return (
+    <div className="flex flex-col items-center my-0.5 pointer-events-none">
+      <div className="w-px h-3 bg-gray-700" />
+      <ChevronDown className="w-3 h-3 text-gray-700" />
+      <div className="w-px h-3 bg-gray-700" />
+    </div>
+  );
+}
+
+// ── StepCard — collapsible Relevance-AI-style step card ───────────────────────
+
+function StepCard({
+  step, index, total, allAgents,
   onChange, onRemove, onMove,
 }: {
   step: PipelineStep;
   index: number;
   total: number;
-  agents: UniversalAgent[];
   allAgents: UniversalAgent[];
   onChange: (s: PipelineStep) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
 }) {
   const agent = allAgents.find(a => a.id === step.agent_id);
-  return (
-    <div className="flex items-start gap-2 p-3 bg-gray-800/40 border border-gray-700/60 rounded-xl">
-      {/* Step number */}
-      <div className="flex flex-col items-center gap-1 shrink-0 mt-0.5">
-        <span className="w-5 h-5 rounded-full bg-indigo-900/60 text-indigo-300 text-[9px] font-bold flex items-center justify-center">{index + 1}</span>
-        <button onClick={() => onMove(-1)} disabled={index === 0}
-          className="text-gray-600 hover:text-gray-400 disabled:opacity-30"><ArrowUp className="w-3 h-3" /></button>
-        <button onClick={() => onMove(1)} disabled={index === total - 1}
-          className="text-gray-600 hover:text-gray-400 disabled:opacity-30"><ArrowDown className="w-3 h-3" /></button>
-      </div>
+  const [expanded, setExpanded] = useState(!step.agent_id);
+  const meta = agent ? classMeta(agent.agent_class ?? "") : null;
 
-      <div className="flex-1 min-w-0 space-y-2">
-        {/* Agent picker */}
-        <div>
-          <label className="block text-[9px] text-gray-600 uppercase tracking-wide mb-0.5">Agent</label>
-          <select value={step.agent_id} onChange={e => onChange({ ...step, agent_id: e.target.value })}
-            className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500">
-            <option value="">— pick agent —</option>
-            {allAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+  const accentBorder = meta ? meta.borderColor : "border-gray-700/60";
+  const accentText   = meta ? meta.textColor   : "text-gray-500";
+
+  return (
+    <div className={cn(
+      "group border rounded-xl overflow-hidden bg-gray-900 border-l-2",
+      accentBorder,
+    )}>
+      {/* Header — always visible, click to expand/collapse */}
+      <div
+        className="flex items-center gap-2 px-3 py-2.5 cursor-pointer select-none hover:bg-gray-800/40 transition-colors"
+        onClick={() => setExpanded(e => !e)}
+      >
+        {/* Step number circle */}
+        <span className={cn(
+          "w-5 h-5 rounded-full bg-gray-800 text-[9px] font-bold flex items-center justify-center shrink-0",
+          accentText,
+        )}>
+          {index + 1}
+        </span>
+
+        {/* Agent name + class badge */}
+        <div className="flex-1 min-w-0">
+          {agent ? (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-semibold text-white truncate">{agent.name}</span>
+              {meta && (
+                <span className={cn(
+                  "text-[9px] px-1 py-0 rounded border shrink-0",
+                  meta.textColor, meta.borderColor,
+                )}>
+                  {meta.label}
+                </span>
+              )}
+            </div>
+          ) : (
+            <span className="text-xs italic text-gray-600">Pick an agent…</span>
+          )}
+
+          {/* Input source badges — collapsed view only */}
+          {agent && !expanded && (agent.inputs ?? []).length > 0 && (
+            <div className="flex flex-wrap gap-0.5 mt-0.5">
+              {agent.inputs.map(inp => {
+                const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
+                const s = sourceBadge(effectiveSource);
+                return (
+                  <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>
+                    {inp.key} ← {s.label}
+                  </span>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        {/* Show agent's inputs + allow overrides */}
-        {agent && (agent.inputs ?? []).length > 0 && (
-          <div className="space-y-1">
-            <label className="block text-[9px] text-gray-600 uppercase tracking-wide">Input overrides</label>
-            {agent.inputs.map(inp => {
-              const overrideVal = step.input_overrides[inp.key] ?? "";
-              return (
-                <div key={inp.key} className="flex items-center gap-2">
-                  <span className="text-[10px] text-amber-400 w-20 truncate shrink-0">{`{${inp.key}}`}</span>
-                  <select
-                    value={overrideVal || inp.source}
-                    onChange={e => {
-                      const val = e.target.value;
-                      const overrides = { ...step.input_overrides };
-                      if (val === inp.source) delete overrides[inp.key];
-                      else overrides[inp.key] = val;
-                      onChange({ ...step, input_overrides: overrides });
-                    }}
-                    className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500"
-                  >
-                    {INPUT_SOURCES.map(s => (
-                      <option key={s.value} value={s.value}>
-                        {s.label}{s.value === inp.source ? " (default)" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  {overrideVal && (
-                    <span className="text-[9px] text-amber-500 shrink-0">overridden</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+        {/* Up/Down/Remove — visible on hover */}
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+          <button
+            onClick={e => { e.stopPropagation(); onMove(-1); }}
+            disabled={index === 0}
+            className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30 transition-colors"
+          >
+            <ArrowUp className="w-3 h-3" />
+          </button>
+          <button
+            onClick={e => { e.stopPropagation(); onMove(1); }}
+            disabled={index === total - 1}
+            className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30 transition-colors"
+          >
+            <ArrowDown className="w-3 h-3" />
+          </button>
+          <button
+            onClick={e => { e.stopPropagation(); onRemove(); }}
+            className="p-0.5 text-gray-600 hover:text-red-400 transition-colors"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
 
-        {/* Input badges */}
-        {agent && (agent.inputs ?? []).length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {agent.inputs.map(inp => {
-              const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
-              const s = sourceBadge(effectiveSource);
-              return (
-                <span key={inp.key} className={cn("text-[9px] px-1.5 py-0.5 rounded border", s.badge)}>
-                  {`{${inp.key}}`} ← {s.label}
-                </span>
-              );
-            })}
-          </div>
-        )}
+        {/* Chevron expand indicator */}
+        <ChevronDown className={cn(
+          "w-3.5 h-3.5 text-gray-600 shrink-0 transition-transform duration-150",
+          expanded && "rotate-180",
+        )} />
       </div>
 
-      <button onClick={onRemove} className="text-gray-600 hover:text-red-400 transition-colors shrink-0 mt-1">
-        <X className="w-3.5 h-3.5" />
-      </button>
+      {/* Expanded body */}
+      {expanded && (
+        <div className="border-t border-gray-800 px-3 pb-3 pt-2.5 bg-gray-950/60 space-y-3">
+          {/* Agent picker */}
+          <div>
+            <label className="block text-[9px] text-gray-600 uppercase tracking-wide mb-1">Agent</label>
+            <select
+              value={step.agent_id}
+              onChange={e => {
+                const id = e.target.value;
+                onChange({ agent_id: id, input_overrides: {} });
+                if (id) setExpanded(false);
+              }}
+              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            >
+              <option value="">— pick agent —</option>
+              {allAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+
+          {/* Input sources / overrides */}
+          {agent && (agent.inputs ?? []).length > 0 && (
+            <div className="space-y-1.5">
+              <label className="block text-[9px] text-gray-600 uppercase tracking-wide">Input sources</label>
+              {agent.inputs.map(inp => {
+                const overrideVal = step.input_overrides[inp.key] ?? "";
+                const effectiveSource = overrideVal || inp.source;
+                return (
+                  <div key={inp.key} className="flex items-center gap-2">
+                    <span className="text-[10px] text-amber-400 w-20 truncate shrink-0">{`{${inp.key}}`}</span>
+                    <select
+                      value={effectiveSource}
+                      onChange={e => {
+                        const val = e.target.value;
+                        const overrides = { ...step.input_overrides };
+                        if (val === inp.source) delete overrides[inp.key];
+                        else overrides[inp.key] = val;
+                        onChange({ ...step, input_overrides: overrides });
+                      }}
+                      className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500"
+                    >
+                      {INPUT_SOURCES.map(s => (
+                        <option key={s.value} value={s.value}>
+                          {s.label}{s.value === inp.source ? " (default)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {overrideVal && overrideVal !== inp.source && (
+                      <span className="text-[9px] text-amber-500 shrink-0">overridden</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1153,42 +1276,41 @@ function PipelinesTab() {
               </div>
 
               {/* Steps */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <label className="text-xs text-gray-400 font-medium">Steps</label>
-                  <button onClick={addStep}
-                    className="flex items-center gap-1 text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors">
-                    <Plus className="w-3 h-3" /> Add Step
-                  </button>
-                </div>
+              <div className="space-y-2">
+                {/* Steps label */}
+                <label className="text-xs text-gray-400 font-medium">Steps</label>
 
-                {form.steps.length > 0 && (
-                  <div className="mb-4 flex items-center gap-1 flex-wrap">
-                    {form.steps.map((step, i) => {
-                      const a = allAgents.find(x => x.id === step.agent_id);
-                      return (
-                        <div key={i} className="flex items-center gap-1">
-                          <span className="text-[10px] px-2 py-1 bg-gray-800 border border-gray-700 rounded-lg text-gray-300">
-                            {a ? a.name : <span className="text-gray-600 italic">unset</span>}
-                          </span>
-                          {i < form.steps.length - 1 && <span className="text-gray-700 text-xs">→</span>}
-                        </div>
-                      );
-                    })}
+                {/* Empty state */}
+                {form.steps.length === 0 && (
+                  <div className="flex flex-col items-center py-8 text-gray-700 border border-dashed border-gray-800 rounded-xl">
+                    <Workflow className="w-8 h-8 mb-2 opacity-20" />
+                    <p className="text-xs">No steps yet — add an agent below to start the chain</p>
                   </div>
                 )}
 
-                {form.steps.length === 0 && (
-                  <p className="text-xs text-gray-600 italic py-2">No steps yet. Add agents to build the chain.</p>
-                )}
-
-                <div className="space-y-3">
+                {/* Step cards with connectors */}
+                <div>
                   {form.steps.map((step, i) => (
-                    <StepRow key={i} step={step} index={i} total={form.steps.length}
-                      agents={allAgents} allAgents={allAgents}
-                      onChange={s => updateStep(i, s)} onRemove={() => removeStep(i)} onMove={dir => moveStep(i, dir)} />
+                    <div key={i}>
+                      <StepCard
+                        step={step} index={i} total={form.steps.length}
+                        allAgents={allAgents}
+                        onChange={s => updateStep(i, s)}
+                        onRemove={() => removeStep(i)}
+                        onMove={dir => moveStep(i, dir)}
+                      />
+                      {i < form.steps.length - 1 && <StepConnector />}
+                    </div>
                   ))}
                 </div>
+
+                {/* Add step — prominent bottom button */}
+                <button
+                  onClick={addStep}
+                  className="w-full flex items-center justify-center gap-2 py-3 border border-dashed border-gray-700 rounded-xl text-[11px] text-gray-500 hover:text-white hover:border-gray-500 hover:bg-gray-800/30 transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add step
+                </button>
               </div>
             </div>
           )}
