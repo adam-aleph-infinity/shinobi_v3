@@ -14,9 +14,9 @@ import "@xyflow/react/dist/style.css";
 import {
   FileText, Files, GitMerge, Clock,
   Building2, User, Headphones,
-  AlignLeft, Code2, List, Zap, TrendingUp, Star, Shield, Award, BookOpen, Lightbulb, Tag,
-  StickyNote, ShieldCheck, MessageSquare, BadgeCheck, ListChecks,
-  Trash2, ChevronRight, X,
+  Bot, Star,
+  StickyNote, ShieldCheck, BadgeCheck,
+  Plus, Trash2, ChevronRight, X,
 } from "lucide-react";
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
@@ -29,17 +29,12 @@ type InputSubType =
   | "crm_info"    | "crm_customer" | "crm_agent";
 
 // ── Processing subtypes ──
-type ProcessSubType =
-  | "summarizer" | "extractor"  | "classifier" | "analyzer"
-  | "sentiment"  | "scorer"     | "compliance" | "qa_eval"
-  | "coach"      | "topic";
+type ProcessSubType = "agent";
 
 // ── Artifact subtypes (formerly output) ──
 type ArtifactSubType =
-  | "persona"    | "persona_score"
-  | "notes"      | "notes_compliance"
-  | "response"   | "summary"
-  | "action_items" | "coaching_plan";
+  | "persona" | "persona_score"
+  | "notes"   | "notes_compliance";
 
 interface Meta {
   label:  string;
@@ -69,37 +64,33 @@ const INPUT_META: Record<InputSubType, Meta> = { ...CALLS_META, ...CRM_META } as
 
 // ── Processing ────────────────────────────────────────────────────────────────
 const PROCESS_META: Record<ProcessSubType, Meta> = {
-  summarizer:  { label: "Summarizer",    icon: <AlignLeft     className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-500", text: "text-indigo-400", desc: "Condenses calls into a summary" },
-  extractor:   { label: "Extractor",     icon: <Code2         className="w-4 h-4" />, color: "bg-blue-700",   border: "border-blue-500",   text: "text-blue-400",   desc: "Pulls structured data from transcripts" },
-  classifier:  { label: "Classifier",    icon: <List          className="w-4 h-4" />, color: "bg-violet-700", border: "border-violet-500", text: "text-violet-400", desc: "Categorises calls into defined classes" },
-  analyzer:    { label: "Analyzer",      icon: <Zap           className="w-4 h-4" />, color: "bg-cyan-700",   border: "border-cyan-500",   text: "text-cyan-400",   desc: "Deep behavioural analysis" },
-  sentiment:   { label: "Sentiment",     icon: <TrendingUp    className="w-4 h-4" />, color: "bg-pink-700",   border: "border-pink-500",   text: "text-pink-400",   desc: "Emotion and tone detection" },
-  scorer:      { label: "Scorer",        icon: <Star          className="w-4 h-4" />, color: "bg-teal-700",   border: "border-teal-500",   text: "text-teal-400",   desc: "Assigns numeric or categorical scores" },
-  compliance:  { label: "Compliance",    icon: <Shield        className="w-4 h-4" />, color: "bg-emerald-700",border: "border-emerald-500",text: "text-emerald-400",desc: "Flags compliance and policy issues" },
-  qa_eval:     { label: "QA Evaluator",  icon: <Award         className="w-4 h-4" />, color: "bg-amber-700",  border: "border-amber-500",  text: "text-amber-400",  desc: "Quality assurance evaluation" },
-  coach:       { label: "Coach",         icon: <BookOpen      className="w-4 h-4" />, color: "bg-orange-700", border: "border-orange-500", text: "text-orange-400", desc: "Generates coaching recommendations" },
-  topic:       { label: "Topic Modeler", icon: <Tag           className="w-4 h-4" />, color: "bg-purple-700", border: "border-purple-500", text: "text-purple-400", desc: "Identifies key topics and themes" },
+  agent: { label: "Agent", icon: <Bot className="w-4 h-4" />, color: "bg-indigo-700", border: "border-indigo-500", text: "text-indigo-400", desc: "AI agent — configure its system prompt in the properties panel" },
 };
 
 // ── Artifacts (formerly output) ───────────────────────────────────────────────
-const ARTIFACT_META: Record<ArtifactSubType, Meta> = {
-  persona:          { label: "Persona",           icon: <User          className="w-4 h-4" />, color: "bg-violet-700",  border: "border-violet-600",  text: "text-violet-400",  desc: "Customer or agent persona profile" },
-  persona_score:    { label: "Persona Score",     icon: <BadgeCheck    className="w-4 h-4" />, color: "bg-violet-800",  border: "border-violet-700",  text: "text-violet-300",  desc: "Scored persona with trait ratings" },
-  notes:            { label: "Notes",             icon: <StickyNote    className="w-4 h-4" />, color: "bg-amber-700",   border: "border-amber-600",   text: "text-amber-400",   desc: "Structured call notes" },
-  notes_compliance: { label: "Compliance Notes",  icon: <ShieldCheck   className="w-4 h-4" />, color: "bg-emerald-700", border: "border-emerald-600", text: "text-emerald-400", desc: "Notes flagging compliance findings" },
-  response:         { label: "Response",          icon: <MessageSquare className="w-4 h-4" />, color: "bg-blue-700",    border: "border-blue-600",    text: "text-blue-400",    desc: "AI-generated response or reply" },
-  summary:          { label: "Summary",           icon: <AlignLeft     className="w-4 h-4" />, color: "bg-slate-600",   border: "border-slate-500",   text: "text-slate-400",   desc: "Condensed call or batch summary" },
-  action_items:     { label: "Action Items",      icon: <ListChecks    className="w-4 h-4" />, color: "bg-teal-700",    border: "border-teal-600",    text: "text-teal-400",    desc: "Follow-up tasks extracted from calls" },
-  coaching_plan:    { label: "Coaching Plan",     icon: <Lightbulb     className="w-4 h-4" />, color: "bg-orange-700",  border: "border-orange-600",  text: "text-orange-400",  desc: "Personalised coaching recommendations" },
+
+// Dependency rules: persona_score requires a persona node; notes_compliance requires notes
+const ARTIFACT_REQUIRES: Partial<Record<ArtifactSubType, ArtifactSubType>> = {
+  persona_score:    "persona",
+  notes_compliance: "notes",
 };
 
-// Unified lookup — keeps getMeta's single-arg signature
-const OUTPUT_META = ARTIFACT_META as unknown as Record<string, Meta>;
+const ARTIFACT_META: Record<ArtifactSubType, Meta> = {
+  persona:          { label: "Persona",          icon: <User       className="w-4 h-4" />, color: "bg-violet-700",  border: "border-violet-600",  text: "text-violet-400",  desc: "Customer or agent persona profile" },
+  persona_score:    { label: "Persona Score",    icon: <BadgeCheck className="w-4 h-4" />, color: "bg-violet-800",  border: "border-violet-700",  text: "text-violet-300",  desc: "Scored persona — requires a Persona in the pipeline" },
+  notes:            { label: "Notes",            icon: <StickyNote className="w-4 h-4" />, color: "bg-amber-700",   border: "border-amber-600",   text: "text-amber-400",   desc: "Structured call notes" },
+  notes_compliance: { label: "Compliance Notes", icon: <ShieldCheck className="w-4 h-4" />, color: "bg-emerald-700", border: "border-emerald-600", text: "text-emerald-400", desc: "Compliance notes — requires Notes in the pipeline" },
+};
+
+// Module-level registry for user-defined custom artifacts (persists across renders)
+const CUSTOM_ARTIFACT_REGISTRY: Record<string, Meta> = {};
 
 function getMeta(kind: NodeKind, subType: string): Meta {
   if (kind === "input")      return (INPUT_META   as Record<string, Meta>)[subType] ?? INPUT_META.call_single;
-  if (kind === "processing") return (PROCESS_META as Record<string, Meta>)[subType] ?? PROCESS_META.summarizer;
-  return (OUTPUT_META as Record<string, Meta>)[subType] ?? ARTIFACT_META.response;
+  if (kind === "processing") return PROCESS_META.agent;
+  return (ARTIFACT_META as Record<string, Meta>)[subType]
+    ?? CUSTOM_ARTIFACT_REGISTRY[subType]
+    ?? { label: subType, icon: <Star className="w-4 h-4" />, color: "bg-gray-600", border: "border-gray-500", text: "text-gray-400", desc: "Custom artifact" };
 }
 
 // ── Node data interfaces ──────────────────────────────────────────────────────
@@ -447,11 +438,6 @@ const PALETTE_GROUPS: PaletteGroup[] = [
     label: "Processing",
     items: (Object.entries(PROCESS_META) as [ProcessSubType, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
   },
-  {
-    kind:  "output",
-    label: "Artifacts",
-    items: (Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => ({ subType: k, meta: m })),
-  },
 ];
 
 // ── Pipeline validation ───────────────────────────────────────────────────────
@@ -544,6 +530,8 @@ function PipelineCanvas() {
   const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [addingArtifact, setAddingArtifact] = useState(false);
+  const [newArtifactName, setNewArtifactName] = useState("");
 
   // Refs for fresh state in callbacks (avoid stale closures)
   const nodesRef  = useRef<Node[]>([]);
@@ -788,6 +776,23 @@ function PipelineCanvas() {
     stagesRef.current = next;
   }
 
+  function handleAddCustomArtifact() {
+    const name = newArtifactName.trim();
+    if (!name) return;
+    const key = `custom_${name.toLowerCase().replace(/\s+/g, "_")}`;
+    CUSTOM_ARTIFACT_REGISTRY[key] = {
+      label: name,
+      icon: <Star className="w-4 h-4" />,
+      color: "bg-gray-600",
+      border: "border-gray-500",
+      text: "text-gray-400",
+      desc: "Custom artifact",
+    };
+    addNodeToCanvas("output", key);
+    setAddingArtifact(false);
+    setNewArtifactName("");
+  }
+
   function handleClear() {
     setNodes([]);
     setEdges([]);
@@ -821,10 +826,10 @@ function PipelineCanvas() {
       );
     }
 
-    const subTypeOptions =
-      selKind === "input"      ? Object.entries(INPUT_META)    as [string, Meta][] :
-      selKind === "processing" ? Object.entries(PROCESS_META)  as [string, Meta][] :
-                                  Object.entries(ARTIFACT_META) as [string, Meta][];
+    const artifactSubTypeOptions: [string, Meta][] = [
+      ...(Object.entries(ARTIFACT_META) as [string, Meta][]),
+      ...(Object.entries(CUSTOM_ARTIFACT_REGISTRY) as [string, Meta][]),
+    ];
 
     return (
       <div className="p-4 space-y-4">
@@ -847,21 +852,43 @@ function PipelineCanvas() {
           />
         </div>
 
-        <div className="space-y-1.5">
-          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
-            {selKind === "input" ? "Data Source" : selKind === "processing" ? "Agent Type" : "Artifact Type"}
-          </label>
-          <select
-            value={selData.subType}
-            onChange={e => updateNodeData(selectedNode.id, { subType: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
-          >
-            {subTypeOptions.map(([k, m]) => (
-              <option key={k} value={k}>{m.label}</option>
-            ))}
-          </select>
-          <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
-        </div>
+        {selKind === "input" && (
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Data Source</label>
+            <select
+              value={selData.subType}
+              onChange={e => updateNodeData(selectedNode.id, { subType: e.target.value })}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+            >
+              {(Object.entries(INPUT_META) as [string, Meta][]).map(([k, m]) => (
+                <option key={k} value={k}>{m.label}</option>
+              ))}
+            </select>
+            <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
+          </div>
+        )}
+
+        {selKind === "processing" && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
+          </div>
+        )}
+
+        {selKind === "output" && (
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Artifact Type</label>
+            <select
+              value={selData.subType}
+              onChange={e => updateNodeData(selectedNode.id, { subType: e.target.value })}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+            >
+              {artifactSubTypeOptions.map(([k, m]) => (
+                <option key={k} value={k}>{m.label}</option>
+              ))}
+            </select>
+            <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
+          </div>
+        )}
 
         {selKind === "processing" && (
           <div className="space-y-1.5">
@@ -906,7 +933,7 @@ function PipelineCanvas() {
                 {group.label}
               </p>
 
-              {/* flat items (processing / artifacts) */}
+              {/* flat items (processing) */}
               {group.items && (
                 <div className="space-y-1">
                   {group.items.map(({ subType, meta }) => (
@@ -932,6 +959,78 @@ function PipelineCanvas() {
               )}
             </div>
           ))}
+
+          {/* ── Artifacts section with dependency checks ────────────── */}
+          <div>
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">Artifacts</p>
+            <div className="space-y-1">
+              {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
+                const req = ARTIFACT_REQUIRES[k];
+                const blocked = req != null && !nodes.some(
+                  n => n.type === "output" && (n.data as PipelineNodeData).subType === req
+                );
+                return blocked ? (
+                  <div
+                    key={k}
+                    title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
+                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-not-allowed opacity-40 select-none ${m.border} bg-gray-900/60`}
+                  >
+                    <span className={`p-1 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                    <div className="min-w-0 flex-1">
+                      <span className={`text-[11px] font-semibold ${m.text} leading-tight block`}>{m.label}</span>
+                      <span className="text-[9px] text-gray-600 leading-tight block">
+                        Needs {ARTIFACT_META[req!].label}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
+                );
+              })}
+
+              {/* Custom artifacts from registry */}
+              {Object.entries(CUSTOM_ARTIFACT_REGISTRY).map(([k, m]) => (
+                <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
+              ))}
+
+              {/* + Add Artifact */}
+              {addingArtifact ? (
+                <div className="flex gap-1.5 mt-1">
+                  <input
+                    autoFocus
+                    value={newArtifactName}
+                    onChange={e => setNewArtifactName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") handleAddCustomArtifact();
+                      if (e.key === "Escape") { setAddingArtifact(false); setNewArtifactName(""); }
+                    }}
+                    placeholder="Artifact name…"
+                    className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    onClick={handleAddCustomArtifact}
+                    className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors"
+                  >
+                    Add
+                  </button>
+                  <button
+                    onClick={() => { setAddingArtifact(false); setNewArtifactName(""); }}
+                    className="px-1.5 py-1 rounded-lg border border-gray-700 text-gray-500 hover:text-gray-300 text-xs transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setAddingArtifact(true)}
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-dashed border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 text-[11px] transition-colors mt-1"
+                >
+                  <Plus className="w-3 h-3" />
+                  Add Artifact
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Flow rules */}
