@@ -39,13 +39,41 @@ function ModelSelect({ value, onChange }: { value: string; onChange: (v: string)
 // ── Input sources ─────────────────────────────────────────────────────────────
 
 const INPUT_SOURCES = [
-  { value: "transcript",        label: "Transcript",        icon: Mic2,       badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",       desc: "Single call transcript" },
-  { value: "merged_transcript", label: "Merged Transcript", icon: Layers,     badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",       desc: "All calls merged" },
-  { value: "notes",             label: "Notes",             icon: StickyNote, badge: "bg-green-900/50 text-green-300 border-green-700/50",    desc: "Call notes" },
-  { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,   badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",       desc: "All notes aggregated" },
-  { value: "agent_output",      label: "Agent Output",      icon: Bot,        badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", desc: "Output of another agent" },
-  { value: "chain_previous",    label: "Prev Step",         icon: Link2,      badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",    desc: "Previous pipeline step" },
-  { value: "manual",            label: "Manual",            icon: PenLine,    badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",       desc: "Provided at run time" },
+  { value: "transcript",        label: "Transcript",   shortLabel: "Transcript",  icon: Mic2,
+    badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",
+    card:  "bg-blue-950 border-blue-700 text-blue-300",
+    dot:   "bg-blue-500",
+    desc: "Single call transcript" },
+  { value: "merged_transcript", label: "Merged Transcript", shortLabel: "Merged",  icon: Layers,
+    badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",
+    card:  "bg-cyan-950 border-cyan-700 text-cyan-300",
+    dot:   "bg-cyan-500",
+    desc: "All calls merged" },
+  { value: "notes",             label: "Notes",        shortLabel: "Notes",       icon: StickyNote,
+    badge: "bg-green-900/50 text-green-300 border-green-700/50",
+    card:  "bg-green-950 border-green-700 text-green-300",
+    dot:   "bg-green-500",
+    desc: "Call notes" },
+  { value: "merged_notes",      label: "Merged Notes", shortLabel: "All Notes",   icon: BookOpen,
+    badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",
+    card:  "bg-teal-950 border-teal-700 text-teal-300",
+    dot:   "bg-teal-500",
+    desc: "All notes aggregated" },
+  { value: "agent_output",      label: "Agent Output", shortLabel: "Agent",       icon: Bot,
+    badge: "bg-purple-900/50 text-purple-300 border-purple-700/50",
+    card:  "bg-purple-950 border-purple-700 text-purple-300",
+    dot:   "bg-purple-500",
+    desc: "Output of another agent" },
+  { value: "chain_previous",    label: "Prev Step",    shortLabel: "Prev",        icon: Link2,
+    badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",
+    card:  "bg-amber-950 border-amber-700 text-amber-300",
+    dot:   "bg-amber-500",
+    desc: "Previous pipeline step" },
+  { value: "manual",            label: "Manual",       shortLabel: "Manual",      icon: PenLine,
+    badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",
+    card:  "bg-gray-800 border-gray-600 text-gray-300",
+    dot:   "bg-gray-500",
+    desc: "Provided at run time" },
 ] as const;
 
 type SourceValue = typeof INPUT_SOURCES[number]["value"];
@@ -54,16 +82,16 @@ function sourceMeta(source: string) {
   return INPUT_SOURCES.find(s => s.value === source) ?? INPUT_SOURCES[6];
 }
 
-// ── Output format metadata ────────────────────────────────────────────────────
+// ── Output format ─────────────────────────────────────────────────────────────
 
 const OUTPUT_FMT: Record<string, {
   label: string; desc: string;
   icon: React.ComponentType<{ className?: string }>;
-  bg: string; text: string; border: string;
+  bg: string; text: string; border: string; card: string;
 }> = {
-  markdown: { label: "Markdown", desc: "Structured text with headers", icon: FileText,  bg: "bg-indigo-900/50", text: "text-indigo-300",  border: "border-indigo-700/40" },
-  json:     { label: "JSON",     desc: "Machine-readable data",        icon: Braces,    bg: "bg-yellow-900/50", text: "text-yellow-300", border: "border-yellow-700/40" },
-  text:     { label: "Text",     desc: "Plain unformatted text",       icon: AlignLeft, bg: "bg-gray-700/50",   text: "text-gray-300",   border: "border-gray-600/40" },
+  markdown: { label: "Markdown", desc: "Structured text",     icon: FileText,  bg: "bg-indigo-900/50", text: "text-indigo-300",  border: "border-indigo-700/40", card: "bg-indigo-950 border-indigo-700 text-indigo-300" },
+  json:     { label: "JSON",     desc: "Machine-readable",    icon: Braces,    bg: "bg-yellow-900/50", text: "text-yellow-300", border: "border-yellow-700/40", card: "bg-yellow-950 border-yellow-700 text-yellow-300" },
+  text:     { label: "Text",     desc: "Plain unformatted",   icon: AlignLeft, bg: "bg-gray-700/50",   text: "text-gray-300",   border: "border-gray-600/40",   card: "bg-gray-800   border-gray-600   text-gray-300" },
 };
 
 // ── Agent class metadata ──────────────────────────────────────────────────────
@@ -187,7 +215,7 @@ function ClassPaletteCard({ cls, label, desc, onAdd }: {
   );
 }
 
-// ── SourcePillGrid ────────────────────────────────────────────────────────────
+// ── Source pill grid (in settings panel) ──────────────────────────────────────
 
 function SourcePillGrid({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
@@ -209,7 +237,7 @@ function SourcePillGrid({ value, onChange }: { value: string; onChange: (v: stri
   );
 }
 
-// ── AgentPickerGrid ───────────────────────────────────────────────────────────
+// ── Agent picker grid ─────────────────────────────────────────────────────────
 
 function AgentPickerGrid({ value, allAgents, prevStepClass, onPick }: {
   value: string; allAgents: UniversalAgent[]; prevStepClass?: string;
@@ -257,21 +285,112 @@ function AgentPickerGrid({ value, allAgents, prevStepClass, onPick }: {
   );
 }
 
-// ── Step card (aligned node with ports) ──────────────────────────────────────
+// ── Canvas: input source element ──────────────────────────────────────────────
+// Each input is its own distinct mini-card node, colored by source type.
+
+function InputSourceCard({ inp, step, isSelected, onClick, onRemove }: {
+  inp: AgentInput; step: PipelineStep; isSelected: boolean;
+  onClick: () => void; onRemove: () => void;
+}) {
+  const src  = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
+  const Icon = src.icon;
+  return (
+    <div className="flex flex-col items-center">
+      {/* Mini source card */}
+      <div
+        onClick={onClick}
+        className={cn(
+          "relative rounded-xl border-2 flex flex-col items-center gap-1 px-2 py-2.5 w-[58px] cursor-pointer transition-all group select-none",
+          isSelected
+            ? cn(src.card, "shadow-lg shadow-black/40 scale-105")
+            : cn(src.card, "opacity-60 hover:opacity-100 hover:scale-[1.04]"),
+        )}
+      >
+        <Icon className="w-5 h-5 shrink-0" />
+        <span className="text-[8px] font-semibold leading-tight text-center break-words w-full">{src.shortLabel}</span>
+        <span className="text-[7px] font-mono opacity-60 leading-tight text-center truncate w-full">{inp.key}</span>
+        {/* Remove × */}
+        <button
+          onClick={e => { e.stopPropagation(); onRemove(); }}
+          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-gray-900 border border-gray-700 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:border-red-500 hover:bg-red-950 z-10"
+        >
+          <X className="w-2 h-2 text-gray-500 hover:text-red-400" />
+        </button>
+      </div>
+      {/* Wire down to card */}
+      <div className={cn("w-px flex-1 min-h-[10px] transition-colors", isSelected ? "bg-gray-400" : "bg-gray-700/60")} />
+    </div>
+  );
+}
+
+// ── Canvas: output format element ─────────────────────────────────────────────
+
+function OutputFormatCard({ agent, isSelected, onClick }: {
+  agent: UniversalAgent; isSelected: boolean; onClick: () => void;
+}) {
+  const fmt  = agent.output_format ?? "markdown";
+  const m    = OUTPUT_FMT[fmt] ?? OUTPUT_FMT.markdown;
+  const Icon = m.icon;
+  return (
+    <div className="flex flex-col items-center">
+      {/* Wire up from card */}
+      <div className={cn("w-px h-3 transition-colors", isSelected ? "bg-gray-400" : "bg-gray-700/60")} />
+      {/* Mini format card */}
+      <div
+        onClick={onClick}
+        className={cn(
+          "rounded-xl border-2 flex flex-col items-center gap-1 px-2 py-2.5 w-[58px] cursor-pointer transition-all select-none",
+          isSelected
+            ? cn(m.card, "shadow-lg shadow-black/40 scale-105")
+            : cn(m.card, "opacity-60 hover:opacity-100 hover:scale-[1.04]"),
+        )}
+      >
+        <Icon className="w-5 h-5 shrink-0" />
+        <span className="text-[8px] font-semibold leading-tight text-center">{m.label}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Canvas: "add input" placeholder ──────────────────────────────────────────
+
+function AddInputCard({ onClick }: { onClick: () => void }) {
+  return (
+    <div className="flex flex-col items-center">
+      <button
+        onClick={onClick}
+        title="Add input"
+        className="rounded-xl border-2 border-dashed border-gray-700 flex flex-col items-center justify-center gap-1 w-[48px] py-3 hover:border-teal-600 hover:bg-teal-950/40 transition-all group"
+      >
+        <Plus className="w-4 h-4 text-gray-700 group-hover:text-teal-400 transition-colors" />
+        <span className="text-[7px] text-gray-700 group-hover:text-teal-400 transition-colors">add</span>
+      </button>
+      {/* Spacer (no wire — not connected) */}
+      <div className="flex-1 min-h-[10px]" />
+    </div>
+  );
+}
+
+// ── Step card ─────────────────────────────────────────────────────────────────
 //
-// To keep connecting arrows aligned regardless of how many input ports each
-// node has, we use fixed-height containers for both the input-port region and
-// the output-port region. All card bodies therefore sit at the same Y offset.
+// Fixed-height port regions keep all card bodies at the same Y so arrows align.
 
-const INPUT_PORT_AREA_H  = 56; // px  – space above card body for ports + wire
-const OUTPUT_PORT_AREA_H = 44; // px  – space below card body for wire + port
+const INPUT_AREA_H  = 100; // px — tall enough for source mini-cards + wire
+const OUTPUT_AREA_H = 80;  // px — space for output mini-card + wire
 
-function StepCard({ step, index, total, allAgents, prevStepClass, selection, onSelect, onRemove, onMoveLeft, onMoveRight }: {
+function StepCard({
+  step, index, total, allAgents, prevStepClass,
+  selection, onSelect,
+  onRemove, onMoveLeft, onMoveRight,
+  onAddInput, onRemoveInput,
+}: {
   step: PipelineStep; index: number; total: number;
   allAgents: UniversalAgent[]; prevStepClass?: string;
   selection: NodeSelection;
   onSelect: (s: NodeSelection) => void;
   onRemove: () => void; onMoveLeft: () => void; onMoveRight: () => void;
+  onAddInput: () => void;
+  onRemoveInput: (key: string) => void;
 }) {
   const agent = allAgents.find(a => a.id === step.agent_id);
   const cls   = agent?.agent_class ?? step._cls ?? "";
@@ -286,14 +405,11 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
     selection?.type === "input" && selection.stepIdx === index &&
     (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey === key;
 
-  const fmt     = agent?.output_format ?? "markdown";
-  const fmtMeta = OUTPUT_FMT[fmt] ?? OUTPUT_FMT.markdown;
-  const FmtIcon = fmtMeta.icon;
-  const inputs  = agent?.inputs ?? [];
+  const inputs = agent?.inputs ?? [];
 
   return (
-    <div className="flex items-center shrink-0">
-      {/* Node column ─────────────────────────── */}
+    <div className="flex items-start shrink-0">
+      {/* Node column */}
       <div className="flex flex-col items-center shrink-0">
 
         {/* Controls pill */}
@@ -312,40 +428,26 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
           </button>
         </div>
 
-        {/* ── Input-port region (fixed height) ── */}
+        {/* ── Input source elements (fixed height) ── */}
         <div
-          className="flex items-end justify-center gap-3 w-full"
-          style={{ height: INPUT_PORT_AREA_H }}
+          className="flex items-end justify-center gap-2 w-full pb-0"
+          style={{ height: INPUT_AREA_H }}
         >
-          {inputs.map(inp => {
-            const src    = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
-            const SrcIco = src.icon;
-            const isSel  = inputSel(inp.key);
-            return (
-              <button
-                key={inp.key}
-                onClick={() => onSelect(isSel ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
-                title={`${inp.key} — ${src.label}`}
-                className="flex flex-col items-center gap-0 group"
-              >
-                <span className={cn("text-[8px] font-mono mb-1 transition-colors leading-none",
-                  isSel ? "text-white" : "text-gray-600 group-hover:text-gray-400")}>
-                  {inp.key}
-                </span>
-                <div className={cn(
-                  "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
-                  isSel ? cn(src.badge, "shadow-md scale-110") : "border-gray-700 bg-gray-900 group-hover:border-gray-500",
-                )}>
-                  <SrcIco className={cn("w-2 h-2 shrink-0", isSel ? "" : "text-gray-600 group-hover:text-gray-400")} />
-                </div>
-                {/* wire to card top */}
-                <div className={cn("w-px flex-1 min-h-[6px] transition-colors", isSel ? "bg-gray-500" : "bg-gray-800")} />
-              </button>
-            );
-          })}
+          {inputs.map(inp => (
+            <InputSourceCard
+              key={inp.key}
+              inp={inp}
+              step={step}
+              isSelected={inputSel(inp.key)}
+              onClick={() => onSelect(inputSel(inp.key) ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
+              onRemove={() => onRemoveInput(inp.key)}
+            />
+          ))}
+          {/* + Add input card */}
+          <AddInputCard onClick={onAddInput} />
         </div>
 
-        {/* ── Card body ── */}
+        {/* ── Agent card body ── */}
         <div className={cn(
           "rounded-2xl border-2 bg-gray-900/60 w-48 overflow-hidden transition-all",
           agentSel ? cn(meta.borderColor, "shadow-xl shadow-black/40") : "border-gray-800",
@@ -369,42 +471,27 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
           </div>
         </div>
 
-        {/* ── Output-port region (fixed height) ── */}
+        {/* ── Output format element (fixed height) ── */}
         <div
           className="flex items-start justify-center w-full"
-          style={{ height: OUTPUT_PORT_AREA_H }}
+          style={{ height: OUTPUT_AREA_H }}
         >
           {agent && (
-            <button
+            <OutputFormatCard
+              agent={agent}
+              isSelected={outputSel}
               onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
-              title={`Output — ${fmtMeta.label}`}
-              className="flex flex-col items-center gap-0 group"
-            >
-              {/* wire from card bottom */}
-              <div className={cn("w-px h-3 transition-colors", outputSel ? "bg-gray-500" : "bg-gray-800")} />
-              <div className={cn(
-                "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
-                outputSel
-                  ? cn(fmtMeta.border, fmtMeta.bg, "shadow-md scale-110")
-                  : "border-gray-700 bg-gray-900 group-hover:border-gray-500",
-              )}>
-                <FmtIcon className={cn("w-2 h-2 shrink-0", outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400")} />
-              </div>
-              <span className={cn("text-[8px] mt-1 leading-none transition-colors",
-                outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400")}>
-                {fmtMeta.label}
-              </span>
-            </button>
+            />
           )}
         </div>
 
       </div>
 
-      {/* Arrow between nodes — self-center aligns to vertical midpoint of column */}
+      {/* Connecting arrow — offset to align with card body center */}
       {index < total - 1 && (
         <div
-          className="flex items-center px-2 shrink-0 text-gray-700"
-          style={{ marginTop: -(OUTPUT_PORT_AREA_H - INPUT_PORT_AREA_H) / 2 + 24 }}
+          className="flex items-center px-2 shrink-0 text-gray-700 self-start"
+          style={{ marginTop: INPUT_AREA_H + 24 + 20 /* controls + top of card + half body */ }}
         >
           <div className="w-6 h-px bg-gray-700" />
           <ChevronRight className="w-3.5 h-3.5 -ml-1" />
@@ -478,7 +565,6 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
 
   return (
     <div className="w-80 shrink-0 border-l border-gray-800 flex flex-col bg-gray-950">
-      {/* Header */}
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
         <AgentClassIcon cls={cls} size="sm" />
         <div className="flex-1 min-w-0">
@@ -491,7 +577,6 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
       </div>
 
       <div className="flex-1 overflow-y-auto">
-
         {/* Agent picker */}
         <div className="p-3 border-b border-gray-800">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Agent</p>
@@ -499,7 +584,7 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
             onPick={id => onChangeStep({ ...step, agent_id: id, input_overrides: {} })} />
         </div>
 
-        {/* ── Inputs ─────────────────────────────────────────────── */}
+        {/* Inputs */}
         <div className="p-3 border-b border-gray-800">
           <div className="flex items-center justify-between mb-2">
             <p className="text-[9px] text-gray-600 uppercase tracking-wide">Inputs</p>
@@ -508,20 +593,15 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
               <Plus className="w-3 h-3" /> Add
             </button>
           </div>
-
           {draft.inputs.length === 0 && (
-            <p className="text-[9px] text-gray-700 italic text-center py-2">
-              No inputs — click + Add to define one
-            </p>
+            <p className="text-[9px] text-gray-700 italic text-center py-2">No inputs — click + Add</p>
           )}
-
           <div className="space-y-2">
             {draft.inputs.map((inp, i) => {
               const src    = sourceMeta(inp.source);
               const SrcIco = src.icon;
               return (
                 <div key={i} className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
-                  {/* Key row */}
                   <div className="flex items-center gap-1.5 px-2.5 py-2 border-b border-gray-800/60">
                     <span className="text-[10px] text-gray-600 font-mono shrink-0">{"{"}</span>
                     <input
@@ -536,8 +616,6 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
                       <X className="w-3 h-3" />
                     </button>
                   </div>
-
-                  {/* Source type — shown as element pills */}
                   <div className="px-2.5 py-2">
                     <p className="text-[8px] text-gray-700 uppercase tracking-wide mb-1.5">Source type</p>
                     <div className="flex flex-wrap gap-1">
@@ -545,20 +623,16 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
                         const Ico   = s.icon;
                         const isSel = inp.source === s.value;
                         return (
-                          <button key={s.value}
-                            onClick={() => updateInputSource(i, s.value)}
-                            title={s.desc}
+                          <button key={s.value} onClick={() => updateInputSource(i, s.value)} title={s.desc}
                             className={cn(
                               "flex items-center gap-1 px-1.5 py-1 rounded-lg text-[9px] border transition-all",
                               isSel ? cn(s.badge, "shadow-sm") : "border-gray-700/50 bg-gray-800/30 text-gray-500 hover:text-gray-300 hover:border-gray-600",
                             )}>
-                            <Ico className="w-2.5 h-2.5 shrink-0" />
-                            {s.label}
+                            <Ico className="w-2.5 h-2.5 shrink-0" />{s.label}
                           </button>
                         );
                       })}
                     </div>
-                    {/* Active source chip */}
                     <div className={cn("mt-2 inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[9px]", src.badge)}>
                       <SrcIco className="w-2.5 h-2.5 shrink-0" />
                       <span className="font-medium">{src.label}</span>
@@ -571,17 +645,15 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
           </div>
         </div>
 
-        {/* ── Configure ─────────────────────────────────────────── */}
+        {/* Configure */}
         <div className="p-3 space-y-3">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide">Configure</p>
-
           <div>
             <label className="block text-[9px] text-gray-500 mb-1">Name</label>
             <input value={draft.name} onChange={e => setDraft(f => ({ ...f, name: e.target.value }))}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
           </div>
 
-          {/* System prompt */}
           <div>
             <label className="block text-[9px] text-gray-500 mb-1">System Prompt</label>
             {varKeys.length > 0 && (
@@ -600,7 +672,6 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
           </div>
 
-          {/* User prompt */}
           <div>
             <label className="block text-[9px] text-gray-500 mb-1">User Prompt</label>
             {varKeys.length > 0 && (
@@ -619,7 +690,6 @@ function AgentSettingsPanel({ step, allAgents, prevStepClass, onChangeStep, onSa
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
           </div>
 
-          {/* Model collapsible */}
           <div className="border border-gray-800 rounded-xl overflow-hidden">
             <button onClick={() => setShowModel(s => !s)}
               className="w-full flex items-center justify-between px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-xs">
@@ -682,7 +752,6 @@ function InputSettingsPanel({ inp, step, agent, onChangeStep, onClose }: {
           <X className="w-4 h-4" />
         </button>
       </div>
-
       <div className="p-3 space-y-4 overflow-y-auto">
         <div>
           <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2.5">Select source</p>
@@ -693,7 +762,6 @@ function InputSettingsPanel({ inp, step, agent, onChangeStep, onClose }: {
             onChangeStep({ ...step, input_overrides: overrides });
           }} />
         </div>
-
         <div className="flex items-center gap-1.5 text-[9px] text-gray-600 pt-1 border-t border-gray-800">
           <span>Default:</span>
           <span className={cn("flex items-center gap-1 px-1.5 py-0.5 rounded-full border", defaultSrc.badge)}>
@@ -701,7 +769,6 @@ function InputSettingsPanel({ inp, step, agent, onChangeStep, onClose }: {
           </span>
           {isOverridden && <span className="text-amber-500 ml-1">overridden</span>}
         </div>
-
         <div className="space-y-1 pt-1 border-t border-gray-800">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-1.5">Sources</p>
           {INPUT_SOURCES.map(s => {
@@ -894,6 +961,36 @@ export default function AgentsPage() {
     mutate(`${API}/universal-agents`);
   }
 
+  // Add a new input directly from the canvas + button
+  async function addInputToStep(stepIdx: number) {
+    const step  = pipelineForm.steps[stepIdx];
+    const agent = allAgents.find(a => a.id === step.agent_id);
+    if (!agent) {
+      // No agent yet — open agent settings so they can pick one first
+      setSelection({ type: "agent", stepIdx });
+      return;
+    }
+    const newKey    = `input_${agent.inputs.length + 1}`;
+    const newInputs = [...agent.inputs, { key: newKey, source: "transcript" as SourceValue }];
+    await saveNodeAgent(agent.id, { ...agent, inputs: newInputs });
+    setSelection({ type: "input", stepIdx, inputKey: newKey });
+  }
+
+  // Remove an input directly from the canvas × button
+  async function removeInputFromStep(stepIdx: number, inputKey: string) {
+    const step  = pipelineForm.steps[stepIdx];
+    const agent = allAgents.find(a => a.id === step.agent_id);
+    if (!agent) return;
+    const newInputs = agent.inputs.filter(i => i.key !== inputKey);
+    await saveNodeAgent(agent.id, { ...agent, inputs: newInputs });
+    // Clear selection if this input was selected
+    if (
+      selection?.type === "input" &&
+      selection.stepIdx === stepIdx &&
+      (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey === inputKey
+    ) setSelection(null);
+  }
+
   async function importPresets() {
     setImporting(true); setImportResult(null);
     try {
@@ -967,7 +1064,7 @@ export default function AgentsPage() {
       {/* Main layout */}
       <div className="flex-1 min-h-0 flex bg-gray-950">
 
-        {/* Left: pipeline list + palette */}
+        {/* Left: pipeline list + class palette */}
         <div className="w-44 shrink-0 border-r border-gray-800 flex flex-col">
           <div className="p-2 border-b border-gray-800">
             <div className="flex items-center justify-between mb-2 px-0.5">
@@ -1006,14 +1103,14 @@ export default function AgentsPage() {
 
         {/* Center: canvas */}
         <div
-          className="flex-1 min-w-0 overflow-auto flex items-start pt-10 pb-8 px-8"
+          className="flex-1 min-w-0 overflow-auto flex items-start pt-8 pb-8 px-8"
           onClick={e => { if (e.currentTarget === e.target) setSelection(null); }}
         >
           {!showCanvas ? (
             <div className="flex-1 flex flex-col items-center justify-center min-h-full gap-3 text-gray-700 pointer-events-none">
               <Workflow className="w-14 h-14 opacity-10" />
               <p className="text-sm">Select a pipeline or click New</p>
-              <p className="text-xs text-gray-800">Then click an element on the left to add it</p>
+              <p className="text-xs text-gray-800">Then click an element type on the left to add it</p>
             </div>
           ) : pipelineForm.steps.length === 0 ? (
             <div className="flex-1 flex items-center justify-center min-h-48 pointer-events-none">
@@ -1023,10 +1120,7 @@ export default function AgentsPage() {
               </div>
             </div>
           ) : (
-            // items-end aligns all node columns to their bottom edge;
-            // because INPUT_PORT_AREA_H and OUTPUT_PORT_AREA_H are fixed,
-            // card bodies land at the same vertical position across all nodes.
-            <div className="flex items-end flex-nowrap">
+            <div className="flex items-start flex-nowrap gap-0">
               {pipelineForm.steps.map((step, i) => (
                 <StepCard
                   key={i}
@@ -1038,6 +1132,8 @@ export default function AgentsPage() {
                   onRemove={() => removeStep(i)}
                   onMoveLeft={() => moveStep(i, -1)}
                   onMoveRight={() => moveStep(i, 1)}
+                  onAddInput={() => addInputToStep(i)}
+                  onRemoveInput={key => removeInputFromStep(i, key)}
                 />
               ))}
             </div>
