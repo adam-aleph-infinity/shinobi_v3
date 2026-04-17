@@ -5,6 +5,8 @@ import {
   Bot, Plus, Trash2, Check, Loader2, ChevronDown, ChevronUp,
   Settings2, X, GripVertical, ArrowUp, ArrowDown, Workflow, Download,
   Play, AlertCircle, Clock, CheckCircle2, SkipForward,
+  User, Star, StickyNote, Shield, Zap,
+  Mic2, Layers, BookOpen, Link2, PenLine, TriangleAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppCtx } from "@/lib/app-context";
@@ -43,19 +45,57 @@ function ModelSelect({ value, onChange, accentColor = "indigo" }: {
 // ── Input source definitions ──────────────────────────────────────────────────
 
 const INPUT_SOURCES = [
-  { value: "transcript",        label: "Transcript",         badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",   desc: "Single call transcript" },
-  { value: "merged_transcript", label: "Merged Transcript",  badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",   desc: "All calls for the pair merged into one document" },
-  { value: "notes",             label: "Notes",              badge: "bg-green-900/50 text-green-300 border-green-700/50", desc: "Call notes for a specific call" },
-  { value: "merged_notes",      label: "Merged Notes",       badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",   desc: "All notes aggregated across the pair" },
-  { value: "agent_output",      label: "Agent Output",       badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", desc: "Output of another specific agent" },
-  { value: "chain_previous",    label: "Previous Step",      badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",  desc: "Output of the immediately preceding pipeline step" },
-  { value: "manual",            label: "Manual Input",       badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",   desc: "User provides content at run time" },
+  { value: "transcript",        label: "Transcript",        icon: Mic2,       badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",      desc: "Single call transcript" },
+  { value: "merged_transcript", label: "Merged Transcript", icon: Layers,     badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",      desc: "All calls for the pair merged into one document" },
+  { value: "notes",             label: "Notes",             icon: StickyNote, badge: "bg-green-900/50 text-green-300 border-green-700/50",   desc: "Call notes for a specific call" },
+  { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,   badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",      desc: "All notes aggregated across the pair" },
+  { value: "agent_output",      label: "Agent Output",      icon: Bot,        badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", desc: "Output of another specific agent" },
+  { value: "chain_previous",    label: "Prev Step",         icon: Link2,      badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",   desc: "Output of the immediately preceding pipeline step" },
+  { value: "manual",            label: "Manual",            icon: PenLine,    badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",      desc: "User provides content at run time" },
 ] as const;
 
 type SourceValue = typeof INPUT_SOURCES[number]["value"];
 
 function sourceBadge(source: string) {
   return INPUT_SOURCES.find(s => s.value === source) ?? INPUT_SOURCES[6];
+}
+
+// ── Agent class icons + connection rules ──────────────────────────────────────
+
+const CLASS_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
+  persona:    User,
+  scorer:     Star,
+  notes:      StickyNote,
+  compliance: Shield,
+  general:    Zap,
+};
+
+const CLASS_ICON_BG: Record<string, string> = {
+  persona:    "bg-violet-900/60",
+  scorer:     "bg-violet-800/40",
+  notes:      "bg-teal-900/60",
+  compliance: "bg-teal-800/40",
+  general:    "bg-sky-900/60",
+};
+
+// A step of these classes must follow the specified upstream class
+const CLASS_REQUIRES_PREV: Record<string, string> = {
+  scorer:     "persona",
+  compliance: "notes",
+};
+
+function AgentClassIcon({ cls, size = "md" }: { cls: string; size?: "sm" | "md" | "lg" }) {
+  const norm = cls.toLowerCase();
+  const Icon = CLASS_ICON[norm] ?? Bot;
+  const bg   = CLASS_ICON_BG[norm] ?? "bg-gray-800";
+  const meta = classMeta(norm);
+  const dims     = { sm: "w-6 h-6", md: "w-8 h-8", lg: "w-10 h-10" }[size];
+  const iconDims = { sm: "w-3 h-3", md: "w-4 h-4", lg: "w-5 h-5" }[size];
+  return (
+    <div className={cn("rounded-lg flex items-center justify-center shrink-0", bg, dims)}>
+      <Icon className={cn(iconDims, meta.textColor)} />
+    </div>
+  );
 }
 
 // ── Universal Agent types ─────────────────────────────────────────────────────
@@ -703,16 +743,109 @@ function StepConnector() {
   );
 }
 
-// ── StepCard — collapsible Relevance-AI-style step card ───────────────────────
+// ── SourcePillGrid — visual clickable pill selector for input source ──────────
+
+function SourcePillGrid({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {INPUT_SOURCES.map(s => {
+        const Icon = s.icon;
+        const isSelected = value === s.value;
+        return (
+          <button
+            key={s.value}
+            onClick={() => onChange(s.value)}
+            title={s.desc}
+            className={cn(
+              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-medium border transition-all",
+              isSelected
+                ? s.badge
+                : "border-gray-700 bg-gray-800/40 text-gray-500 hover:text-gray-300 hover:border-gray-600",
+            )}
+          >
+            <Icon className="w-3 h-3 shrink-0" />
+            {s.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── AgentPickerGrid — searchable visual grid for picking an agent ─────────────
+
+function AgentPickerGrid({
+  value, allAgents, prevStepClass, onPick,
+}: {
+  value: string;
+  allAgents: UniversalAgent[];
+  prevStepClass?: string;
+  onPick: (agentId: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const filtered = allAgents.filter(a =>
+    a.name.toLowerCase().includes(search.toLowerCase()) ||
+    (a.agent_class ?? "").toLowerCase().includes(search.toLowerCase())
+  );
+  return (
+    <div className="space-y-2">
+      <input
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        placeholder="Search agents…"
+        className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-600 outline-none focus:border-indigo-500"
+      />
+      <div className="grid grid-cols-2 gap-1.5 max-h-52 overflow-y-auto">
+        {filtered.map(a => {
+          const meta      = classMeta(a.agent_class ?? "");
+          const reqPrev   = CLASS_REQUIRES_PREV[a.agent_class?.toLowerCase() ?? ""];
+          const compatible = !reqPrev || !prevStepClass || reqPrev === prevStepClass.toLowerCase();
+          const isSelected = value === a.id;
+          return (
+            <button
+              key={a.id}
+              onClick={() => onPick(a.id)}
+              title={!compatible ? `${meta.label} agents must follow a ${reqPrev} step` : a.description}
+              className={cn(
+                "flex items-center gap-2 p-2 rounded-lg border text-left transition-colors",
+                isSelected
+                  ? cn(meta.borderColor, "bg-gray-800")
+                  : compatible
+                    ? "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 hover:border-gray-600"
+                    : "border-gray-800/30 bg-gray-900/40 opacity-40 hover:opacity-60",
+              )}
+            >
+              <AgentClassIcon cls={a.agent_class ?? ""} size="sm" />
+              <div className="min-w-0 flex-1">
+                <p className={cn("text-[10px] font-medium truncate leading-tight", isSelected ? "text-white" : compatible ? "text-gray-300" : "text-gray-600")}>
+                  {a.name}
+                </p>
+                <p className={cn("text-[9px] leading-tight", meta.textColor)}>{meta.label}</p>
+              </div>
+              {isSelected    && <Check className="w-3 h-3 text-white shrink-0" />}
+              {!compatible && !isSelected && <TriangleAlert className="w-3 h-3 text-amber-600 shrink-0" />}
+            </button>
+          );
+        })}
+        {filtered.length === 0 && (
+          <p className="col-span-2 text-xs text-gray-600 italic text-center py-3">No agents match</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── StepCard — full visual pipeline step card ─────────────────────────────────
 
 function StepCard({
-  step, index, total, allAgents,
+  step, index, total, allAgents, prevStepClass,
   onChange, onRemove, onMove,
 }: {
   step: PipelineStep;
   index: number;
   total: number;
   allAgents: UniversalAgent[];
+  prevStepClass?: string;
   onChange: (s: PipelineStep) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
@@ -720,29 +853,34 @@ function StepCard({
   const agent = allAgents.find(a => a.id === step.agent_id);
   const [expanded, setExpanded] = useState(!step.agent_id);
   const meta = agent ? classMeta(agent.agent_class ?? "") : null;
-
   const accentBorder = meta ? meta.borderColor : "border-gray-700/60";
-  const accentText   = meta ? meta.textColor   : "text-gray-500";
+
+  // Connection compatibility check
+  const reqPrev = agent ? (CLASS_REQUIRES_PREV[agent.agent_class?.toLowerCase() ?? ""] ?? null) : null;
+  const compatibleWithPrev = !reqPrev || !prevStepClass || reqPrev === prevStepClass.toLowerCase();
 
   return (
     <div className={cn(
       "group border rounded-xl overflow-hidden bg-gray-900 border-l-2",
       accentBorder,
+      !compatibleWithPrev && "border-amber-600/60",
     )}>
       {/* Header — always visible, click to expand/collapse */}
       <div
         className="flex items-center gap-2 px-3 py-2.5 cursor-pointer select-none hover:bg-gray-800/40 transition-colors"
         onClick={() => setExpanded(e => !e)}
       >
-        {/* Step number circle */}
-        <span className={cn(
-          "w-5 h-5 rounded-full bg-gray-800 text-[9px] font-bold flex items-center justify-center shrink-0",
-          accentText,
-        )}>
-          {index + 1}
-        </span>
+        {/* Agent class icon (large) or step number placeholder */}
+        {agent
+          ? <AgentClassIcon cls={agent.agent_class ?? ""} size="md" />
+          : (
+            <div className="w-8 h-8 rounded-lg bg-gray-800 flex items-center justify-center shrink-0">
+              <span className="text-[10px] font-bold text-gray-500">{index + 1}</span>
+            </div>
+          )
+        }
 
-        {/* Agent name + class badge */}
+        {/* Agent name + class badge + connection warning */}
         <div className="flex-1 min-w-0">
           {agent ? (
             <div className="flex items-center gap-1.5 flex-wrap">
@@ -755,20 +893,36 @@ function StepCard({
                   {meta.label}
                 </span>
               )}
+              {!compatibleWithPrev && (
+                <span className="flex items-center gap-0.5 text-[9px] text-amber-400 bg-amber-900/30 border border-amber-700/40 rounded px-1 py-0 shrink-0">
+                  <TriangleAlert className="w-2.5 h-2.5 shrink-0" />
+                  needs {reqPrev}
+                </span>
+              )}
             </div>
           ) : (
-            <span className="text-xs italic text-gray-600">Pick an agent…</span>
+            <span className="text-xs italic text-gray-500">Pick an agent…</span>
           )}
 
-          {/* Input source badges — collapsed view only */}
+          {/* Input source pills — collapsed view only */}
           {agent && !expanded && (agent.inputs ?? []).length > 0 && (
-            <div className="flex flex-wrap gap-0.5 mt-0.5">
+            <div className="flex flex-wrap gap-1 mt-1">
               {agent.inputs.map(inp => {
                 const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
                 const s = sourceBadge(effectiveSource);
+                const SrcIcon = s.icon;
+                const isOverridden = !!step.input_overrides[inp.key] && step.input_overrides[inp.key] !== inp.source;
                 return (
-                  <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>
-                    {inp.key} ← {s.label}
+                  <span
+                    key={inp.key}
+                    className={cn(
+                      "flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border font-medium",
+                      s.badge,
+                      isOverridden && "ring-1 ring-amber-500/40",
+                    )}
+                  >
+                    <SrcIcon className="w-2.5 h-2.5 shrink-0" />
+                    {inp.key}
                   </span>
                 );
               })}
@@ -810,53 +964,47 @@ function StepCard({
       {/* Expanded body */}
       {expanded && (
         <div className="border-t border-gray-800 px-3 pb-3 pt-2.5 bg-gray-950/60 space-y-3">
-          {/* Agent picker */}
+          {/* Agent picker grid */}
           <div>
-            <label className="block text-[9px] text-gray-600 uppercase tracking-wide mb-1">Agent</label>
-            <select
+            <label className="block text-[9px] text-gray-600 uppercase tracking-wide mb-1.5">Agent</label>
+            <AgentPickerGrid
               value={step.agent_id}
-              onChange={e => {
-                const id = e.target.value;
+              allAgents={allAgents}
+              prevStepClass={prevStepClass}
+              onPick={id => {
                 onChange({ agent_id: id, input_overrides: {} });
                 if (id) setExpanded(false);
               }}
-              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
-            >
-              <option value="">— pick agent —</option>
-              {allAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            />
           </div>
 
-          {/* Input sources / overrides */}
+          {/* Input source overrides with visual pills */}
           {agent && (agent.inputs ?? []).length > 0 && (
-            <div className="space-y-1.5">
+            <div className="space-y-2.5">
               <label className="block text-[9px] text-gray-600 uppercase tracking-wide">Input sources</label>
               {agent.inputs.map(inp => {
-                const overrideVal = step.input_overrides[inp.key] ?? "";
-                const effectiveSource = overrideVal || inp.source;
+                const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
+                const isOverridden = !!step.input_overrides[inp.key] && step.input_overrides[inp.key] !== inp.source;
                 return (
-                  <div key={inp.key} className="flex items-center gap-2">
-                    <span className="text-[10px] text-amber-400 w-20 truncate shrink-0">{`{${inp.key}}`}</span>
-                    <select
+                  <div key={inp.key} className="space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-amber-400 font-mono">{`{${inp.key}}`}</span>
+                      {isOverridden && (
+                        <span className="text-[9px] text-amber-500 border border-amber-700/40 rounded px-1">overridden</span>
+                      )}
+                      {!isOverridden && (
+                        <span className="text-[9px] text-gray-600">default</span>
+                      )}
+                    </div>
+                    <SourcePillGrid
                       value={effectiveSource}
-                      onChange={e => {
-                        const val = e.target.value;
+                      onChange={val => {
                         const overrides = { ...step.input_overrides };
                         if (val === inp.source) delete overrides[inp.key];
                         else overrides[inp.key] = val;
                         onChange({ ...step, input_overrides: overrides });
                       }}
-                      className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500"
-                    >
-                      {INPUT_SOURCES.map(s => (
-                        <option key={s.value} value={s.value}>
-                          {s.label}{s.value === inp.source ? " (default)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                    {overrideVal && overrideVal !== inp.source && (
-                      <span className="text-[9px] text-amber-500 shrink-0">overridden</span>
-                    )}
+                    />
                   </div>
                 );
               })}
@@ -1295,6 +1443,7 @@ function PipelinesTab() {
                       <StepCard
                         step={step} index={i} total={form.steps.length}
                         allAgents={allAgents}
+                        prevStepClass={i > 0 ? allAgents.find(a => a.id === form.steps[i - 1]?.agent_id)?.agent_class : undefined}
                         onChange={s => updateStep(i, s)}
                         onRemove={() => removeStep(i)}
                         onMove={dir => moveStep(i, dir)}
