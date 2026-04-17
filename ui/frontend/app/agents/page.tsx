@@ -1,16 +1,14 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import {
   Bot, Plus, Trash2, Check, Loader2, ChevronDown, ChevronUp,
-  Settings2, X, GripVertical, ArrowUp, ArrowDown, Workflow, Download,
-  Play, AlertCircle, Clock, CheckCircle2, SkipForward,
+  Settings2, X, ArrowUp, ArrowDown, Workflow, Download,
   User, Star, StickyNote, Shield, Zap,
   Mic2, Layers, BookOpen, Link2, PenLine, TriangleAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppCtx } from "@/lib/app-context";
-import { SectionContent } from "@/components/shared/SectionCards";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
@@ -45,13 +43,13 @@ function ModelSelect({ value, onChange, accentColor = "indigo" }: {
 // ── Input source definitions ──────────────────────────────────────────────────
 
 const INPUT_SOURCES = [
-  { value: "transcript",        label: "Transcript",        icon: Mic2,       badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",      desc: "Single call transcript" },
-  { value: "merged_transcript", label: "Merged Transcript", icon: Layers,     badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",      desc: "All calls for the pair merged into one document" },
-  { value: "notes",             label: "Notes",             icon: StickyNote, badge: "bg-green-900/50 text-green-300 border-green-700/50",   desc: "Call notes for a specific call" },
-  { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,   badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",      desc: "All notes aggregated across the pair" },
+  { value: "transcript",        label: "Transcript",        icon: Mic2,       badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",       desc: "Single call transcript" },
+  { value: "merged_transcript", label: "Merged Transcript", icon: Layers,     badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",       desc: "All calls for the pair merged into one document" },
+  { value: "notes",             label: "Notes",             icon: StickyNote, badge: "bg-green-900/50 text-green-300 border-green-700/50",    desc: "Call notes for a specific call" },
+  { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,   badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",       desc: "All notes aggregated across the pair" },
   { value: "agent_output",      label: "Agent Output",      icon: Bot,        badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", desc: "Output of another specific agent" },
-  { value: "chain_previous",    label: "Prev Step",         icon: Link2,      badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",   desc: "Output of the immediately preceding pipeline step" },
-  { value: "manual",            label: "Manual",            icon: PenLine,    badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",      desc: "User provides content at run time" },
+  { value: "chain_previous",    label: "Prev Step",         icon: Link2,      badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",    desc: "Output of the immediately preceding pipeline step" },
+  { value: "manual",            label: "Manual",            icon: PenLine,    badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",       desc: "User provides content at run time" },
 ] as const;
 
 type SourceValue = typeof INPUT_SOURCES[number]["value"];
@@ -163,20 +161,13 @@ const EMPTY_PIPELINE: Omit<Pipeline, "id" | "created_at"> = {
 // ── InputRow — one input entry in the agent builder ──────────────────────────
 
 function InputRow({
-  input,
-  agents,
-  onChange,
-  onRemove,
+  input, agents, onChange, onRemove,
 }: {
-  input: AgentInput;
-  agents: UniversalAgent[];
-  onChange: (updated: AgentInput) => void;
-  onRemove: () => void;
+  input: AgentInput; agents: UniversalAgent[];
+  onChange: (updated: AgentInput) => void; onRemove: () => void;
 }) {
-  const info = sourceBadge(input.source);
   return (
     <div className="flex items-start gap-2 p-2.5 bg-gray-800/40 border border-gray-700/60 rounded-lg">
-      {/* key */}
       <div className="flex flex-col gap-0.5 w-28 shrink-0">
         <label className="text-[9px] text-gray-600 uppercase tracking-wide">Variable</label>
         <div className="flex items-center">
@@ -190,8 +181,6 @@ function InputRow({
           <span className="text-gray-500 text-xs ml-0.5">{"}"}</span>
         </div>
       </div>
-
-      {/* source */}
       <div className="flex flex-col gap-0.5 flex-1 min-w-0">
         <label className="text-[9px] text-gray-600 uppercase tracking-wide">Source</label>
         <select
@@ -199,13 +188,9 @@ function InputRow({
           onChange={e => onChange({ ...input, source: e.target.value as SourceValue, agent_id: undefined })}
           className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white outline-none focus:border-indigo-500"
         >
-          {INPUT_SOURCES.map(s => (
-            <option key={s.value} value={s.value}>{s.label}</option>
-          ))}
+          {INPUT_SOURCES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
       </div>
-
-      {/* agent picker — only when source === agent_output */}
       {input.source === "agent_output" && (
         <div className="flex flex-col gap-0.5 flex-1 min-w-0">
           <label className="text-[9px] text-gray-600 uppercase tracking-wide">Agent</label>
@@ -219,12 +204,7 @@ function InputRow({
           </select>
         </div>
       )}
-
-      {/* remove */}
-      <button
-        onClick={onRemove}
-        className="mt-4 text-gray-600 hover:text-red-400 transition-colors shrink-0"
-      >
+      <button onClick={onRemove} className="mt-4 text-gray-600 hover:text-red-400 transition-colors shrink-0">
         <X className="w-3.5 h-3.5" />
       </button>
     </div>
@@ -246,7 +226,6 @@ function VariableHint({ inputs }: { inputs: AgentInput[] }) {
 
 // ── Agent class grouping ──────────────────────────────────────────────────────
 
-/** Which classes are sub-classes of which parent. */
 const CLASS_PARENT: Record<string, string> = {
   scorer:     "persona",
   compliance: "notes",
@@ -280,11 +259,9 @@ function groupAgents(agents: UniversalAgent[]): AgentGroup[] {
     if (!byClass[cls]) byClass[cls] = [];
     byClass[cls].push(a);
   }
-
   const PARENT_ORDER = ["persona", "notes", "general"];
   const usedClasses = new Set<string>();
   const result: AgentGroup[] = [];
-
   for (const parentCls of PARENT_ORDER) {
     const children = Object.entries(CLASS_PARENT)
       .filter(([, p]) => p === parentCls)
@@ -296,114 +273,115 @@ function groupAgents(agents: UniversalAgent[]): AgentGroup[] {
     usedClasses.add(parentCls);
     children.forEach(c => usedClasses.add(c.cls));
   }
-
-  // Any remaining classes not in the hierarchy
   for (const [cls, list] of Object.entries(byClass)) {
     if (!usedClasses.has(cls)) result.push({ cls, agents: list, subGroups: [] });
   }
-
   return result;
 }
 
-function AgentRow({ agent, selected, onSelect }: {
-  agent: UniversalAgent; selected: string | null; onSelect: (a: UniversalAgent) => void;
+// ── Agent Library Card ────────────────────────────────────────────────────────
+
+function AgentLibraryCard({ agent, isEditing, onEdit, onAdd }: {
+  agent: UniversalAgent;
+  isEditing: boolean;
+  onEdit: () => void;
+  onAdd: () => void;
 }) {
   const { setActiveAgent, activeAgentId } = useAppCtx();
   const isActive = activeAgentId === agent.id;
+  const meta = classMeta(agent.agent_class ?? "");
 
   return (
     <div className={cn(
-      "group flex items-center rounded-lg text-xs transition-colors",
-      selected === agent.id
-        ? "bg-indigo-600/20 border border-indigo-600/30"
-        : "hover:bg-gray-800",
+      "group flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors",
+      isEditing ? "bg-indigo-900/20" : "hover:bg-gray-800/60",
     )}>
-      <button onClick={() => onSelect(agent)} className="flex-1 min-w-0 text-left px-2.5 py-2">
-        <div className="flex items-center gap-1.5">
-          <Bot className="w-3 h-3 text-indigo-400 shrink-0" />
-          <span className={cn("font-medium truncate flex-1", selected === agent.id ? "text-white" : "text-gray-400 group-hover:text-white")}>
-            {agent.name}
-          </span>
-          {isActive && <span className="text-[9px] bg-violet-900/60 text-violet-400 border border-violet-700/50 px-1 rounded shrink-0">active</span>}
-          {agent.is_default && !isActive && <span className="text-[9px] bg-indigo-900 text-indigo-400 px-1 rounded shrink-0">default</span>}
+      <AgentClassIcon cls={agent.agent_class ?? ""} size="sm" />
+      <div className="flex-1 min-w-0">
+        <p className={cn("text-[11px] font-medium truncate", isEditing ? "text-white" : "text-gray-300")}>
+          {agent.name}
+        </p>
+        <div className="flex items-center gap-1">
+          <span className={cn("text-[8px]", meta.textColor)}>{meta.label}</span>
+          {isActive && <span className="text-[8px] bg-violet-900/60 text-violet-400 border border-violet-700/50 px-0.5 rounded">active</span>}
+          {agent.is_default && !isActive && <span className="text-[8px] bg-indigo-900 text-indigo-400 px-0.5 rounded">default</span>}
         </div>
-        <div className="mt-0.5 pl-[18px] flex flex-wrap gap-0.5">
-          {(agent.inputs ?? []).slice(0, 3).map(inp => {
-            const s = sourceBadge(inp.source);
-            return <span key={inp.key} className={cn("text-[9px] px-1 py-0 rounded border", s.badge)}>{inp.key || s.label}</span>;
-          })}
-          {(agent.inputs ?? []).length > 3 && <span className="text-[9px] text-gray-600">+{agent.inputs.length - 3}</span>}
-        </div>
-      </button>
-      <button
-        onClick={() => setActiveAgent(isActive ? "" : agent.id, isActive ? "" : agent.name, isActive ? "" : (agent.agent_class || ""))}
-        className={cn(
-          "shrink-0 mr-1.5 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border",
-          isActive
-            ? "opacity-100 bg-violet-900/60 border-violet-700/50 text-violet-300 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400"
-            : "opacity-0 group-hover:opacity-100 bg-gray-800 border-gray-700 text-gray-400 hover:bg-violet-900/40 hover:border-violet-700/50 hover:text-violet-300",
-        )}
-        title={isActive ? "Deselect agent" : "Set as active agent"}
-      >
-        {isActive ? "✓" : "use"}
-      </button>
+      </div>
+      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+        <button
+          onClick={() => setActiveAgent(isActive ? "" : agent.id, isActive ? "" : agent.name, isActive ? "" : (agent.agent_class ?? ""))}
+          title={isActive ? "Deselect" : "Set as active agent"}
+          className={cn(
+            "p-1 rounded transition-colors",
+            isActive ? "text-violet-400" : "text-gray-600 hover:text-violet-400",
+          )}
+        >
+          <Check className="w-2.5 h-2.5" />
+        </button>
+        <button onClick={onEdit} title="Edit agent" className="p-1 text-gray-600 hover:text-gray-300 transition-colors">
+          <Settings2 className="w-3 h-3" />
+        </button>
+        <button onClick={onAdd} title="Add to pipeline" className="p-1 text-gray-600 hover:text-teal-400 transition-colors">
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </div>
     </div>
   );
 }
 
-function SubGroupSection({ sub, selected, onSelect }: {
+function LibrarySubGroup({ sub, editingId, onEdit, onAdd }: {
   sub: { cls: string; agents: UniversalAgent[] };
-  selected: string | null;
-  onSelect: (a: UniversalAgent) => void;
+  editingId: string | null;
+  onEdit: (a: UniversalAgent) => void;
+  onAdd: (id: string) => void;
 }) {
   const meta = classMeta(sub.cls);
   const [open, setOpen] = useState(true);
   return (
     <div className={cn("ml-2.5 pl-2.5 border-l border-dashed mt-1.5", meta.borderColor)}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-1.5 px-1 py-0.5 rounded hover:bg-gray-800/40 transition-colors text-left mb-0.5"
-      >
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-1.5 px-1 py-0.5 rounded hover:bg-gray-800/40 transition-colors text-left mb-0.5">
         <div className={cn("w-1 h-1 rounded-full shrink-0", meta.dotColor)} />
-        <span className={cn("flex-1 text-[9px] font-semibold uppercase tracking-wider", meta.textColor)}>
-          {meta.label}
-        </span>
+        <span className={cn("flex-1 text-[9px] font-semibold uppercase tracking-wider", meta.textColor)}>{meta.label}</span>
         <span className="text-[9px] text-gray-600 mr-0.5">{sub.agents.length}</span>
         {open ? <ChevronUp className="w-3 h-3 text-gray-600" /> : <ChevronDown className="w-3 h-3 text-gray-600" />}
       </button>
       {open && (
         <div className="space-y-0.5">
-          {sub.agents.map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
+          {sub.agents.map(a => (
+            <AgentLibraryCard key={a.id} agent={a} isEditing={editingId === a.id}
+              onEdit={() => onEdit(a)} onAdd={() => onAdd(a.id)} />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function AgentGroupSection({ group, selected, onSelect }: {
-  group: AgentGroup; selected: string | null; onSelect: (a: UniversalAgent) => void;
+function LibraryGroup({ group, editingId, onEdit, onAdd }: {
+  group: AgentGroup; editingId: string | null;
+  onEdit: (a: UniversalAgent) => void; onAdd: (id: string) => void;
 }) {
   const meta = classMeta(group.cls);
   const total = group.agents.length + group.subGroups.reduce((s, g) => s + g.agents.length, 0);
   const [open, setOpen] = useState(total > 0);
   return (
     <div className="mb-2">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-800/60 transition-colors text-left"
-      >
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-800/60 transition-colors text-left">
         <div className={cn("w-1.5 h-1.5 rounded-full shrink-0", meta.dotColor)} />
-        <span className={cn("flex-1 text-[10px] font-semibold uppercase tracking-wider", meta.textColor)}>
-          {meta.label}
-        </span>
+        <span className={cn("flex-1 text-[10px] font-semibold uppercase tracking-wider", meta.textColor)}>{meta.label}</span>
         <span className="text-[9px] text-gray-600 tabular-nums mr-0.5">{total}</span>
         {open ? <ChevronUp className="w-3 h-3 text-gray-600" /> : <ChevronDown className="w-3 h-3 text-gray-600" />}
       </button>
       {open && (
         <div className="space-y-0.5 ml-1 mt-0.5">
-          {group.agents.map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
+          {group.agents.map(a => (
+            <AgentLibraryCard key={a.id} agent={a} isEditing={editingId === a.id}
+              onEdit={() => onEdit(a)} onAdd={() => onAdd(a.id)} />
+          ))}
           {group.subGroups.map(sub => (
-            <SubGroupSection key={sub.cls} sub={sub} selected={selected} onSelect={onSelect} />
+            <LibrarySubGroup key={sub.cls} sub={sub} editingId={editingId} onEdit={onEdit} onAdd={onAdd} />
           ))}
         </div>
       )}
@@ -411,327 +389,7 @@ function AgentGroupSection({ group, selected, onSelect }: {
   );
 }
 
-// ── Universal Agents Tab ──────────────────────────────────────────────────────
-
-function AgentsTab() {
-  const { mutate } = useSWRConfig();
-  const { data: agents, isLoading } = useSWR<UniversalAgent[]>(`${API}/universal-agents`, fetcher);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{ created_agents: string[]; created_pipelines: string[]; skipped: string[] } | null>(null);
-  const [form, setForm] = useState({ ...EMPTY_AGENT });
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [isNew, setIsNew] = useState(false);
-
-  const selectedAgent = agents?.find(a => a.id === selected);
-
-  function openNew() {
-    setSelected(null); setIsNew(true);
-    setForm({ ...EMPTY_AGENT }); setSaved(false);
-  }
-
-  function openEdit(a: UniversalAgent) {
-    setSelected(a.id); setIsNew(false);
-    setForm({
-      name: a.name, description: a.description ?? "",
-      agent_class: a.agent_class ?? "",
-      model: a.model, temperature: a.temperature ?? 0,
-      system_prompt: a.system_prompt ?? "", user_prompt: a.user_prompt ?? "",
-      inputs: a.inputs ?? [], output_format: a.output_format ?? "markdown",
-      tags: a.tags ?? [], is_default: a.is_default ?? false,
-    });
-    setSaved(false);
-  }
-
-  async function save() {
-    if (!form.name.trim()) return;
-    setSaving(true);
-    try {
-      const method = isNew ? "POST" : "PUT";
-      const url = isNew ? `${API}/universal-agents` : `${API}/universal-agents/${selected}`;
-      const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      const data = await res.json();
-      mutate(`${API}/universal-agents`);
-      if (isNew) setSelected(data.id ?? null);
-      setIsNew(false); setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } finally { setSaving(false); }
-  }
-
-  async function del() {
-    if (!selected || !confirm(`Delete agent "${form.name}"?`)) return;
-    await fetch(`${API}/universal-agents/${selected}`, { method: "DELETE" });
-    mutate(`${API}/universal-agents`);
-    setSelected(null); setIsNew(false);
-  }
-
-  async function setDefault() {
-    if (!selected) return;
-    await fetch(`${API}/universal-agents/${selected}/default`, { method: "PATCH" });
-    mutate(`${API}/universal-agents`);
-  }
-
-  function addInput() {
-    setForm(f => ({ ...f, inputs: [...f.inputs, { key: "", source: "transcript" as SourceValue }] }));
-  }
-
-  function updateInput(i: number, updated: AgentInput) {
-    setForm(f => { const ins = [...f.inputs]; ins[i] = updated; return { ...f, inputs: ins }; });
-  }
-
-  function removeInput(i: number) {
-    setForm(f => ({ ...f, inputs: f.inputs.filter((_, idx) => idx !== i) }));
-  }
-
-  async function importPresets() {
-    setImporting(true);
-    setImportResult(null);
-    try {
-      const res = await fetch(`${API}/universal-agents/import-presets`, { method: "POST" });
-      const data = await res.json();
-      mutate(`${API}/universal-agents`);
-      mutate(`${API}/pipelines`);
-      setImportResult(data);
-      setTimeout(() => setImportResult(null), 6000);
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  const showForm = isNew || selected !== null;
-
-  return (
-    <div className="flex h-full gap-0">
-      {/* Sidebar */}
-      <div className="w-56 shrink-0 border-r border-gray-800 flex flex-col">
-        <div className="p-3 border-b border-gray-800 space-y-2">
-          <button onClick={openNew}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors">
-            <Plus className="w-3.5 h-3.5" /> New Agent
-          </button>
-          <button onClick={importPresets} disabled={importing}
-            className="w-full flex items-center justify-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-xs border border-gray-700 rounded-lg transition-colors disabled:opacity-50">
-            {importing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-            Import presets
-          </button>
-          {importResult && (
-            <div className="text-[10px] text-gray-500 space-y-0.5">
-              {importResult.created_agents.length > 0 && (
-                <p className="text-green-500">+ {importResult.created_agents.length} agents, {importResult.created_pipelines.length} pipelines</p>
-              )}
-              {importResult.skipped.length > 0 && (
-                <p>Skipped {importResult.skipped.length} (already exist)</p>
-              )}
-              {importResult.created_agents.length === 0 && importResult.skipped.length === 0 && (
-                <p>Nothing to import</p>
-              )}
-            </div>
-          )}
-        </div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {isLoading && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-          {!isLoading && (agents ?? []).length === 0 && (
-            <p className="text-xs text-gray-600 text-center py-4">No agents yet</p>
-          )}
-          {groupAgents(agents ?? []).map(group => (
-            <AgentGroupSection key={group.cls} group={group} selected={selected} onSelect={openEdit} />
-          ))}
-        </div>
-      </div>
-
-      {/* Form */}
-      {showForm ? (
-        <div className="flex-1 min-w-0 overflow-y-auto p-6 space-y-5">
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white">{isNew ? "New Agent" : `Edit: ${selected ? form.name : ""}`}</h2>
-            <div className="flex items-center gap-2">
-              {selected && (
-                <>
-                  <button onClick={setDefault} disabled={selectedAgent?.is_default}
-                    className="text-xs px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors disabled:opacity-50">
-                    {selectedAgent?.is_default ? "Default ✓" : "Set default"}
-                  </button>
-                  <button onClick={del}
-                    className="text-xs px-2.5 py-1.5 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/50 rounded-lg transition-colors">
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </>
-              )}
-              <button onClick={save} disabled={saving || !form.name.trim()}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50">
-                {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
-                {saved ? "Saved" : "Save"}
-              </button>
-            </div>
-          </div>
-
-          {/* Identity section */}
-          <div className="border border-gray-800 rounded-xl p-4">
-            <label className="block text-[10px] text-gray-600 font-semibold uppercase tracking-wider mb-3">Identity</label>
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Name</label>
-                <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                  placeholder="e.g. Persona Scorer"
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Class</label>
-                <input value={form.agent_class} onChange={e => setForm(f => ({ ...f, agent_class: e.target.value }))}
-                  placeholder="persona / notes / compliance…"
-                  list="agent-class-list"
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-                <datalist id="agent-class-list">
-                  <option value="persona" />
-                  <option value="notes" />
-                  <option value="compliance" />
-                  <option value="scorer" />
-                  <option value="general" />
-                </datalist>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Description</label>
-                <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-                  placeholder="What does this agent do?"
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-              </div>
-            </div>
-          </div>
-
-          {/* Inputs */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs text-gray-400 font-medium">Inputs</label>
-              <button onClick={addInput}
-                className="flex items-center gap-1 text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors">
-                <Plus className="w-3 h-3" /> Add Input
-              </button>
-            </div>
-            {form.inputs.length === 0 && (
-              <p className="text-xs text-gray-600 italic py-2">No inputs defined. Add inputs to reference data in your prompts.</p>
-            )}
-            <div className="space-y-2">
-              {form.inputs.map((inp, i) => (
-                <InputRow key={i} input={inp} agents={agents ?? []}
-                  onChange={updated => updateInput(i, updated)} onRemove={() => removeInput(i)} />
-              ))}
-            </div>
-            <div className="mt-1.5"><VariableHint inputs={form.inputs} /></div>
-          </div>
-
-          {/* Prompts section */}
-          <div className="border border-gray-800 rounded-xl p-4">
-            <label className="block text-[10px] text-gray-600 font-semibold uppercase tracking-wider mb-3">Prompts</label>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="flex flex-col">
-                <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
-                {/* Variable hint chips */}
-                {form.inputs.filter(i => i.key).length > 0 && (
-                  <div className="flex flex-wrap gap-1 mb-1.5">
-                    {form.inputs.filter(i => i.key).map(i => (
-                      <button
-                        key={i.key}
-                        type="button"
-                        onClick={() => setForm(f => ({ ...f, system_prompt: f.system_prompt + `{${i.key}}` }))}
-                        className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 transition-colors font-mono"
-                      >
-                        {`{${i.key}}`}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <textarea
-                  value={form.system_prompt}
-                  onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
-                  rows={14} placeholder="You are a…"
-                  className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
-                />
-              </div>
-              <div className="flex flex-col">
-                <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
-                {/* Variable hint chips */}
-                {form.inputs.filter(i => i.key).length > 0 && (
-                  <div className="flex flex-wrap gap-1 mb-1.5">
-                    {form.inputs.filter(i => i.key).map(i => (
-                      <button
-                        key={i.key}
-                        type="button"
-                        onClick={() => setForm(f => ({ ...f, user_prompt: f.user_prompt + `{${i.key}}` }))}
-                        className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 transition-colors font-mono"
-                      >
-                        {`{${i.key}}`}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <textarea
-                  value={form.user_prompt}
-                  onChange={e => setForm(f => ({ ...f, user_prompt: e.target.value }))}
-                  rows={14} placeholder={"Analyse this:\n\n{transcript}"}
-                  className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
-                />
-                <div className="mt-1"><VariableHint inputs={form.inputs} /></div>
-              </div>
-            </div>
-          </div>
-
-          {/* Settings collapsible */}
-          <div className="border border-gray-800 rounded-xl overflow-hidden">
-            <button onClick={() => setShowSettings(s => !s)}
-              className="w-full flex items-center justify-between px-4 py-3 bg-gray-900 hover:bg-gray-800 transition-colors text-xs">
-              <span className="flex items-center gap-2 text-gray-300 font-medium">
-                <Settings2 className="w-3.5 h-3.5 text-gray-400" /> Settings
-              </span>
-              {showSettings ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
-            </button>
-            {showSettings && (
-              <div className="p-4 grid grid-cols-3 gap-4 border-t border-gray-800">
-                <div className="col-span-1">
-                  <label className="block text-xs text-gray-400 mb-1">Temperature</label>
-                  <input type="number" min={0} max={2} step={0.1} value={form.temperature}
-                    onChange={e => setForm(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500" />
-                </div>
-                <div className="col-span-1">
-                  <label className="block text-xs text-gray-400 mb-1">Output Format</label>
-                  <select value={form.output_format} onChange={e => setForm(f => ({ ...f, output_format: e.target.value }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500">
-                    <option value="markdown">Markdown</option>
-                    <option value="json">JSON</option>
-                    <option value="text">Plain text</option>
-                  </select>
-                </div>
-                <div className="col-span-1">
-                  <label className="block text-xs text-gray-400 mb-1">Tags</label>
-                  <input value={form.tags.join(", ")}
-                    onChange={e => setForm(f => ({ ...f, tags: e.target.value.split(",").map(t => t.trim()).filter(Boolean) }))}
-                    placeholder="notes, compliance, persona"
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-                </div>
-                <div className="col-span-3">
-                  <label className="block text-xs text-gray-400 mb-1">Model</label>
-                  <ModelSelect value={form.model} onChange={v => setForm(f => ({ ...f, model: v }))} />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center text-gray-600">
-          <div className="text-center space-y-3">
-            <Bot className="w-12 h-12 mx-auto opacity-20" />
-            <p className="text-sm">Select an agent or create a new one</p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── StepConnector — visual arrow between cards ────────────────────────────────
+// ── StepConnector ─────────────────────────────────────────────────────────────
 
 function StepConnector() {
   return (
@@ -743,7 +401,7 @@ function StepConnector() {
   );
 }
 
-// ── SourcePillGrid — visual clickable pill selector for input source ──────────
+// ── SourcePillGrid ────────────────────────────────────────────────────────────
 
 function SourcePillGrid({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
@@ -772,14 +430,12 @@ function SourcePillGrid({ value, onChange }: { value: string; onChange: (v: stri
   );
 }
 
-// ── AgentPickerGrid — searchable visual grid for picking an agent ─────────────
+// ── AgentPickerGrid ───────────────────────────────────────────────────────────
 
 function AgentPickerGrid({
   value, allAgents, prevStepClass, onPick,
 }: {
-  value: string;
-  allAgents: UniversalAgent[];
-  prevStepClass?: string;
+  value: string; allAgents: UniversalAgent[]; prevStepClass?: string;
   onPick: (agentId: string) => void;
 }) {
   const [search, setSearch] = useState("");
@@ -835,166 +491,113 @@ function AgentPickerGrid({
   );
 }
 
-// ── StepCard — full visual pipeline step card ─────────────────────────────────
+// ── Pipeline Step Card ────────────────────────────────────────────────────────
 
-function StepCard({
+function PipelineStepCard({
   step, index, total, allAgents, prevStepClass,
   onChange, onRemove, onMove,
 }: {
-  step: PipelineStep;
-  index: number;
-  total: number;
-  allAgents: UniversalAgent[];
-  prevStepClass?: string;
-  onChange: (s: PipelineStep) => void;
-  onRemove: () => void;
-  onMove: (dir: -1 | 1) => void;
+  step: PipelineStep; index: number; total: number;
+  allAgents: UniversalAgent[]; prevStepClass?: string;
+  onChange: (s: PipelineStep) => void; onRemove: () => void; onMove: (dir: -1 | 1) => void;
 }) {
   const agent = allAgents.find(a => a.id === step.agent_id);
   const [expanded, setExpanded] = useState(!step.agent_id);
   const meta = agent ? classMeta(agent.agent_class ?? "") : null;
-  const accentBorder = meta ? meta.borderColor : "border-gray-700/60";
 
-  // Connection compatibility check
   const reqPrev = agent ? (CLASS_REQUIRES_PREV[agent.agent_class?.toLowerCase() ?? ""] ?? null) : null;
   const compatibleWithPrev = !reqPrev || !prevStepClass || reqPrev === prevStepClass.toLowerCase();
 
   return (
     <div className={cn(
       "group border rounded-xl overflow-hidden bg-gray-900 border-l-2",
-      accentBorder,
-      !compatibleWithPrev && "border-amber-600/60",
+      meta ? meta.borderColor : "border-gray-700/60",
+      !compatibleWithPrev && "!border-amber-600/60",
     )}>
-      {/* Header — always visible, click to expand/collapse */}
+      {/* Header */}
       <div
-        className="flex items-center gap-2 px-3 py-2.5 cursor-pointer select-none hover:bg-gray-800/40 transition-colors"
-        onClick={() => setExpanded(e => !e)}
+        className="flex items-center gap-3 px-3 py-2.5 cursor-pointer select-none hover:bg-gray-800/40 transition-colors"
+        onClick={() => agent && setExpanded(e => !e)}
       >
-        {/* Agent class icon (large) or step number placeholder */}
-        {agent
-          ? <AgentClassIcon cls={agent.agent_class ?? ""} size="md" />
-          : (
-            <div className="w-8 h-8 rounded-lg bg-gray-800 flex items-center justify-center shrink-0">
-              <span className="text-[10px] font-bold text-gray-500">{index + 1}</span>
-            </div>
-          )
-        }
-
-        {/* Agent name + class badge + connection warning */}
+        <AgentClassIcon cls={agent?.agent_class ?? ""} size="md" />
         <div className="flex-1 min-w-0">
           {agent ? (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs font-semibold text-white truncate">{agent.name}</span>
-              {meta && (
-                <span className={cn(
-                  "text-[9px] px-1 py-0 rounded border shrink-0",
-                  meta.textColor, meta.borderColor,
-                )}>
-                  {meta.label}
-                </span>
-              )}
-              {!compatibleWithPrev && (
-                <span className="flex items-center gap-0.5 text-[9px] text-amber-400 bg-amber-900/30 border border-amber-700/40 rounded px-1 py-0 shrink-0">
-                  <TriangleAlert className="w-2.5 h-2.5 shrink-0" />
-                  needs {reqPrev}
-                </span>
-              )}
-            </div>
-          ) : (
-            <span className="text-xs italic text-gray-500">Pick an agent…</span>
-          )}
-
-          {/* Input source pills — collapsed view only */}
-          {agent && !expanded && (agent.inputs ?? []).length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-1">
-              {agent.inputs.map(inp => {
-                const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
-                const s = sourceBadge(effectiveSource);
-                const SrcIcon = s.icon;
-                const isOverridden = !!step.input_overrides[inp.key] && step.input_overrides[inp.key] !== inp.source;
-                return (
-                  <span
-                    key={inp.key}
-                    className={cn(
-                      "flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border font-medium",
-                      s.badge,
-                      isOverridden && "ring-1 ring-amber-500/40",
-                    )}
-                  >
-                    <SrcIcon className="w-2.5 h-2.5 shrink-0" />
-                    {inp.key}
+            <>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-xs font-semibold text-white">{agent.name}</span>
+                {meta && (
+                  <span className={cn("text-[9px] px-1 rounded border shrink-0", meta.textColor, meta.borderColor)}>
+                    {meta.label}
                   </span>
-                );
-              })}
-            </div>
+                )}
+                {!compatibleWithPrev && (
+                  <span className="flex items-center gap-0.5 text-[9px] text-amber-400 bg-amber-900/30 border border-amber-700/40 rounded px-1 shrink-0">
+                    <TriangleAlert className="w-2.5 h-2.5" /> needs {reqPrev}
+                  </span>
+                )}
+              </div>
+              {!expanded && (agent.inputs ?? []).length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-0.5">
+                  {agent.inputs.map(inp => {
+                    const s = sourceBadge(step.input_overrides[inp.key] ?? inp.source);
+                    const SrcIcon = s.icon;
+                    return (
+                      <span key={inp.key} className={cn("flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border font-medium", s.badge)}>
+                        <SrcIcon className="w-2.5 h-2.5 shrink-0" />{inp.key}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          ) : (
+            <span className="text-xs italic text-gray-500">No agent — click + in the left panel</span>
           )}
         </div>
 
-        {/* Up/Down/Remove — visible on hover */}
+        {/* Move / remove */}
         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-          <button
-            onClick={e => { e.stopPropagation(); onMove(-1); }}
-            disabled={index === 0}
-            className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30 transition-colors"
-          >
+          <button onClick={e => { e.stopPropagation(); onMove(-1); }} disabled={index === 0}
+            className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30 transition-colors">
             <ArrowUp className="w-3 h-3" />
           </button>
-          <button
-            onClick={e => { e.stopPropagation(); onMove(1); }}
-            disabled={index === total - 1}
-            className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30 transition-colors"
-          >
+          <button onClick={e => { e.stopPropagation(); onMove(1); }} disabled={index === total - 1}
+            className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30 transition-colors">
             <ArrowDown className="w-3 h-3" />
           </button>
-          <button
-            onClick={e => { e.stopPropagation(); onRemove(); }}
-            className="p-0.5 text-gray-600 hover:text-red-400 transition-colors"
-          >
+          <button onClick={e => { e.stopPropagation(); onRemove(); }}
+            className="p-0.5 text-gray-600 hover:text-red-400 transition-colors">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
 
-        {/* Chevron expand indicator */}
-        <ChevronDown className={cn(
-          "w-3.5 h-3.5 text-gray-600 shrink-0 transition-transform duration-150",
-          expanded && "rotate-180",
-        )} />
+        {agent && (
+          <ChevronDown className={cn("w-3.5 h-3.5 text-gray-600 shrink-0 transition-transform duration-150", expanded && "rotate-180")} />
+        )}
       </div>
 
-      {/* Expanded body */}
+      {/* Expanded */}
       {expanded && (
         <div className="border-t border-gray-800 px-3 pb-3 pt-2.5 bg-gray-950/60 space-y-3">
-          {/* Agent picker grid */}
-          <div>
-            <label className="block text-[9px] text-gray-600 uppercase tracking-wide mb-1.5">Agent</label>
+          {!agent && (
             <AgentPickerGrid
               value={step.agent_id}
               allAgents={allAgents}
               prevStepClass={prevStepClass}
-              onPick={id => {
-                onChange({ agent_id: id, input_overrides: {} });
-                if (id) setExpanded(false);
-              }}
+              onPick={id => { onChange({ agent_id: id, input_overrides: {} }); if (id) setExpanded(false); }}
             />
-          </div>
-
-          {/* Input source overrides with visual pills */}
+          )}
           {agent && (agent.inputs ?? []).length > 0 && (
             <div className="space-y-2.5">
-              <label className="block text-[9px] text-gray-600 uppercase tracking-wide">Input sources</label>
+              <p className="text-[9px] text-gray-600 uppercase tracking-wide">Input sources</p>
               {agent.inputs.map(inp => {
                 const effectiveSource = step.input_overrides[inp.key] ?? inp.source;
                 const isOverridden = !!step.input_overrides[inp.key] && step.input_overrides[inp.key] !== inp.source;
                 return (
-                  <div key={inp.key} className="space-y-1">
-                    <div className="flex items-center gap-1.5">
+                  <div key={inp.key}>
+                    <div className="flex items-center gap-1.5 mb-1">
                       <span className="text-[10px] text-amber-400 font-mono">{`{${inp.key}}`}</span>
-                      {isOverridden && (
-                        <span className="text-[9px] text-amber-500 border border-amber-700/40 rounded px-1">overridden</span>
-                      )}
-                      {!isOverridden && (
-                        <span className="text-[9px] text-gray-600">default</span>
-                      )}
+                      {isOverridden && <span className="text-[9px] text-amber-500 border border-amber-700/40 rounded px-1">overridden</span>}
                     </div>
                     <SourcePillGrid
                       value={effectiveSource}
@@ -1010,466 +613,9 @@ function StepCard({
               })}
             </div>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Pipeline Run Panel ────────────────────────────────────────────────────────
-
-type StepStatus = "pending" | "loading" | "cached" | "done" | "error";
-
-interface StepState {
-  agentName: string;
-  status: StepStatus;
-  content: string;
-  thinking: string;
-  resultId: string;
-  stream: string;
-  expanded: boolean;
-}
-
-function PipelineRunPanel({ pipeline, agents }: { pipeline: Pipeline; agents: UniversalAgent[] }) {
-  const { salesAgent, customer, callId } = useAppCtx();
-  const [running, setRunning] = useState(false);
-  const [steps, setSteps] = useState<StepState[]>([]);
-  const [runError, setRunError] = useState("");
-  const [done, setDone] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const streamEndRef = useRef<HTMLDivElement | null>(null);
-
-  const hasPair = !!(salesAgent && customer);
-  const needsCall = pipeline.scope === "per_call";
-  const hasCall = !!(hasPair && callId);
-  const contextOk = needsCall ? hasCall : hasPair;
-
-  function initSteps() {
-    return pipeline.steps.map(s => {
-      const a = agents.find(x => x.id === s.agent_id);
-      return { agentName: a?.name ?? s.agent_id, status: "pending" as StepStatus, content: "", thinking: "", resultId: "", stream: "", expanded: false };
-    });
-  }
-
-  async function run() {
-    if (!contextOk || running) return;
-    setRunning(true); setRunError(""); setDone(false);
-    setSteps(initSteps());
-    abortRef.current = new AbortController();
-
-    try {
-      const res = await fetch(`/api/pipelines/${pipeline.id}/run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: abortRef.current.signal,
-        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: callId }),
-      });
-      if (!res.body) throw new Error("No response body");
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-
-      while (true) {
-        const { done: eof, value } = await reader.read();
-        if (eof) break;
-        for (const line of dec.decode(value).split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          try {
-            const evt = JSON.parse(line.slice(5).trim());
-            const s: number = evt.data.step ?? 0;
-
-            if (evt.type === "step_start") {
-              setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.data.agent_name } : st));
-            }
-            if (evt.type === "step_cached") {
-              setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "cached", content: evt.data.content, resultId: evt.data.result_id } : st));
-            }
-            if (evt.type === "stream") {
-              setSteps(prev => prev.map((st, i) => {
-                if (i !== s) return st;
-                const ns = { ...st, stream: st.stream + (evt.data.text ?? "") };
-                setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0);
-                return ns;
-              }));
-            }
-            if (evt.type === "thinking") {
-              setSteps(prev => prev.map((st, i) => i === s ? { ...st, thinking: evt.data.content ?? "" } : st));
-            }
-            if (evt.type === "step_done") {
-              setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "done", content: evt.data.content, resultId: evt.data.result_id, stream: "" } : st));
-            }
-            if (evt.type === "error") {
-              if (evt.data.step != null) {
-                setSteps(prev => prev.map((st, i) => i === evt.data.step ? { ...st, status: "error" } : st));
-              }
-              setRunError(evt.data.msg ?? "Error");
-            }
-            if (evt.type === "pipeline_done") {
-              setDone(true);
-            }
-          } catch { /* skip */ }
-        }
-      }
-    } catch (e: any) {
-      if (e.name !== "AbortError") setRunError(e.message ?? "Unexpected error");
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  const statusIcon = (st: StepStatus, stream: string) => {
-    if (st === "loading" && !stream) return <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />;
-    if (st === "loading" && stream)  return <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse shrink-0" />;
-    if (st === "cached")  return <SkipForward className="w-3 h-3 text-amber-400 shrink-0" />;
-    if (st === "done")    return <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />;
-    if (st === "error")   return <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />;
-    return <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />;
-  };
-
-  const statusLabel = (st: StepStatus) => {
-    if (st === "cached") return <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 font-medium">cached</span>;
-    if (st === "done")   return <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 font-medium">done</span>;
-    if (st === "error")  return <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 font-medium">error</span>;
-    return null;
-  };
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Context bar */}
-      <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0 flex-wrap">
-        {salesAgent
-          ? <span className="text-[11px] text-teal-300 bg-teal-900/30 border border-teal-700/40 rounded px-1.5 py-0.5">{salesAgent}</span>
-          : <span className="text-[11px] text-gray-600 italic">no agent selected</span>}
-        {customer && <span className="text-[11px] text-cyan-300 bg-cyan-900/30 border border-cyan-700/40 rounded px-1.5 py-0.5">{customer}</span>}
-        {callId && <span className="text-[11px] text-blue-300 bg-blue-900/30 border border-blue-700/40 rounded px-1.5 py-0.5 font-mono">{callId}</span>}
-        {!contextOk && (
-          <span className="text-[11px] text-red-400 ml-auto">
-            Needs: {needsCall ? "agent + customer + call" : "agent + customer"}
-          </span>
-        )}
-      </div>
-
-      {/* Run button */}
-      <div className="px-4 py-3 border-b border-gray-800 shrink-0">
-        <button
-          onClick={run}
-          disabled={running || !contextOk}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
-        >
-          {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-          {running ? "Running pipeline…" : done ? "Run again" : "Run Pipeline"}
-        </button>
-        {runError && <p className="mt-1.5 text-[11px] text-red-400 break-words">{runError}</p>}
-      </div>
-
-      {/* Step list */}
-      {steps.length > 0 && (
-        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-          {steps.map((st, i) => (
-            <div key={i} className={cn(
-              "border rounded-xl overflow-hidden",
-              st.status === "done" || st.status === "cached" ? "border-gray-700/60" : "border-gray-800",
-            )}>
-              {/* Step header */}
-              <div
-                className={cn(
-                  "flex items-center gap-2 px-3 py-2 cursor-pointer",
-                  (st.status === "done" || st.status === "cached") ? "hover:bg-gray-800/40" : "",
-                )}
-                onClick={() => {
-                  if (st.status === "done" || st.status === "cached") {
-                    setSteps(prev => prev.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s));
-                  }
-                }}
-              >
-                {statusIcon(st.status, st.stream)}
-                <span className="text-[10px] text-gray-500 font-mono shrink-0">#{i + 1}</span>
-                <span className={cn("text-xs flex-1 font-medium truncate", st.status === "loading" ? "text-teal-300" : "text-gray-300")}>{st.agentName}</span>
-                {statusLabel(st.status)}
-                {(st.status === "done" || st.status === "cached") && (
-                  st.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />
-                )}
-              </div>
-
-              {/* Live stream (while running) */}
-              {st.status === "loading" && st.stream && (
-                <div className="px-3 pb-3 bg-gray-950">
-                  <pre className="text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
-                    {st.stream}
-                    <div ref={streamEndRef} />
-                  </pre>
-                </div>
-              )}
-
-              {/* Completed content */}
-              {st.expanded && (st.status === "done" || st.status === "cached") && st.content && (
-                <div className="px-3 pb-3 bg-gray-950">
-                  <SectionContent content={st.content} />
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {steps.length === 0 && (
-        <div className="flex-1 flex items-center justify-center text-gray-600">
-          <div className="text-center space-y-2">
-            <Workflow className="w-10 h-10 mx-auto opacity-15" />
-            <p className="text-xs">Select context above and hit Run</p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Pipelines Tab ─────────────────────────────────────────────────────────────
-
-function PipelinesTab() {
-  const { mutate } = useSWRConfig();
-  const { setActivePipeline, activePipelineId } = useAppCtx();
-  const { data: pipelines, isLoading } = useSWR<Pipeline[]>(`${API}/pipelines`, fetcher);
-  const { data: agents } = useSWR<UniversalAgent[]>(`${API}/universal-agents`, fetcher);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [form, setForm] = useState({ ...EMPTY_PIPELINE });
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [isNew, setIsNew] = useState(false);
-
-  function openNew() {
-    setSelected(null); setIsNew(true);
-    setForm({ ...EMPTY_PIPELINE }); setSaved(false);
-    setRightTab("configure");
-  }
-
-  function openEdit(p: Pipeline) {
-    setSelected(p.id); setIsNew(false);
-    setForm({ name: p.name, description: p.description ?? "", scope: p.scope ?? "per_pair", steps: p.steps ?? [] });
-    setSaved(false);
-    setRightTab("run");
-  }
-
-  async function save() {
-    if (!form.name.trim()) return;
-    setSaving(true);
-    try {
-      const method = isNew ? "POST" : "PUT";
-      const url = isNew ? `${API}/pipelines` : `${API}/pipelines/${selected}`;
-      const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      const data = await res.json();
-      mutate(`${API}/pipelines`);
-      if (isNew) setSelected(data.id ?? null);
-      setIsNew(false); setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } finally { setSaving(false); }
-  }
-
-  async function del() {
-    if (!selected || !confirm(`Delete pipeline "${form.name}"?`)) return;
-    await fetch(`${API}/pipelines/${selected}`, { method: "DELETE" });
-    mutate(`${API}/pipelines`);
-    setSelected(null); setIsNew(false);
-  }
-
-  function addStep() {
-    setForm(f => ({ ...f, steps: [...f.steps, { agent_id: "", input_overrides: {} }] }));
-  }
-
-  function updateStep(i: number, s: PipelineStep) {
-    setForm(f => { const steps = [...f.steps]; steps[i] = s; return { ...f, steps }; });
-  }
-
-  function removeStep(i: number) {
-    setForm(f => ({ ...f, steps: f.steps.filter((_, idx) => idx !== i) }));
-  }
-
-  function moveStep(i: number, dir: -1 | 1) {
-    setForm(f => {
-      const steps = [...f.steps];
-      const j = i + dir;
-      if (j < 0 || j >= steps.length) return f;
-      [steps[i], steps[j]] = [steps[j], steps[i]];
-      return { ...f, steps };
-    });
-  }
-
-  const showForm = isNew || selected !== null;
-  const allAgents = agents ?? [];
-  const [rightTab, setRightTab] = useState<"run" | "configure">("run");
-
-  return (
-    <div className="flex h-full gap-0">
-      {/* Sidebar */}
-      <div className="w-56 shrink-0 border-r border-gray-800 flex flex-col">
-        <div className="p-3 border-b border-gray-800">
-          <button onClick={openNew}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 text-white text-xs font-medium rounded-lg transition-colors">
-            <Plus className="w-3.5 h-3.5" /> New Pipeline
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {isLoading && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-          {(pipelines ?? []).map(p => {
-            const isActive = activePipelineId === p.id;
-            return (
-              <div key={p.id} className={cn(
-                "group flex items-center rounded-lg text-xs transition-colors",
-                selected === p.id ? "bg-teal-600/20 border border-teal-600/30" : "hover:bg-gray-800",
-              )}>
-                <button onClick={() => openEdit(p)} className="flex-1 min-w-0 text-left px-3 py-2.5">
-                  <div className="flex items-center gap-1.5">
-                    <Workflow className="w-3 h-3 text-teal-400 shrink-0" />
-                    <span className={cn("font-medium truncate flex-1", selected === p.id ? "text-white" : "text-gray-400 group-hover:text-white")}>
-                      {p.name}
-                    </span>
-                    {isActive && <span className="text-[9px] bg-teal-900/60 text-teal-400 border border-teal-700/50 px-1 rounded shrink-0">active</span>}
-                  </div>
-                  <p className="text-[10px] text-gray-600 mt-0.5 pl-[18px]">
-                    {(p.steps ?? []).length} step{(p.steps ?? []).length !== 1 ? "s" : ""} · {p.scope}
-                  </p>
-                </button>
-                <button
-                  onClick={() => setActivePipeline(isActive ? "" : p.id, isActive ? "" : p.name)}
-                  className={cn(
-                    "shrink-0 mr-1.5 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border",
-                    isActive
-                      ? "opacity-100 bg-teal-900/60 border-teal-700/50 text-teal-300 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400"
-                      : "opacity-0 group-hover:opacity-100 bg-gray-800 border-gray-700 text-gray-400 hover:bg-teal-900/40 hover:border-teal-700/50 hover:text-teal-300",
-                  )}
-                  title={isActive ? "Deselect pipeline" : "Set as active pipeline"}
-                >
-                  {isActive ? "✓" : "use"}
-                </button>
-              </div>
-            );
-          })}
-          {!isLoading && (pipelines ?? []).length === 0 && (
-            <p className="text-xs text-gray-600 text-center py-4">No pipelines yet</p>
+          {agent && (agent.inputs ?? []).length === 0 && (
+            <p className="text-[11px] text-gray-600 italic">No inputs configured for this agent</p>
           )}
-        </div>
-      </div>
-
-      {/* Right panel */}
-      {showForm ? (
-        <div className="flex-1 min-w-0 flex flex-col min-h-0">
-          {/* Panel header with tab toggle */}
-          <div className="px-4 pt-3 pb-0 border-b border-gray-800 shrink-0 flex items-center justify-between gap-3">
-            <span className="text-sm font-semibold text-white truncate">{isNew ? "New Pipeline" : form.name}</span>
-            <div className="flex items-center gap-2 shrink-0">
-              {!isNew && (
-                <div className="flex rounded-lg overflow-hidden border border-gray-700 text-[11px]">
-                  <button onClick={() => setRightTab("run")}
-                    className={cn("px-3 py-1 transition-colors", rightTab === "run" ? "bg-teal-800 text-teal-100" : "bg-gray-800 text-gray-400 hover:text-white")}>
-                    Run
-                  </button>
-                  <button onClick={() => setRightTab("configure")}
-                    className={cn("px-3 py-1 border-l border-gray-700 transition-colors", rightTab === "configure" ? "bg-gray-700 text-white" : "bg-gray-800 text-gray-400 hover:text-white")}>
-                    Configure
-                  </button>
-                </div>
-              )}
-              {(isNew || rightTab === "configure") && (
-                <div className="flex items-center gap-1.5">
-                  {selected && (
-                    <button onClick={del}
-                      className="text-xs px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/50 rounded-lg transition-colors">
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  )}
-                  <button onClick={save} disabled={saving || !form.name.trim()}
-                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-teal-700 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50">
-                    {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
-                    {saved ? "Saved" : "Save"}
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Run tab */}
-          {!isNew && rightTab === "run" && (() => {
-            const pl: Pipeline = { id: selected!, ...form, created_at: "" };
-            return (
-              <div className="flex-1 min-h-0">
-                <PipelineRunPanel pipeline={pl} agents={allAgents} />
-              </div>
-            );
-          })()}
-
-          {/* Configure tab */}
-          {(isNew || rightTab === "configure") && (
-            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5">
-              {/* Name + Description + Scope */}
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Name</label>
-                  <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                    placeholder="e.g. Full Analysis"
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-teal-500" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Description</label>
-                  <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-                    placeholder="What does this pipeline do?"
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-teal-500" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Scope</label>
-                  <select value={form.scope} onChange={e => setForm(f => ({ ...f, scope: e.target.value }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-teal-500">
-                    <option value="per_call">Per Call — runs once per call</option>
-                    <option value="per_pair">Per Pair — runs on merged data for an agent/customer pair</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Steps */}
-              <div className="space-y-2">
-                {/* Steps label */}
-                <label className="text-xs text-gray-400 font-medium">Steps</label>
-
-                {/* Empty state */}
-                {form.steps.length === 0 && (
-                  <div className="flex flex-col items-center py-8 text-gray-700 border border-dashed border-gray-800 rounded-xl">
-                    <Workflow className="w-8 h-8 mb-2 opacity-20" />
-                    <p className="text-xs">No steps yet — add an agent below to start the chain</p>
-                  </div>
-                )}
-
-                {/* Step cards with connectors */}
-                <div>
-                  {form.steps.map((step, i) => (
-                    <div key={i}>
-                      <StepCard
-                        step={step} index={i} total={form.steps.length}
-                        allAgents={allAgents}
-                        prevStepClass={i > 0 ? allAgents.find(a => a.id === form.steps[i - 1]?.agent_id)?.agent_class : undefined}
-                        onChange={s => updateStep(i, s)}
-                        onRemove={() => removeStep(i)}
-                        onMove={dir => moveStep(i, dir)}
-                      />
-                      {i < form.steps.length - 1 && <StepConnector />}
-                    </div>
-                  ))}
-                </div>
-
-                {/* Add step — prominent bottom button */}
-                <button
-                  onClick={addStep}
-                  className="w-full flex items-center justify-center gap-2 py-3 border border-dashed border-gray-700 rounded-xl text-[11px] text-gray-500 hover:text-white hover:border-gray-500 hover:bg-gray-800/30 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Add step
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center text-gray-600">
-          <div className="text-center space-y-3">
-            <Workflow className="w-12 h-12 mx-auto opacity-20" />
-            <p className="text-sm">Select a pipeline or create a new one</p>
-          </div>
         </div>
       )}
     </div>
@@ -1478,33 +624,534 @@ function PipelinesTab() {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-type Tab = "agents" | "pipelines";
-
 export default function AgentsPage() {
-  const [tab, setTab] = useState<Tab>("agents");
+  const { mutate } = useSWRConfig();
+  const { activePipelineId, setActivePipeline } = useAppCtx();
+
+  // Data
+  const { data: agents, isLoading: agentsLoading } = useSWR<UniversalAgent[]>(`${API}/universal-agents`, fetcher);
+  const { data: pipelines } = useSWR<Pipeline[]>(`${API}/pipelines`, fetcher);
+
+  // Agent editor state
+  const [editingAgent, setEditingAgent] = useState<string | "new" | null>(null);
+  const [agentForm, setAgentForm] = useState({ ...EMPTY_AGENT });
+  const [agentSaving, setAgentSaving] = useState(false);
+  const [agentSaved, setAgentSaved] = useState(false);
+  const [showAgentSettings, setShowAgentSettings] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ created_agents: string[]; created_pipelines: string[]; skipped: string[] } | null>(null);
+  const [agentSearch, setAgentSearch] = useState("");
+
+  // Pipeline canvas state
+  const [selectedPipeline, setSelectedPipeline] = useState<string | null>(null);
+  const [pipelineForm, setPipelineForm] = useState({ ...EMPTY_PIPELINE });
+  const [pipelineIsNew, setPipelineIsNew] = useState(false);
+  const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [pipelineSaved, setPipelineSaved] = useState(false);
+
+  const allAgents = agents ?? [];
+  const selectedAgentObj = editingAgent && editingAgent !== "new"
+    ? allAgents.find(a => a.id === editingAgent)
+    : undefined;
+
+  // ── Agent functions ──────────────────────────────────────────────────────────
+
+  function openNewAgent() {
+    setEditingAgent("new");
+    setAgentForm({ ...EMPTY_AGENT });
+    setAgentSaved(false);
+  }
+
+  function openEditAgent(a: UniversalAgent) {
+    setEditingAgent(a.id);
+    setAgentForm({
+      name: a.name, description: a.description ?? "",
+      agent_class: a.agent_class ?? "",
+      model: a.model, temperature: a.temperature ?? 0,
+      system_prompt: a.system_prompt ?? "", user_prompt: a.user_prompt ?? "",
+      inputs: a.inputs ?? [], output_format: a.output_format ?? "markdown",
+      tags: a.tags ?? [], is_default: a.is_default ?? false,
+    });
+    setAgentSaved(false);
+  }
+
+  async function saveAgent() {
+    if (!agentForm.name.trim()) return;
+    setAgentSaving(true);
+    try {
+      const isNew = editingAgent === "new";
+      const method = isNew ? "POST" : "PUT";
+      const url = isNew ? `${API}/universal-agents` : `${API}/universal-agents/${editingAgent}`;
+      const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(agentForm) });
+      const data = await res.json();
+      mutate(`${API}/universal-agents`);
+      if (isNew) setEditingAgent(data.id ?? null);
+      setAgentSaved(true);
+      setTimeout(() => setAgentSaved(false), 2000);
+    } finally { setAgentSaving(false); }
+  }
+
+  async function deleteAgent() {
+    if (!editingAgent || editingAgent === "new" || !confirm(`Delete agent "${agentForm.name}"?`)) return;
+    await fetch(`${API}/universal-agents/${editingAgent}`, { method: "DELETE" });
+    mutate(`${API}/universal-agents`);
+    setEditingAgent(null);
+  }
+
+  async function setAgentDefault() {
+    if (!editingAgent || editingAgent === "new") return;
+    await fetch(`${API}/universal-agents/${editingAgent}/default`, { method: "PATCH" });
+    mutate(`${API}/universal-agents`);
+  }
+
+  function addAgentInput() {
+    setAgentForm(f => ({ ...f, inputs: [...f.inputs, { key: "", source: "transcript" as SourceValue }] }));
+  }
+
+  function updateAgentInput(i: number, updated: AgentInput) {
+    setAgentForm(f => { const ins = [...f.inputs]; ins[i] = updated; return { ...f, inputs: ins }; });
+  }
+
+  function removeAgentInput(i: number) {
+    setAgentForm(f => ({ ...f, inputs: f.inputs.filter((_, idx) => idx !== i) }));
+  }
+
+  async function importPresets() {
+    setImporting(true); setImportResult(null);
+    try {
+      const res = await fetch(`${API}/universal-agents/import-presets`, { method: "POST" });
+      const data = await res.json();
+      mutate(`${API}/universal-agents`);
+      mutate(`${API}/pipelines`);
+      setImportResult(data);
+      setTimeout(() => setImportResult(null), 6000);
+    } finally { setImporting(false); }
+  }
+
+  // ── Pipeline functions ───────────────────────────────────────────────────────
+
+  function openNewPipeline() {
+    setSelectedPipeline(null);
+    setPipelineForm({ ...EMPTY_PIPELINE });
+    setPipelineIsNew(true);
+    setPipelineSaved(false);
+    setEditingAgent(null);
+  }
+
+  function openEditPipeline(p: Pipeline) {
+    setSelectedPipeline(p.id);
+    setPipelineForm({ name: p.name, description: p.description ?? "", scope: p.scope, steps: p.steps ?? [] });
+    setPipelineIsNew(false);
+    setPipelineSaved(false);
+    setEditingAgent(null);
+  }
+
+  async function savePipeline() {
+    if (!pipelineForm.name.trim()) return;
+    setPipelineSaving(true);
+    try {
+      const method = pipelineIsNew ? "POST" : "PUT";
+      const url = pipelineIsNew ? `${API}/pipelines` : `${API}/pipelines/${selectedPipeline}`;
+      const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(pipelineForm) });
+      const data = await res.json();
+      mutate(`${API}/pipelines`);
+      if (pipelineIsNew) setSelectedPipeline(data.id ?? null);
+      setPipelineIsNew(false);
+      setPipelineSaved(true);
+      setTimeout(() => setPipelineSaved(false), 2000);
+    } finally { setPipelineSaving(false); }
+  }
+
+  async function deletePipeline() {
+    if (!selectedPipeline || !confirm(`Delete pipeline "${pipelineForm.name}"?`)) return;
+    await fetch(`${API}/pipelines/${selectedPipeline}`, { method: "DELETE" });
+    mutate(`${API}/pipelines`);
+    if (activePipelineId === selectedPipeline) setActivePipeline("", "");
+    setSelectedPipeline(null);
+    setPipelineIsNew(false);
+  }
+
+  function addAgentToCanvas(agentId: string) {
+    setEditingAgent(null);
+    if (!pipelineIsNew && !selectedPipeline) {
+      // Auto-open a new pipeline with this agent as first step
+      setPipelineIsNew(true);
+      setSelectedPipeline(null);
+      setPipelineForm({ ...EMPTY_PIPELINE, steps: [{ agent_id: agentId, input_overrides: {} }] });
+    } else {
+      setPipelineForm(f => ({ ...f, steps: [...f.steps, { agent_id: agentId, input_overrides: {} }] }));
+    }
+  }
+
+  function updateStep(i: number, s: PipelineStep) {
+    setPipelineForm(f => { const steps = [...f.steps]; steps[i] = s; return { ...f, steps }; });
+  }
+
+  function removeStep(i: number) {
+    setPipelineForm(f => ({ ...f, steps: f.steps.filter((_, idx) => idx !== i) }));
+  }
+
+  function moveStep(i: number, dir: -1 | 1) {
+    setPipelineForm(f => {
+      const steps = [...f.steps];
+      const j = i + dir;
+      if (j < 0 || j >= steps.length) return f;
+      [steps[i], steps[j]] = [steps[j], steps[i]];
+      return { ...f, steps };
+    });
+  }
+
+  const filteredAgents = agentSearch
+    ? allAgents.filter(a =>
+        a.name.toLowerCase().includes(agentSearch.toLowerCase()) ||
+        (a.agent_class ?? "").toLowerCase().includes(agentSearch.toLowerCase())
+      )
+    : allAgents;
+
+  const isActivePipeline = selectedPipeline === activePipelineId;
+  const showCanvas = pipelineIsNew || !!selectedPipeline;
 
   return (
     <div className="min-h-[calc(100vh-5.25rem)] flex flex-col -m-6">
-      <div className="px-6 pt-5 pb-0 border-b border-gray-800 shrink-0">
-        <div className="flex items-center gap-3 mb-4">
-          <Bot className="w-5 h-5 text-indigo-400" />
-          <h1 className="text-lg font-semibold text-white">Agents</h1>
-          <p className="text-sm text-gray-500">Build and chain analysis agents</p>
-        </div>
-        <div className="flex gap-1">
-          {(["agents", "pipelines"] as Tab[]).map(t => (
-            <button key={t} onClick={() => setTab(t)}
-              className={cn("px-4 py-2 text-sm font-medium rounded-t-lg transition-colors",
-                tab === t ? "bg-gray-950 text-white border-t border-x border-gray-800" : "text-gray-500 hover:text-gray-300")}>
-              {t === "agents" ? "Agents" : "Pipelines"}
-            </button>
-          ))}
-        </div>
+      {/* Page header */}
+      <div className="px-6 pt-5 pb-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+        <Bot className="w-5 h-5 text-indigo-400" />
+        <h1 className="text-lg font-semibold text-white">Agents & Pipelines</h1>
+        <p className="text-sm text-gray-500">Build agents · chain them into pipelines</p>
       </div>
 
-      <div className="flex-1 min-h-0 bg-gray-950">
-        {tab === "agents"    && <AgentsTab />}
-        {tab === "pipelines" && <PipelinesTab />}
+      <div className="flex-1 min-h-0 flex bg-gray-950">
+
+        {/* ── Left: Agent library ────────────────────────────────────────────── */}
+        <div className="w-60 shrink-0 border-r border-gray-800 flex flex-col">
+          <div className="p-3 border-b border-gray-800 space-y-2">
+            <button onClick={openNewAgent}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors">
+              <Plus className="w-3.5 h-3.5" /> New Agent
+            </button>
+            <button onClick={importPresets} disabled={importing}
+              className="w-full flex items-center justify-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-xs border border-gray-700 rounded-lg transition-colors disabled:opacity-50">
+              {importing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+              Import presets
+            </button>
+            {importResult && (
+              <div className="text-[10px] text-gray-500 space-y-0.5">
+                {importResult.created_agents.length > 0 && (
+                  <p className="text-green-500">+ {importResult.created_agents.length} agents, {importResult.created_pipelines.length} pipelines</p>
+                )}
+                {importResult.skipped.length > 0 && <p>Skipped {importResult.skipped.length} (already exist)</p>}
+                {importResult.created_agents.length === 0 && importResult.skipped.length === 0 && <p>Nothing to import</p>}
+              </div>
+            )}
+            <input
+              value={agentSearch}
+              onChange={e => setAgentSearch(e.target.value)}
+              placeholder="Search agents…"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-600 outline-none focus:border-indigo-500"
+            />
+          </div>
+          <div className="flex-1 overflow-y-auto p-2">
+            {agentsLoading && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
+            {!agentsLoading && filteredAgents.length === 0 && (
+              <p className="text-xs text-gray-600 text-center py-4">{agentSearch ? "No agents match" : "No agents yet"}</p>
+            )}
+            {groupAgents(filteredAgents).map(group => (
+              <LibraryGroup
+                key={group.cls}
+                group={group}
+                editingId={editingAgent === "new" ? null : editingAgent}
+                onEdit={openEditAgent}
+                onAdd={addAgentToCanvas}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* ── Right: Agent editor OR Pipeline canvas ─────────────────────────── */}
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+
+          {editingAgent !== null ? (
+            /* ── Agent editor ────────────────────────────────────────────────── */
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <button onClick={() => setEditingAgent(null)}
+                    className="flex items-center gap-1 text-xs text-gray-500 hover:text-white transition-colors">
+                    <ChevronDown className="w-3.5 h-3.5 rotate-90" /> Back
+                  </button>
+                  <h2 className="text-sm font-semibold text-white">
+                    {editingAgent === "new" ? "New Agent" : `Edit: ${agentForm.name}`}
+                  </h2>
+                </div>
+                <div className="flex items-center gap-2">
+                  {editingAgent !== "new" && selectedAgentObj && (
+                    <>
+                      <button onClick={setAgentDefault} disabled={selectedAgentObj.is_default}
+                        className="text-xs px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors disabled:opacity-50">
+                        {selectedAgentObj.is_default ? "Default ✓" : "Set default"}
+                      </button>
+                      <button onClick={deleteAgent}
+                        className="text-xs px-2.5 py-1.5 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/50 rounded-lg transition-colors">
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </>
+                  )}
+                  <button onClick={saveAgent} disabled={agentSaving || !agentForm.name.trim()}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50">
+                    {agentSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : agentSaved ? <Check className="w-3 h-3" /> : null}
+                    {agentSaved ? "Saved" : "Save"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Identity */}
+              <div className="border border-gray-800 rounded-xl p-4">
+                <label className="block text-[10px] text-gray-600 font-semibold uppercase tracking-wider mb-3">Identity</label>
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Name</label>
+                    <input value={agentForm.name} onChange={e => setAgentForm(f => ({ ...f, name: e.target.value }))}
+                      placeholder="e.g. Persona Scorer"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Class</label>
+                    <input value={agentForm.agent_class} onChange={e => setAgentForm(f => ({ ...f, agent_class: e.target.value }))}
+                      placeholder="persona / notes / compliance…" list="agent-class-list"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+                    <datalist id="agent-class-list">
+                      <option value="persona" /><option value="notes" /><option value="compliance" />
+                      <option value="scorer" /><option value="general" />
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Description</label>
+                    <input value={agentForm.description} onChange={e => setAgentForm(f => ({ ...f, description: e.target.value }))}
+                      placeholder="What does this agent do?"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Inputs */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs text-gray-400 font-medium">Inputs</label>
+                  <button onClick={addAgentInput}
+                    className="flex items-center gap-1 text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 rounded-lg transition-colors">
+                    <Plus className="w-3 h-3" /> Add Input
+                  </button>
+                </div>
+                {agentForm.inputs.length === 0 && (
+                  <p className="text-xs text-gray-600 italic py-2">No inputs defined. Add inputs to reference data in your prompts.</p>
+                )}
+                <div className="space-y-2">
+                  {agentForm.inputs.map((inp, i) => (
+                    <InputRow key={i} input={inp} agents={allAgents}
+                      onChange={updated => updateAgentInput(i, updated)}
+                      onRemove={() => removeAgentInput(i)} />
+                  ))}
+                </div>
+                <div className="mt-1.5"><VariableHint inputs={agentForm.inputs} /></div>
+              </div>
+
+              {/* Prompts */}
+              <div className="border border-gray-800 rounded-xl p-4">
+                <label className="block text-[10px] text-gray-600 font-semibold uppercase tracking-wider mb-3">Prompts</label>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col">
+                    <label className="block text-xs text-gray-400 mb-1">System Prompt</label>
+                    {agentForm.inputs.filter(i => i.key).length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-1.5">
+                        {agentForm.inputs.filter(i => i.key).map(i => (
+                          <button key={i.key} type="button"
+                            onClick={() => setAgentForm(f => ({ ...f, system_prompt: f.system_prompt + `{${i.key}}` }))}
+                            className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 transition-colors font-mono">
+                            {`{${i.key}}`}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <textarea value={agentForm.system_prompt}
+                      onChange={e => setAgentForm(f => ({ ...f, system_prompt: e.target.value }))}
+                      rows={14} placeholder="You are a…"
+                      className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
+                  </div>
+                  <div className="flex flex-col">
+                    <label className="block text-xs text-gray-400 mb-1">User Prompt</label>
+                    {agentForm.inputs.filter(i => i.key).length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-1.5">
+                        {agentForm.inputs.filter(i => i.key).map(i => (
+                          <button key={i.key} type="button"
+                            onClick={() => setAgentForm(f => ({ ...f, user_prompt: f.user_prompt + `{${i.key}}` }))}
+                            className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 transition-colors font-mono">
+                            {`{${i.key}}`}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <textarea value={agentForm.user_prompt}
+                      onChange={e => setAgentForm(f => ({ ...f, user_prompt: e.target.value }))}
+                      rows={14} placeholder={"Analyse this:\n\n{transcript}"}
+                      className="flex-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
+                    <div className="mt-1"><VariableHint inputs={agentForm.inputs} /></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Settings */}
+              <div className="border border-gray-800 rounded-xl overflow-hidden">
+                <button onClick={() => setShowAgentSettings(s => !s)}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-900 hover:bg-gray-800 transition-colors text-xs">
+                  <span className="flex items-center gap-2 text-gray-300 font-medium">
+                    <Settings2 className="w-3.5 h-3.5 text-gray-400" /> Settings
+                  </span>
+                  {showAgentSettings ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
+                </button>
+                {showAgentSettings && (
+                  <div className="p-4 grid grid-cols-3 gap-4 border-t border-gray-800">
+                    <div className="col-span-1">
+                      <label className="block text-xs text-gray-400 mb-1">Temperature</label>
+                      <input type="number" min={0} max={2} step={0.1} value={agentForm.temperature}
+                        onChange={e => setAgentForm(f => ({ ...f, temperature: parseFloat(e.target.value) || 0 }))}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500" />
+                    </div>
+                    <div className="col-span-1">
+                      <label className="block text-xs text-gray-400 mb-1">Output Format</label>
+                      <select value={agentForm.output_format} onChange={e => setAgentForm(f => ({ ...f, output_format: e.target.value }))}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500">
+                        <option value="markdown">Markdown</option>
+                        <option value="json">JSON</option>
+                        <option value="text">Plain text</option>
+                      </select>
+                    </div>
+                    <div className="col-span-1">
+                      <label className="block text-xs text-gray-400 mb-1">Tags</label>
+                      <input value={agentForm.tags.join(", ")}
+                        onChange={e => setAgentForm(f => ({ ...f, tags: e.target.value.split(",").map(t => t.trim()).filter(Boolean) }))}
+                        placeholder="notes, compliance, persona"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="block text-xs text-gray-400 mb-1">Model</label>
+                      <ModelSelect value={agentForm.model} onChange={v => setAgentForm(f => ({ ...f, model: v }))} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+          ) : (
+            /* ── Pipeline canvas ─────────────────────────────────────────────── */
+            <div className="flex-1 min-h-0 flex flex-col">
+
+              {/* Toolbar */}
+              <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0 flex-wrap">
+                <Workflow className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                <select
+                  value={selectedPipeline ?? ""}
+                  onChange={e => {
+                    const p = (pipelines ?? []).find(x => x.id === e.target.value);
+                    if (p) openEditPipeline(p);
+                  }}
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white outline-none focus:border-teal-500"
+                >
+                  <option value="">— Select pipeline —</option>
+                  {(pipelines ?? []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <button onClick={openNewPipeline}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 bg-teal-800 hover:bg-teal-700 text-teal-100 text-xs rounded-lg border border-teal-700/60 transition-colors">
+                  <Plus className="w-3 h-3" /> New
+                </button>
+                <div className="flex-1" />
+                {showCanvas && (
+                  <div className="flex items-center gap-2">
+                    {selectedPipeline && (
+                      <button
+                        onClick={() => setActivePipeline(
+                          isActivePipeline ? "" : selectedPipeline,
+                          isActivePipeline ? "" : pipelineForm.name,
+                        )}
+                        className={cn(
+                          "px-2 py-1 rounded text-[10px] font-medium border transition-colors",
+                          isActivePipeline
+                            ? "bg-teal-900/60 border-teal-700/50 text-teal-300 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400"
+                            : "bg-gray-800 border-gray-700 text-gray-400 hover:bg-teal-900/40 hover:text-teal-300",
+                        )}
+                      >
+                        {isActivePipeline ? "✓ Active" : "Set active"}
+                      </button>
+                    )}
+                    {selectedPipeline && (
+                      <button onClick={deletePipeline} className="p-1.5 text-red-500/60 hover:text-red-400 transition-colors">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button onClick={savePipeline} disabled={pipelineSaving || !pipelineForm.name.trim()}
+                      className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-teal-700 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50">
+                      {pipelineSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : pipelineSaved ? <Check className="w-3 h-3" /> : null}
+                      {pipelineSaved ? "Saved" : "Save"}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {showCanvas ? (
+                <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                  {/* Pipeline meta */}
+                  <div className="flex items-center gap-3">
+                    <input
+                      value={pipelineForm.name}
+                      onChange={e => setPipelineForm(f => ({ ...f, name: e.target.value }))}
+                      placeholder="Pipeline name…"
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm font-semibold text-white placeholder-gray-600 outline-none focus:border-teal-500"
+                    />
+                    <select
+                      value={pipelineForm.scope}
+                      onChange={e => setPipelineForm(f => ({ ...f, scope: e.target.value }))}
+                      className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-teal-500"
+                    >
+                      <option value="per_call">Per call</option>
+                      <option value="per_pair">Per pair</option>
+                    </select>
+                  </div>
+
+                  {/* Step cards */}
+                  {pipelineForm.steps.length === 0 ? (
+                    <div className="flex flex-col items-center py-16 gap-3 text-gray-700 border border-dashed border-gray-800 rounded-2xl">
+                      <Workflow className="w-10 h-10 opacity-20" />
+                      <p className="text-sm">Click <span className="text-teal-400 font-medium">+</span> next to any agent on the left to add it here</p>
+                    </div>
+                  ) : (
+                    <div>
+                      {pipelineForm.steps.map((step, i) => (
+                        <div key={i}>
+                          <PipelineStepCard
+                            step={step} index={i} total={pipelineForm.steps.length}
+                            allAgents={allAgents}
+                            prevStepClass={i > 0 ? allAgents.find(a => a.id === pipelineForm.steps[i - 1]?.agent_id)?.agent_class : undefined}
+                            onChange={s => updateStep(i, s)}
+                            onRemove={() => removeStep(i)}
+                            onMove={dir => moveStep(i, dir)}
+                          />
+                          {i < pipelineForm.steps.length - 1 && <StepConnector />}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-gray-600">
+                  <div className="text-center space-y-3">
+                    <Workflow className="w-12 h-12 mx-auto opacity-20" />
+                    <p className="text-sm">Select a pipeline above or create a new one</p>
+                    <p className="text-xs text-gray-700">Then click + next to any agent to add it to the chain</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
