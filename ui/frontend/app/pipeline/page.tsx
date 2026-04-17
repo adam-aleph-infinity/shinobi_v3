@@ -193,7 +193,7 @@ function makeSleeves(stages: NodeKind[]): Node[] {
     draggable:  false,
     selectable: false,
     focusable:  false,
-    zIndex:     -10,
+    zIndex:     0,
     style:      { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
     data:       { step: i + 1, label: labelMap[kind], kind } satisfies SleeveData,
   }));
