@@ -1006,6 +1006,11 @@ export default function AgentsPage() {
   }
 
   async function saveNodeAgent(agentId: string, form: Omit<UniversalAgent, "id" | "created_at">) {
+    // Optimistic: update the canvas immediately without waiting for refetch
+    const optimistic = (agents ?? []).map(a =>
+      a.id === agentId ? { ...a, ...form } as UniversalAgent : a
+    );
+    mutate(`${API}/universal-agents`, optimistic, { revalidate: false });
     await fetch(`${API}/universal-agents/${agentId}`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form),
     });
@@ -1025,6 +1030,16 @@ export default function AgentsPage() {
     const newInputs = [...agent.inputs, { key: newKey, source: sourceType }];
     await saveNodeAgent(agent.id, { ...agent, inputs: newInputs });
     setSelection({ type: "input", stepIdx, inputKey: newKey });
+  }
+
+  // Add input from left palette — targets the selected step or the only step
+  function addInputToSelectedStep(sourceType: SourceValue) {
+    const targetIdx =
+      selection !== null ? selection.stepIdx
+      : pipelineForm.steps.length === 1 ? 0
+      : null;
+    if (targetIdx === null) return;
+    addInputToStep(targetIdx, sourceType);
   }
 
   // Remove an input directly from the canvas × button
@@ -1144,11 +1159,41 @@ export default function AgentsPage() {
               ))}
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+          <div className="flex-1 overflow-y-auto p-2">
             <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold px-0.5 mb-1">Add element</p>
-            {CLASS_TYPES.map(t => (
-              <ClassPaletteCard key={t.cls} cls={t.cls} label={t.label} desc={t.desc} onAdd={() => addStep(t.cls)} />
-            ))}
+            <div className="space-y-1.5 mb-3">
+              {CLASS_TYPES.map(t => (
+                <ClassPaletteCard key={t.cls} cls={t.cls} label={t.label} desc={t.desc} onAdd={() => addStep(t.cls)} />
+              ))}
+            </div>
+            <p className="text-[9px] text-gray-600 uppercase tracking-wider font-semibold px-0.5 mb-1 mt-2 border-t border-gray-800 pt-2">Add input</p>
+            {selection === null && pipelineForm.steps.length > 1 && (
+              <p className="text-[8px] text-gray-700 italic px-1 mb-1.5">Select a step first</p>
+            )}
+            <div className="space-y-1">
+              {INPUT_SOURCES.map(s => {
+                const Icon = s.icon;
+                const disabled = selection === null && pipelineForm.steps.length > 1;
+                return (
+                  <button key={s.value} onClick={() => addInputToSelectedStep(s.value)}
+                    disabled={disabled}
+                    className={cn(
+                      "w-full flex items-center gap-2 p-2 rounded-xl border bg-gray-900 transition-all text-left group",
+                      disabled
+                        ? "border-gray-800/50 opacity-40 cursor-not-allowed"
+                        : "border-gray-800 hover:border-gray-600 hover:bg-gray-800",
+                    )}>
+                    <div className={cn("w-6 h-6 rounded-lg flex items-center justify-center shrink-0 border group-hover:scale-105 transition-transform", s.badge)}>
+                      <Icon className="w-3 h-3" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[10px] font-semibold text-gray-200 truncate">{s.label}</p>
+                    </div>
+                    <Plus className="w-3 h-3 text-gray-600 group-hover:text-teal-400 transition-colors shrink-0" />
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
