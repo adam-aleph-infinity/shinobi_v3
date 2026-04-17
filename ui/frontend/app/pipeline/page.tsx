@@ -264,8 +264,11 @@ function nodeXY(si: number, slotIdx: number): { x: number; y: number } {
 const HANDLE_CSS = `
   /* Sleeve nodes must never intercept pointer events */
   .react-flow__node-sleeve { pointer-events: none !important; }
-  /* Source handle (+ connect) */
+  /* Source handle — anchored so its CENTER sits on the bottom edge of the node */
   .rf-src {
+    position:absolute!important;
+    left:50%!important; top:auto!important; bottom:0!important;
+    transform:translate(-50%,50%)!important;
     width:22px!important;height:22px!important;
     border-radius:50%!important;background:#111827!important;
     border:2px solid #4b5563!important;cursor:crosshair!important;
@@ -280,8 +283,11 @@ const HANDLE_CSS = `
   .rf-src:hover { width:30px!important;height:30px!important;
     background:#064e3b!important;border-color:#10b981!important; }
   .rf-src:hover::after { color:#34d399;font-size:18px; }
-  /* Target handle */
+  /* Target handle — anchored so its CENTER sits on the top edge of the node */
   .rf-tgt {
+    position:absolute!important;
+    left:50%!important; bottom:auto!important; top:0!important;
+    transform:translate(-50%,-50%)!important;
     width:12px!important;height:12px!important;border-radius:50%!important;
     background:#111827!important;border:2px solid #374151!important;
     transition:all .15s!important;
@@ -1013,18 +1019,23 @@ function PipelineCanvas() {
   const selKind      = selectedNode?.type as NodeKind | undefined;
   const selMeta      = selData && selKind ? getMeta(selKind, selData.subType) : null;
 
-  // Sync agentDraft when selected node changes
+  // Sync agentDraft when selected node changes — always init so prompts are visible immediately
   useEffect(() => {
     if (!selData || selKind !== "processing") { setAgentDraft(null); return; }
     const agId = selData.agentId as string;
-    if (!agId) { setAgentDraft(null); return; }
-    const a = allAgents.find(x => x.id === agId);
-    if (a) setAgentDraft({
-      name: a.name, description: a.description ?? "", agent_class: a.agent_class ?? "",
-      model: a.model ?? "gpt-5.4", temperature: a.temperature ?? 0,
-      system_prompt: a.system_prompt ?? "", user_prompt: a.user_prompt ?? "",
-      inputs: a.inputs ?? [], output_format: a.output_format ?? "markdown",
-      tags: a.tags ?? [], is_default: a.is_default ?? false,
+    const a    = agId ? allAgents.find(x => x.id === agId) : null;
+    setAgentDraft({
+      name:          a?.name          ?? "",
+      description:   a?.description   ?? "",
+      agent_class:   a?.agent_class   ?? "",
+      model:         a?.model         ?? "gpt-5.4",
+      temperature:   a?.temperature   ?? 0,
+      system_prompt: a?.system_prompt ?? "",
+      user_prompt:   a?.user_prompt   ?? "",
+      inputs:        [],               // pipeline inputs come from canvas edges, not agent definition
+      output_format: a?.output_format ?? "markdown",
+      tags:          a?.tags          ?? [],
+      is_default:    a?.is_default    ?? false,
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNodeId, allAgents.length]);
@@ -1046,7 +1057,6 @@ function PipelineCanvas() {
       const agId  = selData.agentId as string;
       const agCls = selData.agentClass as string;
       const cm    = classMeta(agCls);
-      const varKeys = agentDraft?.inputs?.filter(i => i.key) ?? [];
 
       return (
         <div className="flex flex-col h-full">
@@ -1082,7 +1092,8 @@ function PipelineCanvas() {
                       name: agent.name, description: agent.description ?? "",
                       agent_class: agent.agent_class ?? "", model: agent.model ?? "gpt-5.4",
                       temperature: agent.temperature ?? 0, system_prompt: agent.system_prompt ?? "",
-                      user_prompt: agent.user_prompt ?? "", inputs: agent.inputs ?? [],
+                      user_prompt: agent.user_prompt ?? "",
+                      inputs: [],  // pipeline inputs come from canvas edges
                       output_format: agent.output_format ?? "markdown",
                       tags: agent.tags ?? [], is_default: agent.is_default ?? false,
                     });
@@ -1126,53 +1137,31 @@ function PipelineCanvas() {
               );
             })()}
 
-            {/* Configure — only shown when an agent is selected */}
-            {agId && agentDraft && (
+            {/* Prompts + settings — always visible when processing node selected */}
+            {agentDraft && (
               <div className="p-3 space-y-3">
-                <p className="text-[9px] text-gray-600 uppercase tracking-wide">Configure</p>
-
-                <div>
-                  <label className="block text-[9px] text-gray-500 mb-1">Name</label>
-                  <input value={agentDraft.name}
-                    onChange={e => setAgentDraft(f => f ? { ...f, name: e.target.value } : f)}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
-                </div>
+                {agId && (
+                  <div>
+                    <label className="block text-[9px] text-gray-500 mb-1">Name</label>
+                    <input value={agentDraft.name}
+                      onChange={e => setAgentDraft(f => f ? { ...f, name: e.target.value } : f)}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-[9px] text-gray-500 mb-1">System Prompt</label>
-                  {varKeys.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mb-1.5">
-                      {varKeys.map(inp => (
-                        <button key={inp.key} type="button"
-                          onClick={() => setAgentDraft(f => f ? { ...f, system_prompt: f.system_prompt + `{${inp.key}}` } : f)}
-                          className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 font-mono transition-colors">
-                          {`{${inp.key}}`}
-                        </button>
-                      ))}
-                    </div>
-                  )}
                   <textarea value={agentDraft.system_prompt}
                     onChange={e => setAgentDraft(f => f ? { ...f, system_prompt: e.target.value } : f)}
-                    rows={4} placeholder="You are a…"
+                    rows={5} placeholder="You are a…"
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
                 </div>
 
                 <div>
                   <label className="block text-[9px] text-gray-500 mb-1">User Prompt</label>
-                  {varKeys.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mb-1.5">
-                      {varKeys.map(inp => (
-                        <button key={inp.key} type="button"
-                          onClick={() => setAgentDraft(f => f ? { ...f, user_prompt: f.user_prompt + `{${inp.key}}` } : f)}
-                          className="text-[9px] px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 font-mono transition-colors">
-                          {`{${inp.key}}`}
-                        </button>
-                      ))}
-                    </div>
-                  )}
                   <textarea value={agentDraft.user_prompt}
                     onChange={e => setAgentDraft(f => f ? { ...f, user_prompt: e.target.value } : f)}
-                    rows={4} placeholder={"Analyse this:\n\n{transcript}"}
+                    rows={5} placeholder={"Analyse this:\n\n{transcript}"}
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
                 </div>
 
@@ -1216,10 +1205,10 @@ function PipelineCanvas() {
                   )}
                 </div>
 
-                <button onClick={handleSaveAgent} disabled={agentSaving || !agentDraft.name.trim()}
-                  className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50">
+                <button onClick={handleSaveAgent} disabled={!agId || agentSaving || !agentDraft.name.trim()}
+                  className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40">
                   {agentSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : agentSaved ? <Check className="w-3 h-3" /> : null}
-                  {agentSaved ? "Saved" : "Save agent"}
+                  {agentSaved ? "Saved" : agId ? "Save agent" : "Select an agent above to save"}
                 </button>
               </div>
             )}
@@ -1323,14 +1312,18 @@ function PipelineCanvas() {
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0">
           <Download className="w-3 h-3" /> Presets
         </button>
+        <button onClick={handleSave}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-emerald-400 hover:border-emerald-800 text-xs transition-colors shrink-0">
+          <Check className="w-3 h-3" /> Validate
+        </button>
         <button onClick={handleSavePipeline} disabled={pipelineSaving}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-60 shrink-0">
           {pipelineSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
           Save
         </button>
-        <button onClick={handleClear} title="New pipeline / clear canvas"
-          className="p-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 transition-colors shrink-0">
-          <Trash2 className="w-3.5 h-3.5" />
+        <button onClick={handleClear} title="Clear canvas / new pipeline"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors shrink-0">
+          <Trash2 className="w-3 h-3" /> Clear
         </button>
       </div>
 
