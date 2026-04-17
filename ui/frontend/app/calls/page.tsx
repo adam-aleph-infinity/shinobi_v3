@@ -1,11 +1,10 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import useSWR from "swr";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   Users, Search, Loader2, FileText, CheckCircle2,
   Circle, ChevronRight, Mic2, StickyNote, Trash2, Play,
+  EyeOff, Eye, X,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
@@ -14,7 +13,9 @@ import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
 import { DragHandle } from "@/components/shared/DragHandle";
 import { AgentSidePanel } from "@/components/shared/AgentSidePanel";
 import { PipelineSidePanel } from "@/components/shared/PipelineSidePanel";
+import { SectionContent } from "@/components/shared/SectionCards";
 import { useResize } from "@/lib/useResize";
+import { CallCitationProvider } from "@/lib/call-citation-context";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -194,21 +195,7 @@ function NotesPanel({
             </button>
           </div>
           <div className="px-3 pb-3 bg-gray-950/40">
-            <div className="prose prose-invert prose-sm max-w-none text-xs">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  h2: ({ children }) => <h2 className="text-xs font-semibold text-indigo-300 mt-3 mb-1 border-b border-gray-800 pb-0.5">{children}</h2>,
-                  h3: ({ children }) => <h3 className="text-xs font-semibold text-gray-300 mt-2 mb-0.5">{children}</h3>,
-                  p:  ({ children }) => <p className="text-gray-400 mb-1 leading-relaxed text-[11px]">{children}</p>,
-                  ul: ({ children }) => <ul className="list-disc list-inside text-gray-400 mb-1 space-y-0 pl-2 text-[11px]">{children}</ul>,
-                  li: ({ children }) => <li className="text-gray-400">{children}</li>,
-                  strong: ({ children }) => <strong className="text-white font-medium">{children}</strong>,
-                }}
-              >
-                {note.content_md}
-              </ReactMarkdown>
-            </div>
+            <SectionContent content={note.content_md} />
           </div>
         </div>
       ))}
@@ -281,6 +268,12 @@ export default function CallsPage() {
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
   const [notesW, notesDrag]                     = useResize(320, 200, 560, "left");
+  const [showTranscript, setShowTranscript]     = useState(true);
+
+  // Citation modal state
+  const [citationCallId, setCitationCallId]       = useState<string | null>(null);
+  const [citationTranscript, setCitationTranscript] = useState("");
+  const [citationLoading, setCitationLoading]     = useState(false);
 
   // Restore persisted state after mount — prefer context values if local storage is empty
   useEffect(() => {
@@ -354,6 +347,37 @@ export default function CallsPage() {
 
   const selectedCallData = calls.find(c => c.call_id === selectedCallId) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
+
+  // Calls with transcripts in chronological order — matches the "Call N" numbering in merged transcripts
+  const transcribedCallsInOrder = calls
+    .filter(c => c.tx?.has_llm_smoothed || c.tx?.has_llm_voted || c.tx?.has_pipeline_final)
+    .sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
+
+  // Open a call's transcript in the citation modal
+  async function openCitation(callN: number) {
+    const call = transcribedCallsInOrder[callN - 1];
+    if (!call?.tx) return;
+    const path = call.tx.smoothed_path || call.tx.voted_path;
+    if (!path) return;
+    setCitationCallId(call.call_id);
+    setCitationTranscript("");
+    setCitationLoading(true);
+    try {
+      const text = await fetch(`/api/final-transcript/content?path=${encodeURIComponent(path)}`).then(r => r.text());
+      setCitationTranscript(text);
+    } catch {
+      setCitationTranscript("Error loading transcript.");
+    } finally {
+      setCitationLoading(false);
+    }
+  }
+
+  // Close citation modal on Escape
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") setCitationCallId(null); }
+    if (citationCallId) window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [citationCallId]);
 
   // ── Load transcript ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -660,84 +684,146 @@ export default function CallsPage() {
       <DragHandle onMouseDown={callsDrag} />
 
       {/* Panel 4 — Transcript viewer + optional Notes panel */}
-      <div className="flex-1 min-w-0 flex">
-        {/* Transcript */}
-        <div className="flex-1 min-w-0 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col">
-          <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
-            <FileText className="w-3.5 h-3.5 text-teal-400" />
-            <span className="text-xs font-semibold text-white flex-1">
-              {selectedCallId ? selectedCallId : "Transcript"}
-            </span>
-            {selectedCallData && (
-              <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                {selectedCallData.duration > 0 && <span className="text-teal-400">{formatDuration(selectedCallData.duration)}</span>}
-                {selectedCallData.date && <span>{formatDate(selectedCallData.date)}</span>}
-              </div>
-            )}
-          </div>
-
-          {!selectedCallId ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-gray-600 gap-2">
-              <FileText className="w-10 h-10 opacity-20" />
-              <p className="text-sm">Select a call</p>
-            </div>
-          ) : transcriptLoading ? (
-            <div className="flex-1 flex items-center justify-center gap-2 text-gray-500 text-sm">
-              <Loader2 className="w-4 h-4 animate-spin" /> Loading transcript…
-            </div>
-          ) : transcript ? (
-            <div className="flex-1 min-h-0 p-4 overflow-auto">
-              <div className="h-full bg-gray-950 border border-gray-800 rounded-lg p-3 overflow-auto">
-                <TranscriptViewer content={transcript} format="txt" className="h-full" />
-              </div>
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-600">
-              <Circle className="w-10 h-10 opacity-20" />
-              <p className="text-sm">No transcript yet</p>
-              {selectedCallData?.record_path && (
+      <CallCitationProvider onCitation={openCitation}>
+        <div className="flex-1 min-w-0 flex">
+          {/* Transcript */}
+          <div className={cn(
+            "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col",
+            showTranscript ? "flex-1 min-w-0" : "shrink-0 w-auto"
+          )}>
+            <div className="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+              <FileText className="w-3.5 h-3.5 text-teal-400" />
+              <span className="text-xs font-semibold text-white flex-1">
+                {selectedCallId ? selectedCallId : "Transcript"}
+              </span>
+              {selectedCallData && showTranscript && (
+                <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                  {selectedCallData.duration > 0 && <span className="text-teal-400">{formatDuration(selectedCallData.duration)}</span>}
+                  {selectedCallData.date && <span>{formatDate(selectedCallData.date)}</span>}
+                </div>
+              )}
+              {selectedCallId && (
                 <button
-                  onClick={handleTranscribe}
-                  disabled={transcribing}
-                  className="flex items-center gap-2 px-4 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                  onClick={() => setShowTranscript(s => !s)}
+                  className="text-gray-600 hover:text-gray-400 transition-colors shrink-0"
+                  title={showTranscript ? "Hide transcript" : "Show transcript"}
                 >
-                  {transcribing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic2 className="w-4 h-4" />}
-                  {transcribing ? "Starting…" : "Transcribe"}
+                  {showTranscript ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
               )}
-              {transcribeError && <p className="text-xs text-red-400 max-w-xs text-center">{transcribeError}</p>}
             </div>
-          )}
-        </div>
 
-        {/* Agent / Pipeline side panel */}
-        <>
-          <DragHandle onMouseDown={notesDrag} />
-          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col shrink-0" style={{ width: notesW }}>
-            {/* Tab toggle — only when both are set */}
-            {ctx.activeAgentId && ctx.activePipelineId && (
-              <div className="flex border-b border-gray-800 shrink-0">
-                {(["agent", "pipeline"] as const).map(tab => (
-                  <button
-                    key={tab}
-                    onClick={() => setSidePanel(tab)}
-                    className={cn(
-                      "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
-                      sidePanel === tab
-                        ? tab === "pipeline" ? "bg-teal-900/30 text-teal-300 border-b-2 border-teal-500" : "bg-violet-900/30 text-violet-300 border-b-2 border-violet-500"
-                        : "text-gray-500 hover:text-white hover:bg-gray-800/60",
+            {showTranscript && (
+              <>
+                {!selectedCallId ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-gray-600 gap-2">
+                    <FileText className="w-10 h-10 opacity-20" />
+                    <p className="text-sm">Select a call</p>
+                  </div>
+                ) : transcriptLoading ? (
+                  <div className="flex-1 flex items-center justify-center gap-2 text-gray-500 text-sm">
+                    <Loader2 className="w-4 h-4 animate-spin" /> Loading transcript…
+                  </div>
+                ) : transcript ? (
+                  <div className="flex-1 min-h-0 p-4 overflow-auto">
+                    <div className="h-full bg-gray-950 border border-gray-800 rounded-lg p-3 overflow-auto">
+                      <TranscriptViewer content={transcript} format="txt" className="h-full" />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-600">
+                    <Circle className="w-10 h-10 opacity-20" />
+                    <p className="text-sm">No transcript yet</p>
+                    {selectedCallData?.record_path && (
+                      <button
+                        onClick={handleTranscribe}
+                        disabled={transcribing}
+                        className="flex items-center gap-2 px-4 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                      >
+                        {transcribing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic2 className="w-4 h-4" />}
+                        {transcribing ? "Starting…" : "Transcribe"}
+                      </button>
                     )}
-                  >
-                    {tab}
-                  </button>
-                ))}
-              </div>
+                    {transcribeError && <p className="text-xs text-red-400 max-w-xs text-center">{transcribeError}</p>}
+                  </div>
+                )}
+              </>
             )}
-            {/* Panel content */}
-            {(sidePanel === "pipeline" && ctx.activePipelineId) ? <PipelineSidePanel /> : <AgentSidePanel />}
           </div>
-        </>
-      </div>
+
+          {/* Agent / Pipeline side panel */}
+          <>
+            <DragHandle onMouseDown={notesDrag} />
+            <div className={cn(
+              "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col",
+              showTranscript ? "shrink-0" : "flex-1"
+            )} style={showTranscript ? { width: notesW } : {}}>
+              {/* Tab toggle — only when both are set */}
+              {ctx.activeAgentId && ctx.activePipelineId && (
+                <div className="flex border-b border-gray-800 shrink-0">
+                  {(["agent", "pipeline"] as const).map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setSidePanel(tab)}
+                      className={cn(
+                        "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
+                        sidePanel === tab
+                          ? tab === "pipeline" ? "bg-teal-900/30 text-teal-300 border-b-2 border-teal-500" : "bg-violet-900/30 text-violet-300 border-b-2 border-violet-500"
+                          : "text-gray-500 hover:text-white hover:bg-gray-800/60",
+                      )}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Panel content */}
+              {(sidePanel === "pipeline" && ctx.activePipelineId)
+                ? <PipelineSidePanel showTranscript={showTranscript} onToggleTranscript={() => setShowTranscript(s => !s)} />
+                : <AgentSidePanel />}
+            </div>
+          </>
+        </div>
+      </CallCitationProvider>
+
+      {/* Citation modal — pops up when user clicks a "Call N" citation link */}
+      {citationCallId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setCitationCallId(null)}
+        >
+          <div
+            className="bg-gray-900 border border-gray-700 rounded-xl w-[min(90vw,800px)] h-[min(85vh,700px)] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 shrink-0">
+              <div className="flex items-center gap-2">
+                <FileText className="w-3.5 h-3.5 text-teal-400" />
+                <span className="text-xs font-semibold text-white">{citationCallId}</span>
+                {citationLoading && <Loader2 className="w-3 h-3 animate-spin text-gray-500" />}
+              </div>
+              <button
+                onClick={() => setCitationCallId(null)}
+                className="text-gray-600 hover:text-white transition-colors p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 p-4 overflow-auto">
+              {citationLoading ? (
+                <div className="flex items-center justify-center h-full gap-2 text-gray-500">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="text-xs">Loading transcript…</span>
+                </div>
+              ) : (
+                <div className="h-full bg-gray-950 border border-gray-800 rounded-lg p-3 overflow-auto">
+                  <TranscriptViewer content={citationTranscript} format="txt" className="h-full" />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

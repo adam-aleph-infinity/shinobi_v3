@@ -1,9 +1,10 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import useSWR from "swr";
 import {
   Workflow, Play, Loader2, AlertCircle,
   ChevronDown, ChevronUp, CheckCircle2, SkipForward,
+  Download, Eye, EyeOff,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -17,6 +18,10 @@ interface Pipeline {
   steps: PipelineStep[]; created_at: string;
 }
 interface UniversalAgent { id: string; name: string; }
+interface CachedStepResult {
+  agent_id: string;
+  result: { id: string; content: string; agent_name: string; created_at: string; } | null;
+}
 
 type StepStatus = "pending" | "loading" | "cached" | "done" | "error";
 interface StepState {
@@ -24,7 +29,13 @@ interface StepState {
   content: string; stream: string; expanded: boolean;
 }
 
-export function PipelineSidePanel() {
+export function PipelineSidePanel({
+  showTranscript,
+  onToggleTranscript,
+}: {
+  showTranscript?: boolean;
+  onToggleTranscript?: () => void;
+} = {}) {
   const { salesAgent, customer, callId, activePipelineId, activePipelineName } = useAppCtx();
 
   const { data: pipeline } = useSWR<Pipeline>(
@@ -33,13 +44,55 @@ export function PipelineSidePanel() {
   );
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
 
-  const [running, setRunning] = useState(false);
-  const [steps, setSteps] = useState<StepState[]>([]);
+  const [running, setRunning]   = useState(false);
+  const [steps, setSteps]       = useState<StepState[]>([]);
   const [runError, setRunError] = useState("");
-  const [done, setDone] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [done, setDone]         = useState(false);
+  const [loaded, setLoaded]     = useState(false);
+  const abortRef     = useRef<AbortController | null>(null);
   const streamEndRef = useRef<HTMLDivElement | null>(null);
 
+  // Reset steps when the agent/customer/call context changes
+  const contextKey = `${activePipelineId}:${salesAgent}:${customer}:${callId}`;
+  const prevContextKey = useRef("");
+  useEffect(() => {
+    if (contextKey === prevContextKey.current) return;
+    prevContextKey.current = contextKey;
+    if (!running) {
+      setSteps([]); setDone(false); setRunError(""); setLoaded(false);
+    }
+  }, [contextKey, running]);
+
+  // Fetch cached results for current context
+  const cacheUrl = activePipelineId && salesAgent && customer
+    ? `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`
+    : null;
+  const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
+
+  // Auto-populate steps from cache on first load
+  useEffect(() => {
+    if (loaded || running || !cachedResults || !pipeline || !agents) return;
+    setLoaded(true);
+
+    const initialSteps: StepState[] = pipeline.steps.map((s, i) => {
+      const a = agents.find(x => x.id === s.agent_id);
+      const cr = cachedResults[i];
+      return {
+        agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
+        status: cr?.result ? "cached" : "pending",
+        content: cr?.result?.content ?? "",
+        stream: "",
+        expanded: false,
+      };
+    });
+
+    if (initialSteps.some(st => st.status === "cached")) {
+      setSteps(initialSteps);
+      setDone(true);
+    }
+  }, [cachedResults, pipeline, agents, running, loaded]);
+
+  // ── Early return after all hooks ─────────────────────────────────────────────
   if (!activePipelineId) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-600 p-4 text-center">
@@ -50,20 +103,35 @@ export function PipelineSidePanel() {
   }
 
   const needsCall = pipeline?.scope === "per_call";
-  const hasPair = !!(salesAgent && customer);
-  const hasCall = !!(hasPair && callId);
+  const hasPair   = !!(salesAgent && customer);
+  const hasCall   = !!(hasPair && callId);
   const contextOk = needsCall ? hasCall : hasPair;
+  const hasResults = steps.length > 0 && steps.some(s => s.content);
 
-  function initSteps() {
+  function initSteps(): StepState[] {
     return (pipeline?.steps ?? []).map(s => {
       const a = (agents ?? []).find(x => x.id === s.agent_id);
-      return { agentName: a?.name ?? s.agent_id, status: "pending" as StepStatus, content: "", stream: "", expanded: false };
+      return { agentName: a?.name ?? s.agent_id, status: "pending", content: "", stream: "", expanded: false };
     });
+  }
+
+  function download() {
+    const sections = steps
+      .filter(st => st.content)
+      .map((st, i) => `# Step ${i + 1}: ${st.agentName}\n\n${st.content}`)
+      .join("\n\n---\n\n");
+    const slug = [activePipelineName, salesAgent, customer, callId]
+      .filter(Boolean).join("_").replace(/[^a-z0-9_\-]/gi, "_");
+    const blob = new Blob([sections], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `${slug}.md`; a.click();
+    URL.revokeObjectURL(url);
   }
 
   async function run() {
     if (!activePipelineId || !contextOk || running) return;
-    setRunning(true); setRunError(""); setDone(false);
+    setRunning(true); setRunError(""); setDone(false); setLoaded(true);
     setSteps(initSteps());
     abortRef.current = new AbortController();
 
@@ -104,13 +172,15 @@ export function PipelineSidePanel() {
               setSteps(prev => prev.map((st, i) => i === s ? { ...st, status: "done", content: evt.data.content, stream: "" } : st));
             }
             if (evt.type === "error") {
-              if (evt.data.step != null) {
+              if (evt.data.step != null)
                 setSteps(prev => prev.map((st, i) => i === evt.data.step ? { ...st, status: "error" } : st));
-              }
               setRunError(evt.data.msg ?? "Error");
             }
-            if (evt.type === "pipeline_done") setDone(true);
-          } catch { /* skip */ }
+            if (evt.type === "pipeline_done") {
+              setDone(true);
+              mutateCache(); // keep cache in sync
+            }
+          } catch { /* skip malformed line */ }
         }
       }
     } catch (e: any) {
@@ -131,9 +201,27 @@ export function PipelineSidePanel() {
             {pipeline.steps.length}s · {pipeline.scope}
           </span>
         )}
+        {hasResults && (
+          <button
+            onClick={download}
+            className="text-gray-600 hover:text-teal-400 transition-colors shrink-0"
+            title="Download results (.md)"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
+        )}
+        {onToggleTranscript && (
+          <button
+            onClick={onToggleTranscript}
+            className="text-gray-600 hover:text-gray-400 transition-colors shrink-0"
+            title={showTranscript ? "Hide transcript" : "Show transcript"}
+          >
+            {showTranscript ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        )}
       </div>
 
-      {/* Context check */}
+      {/* Context warning */}
       {!contextOk && (
         <div className="px-3 py-2 border-b border-gray-800 shrink-0 flex items-center gap-1.5 text-[11px] text-amber-400/80">
           <AlertCircle className="w-3 h-3 shrink-0" />
@@ -141,15 +229,17 @@ export function PipelineSidePanel() {
         </div>
       )}
 
-      {/* Run button */}
+      {/* Run / Re-run button */}
       <div className="px-3 py-2 border-b border-gray-800 shrink-0">
         <button
           onClick={run}
           disabled={running || !contextOk}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
         >
-          {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-          {running ? "Running…" : done ? "Run again" : "Run Pipeline"}
+          {running
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Play className="w-3.5 h-3.5" />}
+          {running ? "Running…" : hasResults ? "Re-run" : "Run Pipeline"}
         </button>
         {runError && <p className="mt-1.5 text-[11px] text-red-400 break-words">{runError}</p>}
       </div>
@@ -159,7 +249,9 @@ export function PipelineSidePanel() {
         {steps.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
             <Workflow className="w-8 h-8 opacity-20" />
-            <p className="text-xs">Hit Run to execute the pipeline</p>
+            <p className="text-xs text-center">
+              {contextOk ? "Hit Run to execute the pipeline" : "Select context to load results"}
+            </p>
           </div>
         )}
 
@@ -175,14 +267,12 @@ export function PipelineSidePanel() {
                 (st.status === "done" || st.status === "cached") && "cursor-pointer hover:bg-gray-800/40",
               )}
               onClick={() => {
-                if (st.status === "done" || st.status === "cached") {
+                if (st.status === "done" || st.status === "cached")
                   setSteps(prev => prev.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s));
-                }
               }}
             >
-              {/* Status icon */}
               {st.status === "loading" && !st.stream && <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />}
-              {st.status === "loading" && st.stream && <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse shrink-0" />}
+              {st.status === "loading" && st.stream  && <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse shrink-0" />}
               {st.status === "cached"  && <SkipForward className="w-3 h-3 text-amber-400 shrink-0" />}
               {st.status === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
               {st.status === "error"   && <AlertCircle  className="w-3 h-3 text-red-400 shrink-0" />}
@@ -198,7 +288,9 @@ export function PipelineSidePanel() {
               {st.status === "error"  && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40">error</span>}
 
               {(st.status === "done" || st.status === "cached") && (
-                st.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />
+                st.expanded
+                  ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" />
+                  : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />
               )}
             </div>
 

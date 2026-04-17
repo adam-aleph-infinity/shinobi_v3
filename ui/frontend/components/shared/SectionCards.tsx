@@ -4,6 +4,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, ChevronUp, Copy, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCallCitation } from "@/lib/call-citation-context";
+
+// Pre-process markdown to turn "Call N" into a citation link
+function injectCitationLinks(text: string): string {
+  // Avoid double-wrapping already-linked text; match bare "Call N" / "call #2" etc.
+  return text.replace(/\bCall\s*#?(\d+)\b/gi, (_, n) => `[Call ${n}](#call-ref-${n})`);
+}
 
 // ── Section parsing ────────────────────────────────────────────────────────────
 
@@ -87,6 +94,25 @@ export function SectionCard({ section, colorIdx, depth, expandTick = 0, collapse
   const color = SECTION_COLORS[colorIdx % SECTION_COLORS.length];
   const isRoot = depth === 0;
   const hasContent = !!(section.body || section.children.length > 0);
+  const { active: citationActive, onCitation } = useCallCitation();
+
+  // Citation-aware markdown components
+  const mdComponents: Record<string, any> = citationActive ? {
+    a: ({ href, children, ...props }: any) => {
+      const m = href?.match(/^#call-ref-(\d+)$/);
+      if (m) {
+        return (
+          <button
+            onClick={() => onCitation(parseInt(m[1]))}
+            className="text-teal-400 hover:text-teal-200 underline decoration-dotted font-medium cursor-pointer transition-colors"
+          >
+            {children}
+          </button>
+        );
+      }
+      return <a href={href} {...props}>{children}</a>;
+    },
+  } : {};
 
   useEffect(() => { if (expandTick > 0) setOpen(true); }, [expandTick]);
   useEffect(() => { if (collapseTick > 0) setOpen(false); }, [collapseTick]);
@@ -123,7 +149,9 @@ export function SectionCard({ section, colorIdx, depth, expandTick = 0, collapse
           {section.body && (
             <div className={cn("px-3 text-xs text-gray-300", isRoot ? "pt-2 pb-2" : "pt-1 pb-1")}>
               <div className="prose prose-invert prose-xs max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                  {citationActive ? injectCitationLinks(section.body) : section.body}
+                </ReactMarkdown>
               </div>
             </div>
           )}
@@ -156,6 +184,25 @@ export function SectionContent({ content, format = "markdown", expandTick = 0, c
   expandTick?: number;
   collapseTick?: number;
 }) {
+  const { active: citationActive, onCitation } = useCallCitation();
+
+  const mdComponents: Record<string, any> = citationActive ? {
+    a: ({ href, children, ...props }: any) => {
+      const m = href?.match(/^#call-ref-(\d+)$/);
+      if (m) {
+        return (
+          <button
+            onClick={() => onCitation(parseInt(m[1]))}
+            className="text-teal-400 hover:text-teal-200 underline decoration-dotted font-medium cursor-pointer transition-colors"
+          >
+            {children}
+          </button>
+        );
+      }
+      return <a href={href} {...props}>{children}</a>;
+    },
+  } : {};
+
   if (format === "json") {
     return (
       <pre className="text-[11px] font-mono whitespace-pre-wrap break-words text-green-300 overflow-x-auto">
@@ -178,7 +225,9 @@ export function SectionContent({ content, format = "markdown", expandTick = 0, c
 
   return (
     <div className="prose prose-invert prose-xs max-w-none text-xs text-gray-300">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+        {citationActive ? injectCitationLinks(content) : content}
+      </ReactMarkdown>
     </div>
   );
 }

@@ -103,6 +103,44 @@ class PipelineRunRequest(BaseModel):
     call_id: str = ""
 
 
+@router.get("/{pipeline_id}/results")
+def get_pipeline_results(
+    pipeline_id: str,
+    sales_agent: str = "",
+    customer: str = "",
+    call_id: str = "",
+    db: Session = Depends(get_session),
+):
+    """Return the latest cached AgentResult for each pipeline step (no LLM calls)."""
+    from ui.backend.models.agent_result import AgentResult as AR
+
+    _, pipeline_def = _find_file(pipeline_id)
+    steps = pipeline_def.get("steps", [])
+
+    out = []
+    for step in steps:
+        agent_id = step.get("agent_id", "")
+        stmt = select(AR).where(
+            AR.agent_id == agent_id,
+            AR.sales_agent == sales_agent,
+            AR.customer == customer,
+        )
+        if call_id:
+            stmt = stmt.where(AR.call_id == call_id)
+        stmt = stmt.order_by(AR.created_at.desc())
+        cached = db.exec(stmt).first()
+        out.append({
+            "agent_id": agent_id,
+            "result": {
+                "id": cached.id,
+                "content": cached.content,
+                "agent_name": cached.agent_name,
+                "created_at": cached.created_at.isoformat() if cached.created_at else None,
+            } if cached else None,
+        })
+    return out
+
+
 @router.post("/{pipeline_id}/run")
 async def run_pipeline(
     pipeline_id: str, req: PipelineRunRequest, db: Session = Depends(get_session)
