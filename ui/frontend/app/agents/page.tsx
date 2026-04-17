@@ -258,7 +258,7 @@ function AgentPickerGrid({ value, allAgents, prevStepClass, onPick }: {
   );
 }
 
-// ── Step card (canvas node) ───────────────────────────────────────────────────
+// ── Step card (canvas node with ports) ───────────────────────────────────────
 
 function StepCard({ step, index, total, allAgents, prevStepClass, selection, onSelect, onRemove, onMoveLeft, onMoveRight }: {
   step: PipelineStep; index: number; total: number;
@@ -283,12 +283,15 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
   const fmt     = agent?.output_format ?? "markdown";
   const fmtMeta = OUTPUT_FMT[fmt] ?? OUTPUT_FMT.markdown;
   const FmtIcon = fmtMeta.icon;
+  const inputs  = agent?.inputs ?? [];
 
   return (
     <div className="flex items-center shrink-0">
-      <div className="relative flex flex-col items-center">
+      {/* Node column */}
+      <div className="flex flex-col items-center shrink-0">
+
         {/* Controls pill */}
-        <div className="absolute -top-3 z-10 flex items-center gap-0 bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm">
+        <div className="flex items-center gap-0 bg-gray-900 border border-gray-800 rounded-full px-1.5 py-0.5 shadow-sm mb-1.5">
           <button onClick={onMoveLeft} disabled={index === 0}
             className="p-0.5 text-gray-700 hover:text-gray-400 disabled:opacity-20 transition-colors">
             <ChevronRight className="w-3 h-3 rotate-180" />
@@ -303,9 +306,45 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
           </button>
         </div>
 
-        {/* Main card */}
+        {/* Input ports row */}
+        {inputs.length > 0 && (
+          <div className="flex justify-center gap-3 mb-0">
+            {inputs.map(inp => {
+              const src    = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
+              const SrcIco = src.icon;
+              const isSel  = inputSel(inp.key);
+              return (
+                <button
+                  key={inp.key}
+                  onClick={() => onSelect(isSel ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
+                  title={`${inp.key} — ${src.label}`}
+                  className="flex flex-col items-center gap-0 group"
+                >
+                  {/* Label */}
+                  <span className={cn(
+                    "text-[8px] font-mono mb-0.5 transition-colors",
+                    isSel ? "text-white" : "text-gray-600 group-hover:text-gray-400",
+                  )}>
+                    {inp.key}
+                  </span>
+                  {/* Port circle */}
+                  <div className={cn(
+                    "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
+                    isSel ? cn(src.badge, "shadow-md scale-110") : cn("border-gray-700 bg-gray-900 group-hover:border-gray-500"),
+                  )}>
+                    <SrcIco className={cn("w-2 h-2", isSel ? "" : "text-gray-600 group-hover:text-gray-400")} />
+                  </div>
+                  {/* Wire down to card */}
+                  <div className={cn("w-px h-3 transition-colors", isSel ? "bg-gray-500" : "bg-gray-800")} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Card body */}
         <div className={cn(
-          "rounded-2xl border-2 bg-gray-900/60 overflow-hidden w-44 transition-all mt-1",
+          "rounded-2xl border-2 bg-gray-900/60 w-44 overflow-hidden transition-all",
           agentSel ? cn(meta.borderColor, "shadow-xl shadow-black/40") : "border-gray-800",
         )}>
           {/* Compat warning */}
@@ -318,7 +357,7 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
           {/* Agent body — click opens agent settings */}
           <div
             onClick={() => onSelect(agentSel ? null : { type: "agent", stepIdx: index })}
-            className="flex flex-col items-center gap-1.5 p-3 cursor-pointer hover:bg-gray-800/30 transition-colors"
+            className="flex flex-col items-center gap-1.5 p-4 cursor-pointer hover:bg-gray-800/30 transition-colors"
           >
             <AgentClassIcon cls={cls} size="md" />
             <p className="text-[11px] font-semibold text-white text-center truncate w-full">
@@ -328,57 +367,38 @@ function StepCard({ step, index, total, allAgents, prevStepClass, selection, onS
               {meta.label}
             </span>
           </div>
-
-          {/* Input badges section */}
-          {agent && (agent.inputs ?? []).length > 0 && (
-            <div className="px-2.5 pb-2 pt-1 border-t border-gray-800/60">
-              <p className="text-[8px] text-gray-700 uppercase tracking-wide mb-1">Inputs</p>
-              <div className="flex flex-wrap gap-1">
-                {agent.inputs.map(inp => {
-                  const src    = sourceMeta(step.input_overrides[inp.key] ?? inp.source);
-                  const SrcIco = src.icon;
-                  const isSel  = inputSel(inp.key);
-                  return (
-                    <button
-                      key={inp.key}
-                      onClick={() => onSelect(isSel ? null : { type: "input", stepIdx: index, inputKey: inp.key })}
-                      title={`${inp.key}: ${src.label}`}
-                      className={cn(
-                        "flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] border transition-all",
-                        isSel ? cn(src.badge, "ring-1 ring-white/20 scale-105") : cn(src.badge, "opacity-60 hover:opacity-100"),
-                      )}
-                    >
-                      <SrcIco className="w-2.5 h-2.5 shrink-0" />
-                      <span className="font-mono truncate max-w-[52px]">{inp.key}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Output format badge */}
-          {agent && (
-            <div className="px-2.5 pb-2.5 pt-1 border-t border-gray-800/60">
-              <p className="text-[8px] text-gray-700 uppercase tracking-wide mb-1">Output</p>
-              <button
-                onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
-                className={cn(
-                  "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-[9px] transition-all",
-                  outputSel ? cn(fmtMeta.border, "bg-gray-800") : "border-gray-700/40 bg-gray-900/60 hover:border-gray-600",
-                )}
-              >
-                <FmtIcon className={cn("w-3 h-3 shrink-0", fmtMeta.text)} />
-                <span className={cn("font-medium", fmtMeta.text)}>{fmtMeta.label}</span>
-              </button>
-            </div>
-          )}
         </div>
+
+        {/* Output port */}
+        {agent && (
+          <button
+            onClick={() => onSelect(outputSel ? null : { type: "output", stepIdx: index })}
+            title={`Output — ${fmtMeta.label}`}
+            className="flex flex-col items-center gap-0 group mt-0"
+          >
+            {/* Wire up from card */}
+            <div className={cn("w-px h-3 transition-colors", outputSel ? "bg-gray-500" : "bg-gray-800")} />
+            {/* Port circle */}
+            <div className={cn(
+              "w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all",
+              outputSel ? cn(fmtMeta.border, fmtMeta.bg, "shadow-md scale-110") : "border-gray-700 bg-gray-900 group-hover:border-gray-500",
+            )}>
+              <FmtIcon className={cn("w-2 h-2", outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400")} />
+            </div>
+            {/* Label */}
+            <span className={cn(
+              "text-[8px] mt-0.5 transition-colors",
+              outputSel ? fmtMeta.text : "text-gray-600 group-hover:text-gray-400",
+            )}>
+              {fmtMeta.label}
+            </span>
+          </button>
+        )}
       </div>
 
-      {/* Arrow to next */}
+      {/* Arrow to next — vertically centered on card body */}
       {index < total - 1 && (
-        <div className="flex items-center px-2 shrink-0 text-gray-700">
+        <div className="flex items-center self-center px-2 shrink-0 text-gray-700 mt-8">
           <div className="w-5 h-px bg-gray-800" />
           <ChevronRight className="w-4 h-4 -ml-1" />
         </div>
@@ -795,9 +815,6 @@ export default function AgentsPage() {
     ? selAgent.inputs.find(inp => inp.key === (selection as { type: "input"; stepIdx: number; inputKey: string }).inputKey)
     : undefined;
 
-  // Inferred scope badge
-  const inferredScope = showCanvas ? inferScope(pipelineForm.steps, allAgents) : null;
-
   return (
     <div className="min-h-[calc(100vh-5.25rem)] flex flex-col -m-6">
 
@@ -814,17 +831,6 @@ export default function AgentsPage() {
           />
         ) : (
           <span className="text-sm text-gray-600">Pipeline builder</span>
-        )}
-
-        {inferredScope && (
-          <span className={cn(
-            "text-[9px] px-1.5 py-0.5 rounded-full border font-medium",
-            inferredScope === "per_call"
-              ? "bg-blue-900/30 border-blue-700/40 text-blue-400"
-              : "bg-gray-800 border-gray-700 text-gray-500",
-          )}>
-            {inferredScope === "per_call" ? "per call" : "per pair"}
-          </span>
         )}
 
         <div className="flex-1" />

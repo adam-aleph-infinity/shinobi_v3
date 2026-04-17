@@ -211,15 +211,14 @@ function PipelinePicker({
 export function ContextBar() {
   const {
     salesAgent, customer, callId,
-    activeAgentName, activePipelineName,
+    activePipelineName,
     setSalesAgent, setCustomer, setCallId,
-    setActiveAgent, setActivePipeline,
+    setActivePipeline,
   } = useAppCtx();
 
-  const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelines } = useSWR<Pipeline[]>("/api/pipelines", fetcher);
 
-  const hasCtx = !!(salesAgent || activeAgentName || activePipelineName);
+  const hasCtx = !!(salesAgent || activePipelineName);
 
   return (
     <div className={cn(
@@ -256,19 +255,13 @@ export function ContextBar() {
         </span>
       )}
 
-      {/* ── Pickers — right-aligned ── */}
+      {/* ── Pipeline picker — right-aligned ── */}
       <div className="ml-auto flex items-center gap-3">
         <PipelinePicker
           value={activePipelineName}
           pipelines={pipelines}
           onSelect={p => setActivePipeline(p.id, p.name)}
           onClear={() => setActivePipeline("", "")}
-        />
-        <AgentPicker
-          value={activeAgentName}
-          agents={agents}
-          onSelect={a => setActiveAgent(a.id, a.name, a.agent_class || "general")}
-          onClear={() => setActiveAgent("", "", "")}
         />
       </div>
     </div>
