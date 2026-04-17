@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, Layers,
+  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, Layers, GitBranch,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -24,7 +24,9 @@ const GROUPS = [
   {
     label: "Agents",
     items: [
-      { href: "/agents", icon: Bot, label: "Agents" },
+      { href: "/agents",   icon: Bot,       label: "Agents" },
+      { href: "/workflow", icon: GitBranch, label: "Workflow" },
+      { href: "/test",     icon: Layers,    label: "Pipeline Test" },
     ],
   },
   {
