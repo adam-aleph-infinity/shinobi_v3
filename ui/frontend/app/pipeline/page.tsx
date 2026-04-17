@@ -470,7 +470,7 @@ function PipelineCanvas() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const INIT_STAGES: NodeKind[] = ["input", "processing", "output"];
+  const INIT_STAGES: NodeKind[] = ["input", "processing", "output", "processing", "output"];
   const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
