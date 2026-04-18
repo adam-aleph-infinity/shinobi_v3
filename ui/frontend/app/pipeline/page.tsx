@@ -1105,12 +1105,31 @@ function PipelineCanvas() {
         return { agent_id: d.agentId, input_overrides };
       });
 
+    // Derive scope: if any step reads a merged source → per_pair, else → per_call
+    const MERGED_SOURCES = new Set(["merged_transcript", "merged_notes"]);
+    let scope = "per_call";
+    for (const n of nodes.filter(n => n.type === "processing" && (n.data as PipelineNodeData).agentId)) {
+      const d = n.data as PipelineNodeData;
+      const agent = allAgents.find(a => a.id === d.agentId);
+      if (!agent) continue;
+      const connectedSrcs = edges
+        .filter(e => e.target === n.id)
+        .map(e => nodes.find(x => x.id === e.source))
+        .filter(s => s?.type === "input")
+        .map(s => (s!.data as PipelineNodeData).inputSource as string)
+        .filter(Boolean);
+      agent.inputs.forEach((inp, idx) => {
+        const src = connectedSrcs[idx] ?? inp.source;
+        if (MERGED_SOURCES.has(src)) scope = "per_pair";
+      });
+    }
+
     setPipelineSaving(true);
     try {
       const url    = pipelineId ? `/api/pipelines/${pipelineId}` : `/api/pipelines`;
       const method = pipelineId ? "PUT" : "POST";
       const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: pipelineName, description: "", scope: "per_pair", steps }) });
+        body: JSON.stringify({ name: pipelineName, description: "", scope, steps }) });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         showToast(`Save failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
