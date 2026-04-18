@@ -220,6 +220,12 @@ export default function CallsPage() {
   const ctx = useAppCtx();
   const [sidePanel, setSidePanel] = useState<"agent" | "pipeline">("agent");
 
+  // On mount: default to pipeline tab if only a pipeline is active (no agent)
+  useEffect(() => {
+    if (ctx.activePipelineId && !ctx.activeAgentId) setSidePanel("pipeline");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auto-switch to pipeline tab when a pipeline becomes active
   const prevPipelineId = useRef(ctx.activePipelineId);
   useEffect(() => {
@@ -758,27 +764,41 @@ export default function CallsPage() {
               "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col",
               showTranscript ? "shrink-0" : "flex-1"
             )} style={showTranscript ? { width: notesW } : {}}>
-              {/* Tab toggle — only when both are set */}
-              {ctx.activeAgentId && ctx.activePipelineId && (
+              {/* Tab toggle — show when at least one option is active */}
+              {(ctx.activeAgentId || ctx.activePipelineId) && (
                 <div className="flex border-b border-gray-800 shrink-0">
-                  {(["agent", "pipeline"] as const).map(tab => (
+                  {ctx.activeAgentId && (
                     <button
-                      key={tab}
-                      onClick={() => setSidePanel(tab)}
+                      key="agent"
+                      onClick={() => setSidePanel("agent")}
                       className={cn(
                         "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
-                        sidePanel === tab
-                          ? tab === "pipeline" ? "bg-teal-900/30 text-teal-300 border-b-2 border-teal-500" : "bg-violet-900/30 text-violet-300 border-b-2 border-violet-500"
+                        sidePanel === "agent"
+                          ? "bg-violet-900/30 text-violet-300 border-b-2 border-violet-500"
                           : "text-gray-500 hover:text-white hover:bg-gray-800/60",
                       )}
                     >
-                      {tab}
+                      Agent
                     </button>
-                  ))}
+                  )}
+                  {ctx.activePipelineId && (
+                    <button
+                      key="pipeline"
+                      onClick={() => setSidePanel("pipeline")}
+                      className={cn(
+                        "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
+                        sidePanel === "pipeline"
+                          ? "bg-teal-900/30 text-teal-300 border-b-2 border-teal-500"
+                          : "text-gray-500 hover:text-white hover:bg-gray-800/60",
+                      )}
+                    >
+                      Pipeline
+                    </button>
+                  )}
                 </div>
               )}
-              {/* Panel content */}
-              {(sidePanel === "pipeline" && ctx.activePipelineId)
+              {/* Panel content — auto-fallback to pipeline if no agent set */}
+              {(ctx.activePipelineId && (sidePanel === "pipeline" || !ctx.activeAgentId))
                 ? <PipelineSidePanel showTranscript={showTranscript} onToggleTranscript={() => setShowTranscript(s => !s)} />
                 : <AgentSidePanel />}
             </div>

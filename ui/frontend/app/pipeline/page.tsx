@@ -958,6 +958,20 @@ function PipelineCanvas() {
     setPipelineId(null);
   }
 
+  async function handleDeletePipeline(pid: string) {
+    const pl = allPipelines.find(p => p.id === pid);
+    if (!pl) return;
+    if (!window.confirm(`Delete pipeline "${pl.name}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/pipelines/${pid}`, { method: "DELETE" });
+      if (!res.ok) { showToast(`Delete failed (${res.status})`, false); return; }
+      mutate("/api/pipelines");
+      if (activePipelineId === pid) setActivePipeline("", "");
+      if (pipelineId === pid) handleClear();
+      showToast(`Pipeline "${pl.name}" deleted`, true);
+    } catch { showToast("Network error — could not delete pipeline", false); }
+  }
+
   function loadPipelineToCanvas(pid: string) {
     const pl = allPipelines.find(p => p.id === pid);
     if (!pl) return;
@@ -1547,15 +1561,23 @@ function PipelineCanvas() {
               {allPipelines.length === 0 ? (
                 <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
               ) : allPipelines.map(p => (
-                <button key={p.id}
-                  onClick={() => loadPipelineToCanvas(p.id)}
-                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
-                    ${pipelineId === p.id
-                      ? "bg-indigo-900/40 text-white"
-                      : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
-                  <span className="truncate flex-1">{p.name}</span>
-                </button>
+                <div key={p.id} className="flex items-center group">
+                  <button
+                    onClick={() => loadPipelineToCanvas(p.id)}
+                    className={`flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
+                      ${pipelineId === p.id
+                        ? "bg-indigo-900/40 text-white"
+                        : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
+                    <span className="truncate flex-1">{p.name}</span>
+                  </button>
+                  <button
+                    onClick={() => handleDeletePipeline(p.id)}
+                    title="Delete pipeline"
+                    className="shrink-0 p-1 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all">
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
               ))}
             </div>
           </div>

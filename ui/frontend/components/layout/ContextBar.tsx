@@ -211,20 +211,17 @@ function PipelinePicker({
 export function ContextBar() {
   const {
     salesAgent, customer, callId,
+    activeAgentId, activeAgentName,
     activePipelineName,
     setSalesAgent, setCustomer, setCallId,
-    setActivePipeline,
+    setActiveAgent, setActivePipeline,
   } = useAppCtx();
 
+  const { data: agents }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelines } = useSWR<Pipeline[]>("/api/pipelines", fetcher);
 
-  const hasCtx = !!(salesAgent || activePipelineName);
-
   return (
-    <div className={cn(
-      "border-b border-gray-800 px-4 flex items-center gap-2 text-xs shrink-0 transition-all",
-      hasCtx ? "bg-gray-900/90 h-9" : "bg-transparent h-0 overflow-hidden border-0"
-    )}>
+    <div className="border-b border-gray-800 bg-gray-900/90 px-4 flex items-center gap-2 text-xs shrink-0 h-9">
 
       {/* ── Breadcrumb: sales agent → customer → call ── */}
       {salesAgent && (
@@ -255,8 +252,14 @@ export function ContextBar() {
         </span>
       )}
 
-      {/* ── Pipeline picker — right-aligned ── */}
+      {/* ── Agent + Pipeline pickers — right-aligned ── */}
       <div className="ml-auto flex items-center gap-3">
+        <AgentPicker
+          value={activeAgentName}
+          agents={agents}
+          onSelect={a => setActiveAgent(a.id, a.name, a.agent_class)}
+          onClear={() => setActiveAgent("", "", "")}
+        />
         <PipelinePicker
           value={activePipelineName}
           pipelines={pipelines}
