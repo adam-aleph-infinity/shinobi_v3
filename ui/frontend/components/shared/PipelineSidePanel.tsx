@@ -64,7 +64,8 @@ export function PipelineSidePanel({
   );
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
 
-  const isPerCall = pipeline?.scope === "per_call";
+  // Treat as per_call if pipeline is per_call OR if user explicitly selected individual calls
+  const isPerCall = pipeline?.scope === "per_call" || !!(selectedCallIds && selectedCallIds.length > 0);
   const hasPair   = !!(salesAgent && customer);
   const contextOk = hasPair;
 
