@@ -161,7 +161,9 @@ async def run_pipeline(
 
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
-        log_buffer.emit(f"[PIPELINE] ▶ Starting: {pipeline_name} ({len(steps)} steps)")
+        cid = req.call_id or "pair"
+        cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
+        log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
         yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name})
         loop = asyncio.get_event_loop()
         prev_content = ""  # passed to next step as chain_previous
@@ -178,7 +180,7 @@ async def run_pipeline(
             agent_name = agent_def.get("name", agent_id)
             model = agent_def.get("model", "gpt-5.4")
 
-            log_buffer.emit(f"[PIPELINE] Step {step_idx + 1}/{len(steps)}: {agent_def.get('name', agent_id)}")
+            log_buffer.emit(f"[PIPELINE] Step {step_idx + 1}/{len(steps)}: {agent_name} · {cid_short}")
             yield _sse("step_start", {
                 "step": step_idx, "total": len(steps),
                 "agent_id": agent_id, "agent_name": agent_name,
@@ -247,7 +249,7 @@ async def run_pipeline(
 
             # ── Call LLM ─────────────────────────────────────────────────────
             total_chars = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
-            log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input")
+            log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input · {cid_short}")
             if model.startswith("claude-"):
                 q: _queue.Queue = _queue.Queue()
                 result_holder: list = []
@@ -309,16 +311,16 @@ async def run_pipeline(
             db.commit()
 
             prev_content = content
-            log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars)")
+            log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars) · {cid_short}")
             if thinking:
                 yield _sse("thinking", {"content": thinking, "step": step_idx})
-            log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1} done: {agent_def.get('name', agent_id)}")
+            log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1}: {agent_name} · {cid_short}")
             yield _sse("step_done", {
                 "step": step_idx, "agent_name": agent_name,
                 "result_id": result_id, "content": content,
             })
 
-        log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name}")
+        log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
         yield _sse("pipeline_done", {})
 
     return StreamingResponse(stream(), media_type="text/event-stream")

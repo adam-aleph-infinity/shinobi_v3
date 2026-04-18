@@ -26,7 +26,9 @@ interface CachedStepResult {
   result: { id: string; content: string; agent_name: string; created_at: string; } | null;
 }
 
-type StepStatus = "pending" | "loading" | "cached" | "done" | "error";
+type StepStatus    = "pending" | "loading" | "cached" | "done" | "error";
+type CallRunStatus = "queued"  | "running" | "cached" | "done" | "error";
+
 interface StepState {
   agentName: string; status: StepStatus;
   content: string; stream: string; expanded: boolean;
@@ -36,6 +38,7 @@ interface CallResult {
   steps: StepState[];
   expanded: boolean;
   done: boolean; error: string;
+  runStatus: CallRunStatus;
 }
 
 function initStepsFor(pipeline: Pipeline, agents: UniversalAgent[]): StepState[] {
@@ -55,15 +58,13 @@ export function PipelineSidePanel({
   const { salesAgent, customer, callId, activePipelineId, activePipelineName, setActivePipeline } = useAppCtx();
 
   const { data: pipeline, error: pipelineError } = useSWR<Pipeline>(
-    activePipelineId ? `/api/pipelines/${activePipelineId}` : null,
-    fetcher,
+    activePipelineId ? `/api/pipelines/${activePipelineId}` : null, fetcher,
   );
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
 
   const isPerCall = pipeline?.scope === "per_call";
   const hasPair   = !!(salesAgent && customer);
-  const hasCall   = !!(hasPair && callId);
-  const contextOk = hasPair; // both scopes only need pair
+  const contextOk = hasPair;
 
   // ── per_pair state ───────────────────────────────────────────────────────────
   const [steps,    setSteps]    = useState<StepState[]>([]);
@@ -73,16 +74,15 @@ export function PipelineSidePanel({
   const [loaded,   setLoaded]   = useState(false);
 
   // ── per_call state ───────────────────────────────────────────────────────────
-  const [callResults,    setCallResults]    = useState<CallResult[]>([]);
-  const [callsRunning,   setCallsRunning]   = useState(false);
-  const [callsRunError,  setCallsRunError]  = useState("");
-  const [callsLoaded,    setCallsLoaded]    = useState(false);
+  const [callResults,   setCallResults]   = useState<CallResult[]>([]);
+  const [callsRunning,  setCallsRunning]  = useState(false);
+  const [callsRunError, setCallsRunError] = useState("");
+  const [callsLoaded,   setCallsLoaded]   = useState(false);
 
-  const abortRef     = useRef<AbortController | null>(null);
   const streamEndRef = useRef<HTMLDivElement>(null);
 
   // Fetch all call dates for per_call scope
-  const callDatesUrl = isPerCall && hasPair && salesAgent && customer
+  const callDatesUrl = isPerCall && hasPair
     ? `/api/crm/call-dates?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
     : null;
   const { data: callDates } = useSWR<Record<string, { date: string; has_audio: boolean }>>(callDatesUrl, fetcher);
@@ -127,13 +127,13 @@ export function PipelineSidePanel({
   useEffect(() => {
     if (!isPerCall || callsLoaded || callsRunning || !callDates || !pipeline || !agents) return;
     setCallsLoaded(true);
-    const sortedCalls = Object.entries(callDates).sort((a, b) => a[1].date.localeCompare(b[1].date));
-    if (sortedCalls.length === 0) return;
+    const sorted = Object.entries(callDates).sort((a, b) => a[1].date.localeCompare(b[1].date));
+    if (sorted.length === 0) return;
 
     let cancelled = false;
     (async () => {
       const results: CallResult[] = [];
-      for (const [cid, info] of sortedCalls) {
+      for (const [cid, info] of sorted) {
         if (cancelled) break;
         try {
           const url = `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(cid)}`;
@@ -148,9 +148,17 @@ export function PipelineSidePanel({
               stream: "", expanded: false,
             };
           });
-          results.push({ callId: cid, date: info.date, steps: stepStates, expanded: false, done: stepStates.some(s => s.status === "cached"), error: "" });
+          const allCached = stepStates.length > 0 && stepStates.every(s => s.status === "cached");
+          results.push({
+            callId: cid, date: info.date, steps: stepStates,
+            expanded: false, done: allCached, error: "",
+            runStatus: allCached ? "cached" : "queued",
+          });
         } catch {
-          results.push({ callId: cid, date: info.date, steps: initStepsFor(pipeline, agents), expanded: false, done: false, error: "" });
+          results.push({
+            callId: cid, date: info.date, steps: initStepsFor(pipeline, agents),
+            expanded: false, done: false, error: "", runStatus: "queued",
+          });
         }
       }
       if (!cancelled) setCallResults(results);
@@ -158,7 +166,7 @@ export function PipelineSidePanel({
     return () => { cancelled = true; };
   }, [callDates, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer]);
 
-  // ── early returns (after all hooks) ─────────────────────────────────────────
+  // ── early returns ─────────────────────────────────────────────────────────────
   if (!activePipelineId) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-600 p-4 text-center">
@@ -167,7 +175,6 @@ export function PipelineSidePanel({
       </div>
     );
   }
-
   if (pipelineError?.status === 404) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 p-4 text-center">
@@ -180,96 +187,104 @@ export function PipelineSidePanel({
     );
   }
 
-  const hasResults    = steps.length > 0 && steps.some(s => s.content);
+  const hasResults     = steps.length > 0 && steps.some(s => s.content);
   const hasCallResults = callResults.some(cr => cr.done);
 
+  // ── download ──────────────────────────────────────────────────────────────────
   function download() {
     if (isPerCall) {
-      const sections = callResults
-        .filter(cr => cr.done)
-        .map(cr => {
-          const stepLines = cr.steps
-            .filter(s => s.content)
-            .map((s, i) => `### Step ${i + 1}: ${s.agentName}\n\n${s.content}`)
-            .join("\n\n");
-          return `## Call ${cr.callId} (${cr.date.slice(0, 10)})\n\n${stepLines}`;
-        })
-        .join("\n\n---\n\n");
+      const text = callResults.filter(cr => cr.done).map(cr => {
+        const body = cr.steps.filter(s => s.content).map((s, i) => `### Step ${i + 1}: ${s.agentName}\n\n${s.content}`).join("\n\n");
+        return `## ${cr.callId} (${cr.date.slice(0, 10)})\n\n${body}`;
+      }).join("\n\n---\n\n");
       const slug = [activePipelineName, salesAgent, customer].filter(Boolean).join("_").replace(/[^a-z0-9_\-]/gi, "_");
-      const blob = new Blob([sections], { type: "text/markdown" });
+      const blob = new Blob([text], { type: "text/markdown" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = `${slug}.md`; a.click();
       URL.revokeObjectURL(url);
     } else {
-      const sections = steps.filter(st => st.content).map((st, i) => `# Step ${i + 1}: ${st.agentName}\n\n${st.content}`).join("\n\n---\n\n");
+      const text = steps.filter(s => s.content).map((s, i) => `# Step ${i + 1}: ${s.agentName}\n\n${s.content}`).join("\n\n---\n\n");
       const slug = [activePipelineName, salesAgent, customer, callId].filter(Boolean).join("_").replace(/[^a-z0-9_\-]/gi, "_");
-      const blob = new Blob([sections], { type: "text/markdown" });
+      const blob = new Blob([text], { type: "text/markdown" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = `${slug}.md`; a.click();
       URL.revokeObjectURL(url);
     }
   }
 
-  // ── per_pair run ─────────────────────────────────────────────────────────────
+  // ── per_pair run ──────────────────────────────────────────────────────────────
   async function run() {
-    if (!activePipelineId || !contextOk || running) return;
+    if (!activePipelineId || !contextOk || running || !pipeline || !agents) return;
     setRunning(true); setRunError(""); setDone(false); setLoaded(true);
-    if (pipeline && agents) setSteps(initStepsFor(pipeline, agents));
-    abortRef.current = new AbortController();
+    setSteps(initStepsFor(pipeline, agents));
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        signal: abortRef.current.signal,
         body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: callId }),
       });
       if (!res.body) throw new Error("No response body");
-      await streamPipelineSSE(res, s => setSteps(s), () => { setDone(true); mutateCache(); });
+      let hadLLM = false;
+      await readPipelineSSE(res,
+        (type, evt, s) => {
+          if (type === "step_start")  setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name } : st));
+          if (type === "step_cached") setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached",  content: evt.content } : st));
+          if (type === "stream")      setSteps(p => { const n = p.map((st, i) => i === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
+          if (type === "step_done")   { hadLLM = true; setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "" } : st)); }
+          if (type === "error" && evt.step != null) setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error" } : st));
+          if (type === "pipeline_done") { setDone(true); mutateCache(); }
+        },
+      );
     } catch (e: any) {
       if (e.name !== "AbortError") setRunError(e.message ?? "Unexpected error");
     } finally { setRunning(false); }
   }
 
-  // ── per_call run (all calls) ─────────────────────────────────────────────────
+  // ── per_call parallel run ─────────────────────────────────────────────────────
   async function runAllCalls() {
     if (!activePipelineId || !hasPair || callsRunning || !callDates || !pipeline || !agents) return;
-    const sortedCalls = Object.entries(callDates).sort((a, b) => a[1].date.localeCompare(b[1].date));
-    if (sortedCalls.length === 0) { setCallsRunError("No calls found for this pair"); return; }
+    const sorted = Object.entries(callDates).sort((a, b) => a[1].date.localeCompare(b[1].date));
+    if (sorted.length === 0) { setCallsRunError("No calls found for this pair"); return; }
 
     setCallsRunning(true); setCallsRunError(""); setCallsLoaded(true);
-    // Reset all steps to pending
-    setCallResults(sortedCalls.map(([cid, info]) => ({
+    setCallResults(sorted.map(([cid, info]) => ({
       callId: cid, date: info.date,
-      steps: initStepsFor(pipeline, agents),
-      expanded: true, done: false, error: "",
+      steps: initStepsFor(pipeline!, agents!),
+      expanded: false, done: false, error: "",
+      runStatus: "queued" as CallRunStatus,
     })));
 
-    for (let ci = 0; ci < sortedCalls.length; ci++) {
-      const [cid] = sortedCalls[ci];
-      // Mark this call as running
-      setCallResults(prev => prev.map((cr, i) => i === ci ? { ...cr, steps: initStepsFor(pipeline!, agents!) } : cr));
+    const runSingle = async (cid: string, ci: number) => {
+      // Mark as running + auto-expand
+      setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, runStatus: "running", expanded: true } : cr));
+      let hadLLM = false;
       try {
         const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: cid }),
         });
         if (!res.body) throw new Error("No response body");
-        await streamPipelineSSE(
-          res,
-          updater => setCallResults(prev => prev.map((cr, i) => i === ci ? { ...cr, steps: updater(cr.steps) } : cr)),
-          () => setCallResults(prev => prev.map((cr, i) => i === ci ? { ...cr, done: true } : cr)),
-        );
+        await readPipelineSSE(res, (type, evt, s) => {
+          if (type === "step_start")  setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "loading", agentName: evt.agent_name } : st) } : cr));
+          if (type === "step_cached") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "cached", content: evt.content } : st) } : cr));
+          if (type === "stream")      setCallResults(p => { const n = p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st) } : cr); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
+          if (type === "step_done")   { hadLLM = true; setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "done", content: evt.content, stream: "" } : st) } : cr)); }
+          if (type === "error" && evt.step != null) setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === evt.step ? { ...st, status: "error" } : st) } : cr));
+          if (type === "pipeline_done") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, done: true, runStatus: hadLLM ? "done" : "cached", expanded: hadLLM } : cr));
+        });
       } catch (e: any) {
-        setCallResults(prev => prev.map((cr, i) => i === ci ? { ...cr, error: e.message ?? "Error" } : cr));
+        setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, error: e.message ?? "Error", runStatus: "error" } : cr));
       }
-    }
+    };
+
+    // All calls run in parallel
+    await Promise.allSettled(sorted.map(([cid], ci) => runSingle(cid, ci)));
     setCallsRunning(false);
   }
 
-  // ── SSE helper ───────────────────────────────────────────────────────────────
-  async function streamPipelineSSE(
+  // ── SSE reader ────────────────────────────────────────────────────────────────
+  async function readPipelineSSE(
     res: Response,
-    setStepsFn: (updater: (prev: StepState[]) => StepState[]) => void,
-    onDone: () => void,
+    onEvent: (type: string, data: any, step: number) => void,
   ) {
     const reader = res.body!.getReader();
     const dec = new TextDecoder();
@@ -280,34 +295,26 @@ export function PipelineSidePanel({
         if (!line.startsWith("data:")) continue;
         try {
           const evt = JSON.parse(line.slice(5).trim());
-          const s: number = evt.data.step ?? 0;
-          if (evt.type === "step_start") {
-            setStepsFn(prev => prev.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.data.agent_name } : st));
-          }
-          if (evt.type === "step_cached") {
-            setStepsFn(prev => prev.map((st, i) => i === s ? { ...st, status: "cached", content: evt.data.content } : st));
-          }
-          if (evt.type === "stream") {
-            setStepsFn(prev => prev.map((st, i) => {
-              if (i !== s) return st;
-              setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0);
-              return { ...st, stream: st.stream + (evt.data.text ?? "") };
-            }));
-          }
-          if (evt.type === "step_done") {
-            setStepsFn(prev => prev.map((st, i) => i === s ? { ...st, status: "done", content: evt.data.content, stream: "" } : st));
-          }
-          if (evt.type === "error") {
-            if (evt.data.step != null)
-              setStepsFn(prev => prev.map((st, i) => i === evt.data.step ? { ...st, status: "error" } : st));
-          }
-          if (evt.type === "pipeline_done") { onDone(); }
-        } catch { /* skip malformed line */ }
+          onEvent(evt.type, evt.data ?? {}, evt.data?.step ?? 0);
+        } catch { /* skip malformed */ }
       }
     }
   }
 
   const anyRunning = running || callsRunning;
+
+  // ── per_call progress stats ───────────────────────────────────────────────────
+  const callStats = callResults.length > 0 ? (() => {
+    const total   = callResults.length;
+    const queued  = callResults.filter(cr => cr.runStatus === "queued").length;
+    const running2 = callResults.filter(cr => cr.runStatus === "running").length;
+    const done2   = callResults.filter(cr => cr.runStatus === "done").length;
+    const cached2 = callResults.filter(cr => cr.runStatus === "cached").length;
+    const error2  = callResults.filter(cr => cr.runStatus === "error").length;
+    const completed = done2 + cached2 + error2;
+    const pct = Math.round((completed / total) * 100);
+    return { total, queued, running: running2, done: done2, cached: cached2, error: error2, completed, pct };
+  })() : null;
 
   return (
     <div className="flex flex-col h-full">
@@ -340,6 +347,28 @@ export function PipelineSidePanel({
         </div>
       )}
 
+      {/* per_call progress bar + stats */}
+      {isPerCall && callStats && (
+        <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="text-gray-500 font-mono">{callStats.completed}/{callStats.total} calls</span>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {callStats.queued  > 0 && <span className="text-gray-600">{callStats.queued} queued</span>}
+              {callStats.running > 0 && <span className="text-teal-400 flex items-center gap-0.5"><Loader2 className="w-2.5 h-2.5 animate-spin" /> {callStats.running} running</span>}
+              {callStats.done    > 0 && <span className="text-green-400">{callStats.done} done</span>}
+              {callStats.cached  > 0 && <span className="text-amber-400">{callStats.cached} cached</span>}
+              {callStats.error   > 0 && <span className="text-red-400">{callStats.error} failed</span>}
+            </div>
+          </div>
+          <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className={cn("h-full rounded-full transition-all duration-500", callStats.error > 0 && callStats.completed === callStats.total ? "bg-red-600" : "bg-teal-600")}
+              style={{ width: `${callStats.pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Run button */}
       <div className="px-3 py-2 border-b border-gray-800 shrink-0">
         <button
@@ -350,8 +379,12 @@ export function PipelineSidePanel({
           {anyRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
           {anyRunning ? "Running…"
             : isPerCall
-            ? (hasCallResults ? `Re-run all calls` : `Run all calls`)
-            : (hasResults ? "Re-run" : "Run Pipeline")}
+              ? (hasCallResults
+                  ? `Re-run all (${callResults.length} calls)`
+                  : callResults.length > 0
+                    ? `Run all (${callResults.length} calls)`
+                    : "Run all calls")
+              : (hasResults ? "Re-run" : "Run Pipeline")}
         </button>
         {(runError || callsRunError) && (
           <p className="mt-1.5 text-[11px] text-red-400 break-words">{runError || callsRunError}</p>
@@ -367,14 +400,16 @@ export function PipelineSidePanel({
               <p className="text-xs text-center">{contextOk ? "Hit Run to execute the pipeline" : "Select context to load results"}</p>
             </div>
           )}
-          {steps.map((st, i) => <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
-            onToggle={() => setSteps(prev => prev.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />)}
+          {steps.map((st, i) => (
+            <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
+              onToggle={() => setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />
+          ))}
         </div>
       )}
 
       {/* Call results (per_call) */}
       {isPerCall && (
-        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
           {callResults.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
               <Workflow className="w-8 h-8 opacity-20" />
@@ -387,33 +422,43 @@ export function PipelineSidePanel({
             </div>
           )}
           {callResults.map((cr, ci) => (
-            <div key={cr.callId} className="border border-gray-700/60 rounded-xl overflow-hidden">
+            <div key={cr.callId} className={cn(
+              "border rounded-xl overflow-hidden transition-colors",
+              cr.runStatus === "running" ? "border-teal-700/60" : "border-gray-700/50",
+            )}>
               {/* Call header */}
               <button
                 className="w-full flex items-center gap-2 px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-left"
-                onClick={() => setCallResults(prev => prev.map((r, i) => i === ci ? { ...r, expanded: !r.expanded } : r))}
+                onClick={() => setCallResults(p => p.map((r, i) => i === ci ? { ...r, expanded: !r.expanded } : r))}
               >
-                {cr.done
-                  ? <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />
-                  : cr.error
-                  ? <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />
-                  : cr.steps.some(s => s.status === "loading")
-                  ? <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />
-                  : <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
-                <span className="text-[10px] font-mono text-gray-400 truncate flex-1">{cr.callId}</span>
-                <span className="text-[9px] text-gray-600 shrink-0">{cr.date.slice(0, 10)}</span>
+                {cr.runStatus === "queued"  && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
+                {cr.runStatus === "running" && <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />}
+                {cr.runStatus === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
+                {cr.runStatus === "cached"  && <SkipForward className="w-3 h-3 text-amber-400 shrink-0" />}
+                {cr.runStatus === "error"   && <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />}
+
+                <span className="text-[10px] font-mono text-gray-400 truncate flex-1 min-w-0">{cr.callId}</span>
+                <span className="text-[9px] text-gray-600 shrink-0 tabular-nums">{cr.date.slice(0, 10)}</span>
+
+                {cr.runStatus === "queued"  && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">queued</span>}
+                {cr.runStatus === "running" && <span className="text-[9px] px-1 py-0.5 rounded bg-teal-900/40 text-teal-400 border border-teal-700/40 shrink-0">running</span>}
+                {cr.runStatus === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
+                {cr.runStatus === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
+                {cr.runStatus === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+
                 {cr.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
               </button>
+
               {/* Call steps */}
               {cr.expanded && (
-                <div className="p-2 space-y-1.5 bg-gray-950/40">
+                <div className="p-2 space-y-1 bg-gray-950/40 border-t border-gray-800">
                   {cr.steps.map((st, i) => (
                     <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
-                      onToggle={() => setCallResults(prev => prev.map((r, ri) => ri === ci
+                      onToggle={() => setCallResults(p => p.map((r, ri) => ri === ci
                         ? { ...r, steps: r.steps.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s) }
                         : r))} />
                   ))}
-                  {cr.error && <p className="text-[11px] text-red-400 px-2">{cr.error}</p>}
+                  {cr.error && <p className="text-[11px] text-red-400 px-2 pt-1">{cr.error}</p>}
                 </div>
               )}
             </div>
