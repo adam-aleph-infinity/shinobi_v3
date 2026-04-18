@@ -396,6 +396,17 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
 
+def _make_file_header(source: str, sales_agent: str, customer: str, call_id: str, chars: int) -> str:
+    """Short metadata block prepended to every uploaded file so the LLM knows the context."""
+    parts: list[str] = []
+    if source:      parts.append(f"source={source}")
+    if sales_agent: parts.append(f"agent={sales_agent}")
+    if customer:    parts.append(f"customer={customer}")
+    if call_id:     parts.append(f"call_id={call_id}")
+    parts.append(f"size={chars:,} chars")
+    return "[File context: " + " | ".join(parts) + "]\n\n"
+
+
 # ── Per-provider file upload helpers (with DB dedup) ─────────────────────────
 
 def _get_or_upload_gemini(
@@ -414,8 +425,10 @@ def _get_or_upload_gemini(
         raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
 
-    chash = _content_hash(content)
-    now   = datetime.utcnow()
+    chash     = _content_hash(content)
+    now       = datetime.utcnow()
+    cid_short = f"…{call_id[-8:]}" if call_id else "pair"
+    header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
 
     # Try existing record first
     existing = db.exec(
@@ -426,16 +439,18 @@ def _get_or_upload_gemini(
     if existing and (existing.expires_at is None or existing.expires_at > now):
         try:
             f = genai.get_file(existing.provider_file_id)
+            log_buffer.emit(f"[FILE] ✓ gemini:{existing.provider_file_id} ({source} · {cid_short})")
             return f  # ✓ reused cached file
         except Exception:
             pass  # file gone on Google's side; fall through
 
-    # Upload fresh
+    # Upload fresh (header + content so the model sees the context)
     f = genai.upload_file(
-        io.BytesIO(content.encode("utf-8")),
+        io.BytesIO((header + content).encode("utf-8")),
         mime_type="text/plain",
-        display_name=f"{key}.txt",
+        display_name=f"{source}_{customer}_{call_id or 'pair'}.txt",
     )
+    log_buffer.emit(f"[FILE] ↑ gemini:{f.name} ({source} · {cid_short})")
 
     record = UF(
         id=str(uuid.uuid4()),
@@ -471,8 +486,10 @@ def _get_or_upload_anthropic(
         raise RuntimeError("ANTHROPIC_API_KEY not set")
     client = anthropic.Anthropic(api_key=api_key)
 
-    chash = _content_hash(content)
-    now   = datetime.utcnow()
+    chash     = _content_hash(content)
+    now       = datetime.utcnow()
+    cid_short = f"…{call_id[-8:]}" if call_id else "pair"
+    header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
 
     # Try existing record
     existing = db.exec(
@@ -484,16 +501,18 @@ def _get_or_upload_anthropic(
         try:
             client.beta.files.retrieve(existing.provider_file_id,
                                         betas=["files-api-2025-04-14"])
+            log_buffer.emit(f"[FILE] ✓ anthropic:{existing.provider_file_id} ({source} · {cid_short})")
             return existing.provider_file_id  # ✓ reused
         except Exception:
             pass  # file deleted on Anthropic's side; fall through
 
-    # Upload fresh
+    # Upload fresh (header + content so the model sees the context)
     resp = client.beta.files.upload(
-        file=(f"{key}.txt", content.encode("utf-8"), "text/plain"),
+        file=(f"{source}_{customer}_{call_id or 'pair'}.txt", (header + content).encode("utf-8"), "text/plain"),
         betas=["files-api-2025-04-14"],
     )
     file_id = resp.id
+    log_buffer.emit(f"[FILE] ↑ anthropic:{file_id} ({source} · {cid_short})")
 
     record = UF(
         id=str(uuid.uuid4()),
@@ -513,6 +532,70 @@ def _get_or_upload_anthropic(
     db.add(record)
     db.commit()
     return file_id
+
+
+def _get_or_upload_openai(
+    content: str, key: str, source: str,
+    sales_agent: str, customer: str, call_id: str,
+    provider: str, api_key: str,
+    db: Session,
+) -> tuple[str, str]:
+    """Upload to OpenAI/Grok Files API, track in DB, return (file_id, content_with_header).
+    Note: OpenAI/Grok Chat Completions don't support inline file references, so the returned
+    content_with_header is still included as text in the message, but the file_id is logged
+    and persisted for reference."""
+    from openai import OpenAI
+    from ui.backend.models.uploaded_file import UploadedFile as UF
+
+    chash     = _content_hash(content)
+    now       = datetime.utcnow()
+    cid_short = f"…{call_id[-8:]}" if call_id else "pair"
+    header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
+    upload_content = header + content
+
+    # Try existing record
+    existing = db.exec(
+        select(UF).where(UF.provider == provider, UF.content_hash == chash)
+        .order_by(UF.created_at.desc())
+    ).first()
+
+    if existing:
+        log_buffer.emit(f"[FILE] ✓ {provider}:{existing.provider_file_id} ({source} · {cid_short})")
+        return existing.provider_file_id, upload_content
+
+    # Upload fresh
+    base_url = "https://api.x.ai/v1" if provider == "grok" else None
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    filename = f"{source}_{customer}_{call_id or 'pair'}.txt"
+    file_id = f"local:{chash[:16]}"  # fallback if upload fails
+    try:
+        resp = client.files.create(
+            file=(filename, upload_content.encode("utf-8"), "text/plain"),
+            purpose="assistants",
+        )
+        file_id = resp.id
+        log_buffer.emit(f"[FILE] ↑ {provider}:{file_id} ({source} · {cid_short})")
+    except Exception as exc:
+        log_buffer.emit(f"[FILE] ⚠ {provider} upload failed ({source} · {cid_short}): {exc} — tracking locally as {file_id}")
+
+    record = UF(
+        id=str(uuid.uuid4()),
+        provider=provider,
+        provider_file_id=file_id,
+        provider_file_uri="",
+        content_hash=chash,
+        input_key=key,
+        source=source,
+        sales_agent=sales_agent,
+        customer=customer,
+        call_id=call_id,
+        chars=len(content),
+        created_at=now,
+        expires_at=None,
+    )
+    db.add(record)
+    db.commit()
+    return file_id, upload_content
 
 
 # ── LLM call with file upload ─────────────────────────────────────────────────
@@ -706,7 +789,8 @@ def _llm_call_with_files(
         return _llm_call_anthropic_files(
             system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
-    # OpenAI / Grok — inline (their chat API has no equivalent file upload)
+    # OpenAI / Grok — upload to their Files API (tracked + logged), then include inline
+    # (Chat Completions doesn't support file references; file_id is for audit/tracking only)
     import sys
     sys.path.insert(0, str(settings.project_root))
     from shared.llm_client import LLMClient
@@ -714,25 +798,42 @@ def _llm_call_with_files(
     provider = "grok" if model.startswith("grok") else "openai"
     if provider == "grok":
         from shared.llm_client import resolve_grok_key
-        key = resolve_grok_key() or ""
+        api_key = resolve_grok_key() or ""
     else:
-        key = os.environ.get("OPENAI_API_KEY", "")
-    if not key:
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
         raise RuntimeError(f"API key not set for provider '{provider}'")
 
+    ctx = getattr(db, "_agent_run_ctx", {})
+
+    # Upload each file input and get (file_id, content_with_header)
+    file_resolved: dict[str, tuple[str, str]] = {}
+    for k, v in file_inputs.items():
+        fid, content_with_header = _get_or_upload_openai(
+            v, k,
+            ctx.get("source_for_key", {}).get(k, ""),
+            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
+            provider, api_key, db,
+        )
+        file_resolved[k] = (fid, content_with_header)
+
     user = user_template
-    orphaned: list[str] = []  # file inputs whose placeholder is absent from the template
-    for k, v in {**file_inputs, **inline_inputs}.items():
+    orphaned: list[str] = []
+    for k, v in inline_inputs.items():
         placeholder = f"{{{k}}}"
         if placeholder in user:
             user = user.replace(placeholder, v)
-        elif k in file_inputs and v.strip():
-            # No placeholder — append content so the model always receives it
-            orphaned.append(f"--- {k} ---\n{v}")
+    for k, (fid, content_with_header) in file_resolved.items():
+        placeholder = f"{{{k}}}"
+        if placeholder in user:
+            user = user.replace(placeholder, content_with_header)
+        elif content_with_header.strip():
+            # No placeholder — append so the model always receives the content
+            orphaned.append(f"--- {k} [file_id={fid}] ---\n{content_with_header}")
     if orphaned:
         user = user.strip() + "\n\n" + "\n\n".join(orphaned)
 
-    client = LLMClient(provider=provider, api_key=key)
+    client = LLMClient(provider=provider, api_key=api_key)
     resp = client.chat_completion(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
