@@ -265,12 +265,14 @@ function nodeXY(si: number, slotIdx: number): { x: number; y: number } {
 const HANDLE_CSS = `
   /* Sleeve nodes must never intercept pointer events */
   .react-flow__node-sleeve { pointer-events: none !important; }
-  /* Source handle — anchored so its CENTER sits on the bottom edge of the node */
+  /* Both handles share the same base size (14 px) so they protrude
+     symmetrically from the top and bottom edges of every node card.   */
+  /* Source handle — center sits ON the bottom edge (protrudes equally below) */
   .rf-src {
     position:absolute!important;
     left:50%!important; top:auto!important; bottom:0!important;
     transform:translate(-50%,50%)!important;
-    width:22px!important;height:22px!important;
+    width:14px!important;height:14px!important;
     border-radius:50%!important;background:#111827!important;
     border:2px solid #4b5563!important;cursor:crosshair!important;
     overflow:visible!important;
@@ -278,22 +280,23 @@ const HANDLE_CSS = `
   }
   .rf-src::after {
     content:'+';position:absolute;top:50%;left:50%;
-    transform:translate(-50%,-50%);color:#6b7280;
-    font-size:13px;font-weight:900;line-height:1;pointer-events:none;
+    transform:translate(-50%,-50%);color:transparent;
+    font-size:10px;font-weight:900;line-height:1;pointer-events:none;
+    transition:color .15s!important;
   }
-  .rf-src:hover { width:30px!important;height:30px!important;
+  .rf-src:hover { width:24px!important;height:24px!important;
     background:#064e3b!important;border-color:#10b981!important; }
-  .rf-src:hover::after { color:#34d399;font-size:18px; }
-  /* Target handle — anchored so its CENTER sits on the top edge of the node */
+  .rf-src:hover::after { color:#34d399;font-size:14px; }
+  /* Target handle — center sits ON the top edge (protrudes equally above) */
   .rf-tgt {
     position:absolute!important;
     left:50%!important; bottom:auto!important; top:0!important;
     transform:translate(-50%,-50%)!important;
-    width:12px!important;height:12px!important;border-radius:50%!important;
-    background:#111827!important;border:2px solid #374151!important;
-    transition:all .15s!important;
+    width:14px!important;height:14px!important;border-radius:50%!important;
+    background:#111827!important;border:2px solid #4b5563!important;
+    cursor:default!important;transition:all .15s!important;
   }
-  .rf-tgt:hover { width:16px!important;height:16px!important;
+  .rf-tgt:hover { width:20px!important;height:20px!important;
     background:#1e1b4b!important;border-color:#6366f1!important; }
 `;
 
@@ -486,7 +489,7 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
           ◆ Artifact · {m.label}
         </span>
       </div>
-      {/* OutputNode is terminal — no outgoing handle */}
+      <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
   );
 }
