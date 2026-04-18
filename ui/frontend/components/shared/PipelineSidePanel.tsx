@@ -140,11 +140,18 @@ export function PipelineSidePanel({
 
     if (sorted.length === 0) return;
 
+    // Show all calls immediately as queued, then update with cache status async
+    setCallResults(sorted.map(([cid, date]) => ({
+      callId: cid, date,
+      steps: initStepsFor(pipeline, agents),
+      expanded: false, done: false, error: "", runStatus: "queued" as CallRunStatus,
+    })));
+
     let cancelled = false;
     (async () => {
-      const results: CallResult[] = [];
-      for (const [cid, date] of sorted) {
+      for (let idx = 0; idx < sorted.length; idx++) {
         if (cancelled) break;
+        const [cid] = sorted[idx];
         try {
           const url = `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(cid)}`;
           const cached: CachedStepResult[] = await fetch(url).then(r => r.ok ? r.json() : []);
@@ -159,19 +166,11 @@ export function PipelineSidePanel({
             };
           });
           const allCached = stepStates.length > 0 && stepStates.every(s => s.status === "cached");
-          results.push({
-            callId: cid, date, steps: stepStates,
-            expanded: false, done: allCached, error: "",
-            runStatus: allCached ? "cached" : "queued",
-          });
-        } catch {
-          results.push({
-            callId: cid, date, steps: initStepsFor(pipeline, agents),
-            expanded: false, done: false, error: "", runStatus: "queued",
-          });
-        }
+          if (!cancelled) setCallResults(p => p.map((cr, i) => i === idx
+            ? { ...cr, steps: stepStates, done: allCached, runStatus: allCached ? "cached" : "queued" }
+            : cr));
+        } catch { /* leave as queued */ }
       }
-      if (!cancelled) setCallResults(results);
     })();
     return () => { cancelled = true; };
   }, [callDates, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer]);
