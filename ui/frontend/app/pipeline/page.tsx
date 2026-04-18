@@ -678,9 +678,10 @@ function PipelineCanvas() {
   const [pipelineSaving, setPipelineSaving] = useState(false);
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
-  const [agentSaving, setAgentSaving]   = useState(false);
-  const [agentSaved,  setAgentSaved]    = useState(false);
-  const [showModel,   setShowModel]     = useState(false);
+  const [agentSaving,   setAgentSaving]   = useState(false);
+  const [agentSaved,    setAgentSaved]    = useState(false);
+  const [agentDeleting, setAgentDeleting] = useState(false);
+  const [showModel,     setShowModel]     = useState(false);
 
   // Refs for fresh state in callbacks (avoid stale closures)
   const nodesRef  = useRef<Node[]>([]);
@@ -967,27 +968,55 @@ function PipelineCanvas() {
 
   async function handleSavePipeline() {
     if (!pipelineName.trim()) { showToast("Enter a pipeline name first", false); return; }
-    const err = validatePipeline(nodes, edges);
-    if (err) { showToast(err, false); return; }
+    // Build steps from processing nodes that have an agent assigned.
+    // For each step, derive input_overrides from canvas edges:
+    // if a canvas Input node is connected whose inputSource differs from the agent's default source
+    // for that key, record the override so execution uses the canvas-indicated source.
     const steps = nodes
       .filter(n => n.type === "processing" && (n.data as PipelineNodeData).agentId)
       .sort((a, b) => {
         const da = a.data as PipelineNodeData, db = b.data as PipelineNodeData;
         return da.stageIndex !== db.stageIndex ? da.stageIndex - db.stageIndex : a.position.x - b.position.x;
       })
-      .map(n => ({ agent_id: (n.data as PipelineNodeData).agentId, input_overrides: {} }));
+      .map(n => {
+        const d = n.data as PipelineNodeData;
+        const agent = allAgents.find(a => a.id === d.agentId);
+        const input_overrides: Record<string, string> = {};
+        if (agent && agent.inputs.length > 0) {
+          const connectedInputSources = edges
+            .filter(e => e.target === n.id)
+            .map(e => nodes.find(x => x.id === e.source))
+            .filter(src => src?.type === "input")
+            .map(src => (src!.data as PipelineNodeData).inputSource)
+            .filter(Boolean);
+          // Map each agent input key to the canvas-provided source if it differs
+          agent.inputs.forEach((inp, idx) => {
+            const canvasSrc = connectedInputSources[idx];
+            if (canvasSrc && canvasSrc !== inp.source) {
+              input_overrides[inp.key] = canvasSrc;
+            }
+          });
+        }
+        return { agent_id: d.agentId, input_overrides };
+      });
+
     setPipelineSaving(true);
     try {
       const url    = pipelineId ? `/api/pipelines/${pipelineId}` : `/api/pipelines`;
       const method = pipelineId ? "PUT" : "POST";
       const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: pipelineName, description: "", scope: "per_pair", steps }) });
-      const saved  = await res.json();
-      const newId  = pipelineId ?? saved.id;
-      if (newId) { setPipelineId(newId); }
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        showToast(`Save failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
+        return;
+      }
+      const saved = await res.json();
+      const newId = saved.id ?? pipelineId;
+      if (newId) setPipelineId(newId);
       mutate("/api/pipelines");
       showToast(`Pipeline "${pipelineName}" saved`, true);
-    } catch { showToast("Failed to save pipeline", false); }
+    } catch { showToast("Network error — could not save pipeline", false); }
     finally  { setPipelineSaving(false); }
   }
 
@@ -997,13 +1026,68 @@ function PipelineCanvas() {
     if (!nd?.agentId) return;
     setAgentSaving(true);
     try {
-      await fetch(`/api/universal-agents/${nd.agentId}`, {
+      const res = await fetch(`/api/universal-agents/${nd.agentId}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(agentDraft),
       });
+      if (!res.ok) { showToast(`Agent save failed (${res.status})`, false); return; }
       mutate("/api/universal-agents");
       setAgentSaved(true); setTimeout(() => setAgentSaved(false), 2000);
     } finally { setAgentSaving(false); }
+  }
+
+  // Create a new blank agent on the backend and attach it to the selected node
+  async function handleCreateAgent() {
+    if (!selectedNodeId) return;
+    const draft = {
+      name: "New Agent", description: "", agent_class: "general",
+      model: "gpt-5.4", temperature: 0,
+      system_prompt: "", user_prompt: "",
+      inputs: [{ key: "transcript", source: "transcript" }],
+      output_format: "markdown", tags: [], is_default: false,
+    };
+    try {
+      const res = await fetch("/api/universal-agents", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      if (!res.ok) { showToast("Failed to create agent", false); return; }
+      const created: UniversalAgent = await res.json();
+      mutate("/api/universal-agents");
+      updateNodeData(selectedNodeId, {
+        agentId: created.id, agentClass: created.agent_class, agentName: created.name,
+      });
+      setAgentDraft({ ...draft, inputs: created.inputs ?? draft.inputs });
+      setAgentSaved(false);
+      showToast("New agent created — edit and save below", true);
+    } catch { showToast("Network error — could not create agent", false); }
+  }
+
+  // Remove the agent association from this canvas node (agent stays in backend)
+  function handleDetachAgent() {
+    if (!selectedNodeId) return;
+    updateNodeData(selectedNodeId, { agentId: "", agentClass: "", agentName: "" });
+    setAgentDraft({ name: "", description: "", agent_class: "", model: "gpt-5.4",
+      temperature: 0, system_prompt: "", user_prompt: "", inputs: [],
+      output_format: "markdown", tags: [], is_default: false });
+    setAgentSaved(false);
+  }
+
+  // Permanently delete the agent from the backend, then detach from node
+  async function handleDeleteAgent() {
+    if (!selectedNodeId) return;
+    const nd = nodes.find(n => n.id === selectedNodeId)?.data as PipelineNodeData | undefined;
+    if (!nd?.agentId) return;
+    if (!window.confirm(`Delete agent "${nd.agentName}"? This cannot be undone.`)) return;
+    setAgentDeleting(true);
+    try {
+      const res = await fetch(`/api/universal-agents/${nd.agentId}`, { method: "DELETE" });
+      if (!res.ok) { showToast(`Delete failed (${res.status})`, false); return; }
+      mutate("/api/universal-agents");
+      handleDetachAgent();
+      showToast("Agent deleted", true);
+    } catch { showToast("Network error — could not delete agent", false); }
+    finally { setAgentDeleting(false); }
   }
 
   function handleSave() {
@@ -1032,7 +1116,9 @@ function PipelineCanvas() {
       temperature:   a?.temperature   ?? 0,
       system_prompt: a?.system_prompt ?? "",
       user_prompt:   a?.user_prompt   ?? "",
-      inputs:        [],               // pipeline inputs come from canvas edges, not agent definition
+      // IMPORTANT: preserve the agent's inputs — the pipeline executor uses these
+      // to know which data sources to fetch. Wiping them breaks execution.
+      inputs:        a?.inputs        ?? [],
       output_format: a?.output_format ?? "markdown",
       tags:          a?.tags          ?? [],
       is_default:    a?.is_default    ?? false,
@@ -1093,7 +1179,8 @@ function PipelineCanvas() {
                       agent_class: agent.agent_class ?? "", model: agent.model ?? "gpt-5.4",
                       temperature: agent.temperature ?? 0, system_prompt: agent.system_prompt ?? "",
                       user_prompt: agent.user_prompt ?? "",
-                      inputs: [],  // pipeline inputs come from canvas edges
+                      // Preserve the agent's inputs — pipeline executor uses these for source resolution
+                      inputs: agent.inputs ?? [],
                       output_format: agent.output_format ?? "markdown",
                       tags: agent.tags ?? [], is_default: agent.is_default ?? false,
                     });
@@ -1101,6 +1188,29 @@ function PipelineCanvas() {
                   }}
                 />
               )}
+              {/* Agent action buttons — New / Detach / Delete */}
+              <div className="flex gap-1.5 mt-2">
+                <button onClick={handleCreateAgent}
+                  title="Create a new blank agent and attach it to this node"
+                  className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-[10px] transition-colors">
+                  <Plus className="w-3 h-3" /> New
+                </button>
+                {agId && (
+                  <>
+                    <button onClick={handleDetachAgent}
+                      title="Remove the agent from this node (agent stays in library)"
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-amber-400 hover:border-amber-800 text-[10px] transition-colors">
+                      <X className="w-3 h-3" /> Detach
+                    </button>
+                    <button onClick={handleDeleteAgent} disabled={agentDeleting}
+                      title="Permanently delete this agent from the backend"
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40">
+                      {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                      Delete
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Connected inputs — auto-derived from canvas connections */}
