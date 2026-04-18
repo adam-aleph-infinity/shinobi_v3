@@ -290,13 +290,16 @@ export function ContextBar() {
 
       {/* ── Agent + Pipeline pickers — right-aligned ── */}
       <div className="ml-auto flex items-center gap-3">
-        <AgentPicker
-          activeId={activeAgentId}
-          activeName={activeAgentName}
-          agents={agents}
-          onSelect={a => setActiveAgent(a.id, a.name, a.agent_class)}
-          onClear={() => setActiveAgent("", "", "")}
-        />
+        {/* Hide agent picker when a pipeline is active — pipeline owns execution */}
+        {!activePipelineId && (
+          <AgentPicker
+            activeId={activeAgentId}
+            activeName={activeAgentName}
+            agents={agents}
+            onSelect={a => setActiveAgent(a.id, a.name, a.agent_class)}
+            onClear={() => setActiveAgent("", "", "")}
+          />
+        )}
         <PipelinePicker
           activeId={activePipelineId}
           activeName={activePipelineName}
