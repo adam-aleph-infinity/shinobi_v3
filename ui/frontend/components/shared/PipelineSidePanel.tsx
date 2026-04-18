@@ -79,7 +79,7 @@ export function PipelineSidePanel({
   const [callsLoaded,    setCallsLoaded]    = useState(false);
 
   const abortRef     = useRef<AbortController | null>(null);
-  const streamEndRef = useRef<HTMLDivElement | null>(null);
+  const streamEndRef = useRef<HTMLDivElement>(null);
 
   // Fetch all call dates for per_call scope
   const callDatesUrl = isPerCall && hasPair && salesAgent && customer
@@ -427,7 +427,7 @@ export function PipelineSidePanel({
 // ── Shared step row ───────────────────────────────────────────────────────────
 function StepRow({ st, index, streamEndRef, onToggle }: {
   st: StepState; index: number;
-  streamEndRef: React.RefObject<HTMLDivElement | null>;
+  streamEndRef: React.RefObject<HTMLDivElement>;
   onToggle: () => void;
 }) {
   return (
