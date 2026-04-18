@@ -1137,6 +1137,8 @@ function PipelineCanvas() {
       });
       if (!res.ok) { showToast(`Agent save failed (${res.status})`, false); return; }
       mutate("/api/universal-agents");
+      // Keep canvas node header in sync with the (possibly renamed) agent
+      updateNodeData(selectedNodeId, { agentName: agentDraft.name });
       setAgentSaved(true); setTimeout(() => setAgentSaved(false), 2000);
     } finally { setAgentSaving(false); }
   }

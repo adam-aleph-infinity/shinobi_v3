@@ -23,12 +23,14 @@ interface Pipeline {
 
 // ── Universal Agent Picker ─────────────────────────────────────────────────────
 function AgentPicker({
-  value,
+  activeId,
+  activeName,
   agents,
   onSelect,
   onClear,
 }: {
-  value: string;
+  activeId: string;
+  activeName: string;
   agents: UniversalAgent[] | undefined;
   onSelect: (agent: UniversalAgent) => void;
   onClear: () => void;
@@ -43,6 +45,11 @@ function AgentPicker({
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
+
+  // Determine display state
+  const loaded = agents !== undefined;
+  const notFound = loaded && activeId && !agents.find(a => a.id === activeId);
+  const label = notFound ? "not found" : (activeName || "none");
 
   // Group agents by agent_class
   const grouped: Record<string, UniversalAgent[]> = {};
@@ -60,16 +67,18 @@ function AgentPicker({
         onClick={() => setOpen(o => !o)}
         className={cn(
           "flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition-colors",
-          value
+          notFound
+            ? "bg-red-950/40 border-red-800/60 text-red-400 hover:bg-red-950/60"
+            : activeId
             ? "bg-violet-900/50 border-violet-700/60 text-violet-300 hover:bg-violet-900/70"
             : "bg-gray-800/60 border-gray-700/60 text-gray-500 hover:text-gray-300 hover:bg-gray-800"
         )}
       >
         <Bot className="w-2.5 h-2.5 shrink-0" />
-        <span className="max-w-[130px] truncate">{value || "none"}</span>
+        <span className="max-w-[130px] truncate">{label}</span>
         <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
       </button>
-      {value && (
+      {activeId && (
         <button onClick={onClear} className="text-gray-600 hover:text-gray-400 transition-colors -ml-0.5">
           <X className="w-2.5 h-2.5" />
         </button>
@@ -80,7 +89,7 @@ function AgentPicker({
           <p className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-semibold border-b border-gray-800 sticky top-0 bg-gray-900">
             Active Agent
           </p>
-          {value && (
+          {activeId && (
             <button
               onClick={() => { onClear(); setOpen(false); }}
               className="w-full px-3 py-2 text-left text-xs text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
@@ -88,10 +97,13 @@ function AgentPicker({
               — Clear
             </button>
           )}
-          {(agents ?? []).length === 0 && (
+          {loaded && (agents ?? []).length === 0 && (
             <p className="px-3 py-3 text-xs text-gray-600 text-center">
-              No agents yet. Create one in <span className="text-violet-400">Agents</span>.
+              No agents yet. Create one in <span className="text-violet-400">Pipelines</span>.
             </p>
+          )}
+          {!loaded && (
+            <p className="px-3 py-3 text-xs text-gray-600 text-center">Loading…</p>
           )}
           {classes.map(cls => (
             <div key={cls}>
@@ -104,7 +116,7 @@ function AgentPicker({
                   onClick={() => { onSelect(agent); setOpen(false); }}
                   className={cn(
                     "w-full px-3 py-1.5 text-left text-xs flex items-center justify-between transition-colors",
-                    value === agent.name
+                    activeId === agent.id
                       ? "bg-violet-900/40 text-violet-300"
                       : "text-gray-300 hover:bg-gray-800 hover:text-white"
                   )}
@@ -125,12 +137,14 @@ function AgentPicker({
 
 // ── Pipeline Picker ────────────────────────────────────────────────────────────
 function PipelinePicker({
-  value,
+  activeId,
+  activeName,
   pipelines,
   onSelect,
   onClear,
 }: {
-  value: string;
+  activeId: string;
+  activeName: string;
   pipelines: Pipeline[] | undefined;
   onSelect: (p: Pipeline) => void;
   onClear: () => void;
@@ -146,6 +160,10 @@ function PipelinePicker({
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
+  const loaded = pipelines !== undefined;
+  const notFound = loaded && activeId && !pipelines.find(p => p.id === activeId);
+  const label = notFound ? "not found" : (activeName || "none");
+
   return (
     <div className="relative shrink-0 flex items-center gap-1" ref={ref}>
       <span className="text-[10px] text-gray-600 font-medium">Pipeline</span>
@@ -153,16 +171,18 @@ function PipelinePicker({
         onClick={() => setOpen(o => !o)}
         className={cn(
           "flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition-colors",
-          value
+          notFound
+            ? "bg-red-950/40 border-red-800/60 text-red-400 hover:bg-red-950/60"
+            : activeId
             ? "bg-teal-900/50 border-teal-700/60 text-teal-300 hover:bg-teal-900/70"
             : "bg-gray-800/60 border-gray-700/60 text-gray-500 hover:text-gray-300 hover:bg-gray-800"
         )}
       >
         <Workflow className="w-2.5 h-2.5 shrink-0" />
-        <span className="max-w-[120px] truncate">{value || "none"}</span>
+        <span className="max-w-[120px] truncate">{label}</span>
         <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
       </button>
-      {value && (
+      {activeId && (
         <button onClick={onClear} className="text-gray-600 hover:text-gray-400 transition-colors -ml-0.5">
           <X className="w-2.5 h-2.5" />
         </button>
@@ -173,7 +193,7 @@ function PipelinePicker({
           <p className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-semibold border-b border-gray-800 sticky top-0 bg-gray-900">
             Active Pipeline
           </p>
-          {value && (
+          {activeId && (
             <button
               onClick={() => { onClear(); setOpen(false); }}
               className="w-full px-3 py-2 text-left text-xs text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
@@ -181,10 +201,13 @@ function PipelinePicker({
               — Clear
             </button>
           )}
-          {(pipelines ?? []).length === 0 && (
+          {loaded && (pipelines ?? []).length === 0 && (
             <p className="px-3 py-3 text-xs text-gray-600 text-center">
               No pipelines yet. Create one in <span className="text-teal-400">Pipelines</span>.
             </p>
+          )}
+          {!loaded && (
+            <p className="px-3 py-3 text-xs text-gray-600 text-center">Loading…</p>
           )}
           {(pipelines ?? []).map(p => (
             <button
@@ -192,7 +215,7 @@ function PipelinePicker({
               onClick={() => { onSelect(p); setOpen(false); }}
               className={cn(
                 "w-full px-3 py-1.5 text-left text-xs flex items-center justify-between transition-colors",
-                value === p.name
+                activeId === p.id
                   ? "bg-teal-900/40 text-teal-300"
                   : "text-gray-300 hover:bg-gray-800 hover:text-white"
               )}
@@ -212,13 +235,26 @@ export function ContextBar() {
   const {
     salesAgent, customer, callId,
     activeAgentId, activeAgentName,
-    activePipelineName,
+    activePipelineId, activePipelineName,
     setSalesAgent, setCustomer, setCallId,
     setActiveAgent, setActivePipeline,
   } = useAppCtx();
 
   const { data: agents }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelines } = useSWR<Pipeline[]>("/api/pipelines", fetcher);
+
+  // Auto-clear stale IDs once lists have loaded and the stored ID is missing
+  useEffect(() => {
+    if (agents && activeAgentId && !agents.find(a => a.id === activeAgentId)) {
+      setActiveAgent("", "", "");
+    }
+  }, [agents, activeAgentId, setActiveAgent]);
+
+  useEffect(() => {
+    if (pipelines && activePipelineId && !pipelines.find(p => p.id === activePipelineId)) {
+      setActivePipeline("", "");
+    }
+  }, [pipelines, activePipelineId, setActivePipeline]);
 
   return (
     <div className="border-b border-gray-800 bg-gray-900/90 px-4 flex items-center gap-2 text-xs shrink-0 h-9">
@@ -255,13 +291,15 @@ export function ContextBar() {
       {/* ── Agent + Pipeline pickers — right-aligned ── */}
       <div className="ml-auto flex items-center gap-3">
         <AgentPicker
-          value={activeAgentName}
+          activeId={activeAgentId}
+          activeName={activeAgentName}
           agents={agents}
           onSelect={a => setActiveAgent(a.id, a.name, a.agent_class)}
           onClear={() => setActiveAgent("", "", "")}
         />
         <PipelinePicker
-          value={activePipelineName}
+          activeId={activePipelineId}
+          activeName={activePipelineName}
           pipelines={pipelines}
           onSelect={p => setActivePipeline(p.id, p.name)}
           onClear={() => setActivePipeline("", "")}
