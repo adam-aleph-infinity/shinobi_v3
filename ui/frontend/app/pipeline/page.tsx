@@ -16,7 +16,7 @@ import {
   Bot, User, Star, StickyNote, Shield, Zap, BadgeCheck, ShieldCheck,
   Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
   Mic2, Layers, BookOpen, Link2, PenLine, FileText, Braces, AlignLeft,
-  Plus, Trash2, ChevronRight, X, Download, Workflow,
+  Plus, Trash2, ChevronRight, X, Download, Workflow, Copy,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 
@@ -972,8 +972,27 @@ function PipelineCanvas() {
     } catch { showToast("Network error — could not delete pipeline", false); }
   }
 
-  function loadPipelineToCanvas(pid: string) {
+  async function handleDuplicatePipeline(pid: string) {
     const pl = allPipelines.find(p => p.id === pid);
+    if (!pl) return;
+    try {
+      const fullPl = await fetch(`/api/pipelines/${pid}`).then(r => r.json());
+      const newName = `Copy of ${pl.name}`;
+      const res = await fetch("/api/pipelines", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName, steps: fullPl.steps ?? [], scope: fullPl.scope ?? "per_call" }),
+      });
+      if (!res.ok) { showToast(`Duplicate failed (${res.status})`, false); return; }
+      const saved = await res.json();
+      mutate("/api/pipelines");
+      showToast(`Duplicated as "${newName}"`, true);
+      loadPipelineToCanvas(saved.id, { id: saved.id, name: newName, steps: fullPl.steps ?? [] });
+    } catch { showToast("Network error — could not duplicate pipeline", false); }
+  }
+
+  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; steps: { agent_id: string; input_overrides: Record<string, string> }[] }) {
+    const pl = override ?? allPipelines.find(p => p.id === pid);
     if (!pl) return;
 
     // Collect unique input sources from all steps (applying overrides)
@@ -1591,6 +1610,12 @@ function PipelineCanvas() {
                         : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
                     <span className="truncate flex-1">{p.name}</span>
+                  </button>
+                  <button
+                    onClick={() => handleDuplicatePipeline(p.id)}
+                    title="Duplicate pipeline"
+                    className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all">
+                    <Copy className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => handleDeletePipeline(p.id)}
