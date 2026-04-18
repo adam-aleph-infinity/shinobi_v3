@@ -1631,7 +1631,7 @@ function PipelineCanvas() {
           {/* Elements header */}
           <div className="px-3 py-2 border-b border-gray-800 shrink-0">
             <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Elements</p>
-            <p className="text-[9px] text-gray-700 mt-0.5">Click to add · Drag to position</p>
+            <p className="text-[9px] text-gray-700 mt-0.5">Click to add to next available slot</p>
           </div>
 
           <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
@@ -1758,12 +1758,14 @@ function PipelineCanvas() {
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
             onConnect={onConnect}
-            onNodeDragStop={onNodeDragStop}
             isValidConnection={isValidConnectionFn}
+            nodesDraggable={false}
+            panOnDrag={false}
+            panOnScroll={false}
             zoomOnScroll={false}
             zoomOnPinch={false}
             zoomOnDoubleClick={false}
-            panOnScroll={false}
+            preventScrolling={false}
             deleteKeyCode="Delete"
             proOptions={{ hideAttribution: true }}
             className="bg-gray-900"
@@ -1774,7 +1776,7 @@ function PipelineCanvas() {
           {nodes.length === 0 && (
             <div className="absolute pointer-events-none select-none"
               style={{ left: 240, top: 40 + 52 + 22 }}>
-              <p className="text-xs text-gray-700 italic">← click or drag elements from the left panel</p>
+              <p className="text-xs text-gray-700 italic">← click elements from the left panel to add them</p>
             </div>
           )}
 
