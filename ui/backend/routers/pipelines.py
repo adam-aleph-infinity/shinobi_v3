@@ -246,6 +246,8 @@ async def run_pipeline(
             inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
             # ── Call LLM ─────────────────────────────────────────────────────
+            total_chars = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
+            log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input")
             if model.startswith("claude-"):
                 q: _queue.Queue = _queue.Queue()
                 result_holder: list = []
@@ -307,6 +309,7 @@ async def run_pipeline(
             db.commit()
 
             prev_content = content
+            log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars)")
             if thinking:
                 yield _sse("thinking", {"content": thinking, "step": step_idx})
             log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1} done: {agent_def.get('name', agent_id)}")

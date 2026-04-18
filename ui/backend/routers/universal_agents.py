@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from ui.backend.config import settings
 from ui.backend.database import get_session
+from ui.backend.services import log_buffer
 
 router = APIRouter(prefix="/universal-agents", tags=["universal-agents"])
 
@@ -890,6 +891,9 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 },
             }
 
+            total_chars = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
+            log_buffer.emit(f"[AGENT] ▶ {agent_def.get('name', agent_id)} · {model}")
+            log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input")
             yield _sse("progress", {
                 "msg": f"Calling {model}… ({len(file_inputs)} file(s), {len(inline_inputs)} inline)"
             })
@@ -954,11 +958,14 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
             db.add(record)
             db.commit()
 
+            log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars)")
+            log_buffer.emit(f"[AGENT] ✓ {agent_def.get('name', agent_id)}")
             if thinking:
                 yield _sse("thinking", {"content": thinking})
             yield _sse("done", {"content": content, "result_id": result_id})
 
         except Exception as e:
+            log_buffer.emit(f"[AGENT] ✗ {agent_def.get('name', agent_id)}: {e}")
             yield _sse("error", {"msg": str(e)})
 
     return StreamingResponse(stream(), media_type="text/event-stream")
