@@ -1,10 +1,12 @@
 "use client";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import useSWR from "swr";
 import {
   Workflow, Play, Loader2, AlertCircle,
   ChevronDown, ChevronUp, CheckCircle2, SkipForward,
-  Download, Eye, EyeOff,
+  Download, Eye, EyeOff, ChevronLeft, ChevronRight,
+  Mic2, FileText, Bot, StickyNote, Layers, BookOpen,
+  GitBranch, PenLine,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -20,7 +22,10 @@ interface Pipeline {
   id: string; name: string; scope: string;
   steps: PipelineStep[]; created_at: string;
 }
-interface UniversalAgent { id: string; name: string; }
+interface UniversalAgent {
+  id: string; name: string; agent_class?: string;
+  inputs?: { key: string; source: string }[];
+}
 interface CachedStepResult {
   agent_id: string;
   result: { id: string; content: string; agent_name: string; created_at: string; } | null;
@@ -48,6 +53,36 @@ function initStepsFor(pipeline: Pipeline, agents: UniversalAgent[]): StepState[]
   });
 }
 
+// ── Source metadata for flow diagram ─────────────────────────────────────────
+
+const SOURCE_META: Record<string, {
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  color: string; bg: string; border: string;
+}> = {
+  transcript:        { label: "Transcript",        icon: Mic2,      color: "text-blue-400",   bg: "bg-blue-950/30",   border: "border-blue-700/50" },
+  merged_transcript: { label: "Merged Transcript", icon: Layers,    color: "text-cyan-400",   bg: "bg-cyan-950/30",   border: "border-cyan-700/50" },
+  notes:             { label: "Notes",             icon: StickyNote, color: "text-green-400", bg: "bg-green-950/30",  border: "border-green-700/50" },
+  merged_notes:      { label: "Merged Notes",      icon: BookOpen,  color: "text-teal-400",   bg: "bg-teal-950/30",   border: "border-teal-700/50" },
+  agent_output:      { label: "Agent Output",      icon: Bot,       color: "text-purple-400", bg: "bg-purple-950/30", border: "border-purple-700/50" },
+  chain_previous:    { label: "Previous Step",     icon: GitBranch, color: "text-amber-400",  bg: "bg-amber-950/30",  border: "border-amber-700/50" },
+  manual:            { label: "Manual Input",      icon: PenLine,   color: "text-gray-400",   bg: "bg-gray-800/40",   border: "border-gray-700/50" },
+};
+const GENERIC_SOURCE = SOURCE_META.transcript; // fallback
+
+function ArrowDown() {
+  return (
+    <div className="flex justify-center py-0.5">
+      <div className="flex flex-col items-center">
+        <div className="w-px h-3 bg-gray-700" />
+        <div className="text-gray-700 text-[10px] leading-none">▾</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
 export function PipelineSidePanel({
   showTranscript,
   onToggleTranscript,
@@ -64,10 +99,17 @@ export function PipelineSidePanel({
   );
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
 
-  // Treat as per_call if pipeline is per_call OR if user explicitly selected individual calls
   const isPerCall = pipeline?.scope === "per_call" || !!(selectedCallIds && selectedCallIds.length > 0);
   const hasPair   = !!(salesAgent && customer);
   const contextOk = hasPair;
+
+  // ── view state ───────────────────────────────────────────────────────────────
+  const [panelView, setPanelView] = useState<"flow" | "steps">("flow");
+  const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
+  const [inputPreview, setInputPreview] = useState<{ loading: boolean; content: string; error: string }>(
+    { loading: false, content: "", error: "" }
+  );
+  const [flowCallIdx, setFlowCallIdx] = useState(0);
 
   // ── per_pair state ───────────────────────────────────────────────────────────
   const [steps,    setSteps]    = useState<StepState[]>([]);
@@ -90,13 +132,16 @@ export function PipelineSidePanel({
     : null;
   const { data: callDates } = useSWR<Record<string, { date: string; has_audio: boolean }>>(callDatesUrl, fetcher);
 
-  // Reset on context change (including when selected calls change)
+  // Reset on context change
   const selKey = selectedCallIds?.slice().sort().join(",") ?? "";
   const contextKey = `${activePipelineId}:${salesAgent}:${customer}:${callId}:${selKey}`;
   const prevContextKey = useRef("");
   useEffect(() => {
     if (contextKey === prevContextKey.current) return;
     prevContextKey.current = contextKey;
+    setFlowSelectedKey(null);
+    setInputPreview({ loading: false, content: "", error: "" });
+    setFlowCallIdx(0);
     if (!running && !callsRunning) {
       setSteps([]); setDone(false); setRunError(""); setLoaded(false);
       setCallResults([]); setCallsRunError(""); setCallsLoaded(false);
@@ -130,7 +175,6 @@ export function PipelineSidePanel({
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
     if (!isPerCall || callsLoaded || callsRunning || !pipeline || !agents) return;
-    // Use explicit selection if provided, otherwise all pair calls (need callDates)
     const hasSelection = selectedCallIds && selectedCallIds.length > 0;
     if (!hasSelection && !callDates) return;
     setCallsLoaded(true);
@@ -141,7 +185,6 @@ export function PipelineSidePanel({
 
     if (sorted.length === 0) return;
 
-    // Show all calls immediately as queued, then update with cache status async
     setCallResults(sorted.map(([cid, date]) => ({
       callId: cid, date,
       steps: initStepsFor(pipeline, agents),
@@ -175,6 +218,63 @@ export function PipelineSidePanel({
     })();
     return () => { cancelled = true; };
   }, [callDates, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer]);
+
+  // ── flow computed values ─────────────────────────────────────────────────────
+
+  // Unique data sources shown at the top of the flow diagram
+  const flowInputSources = useMemo(() => {
+    if (!pipeline || !agents) return [];
+    const sources = new Set<string>();
+    pipeline.steps.forEach(step => {
+      const agent = agents.find(a => a.id === step.agent_id);
+      if (agent?.inputs?.length) {
+        agent.inputs.forEach(inp => {
+          const src = step.input_overrides?.[inp.key] ?? inp.source;
+          // Skip "virtual" sources — they are resolved at runtime, not real files
+          if (src && src !== "agent_output" && src !== "chain_previous") sources.add(src);
+        });
+      } else {
+        sources.add("transcript");
+      }
+    });
+    return [...sources];
+  }, [pipeline, agents]);
+
+  // Active call for the flow view (in per_call mode)
+  const safeFlowCallIdx = Math.min(flowCallIdx, Math.max(0, callResults.length - 1));
+  const flowCall  = isPerCall && callResults.length > 0 ? callResults[safeFlowCallIdx] : null;
+  const flowSteps = flowCall ? flowCall.steps : steps;
+  const flowCallId = flowCall ? flowCall.callId : callId;
+
+  // ── input preview fetch ──────────────────────────────────────────────────────
+  async function fetchInputPreview(source: string) {
+    if (!salesAgent || !customer) {
+      setInputPreview({ loading: false, content: "", error: "No agent + customer selected" });
+      return;
+    }
+    setInputPreview({ loading: true, content: "", error: "" });
+    try {
+      let content = "";
+      if (source === "transcript") {
+        const url = `/api/notes/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(flowCallId)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        content = data.transcript ?? data.text ?? JSON.stringify(data, null, 2);
+      } else if (source === "merged_transcript") {
+        const url = `/api/full-persona-agent/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        content = data.transcript ?? JSON.stringify(data, null, 2);
+      } else {
+        content = `Source type: ${source}\n\n(Data is resolved at pipeline execution time)`;
+      }
+      setInputPreview({ loading: false, content, error: "" });
+    } catch (e: any) {
+      setInputPreview({ loading: false, content: "", error: e.message ?? "Failed to load" });
+    }
+  }
 
   // ── early returns ─────────────────────────────────────────────────────────────
   if (!activePipelineId) {
@@ -268,7 +368,6 @@ export function PipelineSidePanel({
     })));
 
     const runSingle = async (cid: string, ci: number) => {
-      // Mark as running + auto-expand
       setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, runStatus: "running", expanded: true } : cr));
       let hadLLM = false;
       try {
@@ -290,16 +389,12 @@ export function PipelineSidePanel({
       }
     };
 
-    // All calls run in parallel
     await Promise.allSettled(sorted.map(([cid], ci) => runSingle(cid, ci)));
     setCallsRunning(false);
   }
 
   // ── SSE reader ────────────────────────────────────────────────────────────────
-  async function readPipelineSSE(
-    res: Response,
-    onEvent: (type: string, data: any, step: number) => void,
-  ) {
+  async function readPipelineSSE(res: Response, onEvent: (type: string, data: any, step: number) => void) {
     const reader = res.body!.getReader();
     const dec = new TextDecoder();
     while (true) {
@@ -319,19 +414,21 @@ export function PipelineSidePanel({
 
   // ── per_call progress stats ───────────────────────────────────────────────────
   const callStats = callResults.length > 0 ? (() => {
-    const total   = callResults.length;
-    const queued  = callResults.filter(cr => cr.runStatus === "queued").length;
+    const total    = callResults.length;
+    const queued   = callResults.filter(cr => cr.runStatus === "queued").length;
     const running2 = callResults.filter(cr => cr.runStatus === "running").length;
-    const done2   = callResults.filter(cr => cr.runStatus === "done").length;
-    const cached2 = callResults.filter(cr => cr.runStatus === "cached").length;
-    const error2  = callResults.filter(cr => cr.runStatus === "error").length;
+    const done2    = callResults.filter(cr => cr.runStatus === "done").length;
+    const cached2  = callResults.filter(cr => cr.runStatus === "cached").length;
+    const error2   = callResults.filter(cr => cr.runStatus === "error").length;
     const completed = done2 + cached2 + error2;
     const pct = Math.round((completed / total) * 100);
     return { total, queued, running: running2, done: done2, cached: cached2, error: error2, completed, pct };
   })() : null;
 
+  // ── render ────────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full">
+
       {/* Header */}
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
         <Workflow className="w-3.5 h-3.5 text-teal-400 shrink-0" />
@@ -353,6 +450,24 @@ export function PipelineSidePanel({
         )}
       </div>
 
+      {/* Tab switcher: Flow / Steps */}
+      <div className="px-3 border-b border-gray-800 flex gap-3 shrink-0 bg-gray-900/50">
+        {(["flow", "steps"] as const).map(v => (
+          <button
+            key={v}
+            onClick={() => setPanelView(v)}
+            className={cn(
+              "py-1.5 text-[10px] font-bold uppercase tracking-widest border-b-2 transition-colors",
+              panelView === v
+                ? "border-teal-500 text-teal-400"
+                : "border-transparent text-gray-600 hover:text-gray-400",
+            )}
+          >
+            {v === "flow" ? "Flow" : "Steps"}
+          </button>
+        ))}
+      </div>
+
       {/* Context warning */}
       {!contextOk && (
         <div className="px-3 py-2 border-b border-gray-800 shrink-0 flex items-center gap-1.5 text-[11px] text-amber-400/80">
@@ -361,7 +476,7 @@ export function PipelineSidePanel({
         </div>
       )}
 
-      {/* per_call progress bar + stats */}
+      {/* per_call progress bar */}
       {isPerCall && callStats && (
         <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
           <div className="flex items-center justify-between text-[10px]">
@@ -405,8 +520,209 @@ export function PipelineSidePanel({
         )}
       </div>
 
+      {/* ── FLOW VIEW ───────────────────────────────────────────────────────────── */}
+      {panelView === "flow" && (
+        <div className="flex-1 min-h-0 flex flex-col">
+
+          {/* Call navigator (per_call mode) */}
+          {isPerCall && callResults.length > 0 && (
+            <div className="px-2 py-1.5 border-b border-gray-800 flex items-center gap-1 shrink-0">
+              <button
+                onClick={() => setFlowCallIdx(i => Math.max(0, i - 1))}
+                disabled={safeFlowCallIdx === 0}
+                className="p-1 text-gray-600 hover:text-gray-300 disabled:opacity-30 transition-colors rounded"
+              >
+                <ChevronLeft className="w-3 h-3" />
+              </button>
+              <div className="flex-1 text-center min-w-0">
+                <p className="text-[9px] font-mono text-gray-500 truncate">{flowCall?.callId ?? "—"}</p>
+                <p className="text-[8px] text-gray-700">{safeFlowCallIdx + 1} / {callResults.length}</p>
+              </div>
+              <button
+                onClick={() => setFlowCallIdx(i => Math.min(callResults.length - 1, i + 1))}
+                disabled={safeFlowCallIdx >= callResults.length - 1}
+                className="p-1 text-gray-600 hover:text-gray-300 disabled:opacity-30 transition-colors rounded"
+              >
+                <ChevronRight className="w-3 h-3" />
+              </button>
+            </div>
+          )}
+
+          {/* Flow diagram */}
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-0.5">
+
+            {/* ── Input source nodes ── */}
+            {flowInputSources.length > 0 && (
+              <>
+                <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">Inputs</p>
+                <div className="space-y-1">
+                  {flowInputSources.map(src => {
+                    const m = SOURCE_META[src] ?? GENERIC_SOURCE;
+                    const Icon = m.icon;
+                    const key = `input:${src}`;
+                    const isSelected = flowSelectedKey === key;
+                    return (
+                      <div key={src}>
+                        <button
+                          onClick={() => {
+                            if (isSelected) {
+                              setFlowSelectedKey(null);
+                              setInputPreview({ loading: false, content: "", error: "" });
+                            } else {
+                              setFlowSelectedKey(key);
+                              fetchInputPreview(src);
+                            }
+                          }}
+                          className={cn(
+                            "w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
+                            m.bg, m.border,
+                            isSelected ? "opacity-100 ring-1 ring-inset ring-current/30" : "opacity-75 hover:opacity-100",
+                          )}
+                        >
+                          <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
+                          <span className={cn("text-xs font-semibold flex-1 truncate", m.color)}>{m.label}</span>
+                          <span className="text-[9px] text-gray-600 shrink-0">input</span>
+                          {isSelected
+                            ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" />
+                            : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
+                        </button>
+
+                        {/* Input detail pane */}
+                        {isSelected && (
+                          <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                            {inputPreview.loading && (
+                              <div className="p-3 flex items-center gap-2 text-xs text-gray-500">
+                                <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+                              </div>
+                            )}
+                            {inputPreview.error && (
+                              <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>
+                            )}
+                            {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
+                              <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-56 overflow-y-auto">
+                                {inputPreview.content}
+                              </pre>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* Arrow from inputs to first step */}
+            {flowInputSources.length > 0 && pipeline && pipeline.steps.length > 0 && (
+              <ArrowDown />
+            )}
+
+            {/* ── Agent step nodes ── */}
+            {pipeline && pipeline.steps.length > 0 && (
+              <>
+                <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">
+                  Pipeline Steps
+                </p>
+                {pipeline.steps.map((step, i) => {
+                  const agent   = agents?.find(a => a.id === step.agent_id);
+                  const agentName = agent?.name ?? step.agent_id;
+                  const st      = flowSteps[i];
+                  const status  = st?.status ?? "pending";
+                  const key     = `agent:${i}`;
+                  const isSel   = flowSelectedKey === key;
+                  const hasContent = !!(st?.content);
+                  const hasStream  = !!(st?.stream);
+
+                  const borderClass =
+                    status === "loading" ? "border-teal-700/60 bg-teal-950/20" :
+                    status === "cached"  ? "border-amber-700/40 bg-amber-950/10" :
+                    status === "done"    ? "border-indigo-700/40 bg-indigo-950/20" :
+                    status === "error"   ? "border-red-700/40 bg-red-950/20" :
+                                          "border-gray-700/50 bg-gray-900/60";
+
+                  return (
+                    <div key={i}>
+                      <button
+                        onClick={() => setFlowSelectedKey(isSel ? null : key)}
+                        className={cn(
+                          "w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
+                          borderClass,
+                          isSel ? "opacity-100 ring-1 ring-inset ring-indigo-500/30" : "opacity-80 hover:opacity-100",
+                        )}
+                      >
+                        {status === "loading" && !hasStream && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400 shrink-0" />}
+                        {status === "loading" && hasStream   && <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0" />}
+                        {status === "cached"  && <SkipForward  className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                        {status === "done"    && <CheckCircle2  className="w-3.5 h-3.5 text-green-400 shrink-0" />}
+                        {status === "error"   && <AlertCircle   className="w-3.5 h-3.5 text-red-400 shrink-0" />}
+                        {status === "pending" && <Bot            className="w-3.5 h-3.5 text-indigo-500 shrink-0" />}
+
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-gray-200 truncate">{agentName}</p>
+                          <p className="text-[9px] text-gray-600">Step {i + 1}</p>
+                        </div>
+
+                        {status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
+                        {status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
+                        {status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+                        {status === "pending" && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">pending</span>}
+
+                        {isSel
+                          ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" />
+                          : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
+                      </button>
+
+                      {/* Agent detail pane */}
+                      {isSel && (
+                        <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                          {(status === "done" || status === "cached") && hasContent ? (
+                            <div className="max-h-56 overflow-y-auto p-1">
+                              <SectionContent content={st!.content} />
+                            </div>
+                          ) : hasStream ? (
+                            <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto">
+                              {st!.stream}<div ref={streamEndRef} />
+                            </pre>
+                          ) : (
+                            <div className="p-3 flex flex-col items-center gap-2">
+                              <p className="text-[11px] text-gray-600 text-center">
+                                {status === "error" ? "Step failed" : "Not yet executed"}
+                              </p>
+                              <button
+                                onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
+                                disabled={anyRunning || !contextOk}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors"
+                              >
+                                <Play className="w-3 h-3" />
+                                {isPerCall ? "Run All Calls" : "Run Pipeline"}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {i < pipeline.steps.length - 1 && <ArrowDown />}
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
+            {/* Empty state */}
+            {(!pipeline || pipeline.steps.length === 0) && (
+              <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
+                <Workflow className="w-8 h-8 opacity-20" />
+                <p className="text-xs text-center">No steps in this pipeline</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── STEPS VIEW ──────────────────────────────────────────────────────────── */}
+
       {/* Steps (per_pair) */}
-      {!isPerCall && (
+      {panelView === "steps" && !isPerCall && (
         <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
           {steps.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
@@ -422,7 +738,7 @@ export function PipelineSidePanel({
       )}
 
       {/* Call results (per_call) */}
-      {isPerCall && (
+      {panelView === "steps" && isPerCall && (
         <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
           {callResults.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
@@ -441,7 +757,6 @@ export function PipelineSidePanel({
               "border rounded-xl overflow-hidden transition-colors",
               cr.runStatus === "running" ? "border-teal-700/60" : "border-gray-700/50",
             )}>
-              {/* Call header */}
               <button
                 className="w-full flex items-center gap-2 px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-left"
                 onClick={() => setCallResults(p => p.map((r, i) => i === ci ? { ...r, expanded: !r.expanded } : r))}
@@ -451,20 +766,15 @@ export function PipelineSidePanel({
                 {cr.runStatus === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
                 {cr.runStatus === "cached"  && <SkipForward className="w-3 h-3 text-amber-400 shrink-0" />}
                 {cr.runStatus === "error"   && <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />}
-
                 <span className="text-[10px] font-mono text-gray-400 truncate flex-1 min-w-0">{cr.callId}</span>
                 <span className="text-[9px] text-gray-600 shrink-0 tabular-nums">{cr.date.slice(0, 10)}</span>
-
                 {cr.runStatus === "queued"  && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">queued</span>}
                 {cr.runStatus === "running" && <span className="text-[9px] px-1 py-0.5 rounded bg-teal-900/40 text-teal-400 border border-teal-700/40 shrink-0">running</span>}
                 {cr.runStatus === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
                 {cr.runStatus === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
                 {cr.runStatus === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
-
                 {cr.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
               </button>
-
-              {/* Call steps */}
               {cr.expanded && (
                 <div className="p-2 space-y-1 bg-gray-950/40 border-t border-gray-800">
                   {cr.steps.map((st, i) => (
