@@ -10,7 +10,10 @@ import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
 import { SectionContent } from "./SectionCards";
 
-const fetcher = (url: string) => fetch(url).then(r => r.json());
+const fetcher = (url: string) => fetch(url).then(r => {
+  if (!r.ok) { const e: any = new Error(r.statusText || String(r.status)); e.status = r.status; throw e; }
+  return r.json();
+});
 
 interface PipelineStep { agent_id: string; input_overrides: Record<string, string>; }
 interface Pipeline {
@@ -36,9 +39,9 @@ export function PipelineSidePanel({
   showTranscript?: boolean;
   onToggleTranscript?: () => void;
 } = {}) {
-  const { salesAgent, customer, callId, activePipelineId, activePipelineName } = useAppCtx();
+  const { salesAgent, customer, callId, activePipelineId, activePipelineName, setActivePipeline } = useAppCtx();
 
-  const { data: pipeline } = useSWR<Pipeline>(
+  const { data: pipeline, error: pipelineError } = useSWR<Pipeline>(
     activePipelineId ? `/api/pipelines/${activePipelineId}` : null,
     fetcher,
   );
@@ -98,6 +101,21 @@ export function PipelineSidePanel({
       <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-600 p-4 text-center">
         <Workflow className="w-8 h-8 opacity-20" />
         <p className="text-xs">Select a pipeline in the context bar</p>
+      </div>
+    );
+  }
+
+  if (pipelineError?.status === 404) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 p-4 text-center">
+        <AlertCircle className="w-8 h-8 text-red-500/40" />
+        <p className="text-xs text-red-400">Pipeline not found — it may have been deleted.</p>
+        <button
+          onClick={() => setActivePipeline("", "")}
+          className="text-[10px] text-gray-500 hover:text-white underline transition-colors"
+        >
+          Clear active pipeline
+        </button>
       </div>
     );
   }
