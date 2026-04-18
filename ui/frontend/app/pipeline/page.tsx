@@ -1758,14 +1758,13 @@ function PipelineCanvas() {
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
             onConnect={onConnect}
+            onNodeDragStop={onNodeDragStop}
             isValidConnection={isValidConnectionFn}
-            nodesDraggable={false}
             panOnDrag={false}
             panOnScroll={false}
             zoomOnScroll={false}
             zoomOnPinch={false}
             zoomOnDoubleClick={false}
-            preventScrolling={false}
             deleteKeyCode="Delete"
             proOptions={{ hideAttribution: true }}
             className="bg-gray-900"
