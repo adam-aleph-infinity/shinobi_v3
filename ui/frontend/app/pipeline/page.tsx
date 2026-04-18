@@ -415,7 +415,7 @@ function NodeCard({
   return (
     <div className={`w-[200px] rounded-xl border-2 shadow-2xl transition-all duration-150
       ${meta.border} bg-gray-900
-      ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40 scale-105` : "opacity-90 hover:opacity-100 hover:scale-[1.02]"}`}>
+      ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40` : "opacity-90 hover:opacity-100"}`}>
       {children}
     </div>
   );
@@ -486,7 +486,7 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
           ◆ Artifact · {m.label}
         </span>
       </div>
-      <Handle type="source" position={Position.Bottom} className="rf-src" />
+      {/* OutputNode is terminal — no outgoing handle */}
     </NodeCard>
   );
 }
@@ -1013,8 +1013,10 @@ function PipelineCanvas() {
     // Build stages: input, then per-step: processing + output
     const newStages: NodeKind[] = ["input"];
     pl.steps.forEach(() => { newStages.push("processing"); newStages.push("output"); });
-    // Ensure at least the initial 5-stage layout if pipeline is empty
-    if (pl.steps.length === 0) { newStages.push(...INIT_STAGES.slice(1)); }
+    // Always show at least INIT_STAGES rows so there is room to expand
+    while (newStages.length < INIT_STAGES.length) {
+      newStages.push("processing", "output");
+    }
 
     const newNodes: Node[] = [];
     const newEdges: Edge[] = [];
