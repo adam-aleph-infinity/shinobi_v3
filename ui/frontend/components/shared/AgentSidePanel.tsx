@@ -10,7 +10,10 @@ import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
 import { parseSections, SectionCard, SectionContent } from "./SectionCards";
 
-const fetcher = (url: string) => fetch(url).then(r => r.json());
+const fetcher = (url: string) => fetch(url).then(r => {
+  if (!r.ok) { const e: any = new Error(r.statusText || String(r.status)); e.status = r.status; throw e; }
+  return r.json();
+});
 
 interface AgentInput { key: string; source: string; agent_id?: string; }
 interface AgentDef {
@@ -203,20 +206,21 @@ function ResultCard({ result, format }: { result: AgentResult; format: string })
 // ── AgentSidePanel ─────────────────────────────────────────────────────────────
 
 export function AgentSidePanel() {
-  const { salesAgent, customer, callId, activeAgentId, activeAgentName } = useAppCtx();
+  const { salesAgent, customer, callId, activeAgentId, activeAgentName, setActiveAgent } = useAppCtx();
 
-  const { data: agentDef } = useSWR<AgentDef>(
+  const { data: agentDef, error: agentDefError } = useSWR<AgentDef>(
     activeAgentId ? `/api/universal-agents/${activeAgentId}` : null,
     fetcher,
   );
 
   // Scope toggle — only for agents with merged inputs when a call is selected
-  const canScopeDown = !!(agentDef && hasMergedInputs(agentDef.inputs) && callId);
+  const agentInputs = agentDef?.inputs ?? [];
+  const canScopeDown = !!(agentDef && hasMergedInputs(agentInputs) && callId);
   const [scope, setScope] = useState<"call" | "pair">("pair");
   const scopedCallId = canScopeDown && scope === "call" ? callId : "";
 
   // Context sufficiency
-  const requires = agentDef ? agentRequires(agentDef.inputs) : "none";
+  const requires = agentDef ? agentRequires(agentInputs) : "none";
   const hasPair = !!(salesAgent && customer);
   const hasCall = !!(hasPair && callId);
   const contextOk = requires === "none" ? true : requires === "pair" ? hasPair : hasCall;
@@ -250,8 +254,8 @@ export function AgentSidePanel() {
     abortRef.current = new AbortController();
 
     const sourceOverrides: Record<string, string> = {};
-    if (scopedCallId && agentDef) {
-      for (const inp of agentDef.inputs) {
+    if (scopedCallId && agentInputs.length > 0) {
+      for (const inp of agentInputs) {
         if (inp.source === "merged_transcript") sourceOverrides[inp.key] = "transcript";
         if (inp.source === "merged_notes")      sourceOverrides[inp.key] = "notes";
       }
@@ -296,6 +300,21 @@ export function AgentSidePanel() {
       <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-600 p-4 text-center">
         <Bot className="w-8 h-8 opacity-20" />
         <p className="text-xs">Select an agent in the context bar</p>
+      </div>
+    );
+  }
+
+  if (agentDefError?.status === 404) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 p-4 text-center">
+        <AlertCircle className="w-8 h-8 text-red-500/40" />
+        <p className="text-xs text-red-400">Agent not found — it may have been deleted.</p>
+        <button
+          onClick={() => setActiveAgent("", "", "")}
+          className="text-[10px] text-gray-500 hover:text-white underline transition-colors"
+        >
+          Clear active agent
+        </button>
       </div>
     );
   }
