@@ -235,15 +235,6 @@ export default function CallsPage() {
     prevPipelineId.current = ctx.activePipelineId;
   }, [ctx.activePipelineId]);
 
-  // Auto-switch to pipeline tab when calls are first checked (if pipeline active)
-  const prevCheckedSizeRef = useRef(0);
-  useEffect(() => {
-    if (checkedCallIds.size > 0 && prevCheckedSizeRef.current === 0 && ctx.activePipelineId) {
-      setSidePanel("pipeline");
-    }
-    prevCheckedSizeRef.current = checkedCallIds.size;
-  }, [checkedCallIds, ctx.activePipelineId]);
-
   const [agentW, agentDrag]       = useResize(180, 120, 360);
   const [customerW, customerDrag] = useResize(180, 120, 360);
   const [callsW, callsDrag]       = useResize(280, 180, 440);
@@ -259,6 +250,16 @@ export default function CallsPage() {
   const [agentSearch, _setAgentSearch]           = useState("");
   const [customerSearch, _setCustomerSearch]     = useState("");
   const [checkedCallIds, setCheckedCallIds]       = useState<Set<string>>(new Set());
+
+  // Auto-switch to pipeline tab when calls are first checked (if pipeline active)
+  const prevCheckedSizeRef = useRef(0);
+  useEffect(() => {
+    if (checkedCallIds.size > 0 && prevCheckedSizeRef.current === 0 && ctx.activePipelineId) {
+      setSidePanel("pipeline");
+    }
+    prevCheckedSizeRef.current = checkedCallIds.size;
+  }, [checkedCallIds, ctx.activePipelineId]);
+
   const [batchTranscribing, setBatchTranscribing] = useState(false);
   const [batchError, setBatchError]               = useState("");
 
