@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from ui.backend.config import settings
 from ui.backend.database import get_session
+from ui.backend.services import log_buffer
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
@@ -159,7 +160,9 @@ async def run_pipeline(
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
 
     async def stream():
-        yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_def.get("name", "")})
+        pipeline_name = pipeline_def.get("name", "pipeline")
+        log_buffer.emit(f"[PIPELINE] ▶ Starting: {pipeline_name} ({len(steps)} steps)")
+        yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name})
         loop = asyncio.get_event_loop()
         prev_content = ""  # passed to next step as chain_previous
 
@@ -175,6 +178,7 @@ async def run_pipeline(
             agent_name = agent_def.get("name", agent_id)
             model = agent_def.get("model", "gpt-5.4")
 
+            log_buffer.emit(f"[PIPELINE] Step {step_idx + 1}/{len(steps)}: {agent_def.get('name', agent_id)}")
             yield _sse("step_start", {
                 "step": step_idx, "total": len(steps),
                 "agent_id": agent_id, "agent_name": agent_name,
@@ -305,11 +309,13 @@ async def run_pipeline(
             prev_content = content
             if thinking:
                 yield _sse("thinking", {"content": thinking, "step": step_idx})
+            log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1} done: {agent_def.get('name', agent_id)}")
             yield _sse("step_done", {
                 "step": step_idx, "agent_name": agent_name,
                 "result_id": result_id, "content": content,
             })
 
+        log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name}")
         yield _sse("pipeline_done", {})
 
     return StreamingResponse(stream(), media_type="text/event-stream")

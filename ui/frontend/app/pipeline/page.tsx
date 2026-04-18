@@ -137,7 +137,8 @@ const CLASS_META: Record<string, { label: string; textColor: string; borderColor
 const CLASS_REQUIRES_PREV: Record<string, string> = { scorer: "persona", compliance: "notes" };
 
 function classMeta(cls: string) {
-  return CLASS_META[cls.toLowerCase()] ?? { label: cls, textColor: "text-gray-400", borderColor: "border-gray-700/40" };
+  const s = (cls ?? "").toLowerCase();
+  return CLASS_META[s] ?? { label: cls || "Agent", textColor: "text-gray-400", borderColor: "border-gray-700/40" };
 }
 
 // ── Agent sub-components ──────────────────────────────────────────────────────
@@ -156,7 +157,7 @@ function ModelSelect({ value, onChange }: { value: string; onChange: (v: string)
 }
 
 function AgentClassIcon({ cls, size = "md" }: { cls: string; size?: "sm" | "md" }) {
-  const norm = cls.toLowerCase();
+  const norm = (cls ?? "").toLowerCase();
   const Icon = CLASS_ICON[norm] ?? Bot;
   const bg   = CLASS_ICON_BG[norm] ?? "bg-gray-800";
   const meta = classMeta(norm);
@@ -175,7 +176,7 @@ function AgentPickerGrid({ value, allAgents, onChange }: {
 }) {
   const [search, setSearch] = useState("");
   const filtered = allAgents.filter(a =>
-    a.name.toLowerCase().includes(search.toLowerCase()) ||
+    (a.name ?? "").toLowerCase().includes(search.toLowerCase()) ||
     (a.agent_class ?? "").toLowerCase().includes(search.toLowerCase())
   );
   return (
@@ -957,6 +958,96 @@ function PipelineCanvas() {
     setPipelineId(null);
   }
 
+  function loadPipelineToCanvas(pid: string) {
+    const pl = allPipelines.find(p => p.id === pid);
+    if (!pl) return;
+
+    // Collect unique input sources from all steps (applying overrides)
+    const sourceSet = new Set<string>();
+    pl.steps.forEach(step => {
+      const agent = allAgents.find(a => a.id === step.agent_id);
+      if (agent?.inputs?.length) {
+        agent.inputs.forEach(inp => {
+          const src = step.input_overrides?.[inp.key] ?? inp.source;
+          if (src) sourceSet.add(src);
+        });
+      } else {
+        sourceSet.add("transcript"); // fallback
+      }
+    });
+    const sources = [...sourceSet];
+
+    // Build stages: input, then per-step: processing + output
+    const newStages: NodeKind[] = ["input"];
+    pl.steps.forEach(() => { newStages.push("processing"); newStages.push("output"); });
+    // Ensure at least the initial 5-stage layout if pipeline is empty
+    if (pl.steps.length === 0) { newStages.push(...INIT_STAGES.slice(1)); }
+
+    const newNodes: Node[] = [];
+    const newEdges: Edge[] = [];
+    nodeSeq = 1;
+
+    // Input nodes (stage 0)
+    const inputIds: string[] = [];
+    sources.forEach((src, i) => {
+      const srcMeta = INPUT_SOURCES.find(s => s.value === src);
+      const id = nextId();
+      inputIds.push(id);
+      newNodes.push({
+        id, type: "input",
+        position: { x: X_SLOTS[Math.min(i, MAX_PER_LANE - 1)], y: laneY(0) + SLEEVE_INNER },
+        sourcePosition: Position.Bottom, targetPosition: Position.Top,
+        style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
+        data: {
+          label: srcMeta?.label ?? src, subType: "input", prompt: "", stageIndex: 0,
+          agentId: "", agentClass: "", agentName: "", inputSource: src,
+        } satisfies PipelineNodeData,
+      });
+    });
+
+    // Processing + output nodes per step
+    pl.steps.forEach((step, i) => {
+      const agent = allAgents.find(a => a.id === step.agent_id);
+      const procStage = 1 + i * 2;
+      const outStage  = 2 + i * 2;
+
+      const procId = nextId();
+      newNodes.push({
+        id: procId, type: "processing",
+        position: { x: X_SLOTS[0], y: laneY(procStage) + SLEEVE_INNER },
+        sourcePosition: Position.Bottom, targetPosition: Position.Top,
+        style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
+        data: {
+          label: agent?.name ?? step.agent_id, subType: "agent", prompt: "", stageIndex: procStage,
+          agentId: step.agent_id, agentClass: agent?.agent_class ?? "", agentName: agent?.name ?? step.agent_id,
+          inputSource: "",
+        } satisfies PipelineNodeData,
+      });
+      inputIds.forEach(inputId => newEdges.push(makeEdge(inputId, procId)));
+
+      const outId = nextId();
+      newNodes.push({
+        id: outId, type: "output",
+        position: { x: X_SLOTS[0], y: laneY(outStage) + SLEEVE_INNER },
+        sourcePosition: Position.Bottom, targetPosition: Position.Top,
+        style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
+        data: {
+          label: `${agent?.name ?? "Step " + (i + 1)} Output`, subType: "notes", prompt: "", stageIndex: outStage,
+          agentId: "", agentClass: "", agentName: "", inputSource: "",
+        } satisfies PipelineNodeData,
+      });
+      newEdges.push(makeEdge(procId, outId));
+    });
+
+    setStages(newStages);
+    stagesRef.current = newStages;
+    setNodes(newNodes);
+    setEdges(newEdges);
+    setPipelineName(pl.name);
+    setPipelineId(pl.id);
+    setSelectedNodeId(null);
+  }
+
   async function importPresets() {
     try {
       await fetch("/api/universal-agents/import-presets", { method: "POST" });
@@ -1457,7 +1548,7 @@ function PipelineCanvas() {
                 <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
               ) : allPipelines.map(p => (
                 <button key={p.id}
-                  onClick={() => { setPipelineName(p.name); setPipelineId(p.id); }}
+                  onClick={() => loadPipelineToCanvas(p.id)}
                   className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
                     ${pipelineId === p.id
                       ? "bg-indigo-900/40 text-white"

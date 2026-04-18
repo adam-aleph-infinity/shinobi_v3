@@ -221,12 +221,14 @@ def _write_pipeline(record: dict) -> dict:
 def _make_agent(name: str, model: str, temperature: float,
                 system_prompt: str, user_prompt: str,
                 inputs: list[dict], output_format: str,
-                tags: list[str], is_default: bool = False) -> dict:
+                tags: list[str], is_default: bool = False,
+                agent_class: str = "") -> dict:
     now = datetime.utcnow().isoformat()
     return {
         "id": str(uuid.uuid4()),
         "created_at": now, "updated_at": now,
         "name": name, "description": "",
+        "agent_class": agent_class,
         "model": model, "temperature": temperature,
         "system_prompt": system_prompt, "user_prompt": user_prompt,
         "inputs": inputs, "output_format": output_format,
@@ -290,6 +292,7 @@ def import_presets():
                 output_format="markdown",
                 tags=["persona", "generator"],
                 is_default=bool(p.get("is_default", False)),
+                agent_class="persona",
             )
             _write_agent(gen)
             created_agents.append(gen_name)
@@ -313,6 +316,7 @@ def import_presets():
                 ],
                 output_format="json",
                 tags=["persona", "scorer"],
+                agent_class="scorer",
             )
             _write_agent(scorer)
             created_agents.append(score_name)
@@ -356,6 +360,7 @@ def import_presets():
                 output_format="markdown",
                 tags=["notes"],
                 is_default=bool(na.get("is_default", False)),
+                agent_class="notes",
             )
             _write_agent(agent)
             created_agents.append(agent_name)
