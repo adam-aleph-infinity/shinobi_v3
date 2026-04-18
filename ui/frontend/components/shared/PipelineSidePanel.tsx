@@ -265,8 +265,8 @@ export function PipelineSidePanel({
         const url = `/api/full-persona-agent/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        content = data.transcript ?? JSON.stringify(data, null, 2);
+        // Endpoint returns plain text (not JSON)
+        content = await res.text();
       } else {
         content = `Source type: ${source}\n\n(Data is resolved at pipeline execution time)`;
       }
