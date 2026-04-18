@@ -51,9 +51,11 @@ function initStepsFor(pipeline: Pipeline, agents: UniversalAgent[]): StepState[]
 export function PipelineSidePanel({
   showTranscript,
   onToggleTranscript,
+  selectedCallIds,
 }: {
   showTranscript?: boolean;
   onToggleTranscript?: () => void;
+  selectedCallIds?: string[];
 } = {}) {
   const { salesAgent, customer, callId, activePipelineId, activePipelineName, setActivePipeline } = useAppCtx();
 
@@ -87,8 +89,9 @@ export function PipelineSidePanel({
     : null;
   const { data: callDates } = useSWR<Record<string, { date: string; has_audio: boolean }>>(callDatesUrl, fetcher);
 
-  // Reset on context change
-  const contextKey = `${activePipelineId}:${salesAgent}:${customer}:${callId}`;
+  // Reset on context change (including when selected calls change)
+  const selKey = selectedCallIds?.slice().sort().join(",") ?? "";
+  const contextKey = `${activePipelineId}:${salesAgent}:${customer}:${callId}:${selKey}`;
   const prevContextKey = useRef("");
   useEffect(() => {
     if (contextKey === prevContextKey.current) return;
@@ -125,15 +128,22 @@ export function PipelineSidePanel({
 
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
-    if (!isPerCall || callsLoaded || callsRunning || !callDates || !pipeline || !agents) return;
+    if (!isPerCall || callsLoaded || callsRunning || !pipeline || !agents) return;
+    // Use explicit selection if provided, otherwise all pair calls (need callDates)
+    const hasSelection = selectedCallIds && selectedCallIds.length > 0;
+    if (!hasSelection && !callDates) return;
     setCallsLoaded(true);
-    const sorted = Object.entries(callDates).sort((a, b) => a[1].date.localeCompare(b[1].date));
+
+    const sorted: [string, string][] = hasSelection
+      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""])
+      : Object.entries(callDates!).map(([cid, v]) => [cid, v.date]).sort((a, b) => a[1].localeCompare(b[1]));
+
     if (sorted.length === 0) return;
 
     let cancelled = false;
     (async () => {
       const results: CallResult[] = [];
-      for (const [cid, info] of sorted) {
+      for (const [cid, date] of sorted) {
         if (cancelled) break;
         try {
           const url = `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(cid)}`;
@@ -150,13 +160,13 @@ export function PipelineSidePanel({
           });
           const allCached = stepStates.length > 0 && stepStates.every(s => s.status === "cached");
           results.push({
-            callId: cid, date: info.date, steps: stepStates,
+            callId: cid, date, steps: stepStates,
             expanded: false, done: allCached, error: "",
             runStatus: allCached ? "cached" : "queued",
           });
         } catch {
           results.push({
-            callId: cid, date: info.date, steps: initStepsFor(pipeline, agents),
+            callId: cid, date, steps: initStepsFor(pipeline, agents),
             expanded: false, done: false, error: "", runStatus: "queued",
           });
         }
@@ -241,13 +251,17 @@ export function PipelineSidePanel({
 
   // ── per_call parallel run ─────────────────────────────────────────────────────
   async function runAllCalls() {
-    if (!activePipelineId || !hasPair || callsRunning || !callDates || !pipeline || !agents) return;
-    const sorted = Object.entries(callDates).sort((a, b) => a[1].date.localeCompare(b[1].date));
+    if (!activePipelineId || !hasPair || callsRunning || !pipeline || !agents) return;
+    const hasSelection = selectedCallIds && selectedCallIds.length > 0;
+    if (!hasSelection && !callDates) return;
+    const sorted: [string, string][] = hasSelection
+      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""])
+      : Object.entries(callDates!).map(([cid, v]) => [cid, v.date]).sort((a, b) => a[1].localeCompare(b[1]));
     if (sorted.length === 0) { setCallsRunError("No calls found for this pair"); return; }
 
     setCallsRunning(true); setCallsRunError(""); setCallsLoaded(true);
-    setCallResults(sorted.map(([cid, info]) => ({
-      callId: cid, date: info.date,
+    setCallResults(sorted.map(([cid, date]) => ({
+      callId: cid, date,
       steps: initStepsFor(pipeline!, agents!),
       expanded: false, done: false, error: "",
       runStatus: "queued" as CallRunStatus,
@@ -380,10 +394,10 @@ export function PipelineSidePanel({
           {anyRunning ? "Running…"
             : isPerCall
               ? (hasCallResults
-                  ? `Re-run all (${callResults.length} calls)`
+                  ? `Re-run (${callResults.length} call${callResults.length !== 1 ? "s" : ""})`
                   : callResults.length > 0
-                    ? `Run all (${callResults.length} calls)`
-                    : "Run all calls")
+                    ? `Run ${callResults.length} call${callResults.length !== 1 ? "s" : ""}`
+                    : selectedCallIds?.length ? `Run ${selectedCallIds.length} selected` : "Run all calls")
               : (hasResults ? "Re-run" : "Run Pipeline")}
         </button>
         {(runError || callsRunError) && (
@@ -414,10 +428,11 @@ export function PipelineSidePanel({
             <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
               <Workflow className="w-8 h-8 opacity-20" />
               <p className="text-xs text-center">
-                {!hasPair ? "Select agent + customer to load results"
+                {!hasPair ? "Select agent + customer"
+                  : selectedCallIds?.length ? "Loading selected calls…"
                   : !callDates ? "Loading calls…"
                   : Object.keys(callDates).length === 0 ? "No calls found for this pair"
-                  : "Hit Run to execute for all calls"}
+                  : "Check calls on the left or hit Run to process all"}
               </p>
             </div>
           )}

@@ -799,7 +799,11 @@ export default function CallsPage() {
               )}
               {/* Panel content — auto-fallback to pipeline if no agent set */}
               {(ctx.activePipelineId && (sidePanel === "pipeline" || !ctx.activeAgentId))
-                ? <PipelineSidePanel showTranscript={showTranscript} onToggleTranscript={() => setShowTranscript(s => !s)} />
+                ? <PipelineSidePanel
+                    showTranscript={showTranscript}
+                    onToggleTranscript={() => setShowTranscript(s => !s)}
+                    selectedCallIds={checkedCallIds.size > 0 ? [...checkedCallIds] : undefined}
+                  />
                 : <AgentSidePanel />}
             </div>
           </>
