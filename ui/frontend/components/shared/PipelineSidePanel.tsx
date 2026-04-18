@@ -135,8 +135,8 @@ export function PipelineSidePanel({
     setCallsLoaded(true);
 
     const sorted: [string, string][] = hasSelection
-      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""])
-      : Object.entries(callDates!).map(([cid, v]) => [cid, v.date]).sort((a, b) => a[1].localeCompare(b[1]));
+      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""] as [string, string])
+      : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
 
     if (sorted.length === 0) return;
 
@@ -255,8 +255,8 @@ export function PipelineSidePanel({
     const hasSelection = selectedCallIds && selectedCallIds.length > 0;
     if (!hasSelection && !callDates) return;
     const sorted: [string, string][] = hasSelection
-      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""])
-      : Object.entries(callDates!).map(([cid, v]) => [cid, v.date]).sort((a, b) => a[1].localeCompare(b[1]));
+      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""] as [string, string])
+      : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
     if (sorted.length === 0) { setCallsRunError("No calls found for this pair"); return; }
 
     setCallsRunning(true); setCallsRunError(""); setCallsLoaded(true);
