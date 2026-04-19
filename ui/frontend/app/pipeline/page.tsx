@@ -998,17 +998,36 @@ function PipelineCanvas() {
     const pl = override ?? allPipelines.find(p => p.id === pid);
     if (!pl) return;
 
-    // Collect unique input sources from all steps (applying overrides)
+    // Collect unique canvas-level input sources.
+    // Only add a source as a top-level input node when:
+    //   a) it's always-external (transcript / merged_transcript / manual), OR
+    //   b) the user explicitly overrode it to a non-virtual source.
+    // Never add "notes", "merged_notes", "agent_output", or "chain_previous"
+    // as top-level nodes when they come from an agent's DEFAULT — those are
+    // resolved internally by the executor or chained from a prior step.
+    const ALWAYS_TOPLEVEL = new Set(["transcript", "merged_transcript", "manual"]);
+    const VIRTUAL_SOURCES = new Set(["chain_previous", "agent_output"]);
+
     const sourceSet = new Set<string>();
     pl.steps.forEach(step => {
       const agent = allAgents.find(a => a.id === step.agent_id);
       if (agent?.inputs?.length) {
         agent.inputs.forEach(inp => {
-          const src = step.input_overrides?.[inp.key] ?? inp.source;
-          if (src) sourceSet.add(src);
+          const overrideSrc = step.input_overrides?.[inp.key];
+          const defaultSrc  = inp.source;
+          const effectiveSrc = overrideSrc ?? defaultSrc;
+          if (ALWAYS_TOPLEVEL.has(effectiveSrc)) {
+            // Primary file-based / manual sources always appear on the canvas
+            sourceSet.add(effectiveSrc);
+          } else if (overrideSrc && !VIRTUAL_SOURCES.has(overrideSrc)) {
+            // User explicitly wired a non-virtual override → show as input node
+            sourceSet.add(overrideSrc);
+          }
+          // Notes, merged_notes, chain_previous, agent_output as DEFAULTS are
+          // resolved internally — do NOT create a canvas input node for them.
         });
       } else {
-        sourceSet.add("transcript"); // fallback
+        sourceSet.add("transcript"); // safe fallback when agent has no inputs
       }
     });
     const sources = [...sourceSet];
@@ -1061,7 +1080,15 @@ function PipelineCanvas() {
           inputSource: "",
         } satisfies PipelineNodeData,
       });
-      inputIds.forEach(inputId => newEdges.push(makeEdge(inputId, procId)));
+      // Only connect an input node to this processor if the agent actually
+      // reads that source (by default or via override).  Connecting every
+      // input to every processor was causing wrong overrides on next save.
+      const agentSrcs = new Set(
+        (agent?.inputs ?? []).map(inp => step.input_overrides?.[inp.key] ?? inp.source)
+      );
+      sources.forEach((src, si) => {
+        if (agentSrcs.has(src)) newEdges.push(makeEdge(inputIds[si], procId));
+      });
 
       const outId = nextId();
       newNodes.push({
