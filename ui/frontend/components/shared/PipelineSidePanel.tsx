@@ -21,7 +21,7 @@ interface PipelineStep { agent_id: string; input_overrides: Record<string, strin
 interface Pipeline {
   id: string; name: string; scope: string;
   steps: PipelineStep[]; created_at: string;
-  canvas?: { nodes: { id: string; type: string; data: { inputSource?: string } }[]; edges: any[]; stages: string[] };
+  canvas?: { nodes: CanvasNode[]; edges: { id: string; source: string; target: string }[]; stages: string[] };
 }
 interface UniversalAgent {
   id: string; name: string; agent_class?: string;
