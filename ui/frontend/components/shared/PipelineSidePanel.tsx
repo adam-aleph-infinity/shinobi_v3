@@ -71,6 +71,29 @@ const SOURCE_META: Record<string, {
 };
 const GENERIC_SOURCE = SOURCE_META.transcript; // fallback
 
+// Artifact output node styling
+const ARTIFACT_NODE_META: Record<string, { color: string; bg: string; border: string }> = {
+  persona:          { color: "text-violet-400",  bg: "bg-violet-950/20",  border: "border-violet-700/40" },
+  persona_score:    { color: "text-violet-300",  bg: "bg-violet-950/15",  border: "border-violet-800/40" },
+  notes:            { color: "text-amber-400",   bg: "bg-amber-950/20",   border: "border-amber-700/40" },
+  notes_compliance: { color: "text-emerald-400", bg: "bg-emerald-950/20", border: "border-emerald-700/40" },
+};
+const DEFAULT_ARTIFACT_STYLE = { color: "text-gray-400", bg: "bg-gray-800/40", border: "border-gray-700/50" };
+
+interface CanvasNode {
+  id: string;
+  type: string; // "input" | "processing" | "output"
+  position: { x: number; y: number };
+  data: {
+    label: string;
+    subType: string;
+    stageIndex: number;
+    agentId?: string;
+    agentName?: string;
+    inputSource?: string;
+  };
+}
+
 function ArrowDown() {
   return (
     <div className="flex justify-center py-0.5">
@@ -263,6 +286,52 @@ export function PipelineSidePanel({
   const flowCall  = isPerCall && callResults.length > 0 ? callResults[safeFlowCallIdx] : null;
   const flowSteps = flowCall ? flowCall.steps : steps;
   const flowCallId = flowCall ? flowCall.callId : callId;
+
+  // ── Canvas-based flow nodes ──────────────────────────────────────────────────
+
+  // All canvas nodes sorted by stageIndex asc, then x asc
+  const canvasNodes = useMemo((): CanvasNode[] | null => {
+    if (!pipeline?.canvas?.nodes?.length) return null;
+    return [...pipeline.canvas.nodes].sort((a, b) => {
+      const si = (a.data?.stageIndex ?? 0) - (b.data?.stageIndex ?? 0);
+      return si !== 0 ? si : (a.position?.x ?? 0) - (b.position?.x ?? 0);
+    });
+  }, [pipeline]);
+
+  // Processing node id → pipeline step index (sorted order = step order)
+  const procStepIdx = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!canvasNodes) return map;
+    let idx = 0;
+    for (const n of canvasNodes) {
+      if (n.type === "processing") map.set(n.id, idx++);
+    }
+    return map;
+  }, [canvasNodes]);
+
+  // Output node id → upstream processing node id (via canvas edges)
+  const outputProcId = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!canvasNodes || !pipeline?.canvas?.edges) return map;
+    const procSet = new Set(canvasNodes.filter(n => n.type === "processing").map(n => n.id));
+    for (const e of pipeline.canvas.edges) {
+      if (procSet.has(e.source)) map.set(e.target, e.source);
+    }
+    return map;
+  }, [canvasNodes, pipeline]);
+
+  // Nodes grouped by stageIndex for staged rendering with arrows between groups
+  const canvasStageGroups = useMemo((): CanvasNode[][] | null => {
+    if (!canvasNodes) return null;
+    const groups: CanvasNode[][] = [];
+    let curStage = -1;
+    for (const n of canvasNodes) {
+      const si = n.data?.stageIndex ?? 0;
+      if (si !== curStage) { groups.push([]); curStage = si; }
+      groups[groups.length - 1].push(n);
+    }
+    return groups;
+  }, [canvasNodes]);
 
   // ── input preview fetch ──────────────────────────────────────────────────────
   async function fetchInputPreview(source: string) {
@@ -547,193 +616,293 @@ export function PipelineSidePanel({
           {/* Call navigator (per_call mode) */}
           {isPerCall && callResults.length > 0 && (
             <div className="px-2 py-1.5 border-b border-gray-800 flex items-center gap-1 shrink-0">
-              <button
-                onClick={() => setFlowCallIdx(i => Math.max(0, i - 1))}
-                disabled={safeFlowCallIdx === 0}
-                className="p-1 text-gray-600 hover:text-gray-300 disabled:opacity-30 transition-colors rounded"
-              >
+              <button onClick={() => setFlowCallIdx(i => Math.max(0, i - 1))} disabled={safeFlowCallIdx === 0}
+                className="p-1 text-gray-600 hover:text-gray-300 disabled:opacity-30 transition-colors rounded">
                 <ChevronLeft className="w-3 h-3" />
               </button>
               <div className="flex-1 text-center min-w-0">
                 <p className="text-[9px] font-mono text-gray-500 truncate">{flowCall?.callId ?? "—"}</p>
                 <p className="text-[8px] text-gray-700">{safeFlowCallIdx + 1} / {callResults.length}</p>
               </div>
-              <button
-                onClick={() => setFlowCallIdx(i => Math.min(callResults.length - 1, i + 1))}
-                disabled={safeFlowCallIdx >= callResults.length - 1}
-                className="p-1 text-gray-600 hover:text-gray-300 disabled:opacity-30 transition-colors rounded"
-              >
+              <button onClick={() => setFlowCallIdx(i => Math.min(callResults.length - 1, i + 1))} disabled={safeFlowCallIdx >= callResults.length - 1}
+                className="p-1 text-gray-600 hover:text-gray-300 disabled:opacity-30 transition-colors rounded">
                 <ChevronRight className="w-3 h-3" />
               </button>
             </div>
           )}
 
-          {/* Flow diagram */}
           <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-0.5">
 
-            {/* ── Input source nodes ── */}
-            {flowInputSources.length > 0 && (
-              <>
-                <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">Inputs</p>
-                <div className="space-y-1">
-                  {flowInputSources.map(src => {
-                    const m = SOURCE_META[src] ?? GENERIC_SOURCE;
-                    const Icon = m.icon;
-                    const key = `input:${src}`;
-                    const isSelected = flowSelectedKey === key;
-                    return (
-                      <div key={src}>
-                        <button
-                          onClick={() => {
-                            if (isSelected) {
-                              setFlowSelectedKey(null);
-                              setInputPreview({ loading: false, content: "", error: "" });
-                            } else {
-                              setFlowSelectedKey(key);
-                              fetchInputPreview(src);
-                            }
-                          }}
-                          className={cn(
-                            "w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
-                            m.bg, m.border,
-                            isSelected ? "opacity-100 ring-1 ring-inset ring-current/30" : "opacity-75 hover:opacity-100",
-                          )}
-                        >
-                          <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
-                          <span className={cn("text-xs font-semibold flex-1 truncate", m.color)}>{m.label}</span>
-                          <span className="text-[9px] text-gray-600 shrink-0">input</span>
-                          {isSelected
-                            ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" />
-                            : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                        </button>
+            {canvasStageGroups ? (
+              /* ── Canvas-driven rendering: exact nodes from saved canvas ── */
+              canvasStageGroups.map((group, gi) => (
+                <div key={gi}>
+                  {gi > 0 && <ArrowDown />}
+                  <div className="space-y-1">
+                    {group.map(node => {
 
-                        {/* Input detail pane */}
-                        {isSelected && (
-                          <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                            {inputPreview.loading && (
-                              <div className="p-3 flex items-center gap-2 text-xs text-gray-500">
-                                <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+                      /* ── INPUT NODE ── */
+                      if (node.type === "input") {
+                        const src = node.data.inputSource ?? "";
+                        const m = SOURCE_META[src] ?? GENERIC_SOURCE;
+                        const Icon = m.icon;
+                        const key = `input:${node.id}`;
+                        const isSelected = flowSelectedKey === key;
+                        return (
+                          <div key={node.id}>
+                            <button
+                              onClick={() => {
+                                if (isSelected) { setFlowSelectedKey(null); setInputPreview({ loading: false, content: "", error: "" }); }
+                                else { setFlowSelectedKey(key); fetchInputPreview(src); }
+                              }}
+                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all", m.bg, m.border,
+                                isSelected ? "opacity-100 ring-1 ring-inset ring-current/30" : "opacity-75 hover:opacity-100")}
+                            >
+                              <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
+                              <div className="flex-1 min-w-0">
+                                <p className={cn("text-xs font-semibold truncate", m.color)}>{m.label}</p>
+                                <p className="text-[9px] text-gray-600">input</p>
+                              </div>
+                              {isSelected ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
+                            </button>
+                            {isSelected && (
+                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                                {inputPreview.loading && <div className="p-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>}
+                                {inputPreview.error && <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>}
+                                {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
+                                  <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-56 overflow-y-auto">{inputPreview.content}</pre>
+                                )}
+                                {!inputPreview.loading && !inputPreview.error && !inputPreview.content && (
+                                  <p className="p-3 text-[11px] text-gray-600 text-center">Select agent + customer to preview</p>
+                                )}
                               </div>
                             )}
-                            {inputPreview.error && (
-                              <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>
-                            )}
-                            {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
-                              <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-56 overflow-y-auto">
-                                {inputPreview.content}
-                              </pre>
+                          </div>
+                        );
+                      }
+
+                      /* ── PROCESSING NODE ── */
+                      if (node.type === "processing") {
+                        const stepIdx = procStepIdx.get(node.id) ?? 0;
+                        const st = flowSteps[stepIdx];
+                        const status = st?.status ?? "pending";
+                        const key = `proc:${node.id}`;
+                        const isSel = flowSelectedKey === key;
+                        const hasContent = !!(st?.content);
+                        const hasStream = !!(st?.stream);
+                        const borderClass =
+                          status === "loading" ? "border-teal-700/60 bg-teal-950/20" :
+                          status === "cached"  ? "border-amber-700/40 bg-amber-950/10" :
+                          status === "done"    ? "border-indigo-700/40 bg-indigo-950/20" :
+                          status === "error"   ? "border-red-700/40 bg-red-950/20" :
+                                                "border-gray-700/50 bg-gray-900/60";
+                        return (
+                          <div key={node.id}>
+                            <button
+                              onClick={() => setFlowSelectedKey(isSel ? null : key)}
+                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
+                                borderClass, isSel ? "opacity-100 ring-1 ring-inset ring-indigo-500/30" : "opacity-80 hover:opacity-100")}
+                            >
+                              {status === "loading" && !hasStream && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400 shrink-0" />}
+                              {status === "loading" && hasStream   && <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0" />}
+                              {status === "cached"  && <SkipForward  className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                              {status === "done"    && <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" />}
+                              {status === "error"   && <AlertCircle  className="w-3.5 h-3.5 text-red-400 shrink-0" />}
+                              {status === "pending" && <Bot          className="w-3.5 h-3.5 text-indigo-400 shrink-0" />}
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-semibold text-gray-200 truncate">{node.data.agentName || node.data.label}</p>
+                                <p className="text-[9px] text-gray-600">Step {stepIdx + 1} · agent</p>
+                              </div>
+                              {status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
+                              {status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
+                              {status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+                              {status === "pending" && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">pending</span>}
+                              {isSel ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
+                            </button>
+                            {isSel && (
+                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                                {hasStream && (
+                                  <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
+                                    {st!.stream}<div ref={streamEndRef} />
+                                  </pre>
+                                )}
+                                {!hasStream && (status === "pending" || status === "error") && (
+                                  <div className="p-3 flex flex-col items-center gap-2">
+                                    <p className="text-[11px] text-gray-600">{status === "error" ? "Step failed" : "Not yet executed"}</p>
+                                    <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
+                                      disabled={anyRunning || !contextOk}
+                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
+                                      <Play className="w-3 h-3" />
+                                      {isPerCall ? "Run All Calls" : "Run Pipeline"}
+                                    </button>
+                                  </div>
+                                )}
+                                {!hasStream && (status === "done" || status === "cached") && hasContent && (
+                                  <div className="p-2 border-t border-gray-800">
+                                    <p className="px-1 pb-1 text-[9px] text-gray-600 uppercase tracking-widest font-bold">Raw output</p>
+                                    <pre className="text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto px-1">{st!.content.slice(0, 500)}{st!.content.length > 500 ? "…" : ""}</pre>
+                                  </div>
+                                )}
+                              </div>
                             )}
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                        );
+                      }
+
+                      /* ── OUTPUT NODE ── */
+                      if (node.type === "output") {
+                        const connProcId = outputProcId.get(node.id);
+                        const stepIdx = connProcId != null ? procStepIdx.get(connProcId) : undefined;
+                        const st = stepIdx != null ? flowSteps[stepIdx] : undefined;
+                        const hasContent = !!(st?.content);
+                        const subType = node.data.subType ?? "";
+                        const art = ARTIFACT_NODE_META[subType] ?? DEFAULT_ARTIFACT_STYLE;
+                        const key = `out:${node.id}`;
+                        const isSel = flowSelectedKey === key;
+                        return (
+                          <div key={node.id}>
+                            <button
+                              onClick={() => hasContent ? setFlowSelectedKey(isSel ? null : key) : undefined}
+                              disabled={!hasContent}
+                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
+                                art.bg, art.border,
+                                hasContent ? (isSel ? "opacity-100 ring-1 ring-inset ring-current/20" : "opacity-80 hover:opacity-100") : "opacity-35 cursor-default")}
+                            >
+                              <FileText className={cn("w-3.5 h-3.5 shrink-0", art.color)} />
+                              <div className="flex-1 min-w-0">
+                                <p className={cn("text-xs font-semibold truncate", art.color)}>{node.data.label}</p>
+                                <p className="text-[9px] text-gray-600">output</p>
+                              </div>
+                              {hasContent
+                                ? (isSel ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />)
+                                : <span className="text-[9px] text-gray-700 shrink-0">awaiting</span>}
+                            </button>
+                            {isSel && hasContent && (
+                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                                <div className="max-h-72 overflow-y-auto p-1">
+                                  <SectionContent content={st!.content} />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      return null;
+                    })}
+                  </div>
                 </div>
-              </>
-            )}
-
-            {/* Arrow from inputs to first step */}
-            {flowInputSources.length > 0 && pipeline && pipeline.steps.length > 0 && (
-              <ArrowDown />
-            )}
-
-            {/* ── Agent step nodes ── */}
-            {pipeline && pipeline.steps.length > 0 && (
+              ))
+            ) : (
+              /* ── Legacy fallback: no canvas data saved yet ── */
               <>
-                <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">
-                  Pipeline Steps
-                </p>
-                {pipeline.steps.map((step, i) => {
-                  const agent   = agents?.find(a => a.id === step.agent_id);
-                  const agentName = agent?.name ?? step.agent_id;
-                  const st      = flowSteps[i];
-                  const status  = st?.status ?? "pending";
-                  const key     = `agent:${i}`;
-                  const isSel   = flowSelectedKey === key;
-                  const hasContent = !!(st?.content);
-                  const hasStream  = !!(st?.stream);
-
-                  const borderClass =
-                    status === "loading" ? "border-teal-700/60 bg-teal-950/20" :
-                    status === "cached"  ? "border-amber-700/40 bg-amber-950/10" :
-                    status === "done"    ? "border-indigo-700/40 bg-indigo-950/20" :
-                    status === "error"   ? "border-red-700/40 bg-red-950/20" :
-                                          "border-gray-700/50 bg-gray-900/60";
-
-                  return (
-                    <div key={i}>
-                      <button
-                        onClick={() => setFlowSelectedKey(isSel ? null : key)}
-                        className={cn(
-                          "w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
-                          borderClass,
-                          isSel ? "opacity-100 ring-1 ring-inset ring-indigo-500/30" : "opacity-80 hover:opacity-100",
-                        )}
-                      >
-                        {status === "loading" && !hasStream && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400 shrink-0" />}
-                        {status === "loading" && hasStream   && <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0" />}
-                        {status === "cached"  && <SkipForward  className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
-                        {status === "done"    && <CheckCircle2  className="w-3.5 h-3.5 text-green-400 shrink-0" />}
-                        {status === "error"   && <AlertCircle   className="w-3.5 h-3.5 text-red-400 shrink-0" />}
-                        {status === "pending" && <Bot            className="w-3.5 h-3.5 text-indigo-500 shrink-0" />}
-
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-gray-200 truncate">{agentName}</p>
-                          <p className="text-[9px] text-gray-600">Step {i + 1}</p>
-                        </div>
-
-                        {status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
-                        {status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
-                        {status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
-                        {status === "pending" && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">pending</span>}
-
-                        {isSel
-                          ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" />
-                          : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                      </button>
-
-                      {/* Agent detail pane */}
-                      {isSel && (
-                        <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                          {(status === "done" || status === "cached") && hasContent ? (
-                            <div className="max-h-56 overflow-y-auto p-1">
-                              <SectionContent content={st!.content} />
+                {flowInputSources.length > 0 && (
+                  <>
+                    <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">Inputs</p>
+                    <div className="space-y-1">
+                      {flowInputSources.map(src => {
+                        const m = SOURCE_META[src] ?? GENERIC_SOURCE;
+                        const Icon = m.icon;
+                        const key = `input:${src}`;
+                        const isSelected = flowSelectedKey === key;
+                        return (
+                          <div key={src}>
+                            <button
+                              onClick={() => {
+                                if (isSelected) { setFlowSelectedKey(null); setInputPreview({ loading: false, content: "", error: "" }); }
+                                else { setFlowSelectedKey(key); fetchInputPreview(src); }
+                              }}
+                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all", m.bg, m.border,
+                                isSelected ? "opacity-100 ring-1 ring-inset ring-current/30" : "opacity-75 hover:opacity-100")}
+                            >
+                              <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
+                              <span className={cn("text-xs font-semibold flex-1 truncate", m.color)}>{m.label}</span>
+                              <span className="text-[9px] text-gray-600 shrink-0">input</span>
+                              {isSelected ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
+                            </button>
+                            {isSelected && (
+                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                                {inputPreview.loading && <div className="p-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>}
+                                {inputPreview.error && <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>}
+                                {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
+                                  <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-56 overflow-y-auto">{inputPreview.content}</pre>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {pipeline && pipeline.steps.length > 0 && <ArrowDown />}
+                  </>
+                )}
+                {pipeline && pipeline.steps.length > 0 && (
+                  <>
+                    <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">Pipeline Steps</p>
+                    {pipeline.steps.map((step, i) => {
+                      const agent = agents?.find(a => a.id === step.agent_id);
+                      const st = flowSteps[i];
+                      const status = st?.status ?? "pending";
+                      const key = `agent:${i}`;
+                      const isSel = flowSelectedKey === key;
+                      const hasContent = !!(st?.content);
+                      const hasStream = !!(st?.stream);
+                      const borderClass =
+                        status === "loading" ? "border-teal-700/60 bg-teal-950/20" :
+                        status === "cached"  ? "border-amber-700/40 bg-amber-950/10" :
+                        status === "done"    ? "border-indigo-700/40 bg-indigo-950/20" :
+                        status === "error"   ? "border-red-700/40 bg-red-950/20" :
+                                              "border-gray-700/50 bg-gray-900/60";
+                      return (
+                        <div key={i}>
+                          <button onClick={() => setFlowSelectedKey(isSel ? null : key)}
+                            className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all", borderClass,
+                              isSel ? "opacity-100 ring-1 ring-inset ring-indigo-500/30" : "opacity-80 hover:opacity-100")}>
+                            {status === "loading" && !hasStream && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400 shrink-0" />}
+                            {status === "loading" && hasStream   && <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0" />}
+                            {status === "cached"  && <SkipForward  className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                            {status === "done"    && <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" />}
+                            {status === "error"   && <AlertCircle  className="w-3.5 h-3.5 text-red-400 shrink-0" />}
+                            {status === "pending" && <Bot          className="w-3.5 h-3.5 text-indigo-500 shrink-0" />}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-semibold text-gray-200 truncate">{agent?.name ?? step.agent_id}</p>
+                              <p className="text-[9px] text-gray-600">Step {i + 1}</p>
                             </div>
-                          ) : hasStream ? (
-                            <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto">
-                              {st!.stream}<div ref={streamEndRef} />
-                            </pre>
-                          ) : (
-                            <div className="p-3 flex flex-col items-center gap-2">
-                              <p className="text-[11px] text-gray-600 text-center">
-                                {status === "error" ? "Step failed" : "Not yet executed"}
-                              </p>
-                              <button
-                                onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
-                                disabled={anyRunning || !contextOk}
-                                className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors"
-                              >
-                                <Play className="w-3 h-3" />
-                                {isPerCall ? "Run All Calls" : "Run Pipeline"}
-                              </button>
+                            {status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
+                            {status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
+                            {status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+                            {status === "pending" && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">pending</span>}
+                            {isSel ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
+                          </button>
+                          {isSel && (
+                            <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+                              {(status === "done" || status === "cached") && hasContent
+                                ? <div className="max-h-56 overflow-y-auto p-1"><SectionContent content={st!.content} /></div>
+                                : hasStream
+                                  ? <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto">{st!.stream}<div ref={streamEndRef} /></pre>
+                                  : <div className="p-3 flex flex-col items-center gap-2">
+                                      <p className="text-[11px] text-gray-600">{status === "error" ? "Step failed" : "Not yet executed"}</p>
+                                      <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }} disabled={anyRunning || !contextOk}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
+                                        <Play className="w-3 h-3" /> {isPerCall ? "Run All Calls" : "Run Pipeline"}
+                                      </button>
+                                    </div>
+                              }
                             </div>
                           )}
+                          {i < pipeline.steps.length - 1 && <ArrowDown />}
                         </div>
-                      )}
-
-                      {i < pipeline.steps.length - 1 && <ArrowDown />}
-                    </div>
-                  );
-                })}
+                      );
+                    })}
+                  </>
+                )}
+                {(!pipeline || pipeline.steps.length === 0) && (
+                  <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
+                    <Workflow className="w-8 h-8 opacity-20" />
+                    <p className="text-xs text-center">No steps in this pipeline</p>
+                  </div>
+                )}
               </>
-            )}
-
-            {/* Empty state */}
-            {(!pipeline || pipeline.steps.length === 0) && (
-              <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
-                <Workflow className="w-8 h-8 opacity-20" />
-                <p className="text-xs text-center">No steps in this pipeline</p>
-              </div>
             )}
           </div>
         </div>
