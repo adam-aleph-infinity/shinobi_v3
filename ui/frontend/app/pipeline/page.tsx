@@ -664,7 +664,7 @@ function PipelineCanvas() {
 
   // Backend data
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
-  const { data: pipelinesData } = useSWR<{ id: string; name: string; description: string; steps: {agent_id: string; input_overrides: Record<string,string>}[] }[]>("/api/pipelines", fetcher);
+  const { data: pipelinesData } = useSWR<{ id: string; name: string; description: string; steps: {agent_id: string; input_overrides: Record<string,string>}[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }[]>("/api/pipelines", fetcher);
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
 
@@ -984,20 +984,60 @@ function PipelineCanvas() {
       const res = await fetch("/api/pipelines", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName, steps: fullPl.steps ?? [], scope: fullPl.scope ?? "per_call" }),
+        body: JSON.stringify({ name: newName, steps: fullPl.steps ?? [], scope: fullPl.scope ?? "per_call", canvas: fullPl.canvas ?? {} }),
       });
       if (!res.ok) { showToast(`Duplicate failed (${res.status})`, false); return; }
       const saved = await res.json();
       mutate("/api/pipelines");
       showToast(`Duplicated as "${newName}"`, true);
-      loadPipelineToCanvas(saved.id, { id: saved.id, name: newName, steps: fullPl.steps ?? [] });
+      loadPipelineToCanvas(saved.id, { id: saved.id, name: newName, steps: fullPl.steps ?? [], canvas: fullPl.canvas });
     } catch { showToast("Network error — could not duplicate pipeline", false); }
   }
 
-  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; steps: { agent_id: string; input_overrides: Record<string, string> }[] }) {
+  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; steps: { agent_id: string; input_overrides: Record<string, string> }[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }) {
     const pl = override ?? allPipelines.find(p => p.id === pid);
     if (!pl) return;
 
+    // ── Lossless restore from saved canvas JSON (n8n-style) ───────────────────
+    const cv = pl.canvas;
+    if (cv?.nodes?.length) {
+      // Advance nodeSeq past the highest stored node id to avoid collisions
+      const maxSeq = cv.nodes.reduce((max: number, n: any) => {
+        const m = String(n.id ?? "").match(/^pn(\d+)$/);
+        return m ? Math.max(max, parseInt(m[1])) : max;
+      }, 0);
+      nodeSeq = maxSeq + 1;
+
+      const restoredNodes: Node[] = cv.nodes.map((n: any) => ({
+        id: n.id,
+        type: n.type,
+        position: n.position,
+        sourcePosition: Position.Bottom,
+        targetPosition: Position.Top,
+        style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
+        data: n.data as PipelineNodeData,
+      }));
+
+      const restoredEdges: Edge[] = cv.edges.map((e: any) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
+        style: { stroke: "#818cf8", strokeWidth: 2 },
+      }));
+
+      const restoredStages: NodeKind[] = (cv.stages as NodeKind[]) ?? [...INIT_STAGES];
+      setStages(restoredStages);
+      stagesRef.current = restoredStages;
+      setNodes(restoredNodes);
+      setEdges(restoredEdges);
+      setPipelineName(pl.name);
+      setPipelineId(pl.id);
+      setSelectedNodeId(null);
+      return;
+    }
+
+    // ── Legacy fallback: derive canvas from agent metadata ────────────────────
     // Collect unique canvas-level input sources.
     // Only add a source as a top-level input node when:
     //   a) it's always-external (transcript / merged_transcript / manual), OR
@@ -1175,12 +1215,19 @@ function PipelineCanvas() {
       });
     }
 
+    // Serialize the full canvas state so reload is lossless (n8n-style)
+    const canvasData = {
+      nodes: nodes.map(n => ({ id: n.id, type: n.type, position: n.position, data: n.data })),
+      edges: edges.map(e => ({ id: e.id, source: e.source, target: e.target })),
+      stages,
+    };
+
     setPipelineSaving(true);
     try {
       const url    = pipelineId ? `/api/pipelines/${pipelineId}` : `/api/pipelines`;
       const method = pipelineId ? "PUT" : "POST";
       const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: pipelineName, description: "", scope, steps }) });
+        body: JSON.stringify({ name: pipelineName, description: "", scope, steps, canvas: canvasData }) });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         showToast(`Save failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
@@ -1635,7 +1682,10 @@ function PipelineCanvas() {
               ) : allPipelines.map(p => (
                 <div key={p.id} className="flex items-center group">
                   <button
-                    onClick={() => loadPipelineToCanvas(p.id)}
+                    onClick={async () => {
+                      const fullPl = await fetch(`/api/pipelines/${p.id}`).then(r => r.json());
+                      loadPipelineToCanvas(p.id, { id: fullPl.id, name: fullPl.name, steps: fullPl.steps ?? [], canvas: fullPl.canvas });
+                    }}
                     className={`flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
                       ${pipelineId === p.id
                         ? "bg-indigo-900/40 text-white"

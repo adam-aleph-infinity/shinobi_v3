@@ -33,6 +33,7 @@ class PipelineIn(BaseModel):
     description: str = ""
     scope: str = "per_pair"   # per_call | per_pair
     steps: list[PipelineStep] = []
+    canvas: dict = {}  # lossless n8n-style canvas snapshot {nodes, edges, stages}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
