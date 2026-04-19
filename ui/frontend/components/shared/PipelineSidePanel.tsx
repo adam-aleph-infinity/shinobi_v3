@@ -21,6 +21,7 @@ interface PipelineStep { agent_id: string; input_overrides: Record<string, strin
 interface Pipeline {
   id: string; name: string; scope: string;
   steps: PipelineStep[]; created_at: string;
+  canvas?: { nodes: { id: string; type: string; data: { inputSource?: string } }[]; edges: any[]; stages: string[] };
 }
 interface UniversalAgent {
   id: string; name: string; agent_class?: string;
@@ -221,16 +222,33 @@ export function PipelineSidePanel({
 
   // ── flow computed values ─────────────────────────────────────────────────────
 
-  // Unique data sources shown at the top of the flow diagram
+  // Unique data sources shown at the top of the flow diagram.
+  // Prefer canvas nodes (lossless — exactly what was designed on the canvas),
+  // fall back to deriving from agent inputs for old pipelines without canvas data.
   const flowInputSources = useMemo(() => {
-    if (!pipeline || !agents) return [];
+    if (!pipeline) return [];
+
+    // Use saved canvas nodes if available
+    if (pipeline.canvas?.nodes?.length) {
+      const seen = new Set<string>();
+      const sources: string[] = [];
+      for (const n of pipeline.canvas.nodes) {
+        if (n.type === "input" && n.data?.inputSource && !seen.has(n.data.inputSource)) {
+          seen.add(n.data.inputSource);
+          sources.push(n.data.inputSource);
+        }
+      }
+      if (sources.length > 0) return sources;
+    }
+
+    // Legacy fallback: derive from agent inputs + overrides
+    if (!agents) return [];
     const sources = new Set<string>();
     pipeline.steps.forEach(step => {
       const agent = agents.find(a => a.id === step.agent_id);
       if (agent?.inputs?.length) {
         agent.inputs.forEach(inp => {
           const src = step.input_overrides?.[inp.key] ?? inp.source;
-          // Skip "virtual" sources — they are resolved at runtime, not real files
           if (src && src !== "agent_output" && src !== "chain_previous") sources.add(src);
         });
       } else {
@@ -389,7 +407,9 @@ export function PipelineSidePanel({
       }
     };
 
-    await Promise.allSettled(sorted.map(([cid], ci) => runSingle(cid, ci)));
+    for (let ci = 0; ci < sorted.length; ci++) {
+      await runSingle(sorted[ci][0], ci);
+    }
     setCallsRunning(false);
   }
 
