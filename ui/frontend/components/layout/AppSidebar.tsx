@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History,
+  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -17,8 +17,9 @@ const GROUPS = [
   {
     label: "Browse",
     items: [
-      { href: "/crm",   icon: Users,      label: "CRM Browser" },
-      { href: "/calls", icon: FileText,   label: "Calls" },
+      { href: "/crm",       icon: Users,    label: "CRM Browser" },
+      { href: "/calls",     icon: FileText, label: "Calls" },
+      { href: "/artifacts", icon: Archive,  label: "Artifacts" },
     ],
   },
   {

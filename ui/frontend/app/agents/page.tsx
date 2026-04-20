@@ -132,6 +132,15 @@ function ClassIcon({ cls }: { cls: string }) {
 
 interface AgentInput { key: string; source: SourceValue; agent_id?: string; }
 
+interface Persona {
+  id: string; type: string; agent: string; customer?: string; label?: string;
+  content_md: string; score_json?: string; model: string; created_at: string; version: number;
+}
+interface Note {
+  id: string; agent: string; customer: string; call_id: string;
+  content_md: string; score_json?: string; created_at: string;
+}
+
 interface UniversalAgent {
   id: string; name: string; description: string; agent_class: string;
   model: string; temperature: number; system_prompt: string; user_prompt: string;
@@ -465,14 +474,70 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     setRunError(""); setStatus("");
   }, [agent.id]);
 
-  // Auto-fetch previews for data inputs (not artifacts) when context changes
+  async function fetchArtifact(inp: AgentInput) {
+    if (!testAgent || !testCustomer) return;
+    setPreviews(p => ({ ...p, [inp.key]: { status: "loading", chars: 0, snippet: "" } }));
+    try {
+      let content = "";
+      const qs = new URLSearchParams({ agent: testAgent, customer: testCustomer });
+
+      if (inp.source === "artifact_persona") {
+        const res = await fetch(`/api/personas?${qs}`);
+        if (!res.ok) throw new Error(`${res.status}`);
+        const list: Persona[] = await res.json();
+        const pair = list.filter(p => p.type === "pair").sort((a, b) => b.created_at.localeCompare(a.created_at));
+        if (pair.length === 0) throw new Error("No pair persona cached for this context");
+        content = pair[0].content_md ?? "";
+
+      } else if (inp.source === "artifact_persona_score") {
+        const res = await fetch(`/api/personas?${qs}`);
+        if (!res.ok) throw new Error(`${res.status}`);
+        const list: Persona[] = await res.json();
+        const scored = list.filter(p => p.score_json).sort((a, b) => b.created_at.localeCompare(a.created_at));
+        if (scored.length === 0) throw new Error("No scored persona cached for this context");
+        try { content = JSON.stringify(JSON.parse(scored[0].score_json!), null, 2); }
+        catch { content = scored[0].score_json!; }
+
+      } else if (inp.source === "artifact_notes") {
+        const res = await fetch(`/api/notes/rollup?${qs}`);
+        if (res.status === 404) throw new Error("No merged notes rollup — generate from Notes page first");
+        if (!res.ok) throw new Error(`${res.status}`);
+        const data = await res.json();
+        content = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+
+      } else if (inp.source === "artifact_notes_compliance") {
+        const res = await fetch(`/api/notes?${qs}`);
+        if (!res.ok) throw new Error(`${res.status}`);
+        const list: Note[] = await res.json();
+        const scored = list.filter(n => n.score_json);
+        if (scored.length === 0) throw new Error("No compliance-scored notes cached for this context");
+        content = scored.map(n => {
+          try { return `### Call ${n.call_id}\n\n${JSON.stringify(JSON.parse(n.score_json!), null, 2)}`; }
+          catch { return `### Call ${n.call_id}\n\n${n.score_json}`; }
+        }).join("\n\n---\n\n");
+      }
+
+      setPreviews(p => ({ ...p, [inp.key]: { status: "ok", chars: content.length, snippet: content.slice(0, 300) } }));
+      setCustomText(p => ({ ...p, [inp.key]: content }));
+    } catch (e: unknown) {
+      const msg = (e as Error).message ?? String(e);
+      let clean = msg;
+      try { const j = JSON.parse(msg); clean = j.detail ?? msg; } catch { /* not JSON */ }
+      setPreviews(p => ({ ...p, [inp.key]: { status: "error", chars: 0, snippet: "", errMsg: clean } }));
+    }
+  }
+
+  // Auto-fetch inputs when context changes
   useEffect(() => {
     if (!testAgent || !testCustomer) {
       setPreviews({});
       return;
     }
     for (const inp of agent.inputs) {
-      if (srcCategory(inp.source) === "artifact") continue; // artifacts are always pasted
+      if (srcCategory(inp.source) === "artifact") {
+        fetchArtifact(inp);
+        continue;
+      }
       if (customMode[inp.key]) continue;
       const needsCall = srcMeta(inp.source).needsCall;
       if (needsCall && !testCallId) {
@@ -700,55 +765,90 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
         {/* ── Artifact inputs ──────────────────────────────────────── */}
         {artifactInputs.length > 0 && (
           <div className="p-3 border-b border-gray-800 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold">Artifacts</p>
-              <span className="text-[9px] text-gray-700 italic">paste pipeline output below</span>
-            </div>
+            <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold">Artifacts</p>
             {artifactInputs.map((inp, i) => {
               const sm = srcMeta(inp.source);
               const SrcIcon = sm.icon;
+              const pv = previews[inp.key];
               const text = customText[inp.key] ?? "";
               const expanded = showPreview[inp.key];
+              const isViolet = sm.badge.includes("violet");
+              const isAmber  = sm.badge.includes("amber");
+              const textCls  = sm.badge.split(" ").find(c => c.startsWith("text-")) ?? "text-gray-300";
               return (
-                <div key={i} className={cn("rounded-lg border overflow-hidden", sm.badge.includes("violet") ? "border-violet-800/40" : sm.badge.includes("amber") ? "border-amber-800/40" : "border-emerald-800/40")}>
-                  {/* Artifact type header */}
-                  <div className={cn(
-                    "flex items-center gap-2 px-2.5 py-2",
-                    sm.badge.includes("violet") ? "bg-violet-950/50" : sm.badge.includes("amber") ? "bg-amber-950/50" : "bg-emerald-950/50",
-                  )}>
+                <div key={i} className={cn("rounded-lg border overflow-hidden",
+                  isViolet ? "border-violet-800/40" : isAmber ? "border-amber-800/40" : "border-emerald-800/40")}>
+
+                  {/* Header: type + status */}
+                  <div className={cn("flex items-center gap-2 px-2.5 py-2",
+                    isViolet ? "bg-violet-950/50" : isAmber ? "bg-amber-950/50" : "bg-emerald-950/50")}>
                     <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
                       <SrcIcon className="w-3 h-3" />
                     </span>
                     <div className="flex-1 min-w-0">
-                      <p className={cn("text-[10px] font-semibold", sm.badge.split(" ").find(c => c.startsWith("text-")))}>{sm.label}</p>
+                      <p className={cn("text-[10px] font-semibold", textCls)}>{sm.label}</p>
                       <p className="text-[9px] text-gray-600 font-mono">{`{${inp.key}}`}</p>
                     </div>
-                    {text.length > 0 && (
+
+                    {/* Fetch status */}
+                    {(!testAgent || !testCustomer) ? (
+                      <span className="text-[9px] text-gray-700 shrink-0 italic">select context</span>
+                    ) : pv?.status === "loading" ? (
+                      <div className="flex items-center gap-1 text-[9px] text-gray-500 shrink-0">
+                        <Loader2 className="w-2.5 h-2.5 animate-spin" /> loading
+                      </div>
+                    ) : pv?.status === "ok" ? (
                       <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="text-[9px] text-emerald-400">✓</span>
-                        <span className="text-[9px] text-gray-600">{text.length.toLocaleString()} chars</span>
+                        <span className="text-[9px] text-emerald-400">✓ cached</span>
+                        <span className="text-[9px] text-gray-600">{pv.chars.toLocaleString()} chars</span>
                         <button onClick={() => setShowPreview(p => ({ ...p, [inp.key]: !p[inp.key] }))}
                           className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">
                           {expanded ? "hide" : "peek"}
                         </button>
+                        <button onClick={() => fetchArtifact(inp)} title="Reload from cache"
+                          className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">↺</button>
                       </div>
-                    )}
-                    {text.length === 0 && (
-                      <span className="text-[9px] text-gray-700 shrink-0">empty</span>
-                    )}
+                    ) : pv?.status === "error" ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[9px] text-amber-400">⚠ not cached</span>
+                        <button onClick={() => fetchArtifact(inp)} title="Retry"
+                          className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">↺</button>
+                      </div>
+                    ) : null}
                   </div>
-                  {/* Peek preview */}
-                  {expanded && text.length > 0 && (
-                    <pre className="px-2.5 py-2 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words bg-gray-900 max-h-28 overflow-y-auto border-b border-gray-800">{text.slice(0, 400)}{text.length > 400 ? "\n…" : ""}</pre>
+
+                  {/* Error detail */}
+                  {pv?.status === "error" && pv.errMsg && (
+                    <p className="px-2.5 py-1 text-[9px] text-gray-600 italic border-b border-gray-800/50">{pv.errMsg}</p>
                   )}
-                  {/* Paste area */}
+
+                  {/* Peek preview */}
+                  {expanded && pv?.status === "ok" && (
+                    <pre className="px-2.5 py-2 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words bg-gray-900 max-h-28 overflow-y-auto border-b border-gray-800">
+                      {text.slice(0, 500)}{text.length > 500 ? "\n…" : ""}
+                    </pre>
+                  )}
+
+                  {/* Editable content area */}
                   <div className="px-2.5 py-2">
                     <textarea value={text}
                       onChange={e => setCustomText(p => ({ ...p, [inp.key]: e.target.value }))}
-                      placeholder={`Paste ${sm.label} output here…`}
-                      rows={text.length > 0 ? 2 : 4}
+                      placeholder={
+                        !testAgent || !testCustomer ? "Select context to auto-load…"
+                        : pv?.status === "error" ? `No ${sm.label} cached — paste manually`
+                        : pv?.status === "loading" ? "Loading from cache…"
+                        : `${sm.label} content…`
+                      }
+                      rows={text.length > 0 ? 2 : 3}
                       className="w-full bg-gray-900/60 border border-gray-700/50 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y placeholder-gray-700"
                     />
+                    {text.length > 0 && (
+                      <div className="flex items-center justify-between mt-0.5">
+                        <p className="text-[9px] text-gray-700">{text.length.toLocaleString()} chars</p>
+                        <button onClick={() => setCustomText(p => ({ ...p, [inp.key]: "" }))}
+                          className="text-[9px] text-gray-700 hover:text-red-400 transition-colors">clear</button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
