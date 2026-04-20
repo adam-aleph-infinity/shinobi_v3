@@ -3,6 +3,7 @@ import asyncio
 import json
 import queue as _queue
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -23,17 +24,15 @@ _DIR = settings.ui_data_dir / "_pipelines"
 
 class PipelineStep(BaseModel):
     agent_id: str
-    # Per-step input source overrides: { key: source_override }
-    # e.g. {"note": "chain_previous"} overrides the agent's declared source for key "note"
     input_overrides: dict[str, str] = {}
 
 
 class PipelineIn(BaseModel):
     name: str
     description: str = ""
-    scope: str = "per_pair"   # per_call | per_pair
+    scope: str = "per_pair"
     steps: list[PipelineStep] = []
-    canvas: dict = {}  # lossless n8n-style canvas snapshot {nodes, edges, stages}
+    canvas: dict = {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -103,7 +102,7 @@ class PipelineRunRequest(BaseModel):
     sales_agent: str = ""
     customer: str = ""
     call_id: str = ""
-    force: bool = False  # if True, skip cache and re-run all steps
+    force: bool = False
 
 
 @router.get("/{pipeline_id}/results")
@@ -114,7 +113,7 @@ def get_pipeline_results(
     call_id: str = "",
     db: Session = Depends(get_session),
 ):
-    """Return the latest cached AgentResult for each pipeline step (no LLM calls)."""
+    """Return the latest cached AgentResult for each pipeline step."""
     from ui.backend.models.agent_result import AgentResult as AR
 
     _, pipeline_def = _find_file(pipeline_id)
@@ -153,16 +152,13 @@ def list_pipeline_runs(
     limit: int = Query(30),
     db: Session = Depends(get_session),
 ):
-    """Return recent pipeline run history records (newest first)."""
+    """Return recent runs for a specific pipeline."""
     from ui.backend.models.pipeline_run import PipelineRun as PR
 
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
-    if sales_agent:
-        stmt = stmt.where(PR.sales_agent == sales_agent)
-    if customer:
-        stmt = stmt.where(PR.customer == customer)
-    if call_id:
-        stmt = stmt.where(PR.call_id == call_id)
+    if sales_agent: stmt = stmt.where(PR.sales_agent == sales_agent)
+    if customer:    stmt = stmt.where(PR.customer == customer)
+    if call_id:     stmt = stmt.where(PR.call_id == call_id)
     stmt = stmt.order_by(PR.started_at.desc()).limit(limit)
     rows = db.exec(stmt).all()
     return [
@@ -188,7 +184,7 @@ def list_pipeline_runs(
 async def run_pipeline(
     pipeline_id: str, req: PipelineRunRequest, db: Session = Depends(get_session)
 ):
-    """Execute a pipeline step-by-step, reusing cached AgentResult rows where available."""
+    """Execute a pipeline step-by-step, streaming SSE events."""
     from ui.backend.models.agent_result import AgentResult as AR
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.routers.universal_agents import (
@@ -199,12 +195,10 @@ async def run_pipeline(
 
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
-
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
 
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
-        cid = req.call_id or "pair"
         cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
 
         # ── Create history run record ────────────────────────────────────────
@@ -213,7 +207,19 @@ async def run_pipeline(
 
         run_id = str(uuid.uuid4())
         run_steps = [
-            {"agent_id": s.get("agent_id", ""), "agent_name": "", "status": "pending", "content": "", "error_msg": ""}
+            {
+                "agent_id": s.get("agent_id", ""),
+                "agent_name": "",
+                "model": "",
+                "status": "pending",
+                "content": "",
+                "error_msg": "",
+                "execution_time_s": None,
+                "input_token_est": 0,
+                "output_token_est": 0,
+                "thinking": "",
+                "input_sources": [],
+            }
             for s in steps
         ]
         run_record = PR(
@@ -231,14 +237,14 @@ async def run_pipeline(
 
         run_final_status = "error"
         loop = asyncio.get_event_loop()
-        prev_content = ""  # passed to next step as chain_previous
+        prev_content = ""
 
         try:
             log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
-            yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name})
+            yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name, "run_id": run_id})
 
             for step_idx, step in enumerate(steps):
-                agent_id = step.get("agent_id", "")
+                agent_id  = step.get("agent_id", "")
                 overrides = step.get("input_overrides", {})
                 agent_def = agent_map.get(agent_id)
 
@@ -249,16 +255,25 @@ async def run_pipeline(
                     return
 
                 agent_name = agent_def.get("name", agent_id)
-                model = agent_def.get("model", "gpt-5.4")
+                model      = agent_def.get("model", "gpt-5.4")
+
+                run_steps[step_idx]["agent_name"] = agent_name
+                run_steps[step_idx]["model"]      = model
 
                 log_buffer.emit(f"[PIPELINE] Step {step_idx + 1}/{len(steps)}: {agent_name} · {cid_short}")
                 yield _sse("step_start", {
                     "step": step_idx, "total": len(steps),
-                    "agent_id": agent_id, "agent_name": agent_name,
+                    "agent_id": agent_id, "agent_name": agent_name, "model": model,
                 })
-                run_steps[step_idx]["agent_name"] = agent_name
 
-                # ── Check for cached result (skipped if force=True) ──────────
+                # ── Capture input source declarations ────────────────────────
+                input_sources = [
+                    {"key": inp.get("key", ""), "source": overrides.get(inp.get("key", ""), inp.get("source", "manual"))}
+                    for inp in agent_def.get("inputs", [])
+                ]
+                run_steps[step_idx]["input_sources"] = input_sources
+
+                # ── Check cache ──────────────────────────────────────────────
                 if not req.force:
                     stmt = select(AR).where(
                         AR.agent_id == agent_id,
@@ -272,7 +287,10 @@ async def run_pipeline(
 
                     if cached:
                         prev_content = cached.content
-                        run_steps[step_idx].update({"status": "cached", "content": cached.content})
+                        run_steps[step_idx].update({
+                            "status": "cached",
+                            "content": cached.content,
+                        })
                         yield _sse("step_cached", {
                             "step": step_idx, "agent_name": agent_name,
                             "result_id": cached.id, "content": cached.content,
@@ -280,7 +298,7 @@ async def run_pipeline(
                         continue
 
                 # ── Resolve inputs ───────────────────────────────────────────
-                temperature = float(agent_def.get("temperature", 0.0))
+                temperature   = float(agent_def.get("temperature", 0.0))
                 system_prompt = agent_def.get("system_prompt", "")
                 user_template = agent_def.get("user_prompt", "")
                 manual_inputs = {"_chain_previous": prev_content}
@@ -323,8 +341,12 @@ async def run_pipeline(
                 inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
                 # ── Call LLM ─────────────────────────────────────────────────
-                total_chars = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
+                total_chars    = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
+                input_tok_est  = (total_chars + len(system_prompt)) // 4
                 log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input · {cid_short}")
+
+                step_start_t = time.time()
+
                 if model.startswith("claude-"):
                     q: _queue.Queue = _queue.Queue()
                     result_holder: list = []
@@ -372,7 +394,10 @@ async def run_pipeline(
                         yield _sse("error", {"msg": str(exc), "step": step_idx})
                         return
 
-                # ── Save & advance ────────────────────────────────────────────
+                exec_time_s    = round(time.time() - step_start_t, 1)
+                output_tok_est = len(content) // 4
+
+                # ── Persist AgentResult ───────────────────────────────────────
                 result_id = str(uuid.uuid4())
                 record = AR(
                     id=result_id,
@@ -388,14 +413,30 @@ async def run_pipeline(
                 db.commit()
 
                 prev_content = content
-                run_steps[step_idx].update({"status": "done", "content": content})
-                log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars) · {cid_short}")
+                run_steps[step_idx].update({
+                    "status":           "done",
+                    "content":          content,
+                    "execution_time_s": exec_time_s,
+                    "input_token_est":  input_tok_est,
+                    "output_token_est": output_tok_est,
+                    "thinking":         (thinking or "")[:8000],
+                })
+
+                log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars, {exec_time_s}s) · {cid_short}")
+
                 if thinking:
-                    yield _sse("thinking", {"content": thinking, "step": step_idx})
+                    yield _sse("thinking", {"content": thinking[:5000], "step": step_idx})
+
                 log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1}: {agent_name} · {cid_short}")
                 yield _sse("step_done", {
-                    "step": step_idx, "agent_name": agent_name,
-                    "result_id": result_id, "content": content,
+                    "step":             step_idx,
+                    "agent_name":       agent_name,
+                    "result_id":        result_id,
+                    "content":          content,
+                    "model":            model,
+                    "execution_time_s": exec_time_s,
+                    "input_token_est":  input_tok_est,
+                    "output_token_est": output_tok_est,
                 })
 
             run_final_status = "done"
@@ -409,12 +450,12 @@ async def run_pipeline(
                     for l in log_buffer.get_after(start_seq)
                 ]
                 run_record.finished_at = datetime.utcnow()
-                run_record.status = run_final_status
-                run_record.steps_json = json.dumps(run_steps)
-                run_record.log_json = json.dumps(log_lines[-200:])
+                run_record.status      = run_final_status
+                run_record.steps_json  = json.dumps(run_steps)
+                run_record.log_json    = json.dumps(log_lines[-200:])
                 db.add(run_record)
                 db.commit()
             except Exception:
-                pass  # never fail the stream for a history save error
+                pass
 
     return StreamingResponse(stream(), media_type="text/event-stream")

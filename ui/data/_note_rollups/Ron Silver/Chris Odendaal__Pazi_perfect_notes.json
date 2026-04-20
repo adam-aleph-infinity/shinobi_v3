@@ -1,0 +1,125 @@
+{
+  "overall_risk": "High",
+  "summary": "The agent consistently failed to adhere to foundational compliance procedures, including critical disclosures and security verification, while actively guiding the client to make large, high-risk transfers and engaging in unauthorized trading activities.",
+  "compliance_aggregate": {
+    "procedures": [
+      {
+        "name": "Secret Code verification at the beginning of the call",
+        "compliant": 6,
+        "violations": 4
+      },
+      {
+        "name": "Sending and introduction of the required email “Simple Truth About Your Money”",
+        "compliant": 0,
+        "violations": 10
+      },
+      {
+        "name": "For Australian clients: verification that the client received the email",
+        "compliant": 0,
+        "violations": 2
+      },
+      {
+        "name": "For Australian clients: verification that the client viewed the content, including the banking article",
+        "compliant": 0,
+        "violations": 2
+      },
+      {
+        "name": "Multi-platform (success fee) offer introduction",
+        "compliant": 0,
+        "violations": 10
+      },
+      {
+        "name": "Use of the correct exchange for initial bank deposit",
+        "compliant": 9,
+        "violations": 0
+      },
+      {
+        "name": "Transfer through a secondary exchange (MEXC or Binance) before reaching the broker",
+        "compliant": 9,
+        "violations": 0
+      }
+    ],
+    "total_violations": 28,
+    "total_checks": 52
+  },
+  "call_progression": [
+    {
+      "call_id": "107604",
+      "stage": "late infrastructure / active funding stage",
+      "outcome": "Initial funding and crypto purchase"
+    },
+    {
+      "call_id": "109162",
+      "stage": "infrastructure setup and transfer preparation stage",
+      "outcome": "Exchange verification and Binance setup"
+    },
+    {
+      "call_id": "110603",
+      "stage": "infrastructure setup / exchange verification stage",
+      "outcome": "Exchange withdrawal verification"
+    },
+    {
+      "call_id": "110696",
+      "stage": "infrastructure setup / exchange verification stage",
+      "outcome": "Exchange withdrawal verification"
+    },
+    {
+      "call_id": "112110",
+      "stage": "later infrastructure/execution stage",
+      "outcome": "Funds transferred Swyftx to Binance"
+    },
+    {
+      "call_id": "113195",
+      "stage": "post-deposit portfolio review and short follow-up during the growth phase",
+      "outcome": "Portfolio review and profit confirmation"
+    },
+    {
+      "call_id": "144499",
+      "stage": "late-stage infrastructure/deposit execution call",
+      "outcome": "New deposit attempt, exchange transfer issues"
+    },
+    {
+      "call_id": "116065",
+      "stage": "active trading-management and pre-transfer continuation stage",
+      "outcome": "Active trading and awaiting new funds"
+    },
+    {
+      "call_id": "122975",
+      "stage": "late-stage conversion/execution phase",
+      "outcome": "New large deposit initiated with bank prep"
+    },
+    {
+      "call_id": "138545",
+      "stage": "late-stage capital expansion / advanced-stage interaction",
+      "outcome": "Additional superannuation transfer, agent authorized"
+    }
+  ],
+  "key_patterns": [
+    "Systematic failure to introduce and verify foundational disclosures (email, multi-platform offer).",
+    "Inconsistent adherence to security protocols, specifically secret code verification.",
+    "Agent coaching client on how to respond to banks/exchanges to circumvent scrutiny, including instructing the client to mislead.",
+    "Agent engaging in unauthorized trading activities and seeking explicit authorization to trade on the client's behalf.",
+    "Aggressive and persistent push for large deposits, particularly from the client's SMSF and superannuation.",
+    "Use of market urgency and profit potential to pressure the client into immediate transfers, despite client's expressed emotional distress."
+  ],
+  "next_steps": [
+    "Immediately rectify all missing foundational compliance procedures: send/introduce 'Simple Truth About Your Money' email, verify receipt and viewing of content (especially banking article for Australian client), and introduce the multi-platform/success-fee offer.",
+    "Cease all unauthorized trading activities and remote control of client accounts; ensure client executes all trades independently.",
+    "Retrain agent on appropriate client communication regarding bank/exchange interactions, emphasizing transparency and prohibiting instructions to mislead.",
+    "Review all client interactions for signs of undue influence or high-pressure sales tactics, especially concerning SMSF transfers.",
+    "Follow up on all pending transfers (ANZ to Swyftx, Swyftx to Binance/MEXC, superannuation) to ensure client funds are secure and transfers are completed compliantly.",
+    "Conduct a comprehensive review of the agent's entire book of business for similar compliance violations and high-risk behaviors.",
+    "Implement stricter monitoring of agent calls, focusing on initial disclosures, security protocols, and client interaction during transfers.",
+    "Provide additional training on handling clients in emotional distress and ensuring suitability of financial advice."
+  ],
+  "violated_procedures": [
+    "Secret Code verification at the beginning of the call",
+    "Sending and introduction of the required email “Simple Truth About Your Money”",
+    "For Australian clients: verification that the client received the email",
+    "For Australian clients: verification that the client viewed the content, including the banking article",
+    "Multi-platform (success fee) offer introduction"
+  ],
+  "_saved_at": "2026-04-14T18:29:01.231741",
+  "_note_count": 10,
+  "_preset": "Pazi perfect notes"
+}

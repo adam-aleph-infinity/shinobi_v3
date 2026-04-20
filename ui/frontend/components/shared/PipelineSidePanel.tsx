@@ -6,7 +6,7 @@ import {
   ChevronDown, ChevronUp, CheckCircle2, SkipForward,
   Download, Eye, EyeOff, ChevronLeft, ChevronRight, X,
   Mic2, FileText, Bot, StickyNote, Layers, BookOpen,
-  GitBranch, PenLine, History,
+  GitBranch, PenLine, Clock, Zap, Cpu,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -36,17 +36,6 @@ interface CachedStepResult {
   result: { id: string; content: string; agent_name: string; created_at: string; } | null;
 }
 
-interface RunStep {
-  agent_id: string; agent_name: string;
-  status: string; content: string; error_msg: string;
-}
-interface PipelineRunRecord {
-  id: string; pipeline_name: string;
-  sales_agent: string; customer: string; call_id: string;
-  started_at: string; finished_at: string | null;
-  status: string;
-  canvas_json: string; steps_json: string; log_json: string;
-}
 
 type StepStatus    = "pending" | "loading" | "cached" | "done" | "error";
 type CallRunStatus = "queued"  | "running" | "cached" | "done" | "error";
@@ -55,6 +44,12 @@ interface StepState {
   agentName: string; status: StepStatus;
   content: string; stream: string; expanded: boolean;
   errorMsg?: string;
+  thinking?: string;
+  execTimeS?: number;
+  inputTokenEst?: number;
+  outputTokenEst?: number;
+  model?: string;
+  stepStartTs?: number;  // Date.now() when step_start received (for live timing)
 }
 interface CallResult {
   callId: string; date: string;
@@ -112,46 +107,6 @@ interface CanvasNode {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function relativeTime(isoStr: string): string {
-  const diff = Date.now() - new Date(isoStr + "Z").getTime();
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-function durationStr(startIso: string, endIso: string | null): string {
-  if (!endIso) return "…";
-  const ms = new Date(endIso + "Z").getTime() - new Date(startIso + "Z").getTime();
-  const s = Math.floor(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
-function buildCanvasMaps(canvas: {
-  nodes: CanvasNode[];
-  edges: { id: string; source: string; target: string }[];
-}) {
-  const sorted = [...canvas.nodes].sort((a, b) => {
-    const si = (a.data?.stageIndex ?? 0) - (b.data?.stageIndex ?? 0);
-    return si !== 0 ? si : (a.position?.x ?? 0) - (b.position?.x ?? 0);
-  });
-  const procStepIdx = new Map<string, number>();
-  let idx = 0;
-  for (const n of sorted) { if (n.type === "processing") procStepIdx.set(n.id, idx++); }
-  const outputProcId = new Map<string, string>();
-  const procSet = new Set(sorted.filter(n => n.type === "processing").map(n => n.id));
-  for (const e of canvas.edges) { if (procSet.has(e.source)) outputProcId.set(e.target, e.source); }
-  const inputProcIds = new Map<string, string[]>();
-  const inputSet = new Set(sorted.filter(n => n.type === "input").map(n => n.id));
-  for (const e of canvas.edges) {
-    if (inputSet.has(e.source)) {
-      const list = inputProcIds.get(e.source) ?? []; list.push(e.target); inputProcIds.set(e.source, list);
-    }
-  }
-  return { procStepIdx, outputProcId, inputProcIds, canvasNodes: sorted };
-}
 
 function utcHmsToIsrael(hms: string): string {
   const [h, m, s] = hms.split(":").map(Number);
@@ -298,6 +253,7 @@ function MiniCanvas({
           const sel = selectedKey === k;
           const lbl = n.type === "input"
             ? (SOURCE_META[n.data.inputSource ?? ""]?.label ?? n.data.label)
+            : n.type === "output" ? "Output"
             : (n.data.agentName || n.data.label);
 
           return (
@@ -356,7 +312,7 @@ export function PipelineSidePanel({
   const contextOk = hasPair;
 
   // ── view state ───────────────────────────────────────────────────────────────
-  const [panelView, setPanelView] = useState<"flow" | "steps" | "history">("flow");
+  const [panelView, setPanelView] = useState<"flow" | "steps">("flow");
   const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
   const [inputPreview, setInputPreview] = useState<{ loading: boolean; content: string; error: string }>(
     { loading: false, content: "", error: "" }
@@ -366,8 +322,6 @@ export function PipelineSidePanel({
   );
   const [logLines, setLogLines] = useState<{ ts: string; text: string; level: string }[]>([]);
   const [flowCallIdx, setFlowCallIdx] = useState(0);
-  const [historyExpandedId, setHistoryExpandedId] = useState<string | null>(null);
-  const [historySelectedKey, setHistorySelectedKey] = useState<string | null>(null);
 
   // ── per_pair state ───────────────────────────────────────────────────────────
   const [steps,    setSteps]    = useState<StepState[]>([]);
@@ -432,11 +386,6 @@ export function PipelineSidePanel({
     : null;
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
-  // ── history runs fetch ────────────────────────────────────────────────────────
-  const runsUrl = activePipelineId && hasPair
-    ? `/api/pipelines/${activePipelineId}/runs?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
-    : null;
-  const { data: pipelineRuns, mutate: mutateRuns } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher);
 
   useEffect(() => {
     if (isPerCall || loaded || running || !cachedResults || !pipeline || !agents) return;
@@ -716,12 +665,13 @@ export function PipelineSidePanel({
       let hadLLM = false;
       await readPipelineSSE(res,
         (type, evt, s) => {
-          if (type === "step_start")  setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name } : st));
-          if (type === "step_cached") setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached",  content: evt.content } : st));
+          if (type === "step_start")  setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st));
+          if (type === "step_cached") setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st));
           if (type === "stream")      setSteps(p => { const n = p.map((st, i) => i === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
-          if (type === "step_done")   { hadLLM = true; setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "" } : st)); }
+          if (type === "thinking")    setSteps(p => p.map((st, i) => i === s ? { ...st, thinking: evt.content ?? "" } : st));
+          if (type === "step_done")   { hadLLM = true; setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "", model: evt.model, execTimeS: evt.execution_time_s, inputTokenEst: evt.input_token_est, outputTokenEst: evt.output_token_est } : st)); }
           if (type === "error" && evt.step != null) setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st));
-          if (type === "pipeline_done") { setDone(true); mutateCache(); mutateRuns(); }
+          if (type === "pipeline_done") { setDone(true); mutateCache(); }
         },
       );
     } catch (e: any) {
@@ -761,12 +711,13 @@ export function PipelineSidePanel({
         });
         if (!res.body) throw new Error("No response body");
         await readPipelineSSE(res, (type, evt, s) => {
-          if (type === "step_start")  setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "loading", agentName: evt.agent_name } : st) } : cr));
-          if (type === "step_cached") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "cached", content: evt.content } : st) } : cr));
+          if (type === "step_start")  setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st) } : cr));
+          if (type === "step_cached") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st) } : cr));
           if (type === "stream")      setCallResults(p => { const n = p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st) } : cr); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
-          if (type === "step_done")   { hadLLM = true; setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "done", content: evt.content, stream: "" } : st) } : cr)); }
+          if (type === "thinking")    setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, thinking: evt.content ?? "" } : st) } : cr));
+          if (type === "step_done")   { hadLLM = true; setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "done", content: evt.content, stream: "", model: evt.model, execTimeS: evt.execution_time_s, inputTokenEst: evt.input_token_est, outputTokenEst: evt.output_token_est } : st) } : cr)); }
           if (type === "error" && evt.step != null) setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st) } : cr));
-          if (type === "pipeline_done") { setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, done: true, runStatus: hadLLM ? "done" : "cached", expanded: hadLLM } : cr)); mutateRuns(); }
+          if (type === "pipeline_done") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, done: true, runStatus: hadLLM ? "done" : "cached", expanded: hadLLM } : cr));
         });
       } catch (e: any) {
         setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, error: e.message ?? "Error", runStatus: "error" } : cr));
@@ -834,9 +785,9 @@ export function PipelineSidePanel({
         )}
       </div>
 
-      {/* Tab switcher: Flow / Steps / History */}
+      {/* Tab switcher: Flow / Steps */}
       <div className="px-3 border-b border-gray-800 flex gap-3 shrink-0 bg-gray-900/50">
-        {(["flow", "steps", "history"] as const).map(v => (
+        {(["flow", "steps"] as const).map(v => (
           <button
             key={v}
             onClick={() => setPanelView(v)}
@@ -847,7 +798,7 @@ export function PipelineSidePanel({
                 : "border-transparent text-gray-600 hover:text-gray-400",
             )}
           >
-            {v === "flow" ? "Flow" : v === "steps" ? "Steps" : "History"}
+            {v === "flow" ? "Flow" : "Steps"}
           </button>
         ))}
       </div>
@@ -1083,11 +1034,27 @@ export function PipelineSidePanel({
                         <span className={cn("text-[9px] shrink-0 font-medium", statusColor)}>{status}</span>
                         <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
                       </div>
-                      {/* Meta row: model + inputs */}
-                      <div className="px-3 py-1.5 border-b border-gray-800/60 shrink-0 space-y-1">
-                        <div className="flex items-center gap-1.5 text-[10px]">
-                          <span className="text-gray-600">model</span>
-                          <code className="text-indigo-300 font-mono">{model}</code>
+                      {/* Meta row: model + timing + tokens + inputs */}
+                      <div className="px-3 py-2 border-b border-gray-800/60 shrink-0 space-y-1.5">
+                        <div className="flex flex-wrap gap-2">
+                          {(st?.model || model) && (
+                            <div className="flex items-center gap-1 text-[10px]">
+                              <Cpu className="w-3 h-3 text-indigo-400 shrink-0" />
+                              <code className="text-indigo-300 font-mono">{st?.model || model}</code>
+                            </div>
+                          )}
+                          {st?.execTimeS != null && (
+                            <div className="flex items-center gap-1 text-[10px]">
+                              <Clock className="w-3 h-3 text-cyan-400 shrink-0" />
+                              <span className="text-cyan-300">{st.execTimeS}s</span>
+                            </div>
+                          )}
+                          {(st?.inputTokenEst != null && st.inputTokenEst > 0) && (
+                            <div className="flex items-center gap-1 text-[10px] text-gray-500">
+                              <Zap className="w-3 h-3 text-amber-500/60 shrink-0" />
+                              <span>~{st.inputTokenEst.toLocaleString()} in / ~{st.outputTokenEst?.toLocaleString() ?? "?"} out</span>
+                            </div>
+                          )}
                         </div>
                         {resolvedInputs.map(inp => (
                           <div key={inp.key} className="flex items-center gap-1.5 text-[10px]">
@@ -1095,7 +1062,6 @@ export function PipelineSidePanel({
                             <span className="text-cyan-400">{inp.source}</span>
                           </div>
                         ))}
-                        {/* File IDs for this agent's file-based inputs */}
                         {nodeFileInfo.loading && <span className="text-[10px] text-gray-600">Loading file IDs…</span>}
                         {nodeFileInfo.files.map(f => (
                           <div key={f.id} className="flex items-center gap-1.5 text-[10px]">
@@ -1133,6 +1099,14 @@ export function PipelineSidePanel({
                             </button>
                           </div>
                         )}
+                        {!hasStream && st?.thinking && (
+                          <details className="mx-3 mt-2 mb-1 border border-purple-900/40 rounded-lg overflow-hidden">
+                            <summary className="px-3 py-1.5 text-[10px] text-purple-400 font-semibold bg-purple-950/20 cursor-pointer list-none flex items-center gap-1.5">
+                              <span className="text-purple-500">▶</span> Extended thinking
+                            </summary>
+                            <pre className="p-3 text-[10px] text-purple-300/70 font-mono whitespace-pre-wrap break-words leading-relaxed bg-purple-950/10 max-h-48 overflow-y-auto">{st.thinking}</pre>
+                          </details>
+                        )}
                         {!hasStream && hasContent && (
                           <div className="p-1">
                             <SectionContent content={st!.content} />
@@ -1155,7 +1129,8 @@ export function PipelineSidePanel({
                     <div className="shrink-0 border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "65%" }}>
                       <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
                         <FileText className={cn("w-3.5 h-3.5 shrink-0", art.color)} />
-                        <span className={cn("text-xs font-semibold flex-1 truncate", art.color)}>{node.data.label}</span>
+                        <span className={cn("text-xs font-semibold flex-1", art.color)}>Output</span>
+                        {subType && <span className={cn("text-[10px] px-1.5 py-0.5 rounded border shrink-0", art.color, art.bg, art.border)}>{node.data.label}</span>}
                         {!hasContent && <span className="text-[9px] text-gray-600 shrink-0">awaiting</span>}
                         <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
                       </div>
@@ -1197,174 +1172,6 @@ export function PipelineSidePanel({
             <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
               onToggle={() => setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />
           ))}
-        </div>
-      )}
-
-      {/* ── HISTORY VIEW ────────────────────────────────────────────────────────── */}
-      {panelView === "history" && (
-        <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1.5">
-          {!hasPair && (
-            <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600 text-center">
-              <AlertCircle className="w-5 h-5 opacity-30" />
-              <p className="text-xs">Select agent + customer to view history</p>
-            </div>
-          )}
-          {hasPair && !pipelineRuns && (
-            <div className="flex items-center justify-center gap-2 py-8 text-gray-600 text-xs">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading history…
-            </div>
-          )}
-          {hasPair && pipelineRuns && pipelineRuns.length === 0 && (
-            <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600 text-center">
-              <History className="w-8 h-8 opacity-20" />
-              <p className="text-xs">No runs yet. Hit Run to start the pipeline.</p>
-            </div>
-          )}
-          {pipelineRuns?.map(run => {
-            const isExpanded = historyExpandedId === run.id;
-            const parsedSteps: RunStep[] = (() => { try { return JSON.parse(run.steps_json || "[]"); } catch { return []; } })();
-            const parsedLogs: { ts: string; text: string; level: string }[] = (() => { try { return JSON.parse(run.log_json || "[]"); } catch { return []; } })();
-            const doneCount = parsedSteps.filter(s => s.status === "done" || s.status === "cached").length;
-            const errorCount = parsedSteps.filter(s => s.status === "error").length;
-            let parsedCanvas: { nodes: CanvasNode[]; edges: { id: string; source: string; target: string }[]; stages: string[] } | null = null;
-            try { parsedCanvas = run.canvas_json ? JSON.parse(run.canvas_json) : null; } catch { }
-            const histMaps = parsedCanvas?.nodes?.length ? buildCanvasMaps(parsedCanvas) : null;
-            const histFlowSteps: StepState[] = parsedSteps.map(s => ({
-              agentName: s.agent_name, status: s.status as StepStatus,
-              content: s.content, stream: "", expanded: false,
-              errorMsg: s.error_msg || undefined,
-            }));
-
-            return (
-              <div key={run.id} className={cn("border rounded-xl overflow-hidden", run.status === "error" ? "border-red-900/40" : "border-gray-700/50")}>
-                {/* Run header */}
-                <button
-                  className="w-full flex items-center gap-2 px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-left"
-                  onClick={() => { setHistoryExpandedId(isExpanded ? null : run.id); setHistorySelectedKey(null); }}
-                >
-                  {run.status === "running" && <Loader2 className="w-3 h-3 animate-spin text-orange-400 shrink-0" />}
-                  {run.status === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
-                  {run.status === "error"   && <AlertCircle  className="w-3 h-3 text-red-400 shrink-0" />}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[10px] text-gray-300 font-medium truncate">
-                      {run.call_id && <span className="text-gray-500 mr-1 font-mono">…{run.call_id.slice(-8)}</span>}
-                      {relativeTime(run.started_at)}
-                    </p>
-                    <p className="text-[9px] text-gray-600">
-                      {durationStr(run.started_at, run.finished_at)} · {doneCount}/{parsedSteps.length} steps
-                      {errorCount > 0 && <span className="text-red-500 ml-1">{errorCount} error{errorCount > 1 ? "s" : ""}</span>}
-                    </p>
-                  </div>
-                  {isExpanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                </button>
-
-                {/* Expanded body */}
-                {isExpanded && (
-                  <div className="border-t border-gray-800 bg-gray-950">
-                    {/* Mini canvas (static — uses saved step statuses) */}
-                    {histMaps && parsedCanvas && (
-                      <MiniCanvas
-                        stages={parsedCanvas.stages ?? []}
-                        nodes={histMaps.canvasNodes}
-                        edges={parsedCanvas.edges}
-                        procStepIdx={histMaps.procStepIdx}
-                        outputProcId={histMaps.outputProcId}
-                        inputProcIds={histMaps.inputProcIds}
-                        flowSteps={histFlowSteps}
-                        selectedKey={historySelectedKey}
-                        onNodeClick={key => setHistorySelectedKey(key === historySelectedKey ? null : key)}
-                      />
-                    )}
-
-                    {/* Log lines */}
-                    {parsedLogs.length > 0 && (
-                      <div className="border-t border-gray-800/60 bg-black/40 max-h-24 overflow-y-auto">
-                        {parsedLogs.map((l, i) => (
-                          <div key={i} className={cn(
-                            "px-2 py-px font-mono text-[9px] leading-relaxed whitespace-pre-wrap break-all",
-                            l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-400" :
-                            l.level === "stage" ? "text-teal-400" : l.level === "llm" ? "text-indigo-300" : "text-gray-600"
-                          )}>
-                            <span className="text-gray-700 mr-1">{utcHmsToIsrael(l.ts)}</span>{l.text}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Node detail (shown when a node is clicked in history canvas) */}
-                    {historySelectedKey && histMaps && (() => {
-                      const colonIdx = historySelectedKey.indexOf(":");
-                      const prefix = historySelectedKey.slice(0, colonIdx);
-                      const nodeId = historySelectedKey.slice(colonIdx + 1);
-                      const node = histMaps.canvasNodes.find(n => n.id === nodeId);
-                      if (!node) return null;
-                      const dismiss = () => setHistorySelectedKey(null);
-
-                      if (prefix === "proc") {
-                        const stepIdx = histMaps.procStepIdx.get(nodeId) ?? 0;
-                        const st = histFlowSteps[stepIdx];
-                        const status = st?.status ?? "pending";
-                        const statusColor = status === "done" ? "text-green-400" : status === "cached" ? "text-amber-400" : status === "error" ? "text-red-400" : "text-gray-500";
-                        return (
-                          <div className="border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "50vh" }}>
-                            <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
-                              <Bot className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                              <span className="text-xs font-semibold text-gray-200 flex-1 truncate">{node.data.agentName || node.data.label}</span>
-                              <span className={cn("text-[9px] shrink-0 font-medium", statusColor)}>{status}</span>
-                              <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
-                            </div>
-                            <div className="flex-1 min-h-0 overflow-y-auto">
-                              {st?.errorMsg && <pre className="p-3 text-[10px] text-red-400 font-mono whitespace-pre-wrap break-words bg-red-950/20 border-b border-red-900/40">{st.errorMsg}</pre>}
-                              {st?.content
-                                ? <div className="p-1"><SectionContent content={st.content} /></div>
-                                : <p className="p-3 text-[11px] text-gray-600 text-center">No result for this step</p>}
-                            </div>
-                          </div>
-                        );
-                      }
-
-                      if (prefix === "out") {
-                        const procId = histMaps.outputProcId.get(nodeId);
-                        const stepIdx = procId != null ? histMaps.procStepIdx.get(procId) : undefined;
-                        const st = stepIdx != null ? histFlowSteps[stepIdx] : undefined;
-                        const subType = node.data.subType ?? "";
-                        const art = ARTIFACT_NODE_META[subType] ?? DEFAULT_ARTIFACT_STYLE;
-                        return (
-                          <div className="border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "50vh" }}>
-                            <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
-                              <FileText className={cn("w-3.5 h-3.5 shrink-0", art.color)} />
-                              <span className={cn("text-xs font-semibold flex-1 truncate", art.color)}>{node.data.label}</span>
-                              <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
-                            </div>
-                            {st?.content
-                              ? <div className="flex-1 min-h-0 overflow-y-auto p-1"><SectionContent content={st.content} /></div>
-                              : <p className="p-3 text-[11px] text-gray-600 text-center">No result</p>}
-                          </div>
-                        );
-                      }
-
-                      if (prefix === "input") {
-                        const src = node.data.inputSource ?? "";
-                        const m = SOURCE_META[src] ?? GENERIC_SOURCE;
-                        const Icon = m.icon;
-                        return (
-                          <div className="border-t border-gray-800 bg-gray-950/90">
-                            <div className="px-3 py-2 flex items-center gap-2">
-                              <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
-                              <span className={cn("text-xs font-semibold flex-1", m.color)}>{m.label}</span>
-                              <span className="text-[9px] text-gray-600">input</span>
-                              <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
-                            </div>
-                          </div>
-                        );
-                      }
-                      return null;
-                    })()}
-                  </div>
-                )}
-              </div>
-            );
-          })}
         </div>
       )}
 

@@ -31,6 +31,7 @@ from ui.backend.routers.notes import router as notes_router
 from ui.backend.routers.populate import router as populate_router
 from ui.backend.routers.universal_agents import router as universal_agents_router
 from ui.backend.routers.pipelines import router as pipelines_router
+from ui.backend.routers.history import router as history_router
 from ui.backend.services import log_buffer
 
 app = FastAPI(title="Shinobi V3 API", version="1.0.0")
@@ -61,6 +62,7 @@ app.include_router(notes_router)
 app.include_router(populate_router)
 app.include_router(universal_agents_router)
 app.include_router(pipelines_router)
+app.include_router(history_router)
 
 
 @app.on_event("startup")
