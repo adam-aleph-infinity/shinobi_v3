@@ -433,13 +433,33 @@ export default function ArtifactsPage() {
                 <Archive className="w-6 h-6 opacity-20" />
                 <p className="text-[10px]">No artifacts cached</p>
               </div>
-            ) : (
-              artifactItems.map(item => (
-                <ArtifactRow key={item.id} item={item}
-                  selected={selectedItem?.id === item.id}
-                  onClick={() => setSelectedItem(item)} />
-              ))
-            )}
+            ) : (() => {
+              type Group = { kind: ArtifactItem["kind"]; label: string; items: ArtifactItem[] };
+              const groups: Group[] = ([
+                { kind: "persona"       as const, label: "Personas",       items: artifactItems.filter(i => i.kind === "persona") },
+                { kind: "persona_score" as const, label: "Persona Scores", items: artifactItems.filter(i => i.kind === "persona_score") },
+                { kind: "notes_rollup"  as const, label: "Merged Notes",   items: artifactItems.filter(i => i.kind === "notes_rollup") },
+                { kind: "note"          as const, label: "Call Notes",     items: artifactItems.filter(i => i.kind === "note") },
+              ] as Group[]).filter(g => g.items.length > 0);
+              return groups.map(g => {
+                const m = ARTIFACT_META[g.kind as keyof typeof ARTIFACT_META] ?? ARTIFACT_META.note;
+                const Icon = m.icon;
+                return (
+                  <div key={g.kind}>
+                    <div className={cn("flex items-center gap-1.5 px-3 py-1.5 border-b border-gray-800/60 sticky top-0 z-10", m.bg)}>
+                      <Icon className={cn("w-3 h-3 shrink-0", m.text)} />
+                      <p className={cn("text-[9px] font-bold uppercase tracking-widest", m.text)}>{g.label}</p>
+                      <span className="text-[9px] text-gray-700 ml-auto">{g.items.length}</span>
+                    </div>
+                    {g.items.map(item => (
+                      <ArtifactRow key={item.id} item={item}
+                        selected={selectedItem?.id === item.id}
+                        onClick={() => setSelectedItem(item)} />
+                    ))}
+                  </div>
+                );
+              });
+            })()}
           </div>
         </div>
         <DragHandle onMouseDown={itemsDrag} />
