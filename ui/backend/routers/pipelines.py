@@ -103,6 +103,7 @@ class PipelineRunRequest(BaseModel):
     sales_agent: str = ""
     customer: str = ""
     call_id: str = ""
+    force: bool = False  # if True, skip cache and re-run all steps
 
 
 @router.get("/{pipeline_id}/results")
@@ -187,24 +188,25 @@ async def run_pipeline(
                 "agent_id": agent_id, "agent_name": agent_name,
             })
 
-            # ── Check for cached result ──────────────────────────────────────
-            stmt = select(AR).where(
-                AR.agent_id == agent_id,
-                AR.sales_agent == req.sales_agent,
-                AR.customer == req.customer,
-            )
-            if req.call_id:
-                stmt = stmt.where(AR.call_id == req.call_id)
-            stmt = stmt.order_by(AR.created_at.desc())
-            cached = db.exec(stmt).first()
+            # ── Check for cached result (skipped if force=True) ──────────────
+            if not req.force:
+                stmt = select(AR).where(
+                    AR.agent_id == agent_id,
+                    AR.sales_agent == req.sales_agent,
+                    AR.customer == req.customer,
+                )
+                if req.call_id:
+                    stmt = stmt.where(AR.call_id == req.call_id)
+                stmt = stmt.order_by(AR.created_at.desc())
+                cached = db.exec(stmt).first()
 
-            if cached:
-                prev_content = cached.content
-                yield _sse("step_cached", {
-                    "step": step_idx, "agent_name": agent_name,
-                    "result_id": cached.id, "content": cached.content,
-                })
-                continue
+                if cached:
+                    prev_content = cached.content
+                    yield _sse("step_cached", {
+                        "step": step_idx, "agent_name": agent_name,
+                        "result_id": cached.id, "content": cached.content,
+                    })
+                    continue
 
             # ── Resolve inputs ───────────────────────────────────────────────
             temperature = float(agent_def.get("temperature", 0.0))
