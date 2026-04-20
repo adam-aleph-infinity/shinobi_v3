@@ -22,12 +22,14 @@ const fetcher = (url: string) =>
 
 interface Persona {
   id: string; type: string; agent: string; customer?: string; label?: string;
-  content_md: string; score_json?: string; model: string; created_at: string; version: number;
+  content_md: string; score_json?: unknown; model: string; created_at: string; version: number;
 }
 interface Note {
   id: string; agent: string; customer: string; call_id: string;
-  content_md: string; score_json?: string; model: string; created_at: string;
+  content_md: string; score_json?: unknown; model: string; created_at: string;
 }
+
+type ArtifactKind = "persona" | "persona_score" | "notes_rollup" | "note";
 
 type ArtifactItem =
   | { kind: "persona";       id: string; date: string; chars: number; label: string; data: Persona }
@@ -35,28 +37,44 @@ type ArtifactItem =
   | { kind: "notes_rollup";  id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
   | { kind: "note";          id: string; date: string; chars: number; label: string; data: Note; hasCompliance: boolean };
 
-// ── Artifact type metadata ────────────────────────────────────────────────────
+// ── Artifact type config ──────────────────────────────────────────────────────
 
-const ARTIFACT_META = {
-  persona:       { label: "Persona",          icon: User,        bg: "bg-violet-900/60",  text: "text-violet-300",  border: "border-violet-700/40", dot: "bg-violet-500"  },
-  persona_score: { label: "Persona Score",    icon: BadgeCheck,  bg: "bg-violet-900/40",  text: "text-violet-400",  border: "border-violet-700/30", dot: "bg-violet-400"  },
-  notes_rollup:  { label: "Merged Notes",     icon: Layers,      bg: "bg-amber-900/40",   text: "text-amber-300",   border: "border-amber-700/40",  dot: "bg-amber-500"   },
-  note:          { label: "Call Note",        icon: StickyNote,  bg: "bg-teal-900/40",    text: "text-teal-300",    border: "border-teal-700/40",   dot: "bg-teal-500"    },
-  note_compliant:{ label: "Compliance Note",  icon: ShieldCheck, bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40",dot: "bg-emerald-500" },
-} as const;
+const ARTIFACT_TYPE_META: Record<ArtifactKind, {
+  label: string; icon: React.ComponentType<{ className?: string }>;
+  bg: string; text: string; border: string; dot: string;
+}> = {
+  persona:       { label: "Personas",       icon: User,        bg: "bg-violet-900/50", text: "text-violet-300",  border: "border-violet-700/40",  dot: "bg-violet-500"  },
+  persona_score: { label: "Persona Scores", icon: BadgeCheck,  bg: "bg-violet-900/30", text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
+  notes_rollup:  { label: "Merged Notes",   icon: Layers,      bg: "bg-amber-900/40",  text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
+  note:          { label: "Call Notes",     icon: StickyNote,  bg: "bg-teal-900/40",   text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function prettyJson(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") {
+    try { return JSON.stringify(JSON.parse(value), null, 2); }
+    catch { return value; }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+      className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors shrink-0">
+      <Copy className="w-3 h-3" /> {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
 
 // ── Content viewer ────────────────────────────────────────────────────────────
 
 function ContentViewer({ item }: { item: ArtifactItem }) {
-  const [copied, setCopied] = useState(false);
-
-  function copyText(t: string) {
-    navigator.clipboard.writeText(t);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
-
   if (item.kind === "persona") {
+    const md = item.data.content_md ?? "";
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -64,24 +82,20 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
           </div>
-          <button onClick={() => copyText(item.data.content_md)}
-            className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors shrink-0">
-            <Copy className="w-3 h-3" /> {copied ? "Copied" : "Copy"}
-          </button>
+          <CopyBtn text={md} />
         </div>
         <div className="flex-1 overflow-y-auto p-5">
           <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.data.content_md}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
           </div>
         </div>
       </div>
     );
   }
 
-  if (item.kind === "persona_score" && item.data.score_json) {
-    let parsed: unknown;
-    try { parsed = JSON.parse(item.data.score_json); } catch { parsed = item.data.score_json; }
-    const raw = typeof parsed === "object" ? JSON.stringify(parsed, null, 2) : String(parsed);
+  if (item.kind === "persona_score" && item.data.score_json != null) {
+    const raw = prettyJson(item.data.score_json);
+    const parsed = (() => { try { return typeof item.data.score_json === "string" ? JSON.parse(item.data.score_json) : item.data.score_json; } catch { return null; } })();
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -89,18 +103,15 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
-          <button onClick={() => copyText(raw)}
-            className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors shrink-0">
-            <Copy className="w-3 h-3" /> {copied ? "Copied" : "Copy"}
-          </button>
+          <CopyBtn text={raw} />
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {typeof parsed === "object" && parsed !== null ? (
+          {parsed && typeof parsed === "object" ? (
             <div className="space-y-2">
               {Object.entries(parsed as Record<string, unknown>).map(([k, v]) => (
                 <div key={k} className="flex gap-3 text-xs border-b border-gray-800/60 pb-2 last:border-0">
                   <span className="text-gray-500 w-48 shrink-0 font-medium">{k}</span>
-                  <span className="text-gray-300 break-words">{typeof v === "object" ? JSON.stringify(v, null, 2) : String(v)}</span>
+                  <span className="text-gray-300 break-words">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
                 </div>
               ))}
             </div>
@@ -113,8 +124,8 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
   }
 
   if (item.kind === "notes_rollup") {
-    const raw = JSON.stringify(item.data, null, 2);
     const d = item.data;
+    const raw = JSON.stringify(d, null, 2);
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -126,10 +137,7 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
               {d._note_count ? ` · ${d._note_count} notes` : ""}
             </p>
           </div>
-          <button onClick={() => copyText(raw)}
-            className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors shrink-0">
-            <Copy className="w-3 h-3" /> {copied ? "Copied" : "Copy"}
-          </button>
+          <CopyBtn text={raw} />
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {!!d.summary && (
@@ -168,7 +176,7 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
   }
 
   if (item.kind === "note") {
-    const raw = item.data.content_md;
+    const md = item.data.content_md ?? "";
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -178,20 +186,21 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             </p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
-          <button onClick={() => copyText(raw)}
-            className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors shrink-0">
-            <Copy className="w-3 h-3" /> {copied ? "Copied" : "Copy"}
-          </button>
+          <CopyBtn text={md} />
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{raw}</ReactMarkdown>
-          </div>
-          {item.data.score_json && (
+          {md ? (
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-600 italic">No content</p>
+          )}
+          {item.data.score_json != null && (
             <details className="border border-gray-800 rounded-lg overflow-hidden">
               <summary className="px-3 py-2 text-[10px] text-gray-500 cursor-pointer bg-gray-900/60">Compliance Score</summary>
               <pre className="p-3 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
-                {(() => { try { return JSON.stringify(JSON.parse(item.data.score_json!), null, 2); } catch { return item.data.score_json; } })()}
+                {prettyJson(item.data.score_json)}
               </pre>
             </details>
           )}
@@ -203,30 +212,33 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
   return null;
 }
 
-// ── Nav item row ──────────────────────────────────────────────────────────────
+// ── Item row ──────────────────────────────────────────────────────────────────
 
-function ArtifactRow({ item, selected, onClick }: { item: ArtifactItem; selected: boolean; onClick: () => void }) {
-  const kind = item.kind === "note" && item.hasCompliance ? "note_compliant" : item.kind;
-  const m = ARTIFACT_META[kind as keyof typeof ARTIFACT_META] ?? ARTIFACT_META.note;
+function ItemRow({ item, selected, onClick }: { item: ArtifactItem; selected: boolean; onClick: () => void }) {
+  const isCompliance = item.kind === "note" && item.hasCompliance;
+  const m = isCompliance
+    ? { bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40", icon: ShieldCheck }
+    : ARTIFACT_TYPE_META[item.kind];
   const Icon = m.icon;
   return (
     <button onClick={onClick}
       className={cn(
-        "w-full flex items-center gap-2 px-3 py-2 text-left transition-colors",
+        "w-full flex items-center gap-2 px-3 py-2 text-left transition-colors border-l-2",
         selected
-          ? "bg-indigo-900/30 border-l-2 border-indigo-500"
-          : "border-l-2 border-transparent hover:bg-gray-800/40",
+          ? "bg-indigo-900/30 border-indigo-500"
+          : "border-transparent hover:bg-gray-800/40",
       )}>
       <span className={cn("p-0.5 rounded border shrink-0", m.bg, m.text, m.border)}>
         <Icon className="w-3 h-3" />
       </span>
       <div className="flex-1 min-w-0">
         <p className={cn("text-[11px] font-medium truncate", selected ? "text-white" : "text-gray-300")}>{item.label}</p>
-        <p className="text-[9px] text-gray-600 flex items-center gap-1">
+        <p className="text-[9px] text-gray-600 flex items-center gap-1.5">
           <CalendarDays className="w-2.5 h-2.5" />{item.date.slice(0, 10)}
-          <span className="text-gray-700 ml-1">{item.chars.toLocaleString()} chars</span>
+          <span className="text-gray-700">{item.chars.toLocaleString()} chars</span>
         </p>
       </div>
+      <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
     </button>
   );
 }
@@ -239,11 +251,11 @@ function StatusDots({ salesAgent, customer }: { salesAgent: string; customer: st
   const { data: notes }    = useSWR<Note[]>(`/api/notes?${qs}`, fetcher);
   const { data: rollup, error: rollupErr } = useSWR<Record<string, unknown>>(`/api/notes/rollup?${qs}`, fetcher);
   const has = {
-    persona: (personas ?? []).length > 0,
-    score:   (personas ?? []).some(p => p.score_json),
-    rollup:  !!rollup && !rollupErr,
-    notes:   (notes ?? []).length > 0,
-    compliance: (notes ?? []).some(n => n.score_json),
+    persona:    (personas ?? []).length > 0,
+    score:      (personas ?? []).some(p => p.score_json != null),
+    rollup:     !!rollup && !rollupErr,
+    notes:      (notes ?? []).length > 0,
+    compliance: (notes ?? []).some(n => n.score_json != null),
   };
   if (!has.persona && !has.rollup && !has.notes) return null;
   return (
@@ -260,15 +272,17 @@ function StatusDots({ salesAgent, customer }: { salesAgent: string; customer: st
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ArtifactsPage() {
-  const [agentW,    agentDrag]    = useResize(200, 140, 320);
-  const [customerW, customerDrag] = useResize(200, 140, 320);
-  const [itemsW,    itemsDrag]    = useResize(240, 180, 400);
+  const [agentW,    agentDrag]    = useResize(160, 120, 280);
+  const [customerW, customerDrag] = useResize(160, 120, 280);
+  const [typesW,    typesDrag]    = useResize(150, 120, 240);
+  const [itemsW,    itemsDrag]    = useResize(220, 160, 360);
 
-  const [selectedAgent, setSelectedAgent]       = useState("");
+  const [selectedAgent,    setSelectedAgent]    = useState("");
   const [selectedCustomer, setSelectedCustomer] = useState("");
-  const [selectedItem, setSelectedItem]         = useState<ArtifactItem | null>(null);
-  const [agentSearch, setAgentSearch]           = useState("");
-  const [customerSearch, setCustomerSearch]     = useState("");
+  const [selectedKind,     setSelectedKind]     = useState<ArtifactKind | null>(null);
+  const [selectedItem,     setSelectedItem]     = useState<ArtifactItem | null>(null);
+  const [agentSearch,      setAgentSearch]      = useState("");
+  const [customerSearch,   setCustomerSearch]   = useState("");
 
   const { data: navAgents }    = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
   const { data: navCustomers } = useSWR<{ customer: string; call_count: number }[]>(
@@ -289,20 +303,28 @@ export default function ArtifactsPage() {
     pairQs ? `/api/notes/rollup?${pairQs}` : null, fetcher,
   );
 
-  // Build unified artifact item list
-  const artifactItems: ArtifactItem[] = [];
+  const isLoadingPair = loadP || loadN || loadR;
+
+  // Build items per kind
+  const itemsByKind: Record<ArtifactKind, ArtifactItem[]> = {
+    persona: [],
+    persona_score: [],
+    notes_rollup: [],
+    note: [],
+  };
 
   (personas ?? []).sort((a, b) => b.created_at.localeCompare(a.created_at)).forEach(p => {
-    artifactItems.push({
+    itemsByKind.persona.push({
       kind: "persona", id: p.id, date: p.created_at,
       chars: p.content_md?.length ?? 0,
       label: p.label ? p.label : `Persona (${p.type}) · v${p.version}`,
       data: p,
     });
-    if (p.score_json) {
-      artifactItems.push({
+    if (p.score_json != null) {
+      const scoreStr = prettyJson(p.score_json);
+      itemsByKind.persona_score.push({
         kind: "persona_score", id: `${p.id}_score`, date: p.created_at,
-        chars: p.score_json.length,
+        chars: scoreStr.length,
         label: `Score for ${p.label ?? `v${p.version}`}`,
         data: p,
       });
@@ -312,28 +334,42 @@ export default function ArtifactsPage() {
   if (rollup && !rollupErr) {
     const raw = JSON.stringify(rollup);
     const saved = rollup._saved_at as string | undefined;
-    artifactItems.push({
+    itemsByKind.notes_rollup.push({
       kind: "notes_rollup", id: "rollup",
       date: saved ?? new Date().toISOString(),
       chars: raw.length,
-      label: `Merged Notes Rollup${rollup._note_count ? ` (${rollup._note_count} notes)` : ""}`,
+      label: `Merged Notes${rollup._note_count ? ` (${rollup._note_count} notes)` : ""}`,
       data: rollup,
     });
   }
 
   (notes ?? []).sort((a, b) => b.created_at.localeCompare(a.created_at)).forEach(n => {
-    artifactItems.push({
+    itemsByKind.note.push({
       kind: "note", id: n.id, date: n.created_at,
       chars: n.content_md?.length ?? 0,
       label: `Call Note · ${n.call_id.slice(-12)}`,
       data: n,
-      hasCompliance: !!n.score_json,
+      hasCompliance: n.score_json != null,
     });
   });
 
+  const typeGroups = (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
+    .filter(k => itemsByKind[k].length > 0);
+
+  const visibleItems = selectedKind ? itemsByKind[selectedKind] : [];
+
   const filteredAgents    = (navAgents ?? []).filter(a => a.agent.toLowerCase().includes(agentSearch.toLowerCase()));
   const filteredCustomers = (navCustomers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
-  const isLoadingItems    = loadP || loadN || loadR;
+
+  function selectAgent(a: string) {
+    setSelectedAgent(a); setSelectedCustomer(""); setSelectedKind(null); setSelectedItem(null);
+  }
+  function selectCustomer(c: string) {
+    setSelectedCustomer(c); setSelectedKind(null); setSelectedItem(null);
+  }
+  function selectKind(k: ArtifactKind) {
+    setSelectedKind(k); setSelectedItem(null);
+  }
 
   return (
     <div className="min-h-[calc(100vh-5.25rem)] flex -m-6 overflow-hidden">
@@ -345,15 +381,13 @@ export default function ArtifactsPage() {
             <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Sales Agents</p>
             <div className="relative">
               <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-600" />
-              <input value={agentSearch} onChange={e => setAgentSearch(e.target.value)}
-                placeholder="Search…"
+              <input value={agentSearch} onChange={e => setAgentSearch(e.target.value)} placeholder="Search…"
                 className="w-full bg-gray-800 border border-gray-700 rounded-md pl-6 pr-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500 placeholder-gray-600" />
             </div>
           </div>
           <div className="flex-1 overflow-y-auto py-1">
             {filteredAgents.map(a => (
-              <button key={a.agent}
-                onClick={() => { setSelectedAgent(a.agent); setSelectedCustomer(""); setSelectedItem(null); }}
+              <button key={a.agent} onClick={() => selectAgent(a.agent)}
                 className={cn(
                   "w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] transition-colors border-l-2",
                   selectedAgent === a.agent
@@ -364,9 +398,7 @@ export default function ArtifactsPage() {
                 <span className="text-[9px] text-gray-700 shrink-0">{a.count}</span>
               </button>
             ))}
-            {filteredAgents.length === 0 && (
-              <p className="text-[10px] text-gray-700 italic px-3 py-4">No agents</p>
-            )}
+            {filteredAgents.length === 0 && <p className="text-[10px] text-gray-700 italic px-3 py-4">No agents</p>}
           </div>
         </div>
         <DragHandle onMouseDown={agentDrag} />
@@ -379,93 +411,107 @@ export default function ArtifactsPage() {
             <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Customers</p>
             <div className="relative">
               <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-600" />
-              <input value={customerSearch} onChange={e => setCustomerSearch(e.target.value)}
-                placeholder="Search…"
+              <input value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} placeholder="Search…"
                 disabled={!selectedAgent}
                 className="w-full bg-gray-800 border border-gray-700 rounded-md pl-6 pr-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500 placeholder-gray-600 disabled:opacity-40" />
             </div>
           </div>
           <div className="flex-1 overflow-y-auto py-1">
-            {!selectedAgent ? (
-              <p className="text-[10px] text-gray-700 italic px-3 py-4">Select an agent</p>
-            ) : filteredCustomers.map(c => (
-              <button key={c.customer}
-                onClick={() => { setSelectedCustomer(c.customer); setSelectedItem(null); }}
-                className={cn(
-                  "w-full flex items-center gap-1 px-3 py-2 text-left text-[11px] transition-colors border-l-2",
-                  selectedCustomer === c.customer
-                    ? "bg-indigo-900/30 border-indigo-500 text-white"
-                    : "border-transparent text-gray-400 hover:text-white hover:bg-gray-800/40",
-                )}>
-                <span className="flex-1 truncate">{c.customer}</span>
-                <StatusDots salesAgent={selectedAgent} customer={c.customer} />
-                <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
-              </button>
-            ))}
-            {selectedAgent && filteredCustomers.length === 0 && (
-              <p className="text-[10px] text-gray-700 italic px-3 py-4">No customers</p>
-            )}
+            {!selectedAgent
+              ? <p className="text-[10px] text-gray-700 italic px-3 py-4">Select an agent</p>
+              : filteredCustomers.map(c => (
+                <button key={c.customer} onClick={() => selectCustomer(c.customer)}
+                  className={cn(
+                    "w-full flex items-center gap-1 px-3 py-2 text-left text-[11px] transition-colors border-l-2",
+                    selectedCustomer === c.customer
+                      ? "bg-indigo-900/30 border-indigo-500 text-white"
+                      : "border-transparent text-gray-400 hover:text-white hover:bg-gray-800/40",
+                  )}>
+                  <span className="flex-1 truncate">{c.customer}</span>
+                  <StatusDots salesAgent={selectedAgent} customer={c.customer} />
+                </button>
+              ))}
+            {selectedAgent && filteredCustomers.length === 0 && <p className="text-[10px] text-gray-700 italic px-3 py-4">No customers</p>}
           </div>
         </div>
         <DragHandle onMouseDown={customerDrag} />
       </div>
 
-      {/* ── Panel 3: Artifact items ──────────────────────────────── */}
-      <div className="flex shrink-0 overflow-hidden" style={{ width: itemsW }}>
+      {/* ── Panel 3: Artifact types ──────────────────────────────── */}
+      <div className="flex shrink-0 overflow-hidden" style={{ width: typesW }}>
         <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
           <div className="px-3 py-2 border-b border-gray-800 shrink-0">
-            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">
-              {selectedCustomer ? `${selectedCustomer}` : "Artifacts"}
-            </p>
-            {selectedCustomer && (
-              <p className="text-[9px] text-gray-600 mt-0.5">{artifactItems.length} artifact{artifactItems.length !== 1 ? "s" : ""}</p>
+            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Artifact Types</p>
+            {selectedCustomer && !isLoadingPair && (
+              <p className="text-[9px] text-gray-700 mt-0.5">{typeGroups.length} type{typeGroups.length !== 1 ? "s" : ""}</p>
             )}
           </div>
           <div className="flex-1 overflow-y-auto py-1">
             {!selectedCustomer ? (
               <p className="text-[10px] text-gray-700 italic px-3 py-4">Select a customer</p>
-            ) : isLoadingItems ? (
+            ) : isLoadingPair ? (
               <div className="flex items-center gap-1.5 px-3 py-4 text-[10px] text-gray-600">
                 <Loader2 className="w-3 h-3 animate-spin" /> Loading…
               </div>
-            ) : artifactItems.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 gap-1.5 text-gray-700">
-                <Archive className="w-6 h-6 opacity-20" />
-                <p className="text-[10px]">No artifacts cached</p>
+            ) : typeGroups.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-6 gap-1.5 text-gray-700">
+                <Archive className="w-5 h-5 opacity-20" />
+                <p className="text-[10px]">No artifacts</p>
               </div>
-            ) : (() => {
-              type Group = { kind: ArtifactItem["kind"]; label: string; items: ArtifactItem[] };
-              const groups: Group[] = ([
-                { kind: "persona"       as const, label: "Personas",       items: artifactItems.filter(i => i.kind === "persona") },
-                { kind: "persona_score" as const, label: "Persona Scores", items: artifactItems.filter(i => i.kind === "persona_score") },
-                { kind: "notes_rollup"  as const, label: "Merged Notes",   items: artifactItems.filter(i => i.kind === "notes_rollup") },
-                { kind: "note"          as const, label: "Call Notes",     items: artifactItems.filter(i => i.kind === "note") },
-              ] as Group[]).filter(g => g.items.length > 0);
-              return groups.map(g => {
-                const m = ARTIFACT_META[g.kind as keyof typeof ARTIFACT_META] ?? ARTIFACT_META.note;
-                const Icon = m.icon;
-                return (
-                  <div key={g.kind}>
-                    <div className={cn("flex items-center gap-1.5 px-3 py-1.5 border-b border-gray-800/60 sticky top-0 z-10", m.bg)}>
-                      <Icon className={cn("w-3 h-3 shrink-0", m.text)} />
-                      <p className={cn("text-[9px] font-bold uppercase tracking-widest", m.text)}>{g.label}</p>
-                      <span className="text-[9px] text-gray-700 ml-auto">{g.items.length}</span>
-                    </div>
-                    {g.items.map(item => (
-                      <ArtifactRow key={item.id} item={item}
-                        selected={selectedItem?.id === item.id}
-                        onClick={() => setSelectedItem(item)} />
-                    ))}
+            ) : typeGroups.map(k => {
+              const m = ARTIFACT_TYPE_META[k];
+              const Icon = m.icon;
+              const count = itemsByKind[k].length;
+              const isSel = selectedKind === k;
+              return (
+                <button key={k} onClick={() => selectKind(k)}
+                  className={cn(
+                    "w-full flex items-center gap-2 px-3 py-2.5 text-left transition-colors border-l-2",
+                    isSel ? "bg-indigo-900/30 border-indigo-500" : "border-transparent hover:bg-gray-800/40",
+                  )}>
+                  <span className={cn("p-0.5 rounded border shrink-0", m.bg, m.text, m.border)}>
+                    <Icon className="w-3 h-3" />
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className={cn("text-[11px] font-medium truncate", isSel ? "text-white" : m.text)}>{m.label}</p>
+                    <p className="text-[9px] text-gray-600">{count} item{count !== 1 ? "s" : ""}</p>
                   </div>
-                );
-              });
-            })()}
+                  <ChevronRight className={cn("w-3 h-3 shrink-0 transition-colors", isSel ? "text-indigo-400" : "text-gray-700")} />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <DragHandle onMouseDown={typesDrag} />
+      </div>
+
+      {/* ── Panel 4: Items within type ───────────────────────────── */}
+      <div className="flex shrink-0 overflow-hidden" style={{ width: itemsW }}>
+        <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
+          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
+            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">
+              {selectedKind ? ARTIFACT_TYPE_META[selectedKind].label : "Items"}
+            </p>
+            {selectedKind && (
+              <p className="text-[9px] text-gray-700 mt-0.5">{visibleItems.length} item{visibleItems.length !== 1 ? "s" : ""}</p>
+            )}
+          </div>
+          <div className="flex-1 overflow-y-auto py-1">
+            {!selectedKind ? (
+              <p className="text-[10px] text-gray-700 italic px-3 py-4">Select an artifact type</p>
+            ) : visibleItems.length === 0 ? (
+              <p className="text-[10px] text-gray-700 italic px-3 py-4">No items</p>
+            ) : visibleItems.map(item => (
+              <ItemRow key={item.id} item={item}
+                selected={selectedItem?.id === item.id}
+                onClick={() => setSelectedItem(item)} />
+            ))}
           </div>
         </div>
         <DragHandle onMouseDown={itemsDrag} />
       </div>
 
-      {/* ── Panel 4: Content viewer ──────────────────────────────── */}
+      {/* ── Panel 5: Content viewer ──────────────────────────────── */}
       <div className="flex-1 min-w-0 bg-gray-900 overflow-hidden">
         {selectedItem ? (
           <ContentViewer item={selectedItem} />
@@ -473,9 +519,10 @@ export default function ArtifactsPage() {
           <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
             <Archive className="w-10 h-10 opacity-10" />
             <p className="text-sm">
-              {!selectedAgent ? "Select a sales agent to browse artifacts"
-               : !selectedCustomer ? "Select a customer to see their artifacts"
-               : "Select an artifact to view it"}
+              {!selectedAgent    ? "Select a sales agent"
+               : !selectedCustomer ? "Select a customer"
+               : !selectedKind     ? "Select an artifact type"
+               : "Select an item to view it"}
             </p>
           </div>
         )}
