@@ -99,6 +99,15 @@ interface CanvasNode {
   };
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function utcHmsToIsrael(hms: string): string {
+  const [h, m, s] = hms.split(":").map(Number);
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m, s ?? 0));
+  return d.toLocaleTimeString("en-GB", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 // ── Mini pipeline canvas ─────────────────────────────────────────────────────
 
 function MiniCanvas({
@@ -928,7 +937,7 @@ export function PipelineSidePanel({
                       l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-400" :
                       l.level === "stage" ? "text-teal-400" : l.level === "llm" ? "text-indigo-300" : "text-gray-500"
                     )}>
-                      <span className="text-gray-700 mr-1">{l.ts}</span>{l.text}
+                      <span className="text-gray-700 mr-1">{utcHmsToIsrael(l.ts)}</span>{l.text}
                     </div>
                   ))}
                   <div ref={logEndRef} />
