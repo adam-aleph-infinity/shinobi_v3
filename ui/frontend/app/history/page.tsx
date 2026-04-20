@@ -430,7 +430,7 @@ function NodeDetail({
             </Collapsible>
           )}
 
-          {/* Main output */}
+          {/* Raw response */}
           {step.content && (
             <>
               {step.status === "cached" && (
@@ -438,13 +438,8 @@ function NodeDetail({
                   <span>◎</span> Using cached result
                 </div>
               )}
-              <Collapsible label="Output" defaultOpen accent="text-green-400">
-                <div className="p-3">
-                  <SectionContent content={step.content} />
-                </div>
-              </Collapsible>
-              <Collapsible label="Raw response" accent="text-gray-500">
-                <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed">{step.content}</pre>
+              <Collapsible label="Raw response" accent="text-gray-400">
+                <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-96 overflow-y-auto">{step.content}</pre>
               </Collapsible>
             </>
           )}

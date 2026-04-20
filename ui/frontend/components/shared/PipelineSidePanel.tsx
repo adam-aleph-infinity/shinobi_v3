@@ -1108,9 +1108,12 @@ export function PipelineSidePanel({
                           </details>
                         )}
                         {!hasStream && hasContent && (
-                          <div className="p-1">
-                            <SectionContent content={st!.content} />
-                          </div>
+                          <details className="mx-3 mt-2 mb-1 border border-gray-800/60 rounded-lg overflow-hidden">
+                            <summary className="px-3 py-1.5 text-[10px] text-gray-400 font-semibold bg-gray-900/60 cursor-pointer list-none flex items-center gap-1.5">
+                              <span className="text-gray-600">▶</span> Raw response
+                            </summary>
+                            <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-y-auto">{st!.content}</pre>
+                          </details>
                         )}
                       </div>
                     </div>
