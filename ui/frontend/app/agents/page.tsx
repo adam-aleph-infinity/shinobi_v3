@@ -465,13 +465,14 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     setRunError(""); setStatus("");
   }, [agent.id]);
 
-  // Auto-fetch previews for all inputs when context changes
+  // Auto-fetch previews for data inputs (not artifacts) when context changes
   useEffect(() => {
     if (!testAgent || !testCustomer) {
       setPreviews({});
       return;
     }
     for (const inp of agent.inputs) {
+      if (srcCategory(inp.source) === "artifact") continue; // artifacts are always pasted
       if (customMode[inp.key]) continue;
       const needsCall = srcMeta(inp.source).needsCall;
       if (needsCall && !testCallId) {
@@ -504,8 +505,13 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     }
   }
 
-  // Does any auto-mode input need a call_id?
-  const needsCallId = agent.inputs.some(inp => !customMode[inp.key] && srcMeta(inp.source).needsCall);
+  // Does any auto-mode data input need a call_id?
+  const needsCallId = agent.inputs.some(
+    inp => srcCategory(inp.source) === "input" && !customMode[inp.key] && srcMeta(inp.source).needsCall,
+  );
+
+  const dataInputs     = agent.inputs.filter(inp => srcCategory(inp.source) === "input");
+  const artifactInputs = agent.inputs.filter(inp => srcCategory(inp.source) === "artifact");
 
   const callList = Object.entries(callDates ?? {}).sort((a, b) => (b[1].date ?? "").localeCompare(a[1].date ?? ""));
 
@@ -519,7 +525,8 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     const manual_inputs: Record<string, string> = {};
     const source_overrides: Record<string, string> = {};
     for (const inp of agent.inputs) {
-      if (customMode[inp.key]) {
+      // Artifact inputs are always injected as manual in test mode
+      if (srcCategory(inp.source) === "artifact" || customMode[inp.key]) {
         manual_inputs[inp.key] = customText[inp.key] ?? "";
         source_overrides[inp.key] = "manual";
       }
@@ -603,109 +610,157 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
           )}
         </div>
 
-        {/* ── Per-input status + override ─────────────────────────── */}
-        <div className="p-3 border-b border-gray-800 space-y-3">
-          <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold">Inputs</p>
-
-          {agent.inputs.map((inp, i) => {
-            const sm = srcMeta(inp.source);
-            const SrcIcon = sm.icon;
-            const isCustom = customMode[inp.key];
-            const pv = previews[inp.key];
-            const expanded = showPreview[inp.key];
-
-            return (
-              <div key={i} className="rounded-lg border border-gray-800 overflow-hidden">
-                {/* Input row header */}
-                <div className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-900/60">
-                  <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
-                    <SrcIcon className="w-3 h-3" />
-                  </span>
-                  <span className="text-[10px] text-amber-300 font-mono flex-1 truncate">{`{${inp.key}}`}</span>
-                  <span className="text-[9px] text-gray-600 shrink-0">{sm.label}</span>
-
-                  {/* Toggle custom / auto */}
-                  <button
-                    onClick={() => {
-                      const next = !isCustom;
-                      setCustomMode(p => ({ ...p, [inp.key]: next }));
-                      if (!next && testAgent && testCustomer) fetchPreview(inp);
-                    }}
-                    className={cn(
-                      "text-[9px] px-1.5 py-0.5 rounded border transition-colors shrink-0 ml-0.5",
-                      isCustom
-                        ? "border-amber-600/60 bg-amber-900/30 text-amber-400"
-                        : "border-gray-700 text-gray-500 hover:text-gray-300",
-                    )}>
-                    {isCustom ? "paste" : "auto"}
-                  </button>
-                </div>
-
-                {/* Auto mode: status + preview */}
-                {!isCustom && (
-                  <div className="px-2.5 py-2 space-y-1.5">
-                    {!testAgent || !testCustomer ? (
-                      <p className="text-[9px] text-gray-700 italic">Select context above to load</p>
-                    ) : pv?.status === "loading" ? (
-                      <div className="flex items-center gap-1.5 text-[9px] text-gray-500">
-                        <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" /> Fetching…
-                      </div>
-                    ) : pv?.status === "ok" ? (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[9px] text-emerald-400">✓ cached</span>
-                          <span className="text-[9px] text-gray-600">{pv.chars.toLocaleString()} chars</span>
-                          <button
-                            onClick={() => setShowPreview(p => ({ ...p, [inp.key]: !p[inp.key] }))}
-                            className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors ml-auto">
-                            {expanded ? "hide" : "preview"}
-                          </button>
-                          <button
-                            onClick={() => { setCustomMode(p => ({ ...p, [inp.key]: true })); setCustomText(p => ({ ...p, [inp.key]: pv.snippet + (pv.chars > 300 ? "\n…" : "") })); }}
-                            className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">
-                            edit
+        {/* ── Data inputs ─────────────────────────────────────────── */}
+        {dataInputs.length > 0 && (
+          <div className="p-3 border-b border-gray-800 space-y-2.5">
+            <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold">Data Inputs</p>
+            {dataInputs.map((inp, i) => {
+              const sm = srcMeta(inp.source);
+              const SrcIcon = sm.icon;
+              const isCustom = customMode[inp.key];
+              const pv = previews[inp.key];
+              const expanded = showPreview[inp.key];
+              return (
+                <div key={i} className="rounded-lg border border-gray-800 overflow-hidden">
+                  <div className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-900/60">
+                    <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
+                      <SrcIcon className="w-3 h-3" />
+                    </span>
+                    <span className="text-[10px] text-amber-300 font-mono flex-1 truncate">{`{${inp.key}}`}</span>
+                    <span className="text-[9px] text-gray-600 shrink-0">{sm.label}</span>
+                    <button
+                      onClick={() => {
+                        const next = !isCustom;
+                        setCustomMode(p => ({ ...p, [inp.key]: next }));
+                        if (!next && testAgent && testCustomer) fetchPreview(inp);
+                      }}
+                      className={cn(
+                        "text-[9px] px-1.5 py-0.5 rounded border transition-colors shrink-0 ml-0.5",
+                        isCustom
+                          ? "border-amber-600/60 bg-amber-900/30 text-amber-400"
+                          : "border-gray-700 text-gray-500 hover:text-gray-300",
+                      )}>
+                      {isCustom ? "paste" : "auto"}
+                    </button>
+                  </div>
+                  {!isCustom && (
+                    <div className="px-2.5 py-2 space-y-1.5">
+                      {!testAgent || !testCustomer ? (
+                        <p className="text-[9px] text-gray-700 italic">Select context above to load</p>
+                      ) : pv?.status === "loading" ? (
+                        <div className="flex items-center gap-1.5 text-[9px] text-gray-500">
+                          <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" /> Fetching…
+                        </div>
+                      ) : pv?.status === "ok" ? (
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[9px] text-emerald-400">✓ cached</span>
+                            <span className="text-[9px] text-gray-600">{pv.chars.toLocaleString()} chars</span>
+                            <button onClick={() => setShowPreview(p => ({ ...p, [inp.key]: !p[inp.key] }))}
+                              className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors ml-auto">
+                              {expanded ? "hide" : "preview"}
+                            </button>
+                            <button onClick={() => { setCustomMode(p => ({ ...p, [inp.key]: true })); setCustomText(p => ({ ...p, [inp.key]: pv.snippet + (pv.chars > 300 ? "\n…" : "") })); }}
+                              className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">
+                              edit
+                            </button>
+                          </div>
+                          {expanded && (
+                            <pre className="text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words bg-gray-900 rounded p-2 max-h-32 overflow-y-auto">{pv.snippet}{pv.chars > 300 ? "\n…" : ""}</pre>
+                          )}
+                        </div>
+                      ) : pv?.status === "error" ? (
+                        <div className="space-y-1.5">
+                          <p className="text-[9px] text-amber-400">⚠ {pv.errMsg ?? "Not found"}</p>
+                          <button onClick={() => { setCustomMode(p => ({ ...p, [inp.key]: true })); setCustomText(p => ({ ...p, [inp.key]: "" })); }}
+                            className="text-[9px] px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 transition-colors">
+                            Paste manually
                           </button>
                         </div>
-                        {expanded && (
-                          <pre className="text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words bg-gray-900 rounded p-2 max-h-32 overflow-y-auto">{pv.snippet}{pv.chars > 300 ? "\n…" : ""}</pre>
-                        )}
-                      </div>
-                    ) : pv?.status === "error" ? (
-                      <div className="space-y-1.5">
-                        <p className="text-[9px] text-amber-400">⚠ {pv.errMsg ?? "Not found"}</p>
-                        <button
-                          onClick={() => { setCustomMode(p => ({ ...p, [inp.key]: true })); setCustomText(p => ({ ...p, [inp.key]: "" })); }}
-                          className="text-[9px] px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 transition-colors">
-                          Paste content manually
+                      ) : (
+                        <p className="text-[9px] text-gray-700 italic">Idle</p>
+                      )}
+                    </div>
+                  )}
+                  {isCustom && (
+                    <div className="px-2.5 py-2">
+                      <textarea value={customText[inp.key] ?? ""}
+                        onChange={e => setCustomText(p => ({ ...p, [inp.key]: e.target.value }))}
+                        placeholder={`Paste ${inp.key} content…`} rows={4}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
+                      <p className="text-[9px] text-gray-700 mt-1">{(customText[inp.key] ?? "").length.toLocaleString()} chars</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── Artifact inputs ──────────────────────────────────────── */}
+        {artifactInputs.length > 0 && (
+          <div className="p-3 border-b border-gray-800 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold">Artifacts</p>
+              <span className="text-[9px] text-gray-700 italic">paste pipeline output below</span>
+            </div>
+            {artifactInputs.map((inp, i) => {
+              const sm = srcMeta(inp.source);
+              const SrcIcon = sm.icon;
+              const text = customText[inp.key] ?? "";
+              const expanded = showPreview[inp.key];
+              return (
+                <div key={i} className={cn("rounded-lg border overflow-hidden", sm.badge.includes("violet") ? "border-violet-800/40" : sm.badge.includes("amber") ? "border-amber-800/40" : "border-emerald-800/40")}>
+                  {/* Artifact type header */}
+                  <div className={cn(
+                    "flex items-center gap-2 px-2.5 py-2",
+                    sm.badge.includes("violet") ? "bg-violet-950/50" : sm.badge.includes("amber") ? "bg-amber-950/50" : "bg-emerald-950/50",
+                  )}>
+                    <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
+                      <SrcIcon className="w-3 h-3" />
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className={cn("text-[10px] font-semibold", sm.badge.split(" ").find(c => c.startsWith("text-")))}>{sm.label}</p>
+                      <p className="text-[9px] text-gray-600 font-mono">{`{${inp.key}}`}</p>
+                    </div>
+                    {text.length > 0 && (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[9px] text-emerald-400">✓</span>
+                        <span className="text-[9px] text-gray-600">{text.length.toLocaleString()} chars</span>
+                        <button onClick={() => setShowPreview(p => ({ ...p, [inp.key]: !p[inp.key] }))}
+                          className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">
+                          {expanded ? "hide" : "peek"}
                         </button>
                       </div>
-                    ) : (
-                      <p className="text-[9px] text-gray-700 italic">Idle</p>
+                    )}
+                    {text.length === 0 && (
+                      <span className="text-[9px] text-gray-700 shrink-0">empty</span>
                     )}
                   </div>
-                )}
-
-                {/* Custom paste mode */}
-                {isCustom && (
+                  {/* Peek preview */}
+                  {expanded && text.length > 0 && (
+                    <pre className="px-2.5 py-2 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words bg-gray-900 max-h-28 overflow-y-auto border-b border-gray-800">{text.slice(0, 400)}{text.length > 400 ? "\n…" : ""}</pre>
+                  )}
+                  {/* Paste area */}
                   <div className="px-2.5 py-2">
-                    <textarea
-                      value={customText[inp.key] ?? ""}
+                    <textarea value={text}
                       onChange={e => setCustomText(p => ({ ...p, [inp.key]: e.target.value }))}
-                      placeholder={`Paste ${inp.key} content…`}
-                      rows={4}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                      placeholder={`Paste ${sm.label} output here…`}
+                      rows={text.length > 0 ? 2 : 4}
+                      className="w-full bg-gray-900/60 border border-gray-700/50 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y placeholder-gray-700"
                     />
-                    <p className="text-[9px] text-gray-700 mt-1">{(customText[inp.key] ?? "").length.toLocaleString()} chars</p>
                   </div>
-                )}
-              </div>
-            );
-          })}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
-          {agent.inputs.length === 0 && (
+        {agent.inputs.length === 0 && (
+          <div className="p-3 border-b border-gray-800">
             <p className="text-[10px] text-gray-700 italic">No inputs defined on this agent</p>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* ── Run button ──────────────────────────────────────────── */}
         <div className="p-3 border-b border-gray-800">
