@@ -5,7 +5,7 @@ import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  User, BadgeCheck, StickyNote, ShieldCheck, Layers,
+  User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText,
   Loader2, Copy, Archive, Search, CalendarDays, ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -14,6 +14,14 @@ import { DragHandle } from "@/components/shared/DragHandle";
 
 const fetcher = (url: string) =>
   fetch(url).then(r => {
+    if (!r.ok) throw new Error(`${r.status}`);
+    return r.json();
+  });
+
+// Returns null on 404 instead of throwing (for optional artifacts)
+const fetcherOptional = (url: string) =>
+  fetch(url).then(r => {
+    if (r.status === 404) return null;
     if (!r.ok) throw new Error(`${r.status}`);
     return r.json();
   });
@@ -29,9 +37,10 @@ interface Note {
   content_md: string; score_json?: unknown; model: string; created_at: string;
 }
 
-type ArtifactKind = "persona" | "persona_score" | "notes_rollup" | "note";
+type ArtifactKind = "merged_transcript" | "persona" | "persona_score" | "notes_rollup" | "note";
 
 type ArtifactItem =
+  | { kind: "merged_transcript"; id: "merged_transcript"; date: string; chars: number; label: string; data: { content: string } }
   | { kind: "persona";       id: string; date: string; chars: number; label: string; data: Persona }
   | { kind: "persona_score"; id: string; date: string; chars: number; label: string; data: Persona }
   | { kind: "notes_rollup";  id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
@@ -43,10 +52,11 @@ const ARTIFACT_TYPE_META: Record<ArtifactKind, {
   label: string; icon: React.ComponentType<{ className?: string }>;
   bg: string; text: string; border: string; dot: string;
 }> = {
-  persona:       { label: "Personas",       icon: User,        bg: "bg-violet-900/50", text: "text-violet-300",  border: "border-violet-700/40",  dot: "bg-violet-500"  },
-  persona_score: { label: "Persona Scores", icon: BadgeCheck,  bg: "bg-violet-900/30", text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
-  notes_rollup:  { label: "Merged Notes",   icon: Layers,      bg: "bg-amber-900/40",  text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
-  note:          { label: "Call Notes",     icon: StickyNote,  bg: "bg-teal-900/40",   text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
+  merged_transcript: { label: "Merged Transcript", icon: FileText,   bg: "bg-cyan-900/40",   text: "text-cyan-300",    border: "border-cyan-700/40",    dot: "bg-cyan-500"    },
+  persona:           { label: "Personas",           icon: User,       bg: "bg-violet-900/50", text: "text-violet-300",  border: "border-violet-700/40",  dot: "bg-violet-500"  },
+  persona_score:     { label: "Persona Scores",     icon: BadgeCheck, bg: "bg-violet-900/30", text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
+  notes_rollup:      { label: "Merged Notes",       icon: Layers,     bg: "bg-amber-900/40",  text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
+  note:              { label: "Call Notes",         icon: StickyNote, bg: "bg-teal-900/40",   text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -73,6 +83,24 @@ function CopyBtn({ text }: { text: string }) {
 // ── Content viewer ────────────────────────────────────────────────────────────
 
 function ContentViewer({ item }: { item: ArtifactItem }) {
+  if (item.kind === "merged_transcript") {
+    const text = item.data.content;
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white">Merged Transcript</p>
+            <p className="text-[10px] text-gray-500">{item.chars.toLocaleString()} chars</p>
+          </div>
+          <CopyBtn text={text} />
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed">{text}</pre>
+        </div>
+      </div>
+    );
+  }
+
   if (item.kind === "persona") {
     const md = item.data.content_md ?? "";
     return (
@@ -250,20 +278,24 @@ function StatusDots({ salesAgent, customer }: { salesAgent: string; customer: st
   const { data: personas } = useSWR<Persona[]>(`/api/personas?${qs}`, fetcher);
   const { data: notes }    = useSWR<Note[]>(`/api/notes?${qs}`, fetcher);
   const { data: rollup, error: rollupErr } = useSWR<Record<string, unknown>>(`/api/notes/rollup?${qs}`, fetcher);
+  const mtUrl = `/api/universal-agents/raw-input?source=merged_transcript&sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`;
+  const { data: mt } = useSWR<{ content: string; chars: number } | null>(mtUrl, fetcherOptional);
   const has = {
+    mt:         mt != null,
     persona:    (personas ?? []).length > 0,
     score:      (personas ?? []).some(p => p.score_json != null),
     rollup:     !!rollup && !rollupErr,
     notes:      (notes ?? []).length > 0,
     compliance: (notes ?? []).some(n => n.score_json != null),
   };
-  if (!has.persona && !has.rollup && !has.notes) return null;
+  if (!has.mt && !has.persona && !has.rollup && !has.notes) return null;
   return (
     <div className="flex items-center gap-0.5 shrink-0 ml-1">
-      {has.persona    && <span className="w-1.5 h-1.5 rounded-full bg-violet-500" title="Persona" />}
-      {has.score      && <span className="w-1.5 h-1.5 rounded-full bg-violet-400" title="Score" />}
-      {has.rollup     && <span className="w-1.5 h-1.5 rounded-full bg-amber-500"  title="Merged Notes" />}
-      {has.notes      && <span className="w-1.5 h-1.5 rounded-full bg-teal-500"   title="Call Notes" />}
+      {has.mt         && <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"    title="Merged Transcript" />}
+      {has.persona    && <span className="w-1.5 h-1.5 rounded-full bg-violet-500"  title="Persona" />}
+      {has.score      && <span className="w-1.5 h-1.5 rounded-full bg-violet-400"  title="Score" />}
+      {has.rollup     && <span className="w-1.5 h-1.5 rounded-full bg-amber-500"   title="Merged Notes" />}
+      {has.notes      && <span className="w-1.5 h-1.5 rounded-full bg-teal-500"    title="Call Notes" />}
       {has.compliance && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title="Compliance" />}
     </div>
   );
@@ -302,16 +334,33 @@ export default function ArtifactsPage() {
   const { data: rollup, isLoading: loadR, error: rollupErr } = useSWR<Record<string, unknown>>(
     pairQs ? `/api/notes/rollup?${pairQs}` : null, fetcher,
   );
+  const mtUrl = pairQs
+    ? `/api/universal-agents/raw-input?source=merged_transcript&sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}`
+    : null;
+  const { data: mergedTranscript, isLoading: loadMT } = useSWR<{ content: string; chars: number } | null>(
+    mtUrl, fetcherOptional,
+  );
 
-  const isLoadingPair = loadP || loadN || loadR;
+  const isLoadingPair = loadP || loadN || loadR || loadMT;
 
   // Build items per kind
   const itemsByKind: Record<ArtifactKind, ArtifactItem[]> = {
+    merged_transcript: [],
     persona: [],
     persona_score: [],
     notes_rollup: [],
     note: [],
   };
+
+  if (mergedTranscript != null) {
+    itemsByKind.merged_transcript.push({
+      kind: "merged_transcript", id: "merged_transcript",
+      date: new Date().toISOString(),
+      chars: mergedTranscript.chars,
+      label: `Merged Transcript (${mergedTranscript.chars.toLocaleString()} chars)`,
+      data: { content: mergedTranscript.content },
+    });
+  }
 
   (personas ?? []).sort((a, b) => b.created_at.localeCompare(a.created_at)).forEach(p => {
     itemsByKind.persona.push({
