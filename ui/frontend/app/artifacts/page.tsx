@@ -5,7 +5,7 @@ import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText,
+  User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText, GitBranch,
   Loader2, Copy, Archive, Search, CalendarDays, ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -37,6 +37,15 @@ interface Note {
   id: string; agent: string; customer: string; call_id: string;
   content_md: string; score_json?: unknown; model: string; created_at: string;
 }
+interface PipelineRun {
+  id: string; pipeline_name: string; sales_agent: string; customer: string;
+  started_at: string; finished_at: string | null; status: string;
+  steps_json: string;
+}
+interface RunStep {
+  agent_id: string; agent_name: string; status: string;
+  content: string; model?: string;
+}
 
 type ArtifactKind =
   | "merged_transcript"
@@ -44,7 +53,8 @@ type ArtifactKind =
   | "persona_score"
   | "notes_rollup"
   | "note"
-  | "compliance_note";
+  | "compliance_note"
+  | "pipeline_output";
 
 type ArtifactItem =
   | { kind: "merged_transcript"; id: "merged_transcript"; date: string; chars: number; label: string; data: { content: string } }
@@ -52,7 +62,8 @@ type ArtifactItem =
   | { kind: "persona_score";     id: string; date: string; chars: number; label: string; data: Persona }
   | { kind: "notes_rollup";      id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
   | { kind: "note";              id: string; date: string; chars: number; label: string; data: Note }
-  | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note };
+  | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note }
+  | { kind: "pipeline_output";   id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
 
@@ -66,6 +77,7 @@ const ARTIFACT_TYPE_META: Record<ArtifactKind, {
   notes_rollup:      { label: "Merged Notes",        icon: Layers,     bg: "bg-amber-900/40",   text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
   note:              { label: "Call Notes",          icon: StickyNote, bg: "bg-teal-900/40",    text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
   compliance_note:   { label: "Compliance Notes",    icon: ShieldCheck, bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40", dot: "bg-emerald-500" },
+  pipeline_output:   { label: "Pipeline Outputs",    icon: GitBranch,   bg: "bg-indigo-900/40",  text: "text-indigo-300",  border: "border-indigo-700/40",  dot: "bg-indigo-500"  },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -287,6 +299,29 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
     );
   }
 
+  if (item.kind === "pipeline_output") {
+    const md = item.data.content;
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
+            <p className="text-[10px] text-gray-500">
+              {item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
+              {item.data.model ? ` · ${item.data.model}` : ""}
+            </p>
+          </div>
+          <CopyBtn text={md} />
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          <div className="prose prose-invert prose-sm max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return null;
 }
 
@@ -392,13 +427,17 @@ export default function ArtifactsPage() {
   const { data: rollup, isLoading: loadR, error: rollupErr } = useSWR<Record<string, unknown>>(
     pairQs ? `/api/notes/rollup?${pairQs}` : null, fetcher,
   );
-  // Merged transcript loads independently — doesn't block the type panel
+  // Merged transcript + pipeline runs load independently — don't block the type panel
   const mtUrl = pairQs
     ? `/api/universal-agents/raw-input?source=merged_transcript&sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}`
     : null;
   const { data: mergedTranscript } = useSWR<{ content: string; chars: number } | null>(
     mtUrl, fetcherOptional,
   );
+  const runsUrl = pairQs
+    ? `/api/history/runs?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}&limit=50`
+    : null;
+  const { data: historyRuns } = useSWR<PipelineRun[]>(runsUrl, fetcher);
 
   // personas/notes/rollup loading blocks Panel 3; merged transcript doesn't
   const isLoadingPair = loadP || loadN || loadR;
@@ -411,6 +450,7 @@ export default function ArtifactsPage() {
     notes_rollup: [],
     note: [],
     compliance_note: [],
+    pipeline_output: [],
   };
 
   if (mergedTranscript != null) {
@@ -471,6 +511,30 @@ export default function ArtifactsPage() {
       });
     }
   });
+
+  // Pipeline step outputs — from history runs, newest first
+  (historyRuns ?? [])
+    .filter(r => r.status === "done")
+    .forEach(run => {
+      let steps: RunStep[] = [];
+      try { steps = JSON.parse(run.steps_json); } catch { return; }
+      steps.forEach((step, idx) => {
+        if (step.status !== "done" || !step.content) return;
+        itemsByKind.pipeline_output.push({
+          kind: "pipeline_output",
+          id: `${run.id}_${idx}`,
+          date: run.finished_at ?? run.started_at,
+          chars: step.content.length,
+          label: `${step.agent_name} · ${run.pipeline_name}`,
+          data: {
+            content: step.content,
+            agent_name: step.agent_name,
+            pipeline_name: run.pipeline_name,
+            model: step.model ?? "",
+          },
+        });
+      });
+    });
 
   const typeGroups = (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
     .filter(k => itemsByKind[k].length > 0);
