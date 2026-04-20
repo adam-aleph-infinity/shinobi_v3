@@ -6,8 +6,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Bot, Plus, Trash2, Check, Loader2, ChevronDown, ChevronUp,
-  X, Download, Mic2, Layers, BookOpen, Link2, PenLine, StickyNote,
+  X, Download, Mic2, Layers, BookOpen, PenLine, StickyNote,
   User, Star, Shield, Zap, Play, FileText, Braces, AlignLeft, Copy,
+  BadgeCheck, ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -41,15 +42,17 @@ type InputCategory = "input" | "artifact";
 
 const INPUT_SOURCES_BY_CAT = {
   input: [
-    { value: "transcript",        label: "Transcript",        icon: Mic2,      badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",    needsCall: true  },
-    { value: "merged_transcript", label: "Merged Transcript", icon: Layers,    badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",    needsCall: false },
-    { value: "notes",             label: "Notes",             icon: StickyNote,badge: "bg-green-900/50 text-green-300 border-green-700/50", needsCall: true  },
-    { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,  badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",   needsCall: false },
-    { value: "manual",            label: "Manual",            icon: PenLine,   badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",   needsCall: false },
+    { value: "transcript",        label: "Transcript",        icon: Mic2,      badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",       needsCall: true  },
+    { value: "merged_transcript", label: "Merged Transcript", icon: Layers,    badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",       needsCall: false },
+    { value: "notes",             label: "Call Notes",        icon: StickyNote,badge: "bg-green-900/50 text-green-300 border-green-700/50",    needsCall: true  },
+    { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,  badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",      needsCall: false },
+    { value: "manual",            label: "Manual",            icon: PenLine,   badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",      needsCall: false },
   ],
   artifact: [
-    { value: "agent_output",   label: "Agent Output", icon: Bot,   badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", needsCall: false },
-    { value: "chain_previous", label: "Prev Step",    icon: Link2, badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",   needsCall: false },
+    { value: "artifact_persona",          label: "Persona",          icon: User,       badge: "bg-violet-900/50 text-violet-300 border-violet-700/50",  needsCall: false },
+    { value: "artifact_persona_score",    label: "Persona Score",    icon: BadgeCheck, badge: "bg-violet-900/40 text-violet-400 border-violet-700/40",  needsCall: false },
+    { value: "artifact_notes",            label: "Notes",            icon: StickyNote, badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",    needsCall: false },
+    { value: "artifact_notes_compliance", label: "Compliance Notes", icon: ShieldCheck,badge: "bg-emerald-900/50 text-emerald-300 border-emerald-700/50", needsCall: false },
   ],
 } as const;
 
@@ -61,7 +64,8 @@ type SourceValue = typeof ALL_INPUT_SOURCES[number]["value"];
 const SOURCE_CATEGORY: Record<string, InputCategory> = {
   transcript: "input", merged_transcript: "input", notes: "input",
   merged_notes: "input", manual: "input",
-  agent_output: "artifact", chain_previous: "artifact",
+  artifact_persona: "artifact", artifact_persona_score: "artifact",
+  artifact_notes: "artifact", artifact_notes_compliance: "artifact",
 };
 
 function srcMeta(source: string) {
@@ -343,23 +347,13 @@ function AgentEditor({
                       <X className="w-3 h-3" />
                     </button>
                   </div>
-                  {/* Row 2: source within category (+ agent picker) */}
+                  {/* Row 2: source within category */}
                   <div className="flex items-center gap-1.5 px-2 pb-2">
                     <select value={inp.source}
                       onChange={e => updateInput(i, { source: e.target.value as SourceValue, agent_id: undefined })}
                       className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
                       {catSources.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
-                    {inp.source === "agent_output" && (
-                      <select value={inp.agent_id ?? ""}
-                        onChange={e => updateInput(i, { agent_id: e.target.value })}
-                        className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
-                        <option value="">— agent —</option>
-                        {allAgents.filter(a => a.id !== agent.id).map(a => (
-                          <option key={a.id} value={a.id}>{a.name}</option>
-                        ))}
-                      </select>
-                    )}
                   </div>
                 </div>
               );
