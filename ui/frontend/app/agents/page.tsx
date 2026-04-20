@@ -452,11 +452,13 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
   );
 
   // Per-input preview: auto-fetched content from backend
-  const [previews, setPreviews] = useState<Record<string, PreviewState>>({});
+  const [previews, setPreviews]       = useState<Record<string, PreviewState>>({});
+  const [generating, setGenerating]   = useState<Record<string, boolean>>({});
+  const [genStatus, setGenStatus]     = useState<Record<string, string>>({});
   // Per-input override: when user pastes custom text
-  const [customMode, setCustomMode]     = useState<Record<string, boolean>>({});
-  const [customText, setCustomText]     = useState<Record<string, string>>({});
-  const [showPreview, setShowPreview]   = useState<Record<string, boolean>>({});
+  const [customMode, setCustomMode]   = useState<Record<string, boolean>>({});
+  const [customText, setCustomText]   = useState<Record<string, string>>({});
+  const [showPreview, setShowPreview] = useState<Record<string, boolean>>({});
 
   // Run state
   const [running, setRunning]       = useState(false);
@@ -485,9 +487,9 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
         const res = await fetch(`/api/personas?${qs}`);
         if (!res.ok) throw new Error(`${res.status}`);
         const list: Persona[] = await res.json();
-        const pair = list.filter(p => p.type === "pair").sort((a, b) => b.created_at.localeCompare(a.created_at));
-        if (pair.length === 0) throw new Error("No pair persona cached for this context");
-        content = pair[0].content_md ?? "";
+        const sorted = list.sort((a, b) => b.created_at.localeCompare(a.created_at));
+        if (sorted.length === 0) throw new Error("No persona cached for this context");
+        content = sorted[0].content_md ?? "";
 
       } else if (inp.source === "artifact_persona_score") {
         const res = await fetch(`/api/personas?${qs}`);
@@ -500,7 +502,7 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
 
       } else if (inp.source === "artifact_notes") {
         const res = await fetch(`/api/notes/rollup?${qs}`);
-        if (res.status === 404) throw new Error("No merged notes rollup — generate from Notes page first");
+        if (res.status === 404) throw new Error("not_cached");
         if (!res.ok) throw new Error(`${res.status}`);
         const data = await res.json();
         content = typeof data === "string" ? data : JSON.stringify(data, null, 2);
@@ -524,6 +526,44 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
       let clean = msg;
       try { const j = JSON.parse(msg); clean = j.detail ?? msg; } catch { /* not JSON */ }
       setPreviews(p => ({ ...p, [inp.key]: { status: "error", chars: 0, snippet: "", errMsg: clean } }));
+    }
+  }
+
+  async function generateMergedNotes(inp: AgentInput) {
+    if (!testAgent || !testCustomer) return;
+    setGenerating(p => ({ ...p, [inp.key]: true }));
+    setGenStatus(p => ({ ...p, [inp.key]: "Starting…" }));
+    try {
+      const res = await fetch("/api/notes/rollup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: testAgent, customer: testCustomer }),
+      });
+      if (!res.body) throw new Error("No response body");
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.startsWith("data: ") ? part.slice(6) : part;
+          if (!line.trim()) continue;
+          try {
+            const evt = JSON.parse(line);
+            if (evt.type === "progress") setGenStatus(p => ({ ...p, [inp.key]: evt.data?.msg ?? "Running…" }));
+            if (evt.type === "done") setGenStatus(p => ({ ...p, [inp.key]: "Done — loading…" }));
+          } catch { /* partial */ }
+        }
+      }
+      await fetchArtifact(inp);
+    } catch (e: unknown) {
+      setGenStatus(p => ({ ...p, [inp.key]: `Error: ${(e as Error).message}` }));
+    } finally {
+      setGenerating(p => ({ ...p, [inp.key]: false }));
     }
   }
 
@@ -817,9 +857,35 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
                     ) : null}
                   </div>
 
-                  {/* Error detail */}
-                  {pv?.status === "error" && pv.errMsg && (
-                    <p className="px-2.5 py-1 text-[9px] text-gray-600 italic border-b border-gray-800/50">{pv.errMsg}</p>
+                  {/* Error detail + generate actions */}
+                  {pv?.status === "error" && (
+                    <div className="px-2.5 py-1.5 border-b border-gray-800/50 space-y-1.5">
+                      {pv.errMsg && pv.errMsg !== "not_cached" && (
+                        <p className="text-[9px] text-gray-600 italic">{pv.errMsg}</p>
+                      )}
+                      {/* Generate actions per artifact type */}
+                      {inp.source === "artifact_notes" && testAgent && testCustomer && (
+                        <button
+                          onClick={() => generateMergedNotes(inp)}
+                          disabled={generating[inp.key]}
+                          className={cn(
+                            "flex items-center gap-1.5 text-[9px] px-2 py-1 rounded border transition-colors",
+                            generating[inp.key]
+                              ? "border-gray-700 text-gray-600 cursor-wait"
+                              : "border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40",
+                          )}>
+                          {generating[inp.key]
+                            ? <><Loader2 className="w-2.5 h-2.5 animate-spin" /> {genStatus[inp.key] ?? "Generating…"}</>
+                            : <><Layers className="w-2.5 h-2.5" /> Generate merged notes</>}
+                        </button>
+                      )}
+                      {(inp.source === "artifact_persona" || inp.source === "artifact_persona_score") && (
+                        <p className="text-[9px] text-gray-700">
+                          Generate from{" "}
+                          <a href="/personas" className="text-indigo-400 hover:text-indigo-300 underline">Personas page</a>
+                        </p>
+                      )}
+                    </div>
                   )}
 
                   {/* Peek preview */}
