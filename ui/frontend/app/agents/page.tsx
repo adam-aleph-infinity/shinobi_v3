@@ -384,12 +384,14 @@ function AgentEditor({
 
 // ── TestPanel ─────────────────────────────────────────────────────────────────
 
+type PreviewState = { status: "idle" | "loading" | "ok" | "error"; chars: number; snippet: string; errMsg?: string };
+
 function TestPanel({ agent }: { agent: UniversalAgent }) {
   // CRM context
-  const { data: navAgents }    = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
-  const [testAgent, setTestAgent]     = useState("");
+  const { data: navAgents } = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
+  const [testAgent, setTestAgent]       = useState("");
   const [testCustomer, setTestCustomer] = useState("");
-  const [testCallId, setTestCallId]   = useState("");
+  const [testCallId, setTestCallId]     = useState("");
 
   const { data: navCustomers } = useSWR<{ customer: string; call_count: number }[]>(
     testAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(testAgent)}` : null, fetcher,
@@ -401,9 +403,12 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     fetcher,
   );
 
-  // Per-input: null = use context, string = custom pasted text
-  const [inputOverrides, setInputOverrides] = useState<Record<string, string | null>>({});
-  const [showPaste, setShowPaste]           = useState<Record<string, boolean>>({});
+  // Per-input preview: auto-fetched content from backend
+  const [previews, setPreviews] = useState<Record<string, PreviewState>>({});
+  // Per-input override: when user pastes custom text
+  const [customMode, setCustomMode]     = useState<Record<string, boolean>>({});
+  const [customText, setCustomText]     = useState<Record<string, string>>({});
+  const [showPreview, setShowPreview]   = useState<Record<string, boolean>>({});
 
   // Run state
   const [running, setRunning]       = useState(false);
@@ -411,64 +416,89 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
   const [streamText, setStreamText] = useState("");
   const [thinking, setThinking]     = useState("");
   const [result, setResult]         = useState<string | null>(null);
-  const [error, setError]           = useState("");
+  const [runError, setRunError]     = useState("");
   const abortRef = useRef<AbortController | null>(null);
 
+  // Reset on agent change
   useEffect(() => {
-    setInputOverrides({}); setShowPaste({});
+    setPreviews({}); setCustomMode({}); setCustomText({}); setShowPreview({});
     setStreamText(""); setThinking(""); setResult(null);
-    setError(""); setStatus("");
+    setRunError(""); setStatus("");
   }, [agent.id]);
 
-  // Does any input (not overridden) need a call_id?
-  const needsCallId = agent.inputs.some(inp => {
-    const isCustom = showPaste[inp.key];
-    if (isCustom) return false;
-    return srcMeta(inp.source).needsCall;
-  });
+  // Auto-fetch previews for all inputs when context changes
+  useEffect(() => {
+    if (!testAgent || !testCustomer) {
+      setPreviews({});
+      return;
+    }
+    for (const inp of agent.inputs) {
+      if (customMode[inp.key]) continue;
+      const needsCall = srcMeta(inp.source).needsCall;
+      if (needsCall && !testCallId) {
+        setPreviews(p => ({ ...p, [inp.key]: { status: "idle", chars: 0, snippet: "", errMsg: "Select a call" } }));
+        continue;
+      }
+      fetchPreview(inp);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [testAgent, testCustomer, testCallId, agent.id]);
 
-  const callList = Object.entries(callDates ?? {})
-    .sort((a, b) => (b[1].date ?? "").localeCompare(a[1].date ?? ""));
+  async function fetchPreview(inp: AgentInput) {
+    setPreviews(p => ({ ...p, [inp.key]: { status: "loading", chars: 0, snippet: "" } }));
+    const params = new URLSearchParams({ source: inp.source, sales_agent: testAgent, customer: testCustomer, call_id: testCallId });
+    if (inp.agent_id) params.set("agent_id", inp.agent_id);
+    try {
+      const res = await fetch(`/api/universal-agents/raw-input?${params}`);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `${res.status}`);
+      }
+      const data: { content: string; chars: number } = await res.json();
+      setPreviews(p => ({ ...p, [inp.key]: { status: "ok", chars: data.chars, snippet: (data.content ?? "").slice(0, 300) } }));
+    } catch (e: unknown) {
+      const msg = (e as Error).message ?? String(e);
+      // Strip FastAPI detail wrapper if present
+      let clean = msg;
+      try { const j = JSON.parse(msg); clean = j.detail ?? msg; } catch { /* not JSON */ }
+      setPreviews(p => ({ ...p, [inp.key]: { status: "error", chars: 0, snippet: "", errMsg: clean } }));
+    }
+  }
+
+  // Does any auto-mode input need a call_id?
+  const needsCallId = agent.inputs.some(inp => !customMode[inp.key] && srcMeta(inp.source).needsCall);
+
+  const callList = Object.entries(callDates ?? {}).sort((a, b) => (b[1].date ?? "").localeCompare(a[1].date ?? ""));
 
   async function runTest() {
     if (running) { abortRef.current?.abort(); return; }
 
     setRunning(true);
     setStreamText(""); setThinking(""); setResult(null);
-    setError(""); setStatus("Starting…");
+    setRunError(""); setStatus("Starting…");
 
-    // Build manual_inputs and source_overrides
     const manual_inputs: Record<string, string> = {};
     const source_overrides: Record<string, string> = {};
     for (const inp of agent.inputs) {
-      if (showPaste[inp.key]) {
-        manual_inputs[inp.key] = inputOverrides[inp.key] ?? "";
+      if (customMode[inp.key]) {
+        manual_inputs[inp.key] = customText[inp.key] ?? "";
         source_overrides[inp.key] = "manual";
       }
     }
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-
     try {
       const res = await fetch(`/api/universal-agents/${agent.id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sales_agent: testAgent,
-          customer: testCustomer,
-          call_id: testCallId,
-          manual_inputs,
-          source_overrides,
-        }),
+        body: JSON.stringify({ sales_agent: testAgent, customer: testCustomer, call_id: testCallId, manual_inputs, source_overrides }),
         signal: ctrl.signal,
       });
-
       if (!res.body) throw new Error("No response body");
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -484,12 +514,12 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
             if (evt.type === "stream")   setStreamText(t => t + (evt.data?.text ?? ""));
             if (evt.type === "thinking") setThinking(evt.data?.content ?? "");
             if (evt.type === "done")     { setResult(evt.data?.content ?? ""); setStatus(""); }
-            if (evt.type === "error")    { setError(evt.data?.msg ?? "Unknown error"); setStatus(""); }
-          } catch { /* partial chunk */ }
+            if (evt.type === "error")    { setRunError(evt.data?.msg ?? "Unknown error"); setStatus(""); }
+          } catch { /* partial */ }
         }
       }
     } catch (e: unknown) {
-      if ((e as { name?: string })?.name !== "AbortError") setError(String(e));
+      if ((e as { name?: string })?.name !== "AbortError") setRunError(String(e));
     } finally {
       setRunning(false);
     }
@@ -497,96 +527,148 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
 
   const displayText = result ?? streamText;
 
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full border-l border-gray-800 bg-gray-950">
-      {/* Header */}
       <div className="px-3 py-2.5 border-b border-gray-800 shrink-0">
         <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Quick Test</p>
       </div>
 
       <div className="flex-1 overflow-y-auto">
 
-        {/* CRM context picker */}
+        {/* ── Context picker ──────────────────────────────────────── */}
         <div className="p-3 border-b border-gray-800 space-y-1.5">
-          <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold mb-2">Context</p>
-          <select value={testAgent} onChange={e => { setTestAgent(e.target.value); setTestCustomer(""); setTestCallId(""); }}
+          <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold mb-1.5">Context</p>
+          <select value={testAgent}
+            onChange={e => { setTestAgent(e.target.value); setTestCustomer(""); setTestCallId(""); setPreviews({}); }}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500">
             <option value="">— Sales agent —</option>
-            {(navAgents ?? []).map(a => (
-              <option key={a.agent} value={a.agent}>{a.agent} ({a.count})</option>
-            ))}
+            {(navAgents ?? []).map(a => <option key={a.agent} value={a.agent}>{a.agent} ({a.count})</option>)}
           </select>
-          <select value={testCustomer} onChange={e => { setTestCustomer(e.target.value); setTestCallId(""); }}
+          <select value={testCustomer}
+            onChange={e => { setTestCustomer(e.target.value); setTestCallId(""); setPreviews({}); }}
             disabled={!testAgent}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500 disabled:opacity-40">
             <option value="">— Customer —</option>
-            {(navCustomers ?? []).map(c => (
-              <option key={c.customer} value={c.customer}>{c.customer}</option>
-            ))}
+            {(navCustomers ?? []).map(c => <option key={c.customer} value={c.customer}>{c.customer}</option>)}
           </select>
           {needsCallId && (
             <select value={testCallId} onChange={e => setTestCallId(e.target.value)}
               disabled={!testCustomer}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500 disabled:opacity-40">
-              <option value="">— Call (for transcript/notes) —</option>
+              <option value="">— Call (transcript/notes) —</option>
               {callList.map(([cid, info]) => (
-                <option key={cid} value={cid}>
-                  {info.date ? info.date.slice(0, 10) : "?"} · {cid.slice(-8)}
-                </option>
+                <option key={cid} value={cid}>{info.date ? info.date.slice(0, 10) : "?"} · {cid.slice(-8)}</option>
               ))}
             </select>
           )}
         </div>
 
-        {/* Per-input config */}
-        <div className="p-3 border-b border-gray-800 space-y-2.5">
+        {/* ── Per-input status + override ─────────────────────────── */}
+        <div className="p-3 border-b border-gray-800 space-y-3">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold">Inputs</p>
+
           {agent.inputs.map((inp, i) => {
             const sm = srcMeta(inp.source);
             const SrcIcon = sm.icon;
-            const isCustom = showPaste[inp.key];
+            const isCustom = customMode[inp.key];
+            const pv = previews[inp.key];
+            const expanded = showPreview[inp.key];
+
             return (
-              <div key={i} className="space-y-1">
-                <div className="flex items-center gap-1.5">
+              <div key={i} className="rounded-lg border border-gray-800 overflow-hidden">
+                {/* Input row header */}
+                <div className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-900/60">
                   <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
                     <SrcIcon className="w-3 h-3" />
                   </span>
-                  <span className="text-[10px] text-amber-300 font-mono flex-1">{`{${inp.key}}`}</span>
-                  <span className="text-[9px] text-gray-600">{sm.label}</span>
+                  <span className="text-[10px] text-amber-300 font-mono flex-1 truncate">{`{${inp.key}}`}</span>
+                  <span className="text-[9px] text-gray-600 shrink-0">{sm.label}</span>
+
+                  {/* Toggle custom / auto */}
                   <button
                     onClick={() => {
                       const next = !isCustom;
-                      setShowPaste(p => ({ ...p, [inp.key]: next }));
-                      if (next) setInputOverrides(p => ({ ...p, [inp.key]: p[inp.key] ?? "" }));
-                      else      setInputOverrides(p => { const n = { ...p }; delete n[inp.key]; return n; });
+                      setCustomMode(p => ({ ...p, [inp.key]: next }));
+                      if (!next && testAgent && testCustomer) fetchPreview(inp);
                     }}
                     className={cn(
-                      "text-[9px] px-1.5 py-0.5 rounded border transition-colors",
+                      "text-[9px] px-1.5 py-0.5 rounded border transition-colors shrink-0 ml-0.5",
                       isCustom
-                        ? "border-indigo-600 bg-indigo-900/40 text-indigo-300"
+                        ? "border-amber-600/60 bg-amber-900/30 text-amber-400"
                         : "border-gray-700 text-gray-500 hover:text-gray-300",
                     )}>
-                    {isCustom ? "custom ✕" : "auto"}
+                    {isCustom ? "paste" : "auto"}
                   </button>
                 </div>
+
+                {/* Auto mode: status + preview */}
+                {!isCustom && (
+                  <div className="px-2.5 py-2 space-y-1.5">
+                    {!testAgent || !testCustomer ? (
+                      <p className="text-[9px] text-gray-700 italic">Select context above to load</p>
+                    ) : pv?.status === "loading" ? (
+                      <div className="flex items-center gap-1.5 text-[9px] text-gray-500">
+                        <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" /> Fetching…
+                      </div>
+                    ) : pv?.status === "ok" ? (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] text-emerald-400">✓ cached</span>
+                          <span className="text-[9px] text-gray-600">{pv.chars.toLocaleString()} chars</span>
+                          <button
+                            onClick={() => setShowPreview(p => ({ ...p, [inp.key]: !p[inp.key] }))}
+                            className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors ml-auto">
+                            {expanded ? "hide" : "preview"}
+                          </button>
+                          <button
+                            onClick={() => { setCustomMode(p => ({ ...p, [inp.key]: true })); setCustomText(p => ({ ...p, [inp.key]: pv.snippet + (pv.chars > 300 ? "\n…" : "") })); }}
+                            className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">
+                            edit
+                          </button>
+                        </div>
+                        {expanded && (
+                          <pre className="text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words bg-gray-900 rounded p-2 max-h-32 overflow-y-auto">{pv.snippet}{pv.chars > 300 ? "\n…" : ""}</pre>
+                        )}
+                      </div>
+                    ) : pv?.status === "error" ? (
+                      <div className="space-y-1.5">
+                        <p className="text-[9px] text-amber-400">⚠ {pv.errMsg ?? "Not found"}</p>
+                        <button
+                          onClick={() => { setCustomMode(p => ({ ...p, [inp.key]: true })); setCustomText(p => ({ ...p, [inp.key]: "" })); }}
+                          className="text-[9px] px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 transition-colors">
+                          Paste content manually
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-[9px] text-gray-700 italic">Idle</p>
+                    )}
+                  </div>
+                )}
+
+                {/* Custom paste mode */}
                 {isCustom && (
-                  <textarea
-                    value={inputOverrides[inp.key] ?? ""}
-                    onChange={e => setInputOverrides(p => ({ ...p, [inp.key]: e.target.value }))}
-                    placeholder={`Paste ${inp.key} content…`}
-                    rows={4}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
-                  />
+                  <div className="px-2.5 py-2">
+                    <textarea
+                      value={customText[inp.key] ?? ""}
+                      onChange={e => setCustomText(p => ({ ...p, [inp.key]: e.target.value }))}
+                      placeholder={`Paste ${inp.key} content…`}
+                      rows={4}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                    />
+                    <p className="text-[9px] text-gray-700 mt-1">{(customText[inp.key] ?? "").length.toLocaleString()} chars</p>
+                  </div>
                 )}
               </div>
             );
           })}
+
           {agent.inputs.length === 0 && (
             <p className="text-[10px] text-gray-700 italic">No inputs defined on this agent</p>
           )}
         </div>
 
-        {/* Run button */}
+        {/* ── Run button ──────────────────────────────────────────── */}
         <div className="p-3 border-b border-gray-800">
           <button onClick={runTest}
             className={cn(
@@ -595,19 +677,13 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
                 ? "bg-red-900/40 border border-red-800 text-red-300 hover:bg-red-900/60"
                 : "bg-indigo-700 hover:bg-indigo-600 text-white",
             )}>
-            {running
-              ? <><X className="w-3.5 h-3.5" /> Stop</>
-              : <><Play className="w-3.5 h-3.5" /> Run test</>}
+            {running ? <><X className="w-3.5 h-3.5" /> Stop</> : <><Play className="w-3.5 h-3.5" /> Run test</>}
           </button>
-          {status && (
-            <p className="text-[10px] text-gray-500 mt-1.5 text-center animate-pulse">{status}</p>
-          )}
-          {error && (
-            <p className="text-[10px] text-red-400 mt-1.5 bg-red-950/30 rounded p-2 border border-red-900/50 break-words">{error}</p>
-          )}
+          {status && <p className="text-[10px] text-gray-500 mt-1.5 text-center animate-pulse">{status}</p>}
+          {runError && <p className="text-[10px] text-red-400 mt-1.5 bg-red-950/30 rounded p-2 border border-red-900/50 break-words">{runError}</p>}
         </div>
 
-        {/* Output */}
+        {/* ── Output ─────────────────────────────────────────────── */}
         {(displayText || thinking) && (
           <div className="p-3 space-y-2">
             {thinking && (
@@ -624,8 +700,7 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
               </div>
             )}
             {result && (
-              <button
-                onClick={() => navigator.clipboard.writeText(result)}
+              <button onClick={() => navigator.clipboard.writeText(result)}
                 className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors mt-1">
                 <Copy className="w-3 h-3" /> Copy output
               </button>
