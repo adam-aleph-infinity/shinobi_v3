@@ -6,7 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText, GitBranch,
-  Loader2, Copy, Archive, Search, CalendarDays, ChevronRight,
+  Loader2, Copy, Archive, Search, CalendarDays, ChevronRight, Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useResize } from "@/lib/useResize";
@@ -67,11 +67,11 @@ type ArtifactItem =
   | { kind: "notes_rollup";      id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
   | { kind: "note";              id: string; date: string; chars: number; label: string; data: Note }
   | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note }
-  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
-  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
-  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
-  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
-  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } };
+  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
+  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
+  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
+  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
+  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
 
@@ -145,9 +145,70 @@ function CopyBtn({ text }: { text: string }) {
   );
 }
 
+function DeleteBtn({ onDelete }: { onDelete: () => Promise<void> }) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting,   setDeleting]   = useState(false);
+  if (confirming) return (
+    <div className="flex items-center gap-1.5 shrink-0">
+      <button onClick={() => setConfirming(false)}
+        className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors">Cancel</button>
+      <button onClick={async () => {
+        setDeleting(true);
+        await onDelete();
+        setDeleting(false);
+        setConfirming(false);
+      }} className="text-[9px] text-red-400 hover:text-red-300 font-semibold transition-colors">
+        {deleting ? "…" : "Confirm"}
+      </button>
+    </div>
+  );
+  return (
+    <button onClick={() => setConfirming(true)}
+      className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-red-400 transition-colors shrink-0"
+      title="Delete artifact">
+      <Trash2 className="w-3 h-3" />
+    </button>
+  );
+}
+
+// ── Shared renderers ──────────────────────────────────────────────────────────
+
+/** Render a JSON value as a key-value table; fallback to raw string. */
+function JsonKVTable({ value, accentColor = "text-gray-500" }: { value: unknown; accentColor?: string }) {
+  const parsed = (() => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "object") return value;
+    try { return JSON.parse(value as string); } catch { return null; }
+  })();
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return (
+      <div className="space-y-2">
+        {Object.entries(parsed as Record<string, unknown>).map(([k, v]) => (
+          <div key={k} className="flex gap-3 text-xs border-b border-gray-800/60 pb-2 last:border-0">
+            <span className={cn("w-48 shrink-0 font-medium", accentColor)}>{k}</span>
+            <span className="text-gray-300 break-words">
+              {typeof v === "object" ? JSON.stringify(v) : String(v)}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words">{raw}</pre>;
+}
+
+function MarkdownBody({ content }: { content: string }) {
+  return (
+    <div className="prose prose-invert prose-sm max-w-none">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
+}
+
 // ── Content viewer ────────────────────────────────────────────────────────────
 
-function ContentViewer({ item }: { item: ArtifactItem }) {
+function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () => Promise<void> }) {
   if (item.kind === "merged_transcript") {
     const text = item.data.content;
     return (
@@ -176,11 +237,10 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
           </div>
           <CopyBtn text={md} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
-          </div>
+          <MarkdownBody content={md} />
         </div>
       </div>
     );
@@ -188,7 +248,6 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
 
   if (item.kind === "persona_score" && item.data.score_json != null) {
     const raw = prettyJson(item.data.score_json);
-    const parsed = (() => { try { return typeof item.data.score_json === "string" ? JSON.parse(item.data.score_json) : item.data.score_json; } catch { return null; } })();
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -197,20 +256,10 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <CopyBtn text={raw} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {parsed && typeof parsed === "object" ? (
-            <div className="space-y-2">
-              {Object.entries(parsed as Record<string, unknown>).map(([k, v]) => (
-                <div key={k} className="flex gap-3 text-xs border-b border-gray-800/60 pb-2 last:border-0">
-                  <span className="text-gray-500 w-48 shrink-0 font-medium">{k}</span>
-                  <span className="text-gray-300 break-words">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words">{raw}</pre>
-          )}
+          <JsonKVTable value={item.data.score_json} accentColor="text-gray-500" />
         </div>
       </div>
     );
@@ -278,27 +327,18 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <CopyBtn text={md} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {md ? (
-            <div className="prose prose-invert prose-sm max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
-            </div>
-          ) : (
-            <p className="text-xs text-gray-600 italic">No content</p>
-          )}
+          {md ? <MarkdownBody content={md} /> : <p className="text-xs text-gray-600 italic">No content</p>}
         </div>
       </div>
     );
   }
 
   if (item.kind === "compliance_note") {
-    const md   = item.data.content_md ?? "";
-    const raw  = prettyJson(item.data.score_json);
-    const parsed = (() => {
-      try { return typeof item.data.score_json === "string" ? JSON.parse(item.data.score_json) : item.data.score_json; }
-      catch { return null; }
-    })();
+    const md  = item.data.content_md ?? "";
+    const raw = prettyJson(item.data.score_json);
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -307,35 +347,17 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <CopyBtn text={md + (raw ? "\n\n" + raw : "")} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          {/* Compliance score — shown first as primary artifact */}
-          {parsed && typeof parsed === "object" && (
-            <div>
-              <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
-              <div className="space-y-1.5">
-                {Object.entries(parsed as Record<string, unknown>).map(([k, v]) => (
-                  <div key={k} className="flex gap-3 text-xs border-b border-gray-800/60 pb-1.5 last:border-0">
-                    <span className="text-gray-500 w-48 shrink-0 font-medium">{k}</span>
-                    <span className="text-gray-300 break-words">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {!parsed && raw && (
-            <div>
-              <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
-              <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words">{raw}</pre>
-            </div>
-          )}
-          {/* Note content */}
+          <div>
+            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
+            <JsonKVTable value={item.data.score_json} accentColor="text-emerald-700" />
+          </div>
           {md && (
             <div>
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Note Content</p>
-              <div className="prose prose-invert prose-sm max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
-              </div>
+              <MarkdownBody content={md} />
             </div>
           )}
         </div>
@@ -343,14 +365,13 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
     );
   }
 
+  // ── Pipeline artifact kinds ────────────────────────────────────────────────
   if (
-    item.kind === "pipeline_output" ||
     item.kind === "pipeline_persona" ||
-    item.kind === "pipeline_score" ||
     item.kind === "pipeline_notes" ||
-    item.kind === "pipeline_compliance"
+    item.kind === "pipeline_output"
   ) {
-    const md = item.data.content;
+    // Markdown output
     const m = ARTIFACT_TYPE_META[item.kind];
     return (
       <div className="h-full flex flex-col overflow-hidden">
@@ -365,11 +386,41 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
               {item.data.model ? ` · ${item.data.model}` : ""}
             </p>
           </div>
-          <CopyBtn text={md} />
+          <CopyBtn text={item.data.content} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
+          <MarkdownBody content={item.data.content} />
+        </div>
+      </div>
+    );
+  }
+
+  if (item.kind === "pipeline_score" || item.kind === "pipeline_compliance") {
+    // JSON key-value output — same style as persona_score / compliance_note
+    const m = ARTIFACT_TYPE_META[item.kind];
+    const accentColor = item.kind === "pipeline_compliance" ? "text-emerald-700" : "text-gray-500";
+    const sectionLabel = item.kind === "pipeline_compliance" ? "Compliance Score" : "Score";
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+          <span className={cn("p-1 rounded border shrink-0", m.bg, m.text, m.border)}>
+            <m.icon className="w-3.5 h-3.5" />
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
+            <p className="text-[10px] text-gray-500">
+              {item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
+              {item.data.model ? ` · ${item.data.model}` : ""}
+            </p>
+          </div>
+          <CopyBtn text={item.data.content} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          <div>
+            <p className={cn("text-[10px] font-bold uppercase tracking-wide mb-2", accentColor)}>{sectionLabel}</p>
+            <JsonKVTable value={item.data.content} accentColor={accentColor} />
           </div>
         </div>
       </div>
@@ -472,10 +523,10 @@ export default function ArtifactsPage() {
     ? new URLSearchParams({ agent: selectedAgent, customer: selectedCustomer })
     : null;
 
-  const { data: personas, isLoading: loadP } = useSWR<Persona[]>(
+  const { data: personas, isLoading: loadP, mutate: mutatePersonas } = useSWR<Persona[]>(
     pairQs ? `/api/personas?${pairQs}` : null, fetcher,
   );
-  const { data: notes, isLoading: loadN } = useSWR<Note[]>(
+  const { data: notes, isLoading: loadN, mutate: mutateNotes } = useSWR<Note[]>(
     pairQs ? `/api/notes?${pairQs}` : null, fetcher,
   );
   const { data: rollup, isLoading: loadR, error: rollupErr } = useSWR<Record<string, unknown>>(
@@ -491,7 +542,7 @@ export default function ArtifactsPage() {
   const runsUrl = pairQs
     ? `/api/history/runs?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}&limit=50`
     : null;
-  const { data: historyRuns } = useSWR<PipelineRun[]>(runsUrl, fetcher);
+  const { data: historyRuns, mutate: mutateRuns } = useSWR<PipelineRun[]>(runsUrl, fetcher);
 
   // personas/notes/rollup loading blocks Panel 3; merged transcript doesn't
   const isLoadingPair = loadP || loadN || loadR;
@@ -591,10 +642,38 @@ export default function ArtifactsPage() {
             agent_name: step.agent_name,
             pipeline_name: run.pipeline_name,
             model: step.model ?? "",
+            run_id: run.id,
           },
         } as ArtifactItem);
       });
     });
+
+  async function handleDelete(item: ArtifactItem) {
+    let url: string | null = null;
+    if (item.kind === "persona") {
+      url = `/api/personas/${item.id}`;
+    } else if (item.kind === "persona_score") {
+      url = `/api/personas/${item.data.id}`;
+    } else if (item.kind === "note" || item.kind === "compliance_note") {
+      url = `/api/notes/${item.id}`;
+    } else if (
+      item.kind === "pipeline_persona" || item.kind === "pipeline_score" ||
+      item.kind === "pipeline_notes"   || item.kind === "pipeline_compliance" ||
+      item.kind === "pipeline_output"
+    ) {
+      url = `/api/history/runs/${item.data.run_id}`;
+    }
+    if (!url) return;
+    await fetch(url, { method: "DELETE" });
+    if (item.kind === "persona" || item.kind === "persona_score") {
+      await mutatePersonas();
+    } else if (item.kind === "note" || item.kind === "compliance_note") {
+      await mutateNotes();
+    } else if (item.kind.startsWith("pipeline_")) {
+      await mutateRuns();
+    }
+    setSelectedItem(null);
+  }
 
   const typeGroups = (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
     .filter(k => itemsByKind[k].length > 0);
@@ -757,7 +836,7 @@ export default function ArtifactsPage() {
       {/* ── Panel 5: Content viewer ──────────────────────────────── */}
       <div className="flex-1 min-w-0 bg-gray-900 overflow-hidden">
         {selectedItem ? (
-          <ContentViewer item={selectedItem} />
+          <ContentViewer item={selectedItem} onDelete={() => handleDelete(selectedItem)} />
         ) : (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
             <Archive className="w-10 h-10 opacity-10" />

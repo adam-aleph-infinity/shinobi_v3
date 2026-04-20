@@ -1,5 +1,5 @@
 """Global pipeline execution history — all runs across all pipelines."""
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from ui.backend.database import get_session
@@ -41,3 +41,16 @@ def list_runs(
         }
         for r in rows
     ]
+
+
+@router.delete("/runs/{run_id}")
+def delete_run(run_id: str, db: Session = Depends(get_session)):
+    """Delete a pipeline run and all its step data."""
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+
+    run = db.get(PR, run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    db.delete(run)
+    db.commit()
+    return {"deleted": True}
