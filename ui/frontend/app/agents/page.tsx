@@ -37,20 +37,39 @@ function ModelSelect({ value, onChange }: { value: string; onChange: (v: string)
 
 // ── Input sources ─────────────────────────────────────────────────────────────
 
-const INPUT_SOURCES = [
-  { value: "transcript",        label: "Transcript",        icon: Mic2,      badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",    needsCall: true  },
-  { value: "merged_transcript", label: "Merged Transcript", icon: Layers,    badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",    needsCall: false },
-  { value: "notes",             label: "Notes",             icon: StickyNote,badge: "bg-green-900/50 text-green-300 border-green-700/50", needsCall: true  },
-  { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,  badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",   needsCall: false },
-  { value: "agent_output",      label: "Agent Output",      icon: Bot,       badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", needsCall: false },
-  { value: "chain_previous",    label: "Prev Step",         icon: Link2,     badge: "bg-amber-900/50 text-amber-300 border-amber-700/50", needsCall: false },
-  { value: "manual",            label: "Manual",            icon: PenLine,   badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",   needsCall: false },
-] as const;
+type InputCategory = "input" | "artifact";
 
-type SourceValue = typeof INPUT_SOURCES[number]["value"];
+const INPUT_SOURCES_BY_CAT = {
+  input: [
+    { value: "transcript",        label: "Transcript",        icon: Mic2,      badge: "bg-blue-900/50 text-blue-300 border-blue-700/50",    needsCall: true  },
+    { value: "merged_transcript", label: "Merged Transcript", icon: Layers,    badge: "bg-cyan-900/50 text-cyan-300 border-cyan-700/50",    needsCall: false },
+    { value: "notes",             label: "Notes",             icon: StickyNote,badge: "bg-green-900/50 text-green-300 border-green-700/50", needsCall: true  },
+    { value: "merged_notes",      label: "Merged Notes",      icon: BookOpen,  badge: "bg-teal-900/50 text-teal-300 border-teal-700/50",   needsCall: false },
+    { value: "manual",            label: "Manual",            icon: PenLine,   badge: "bg-gray-700/50 text-gray-300 border-gray-600/50",   needsCall: false },
+  ],
+  artifact: [
+    { value: "agent_output",   label: "Agent Output", icon: Bot,   badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", needsCall: false },
+    { value: "chain_previous", label: "Prev Step",    icon: Link2, badge: "bg-amber-900/50 text-amber-300 border-amber-700/50",   needsCall: false },
+  ],
+} as const;
+
+const ALL_INPUT_SOURCES = [...INPUT_SOURCES_BY_CAT.input, ...INPUT_SOURCES_BY_CAT.artifact];
+
+type SourceValue = typeof ALL_INPUT_SOURCES[number]["value"];
+
+// Map each source value to its category
+const SOURCE_CATEGORY: Record<string, InputCategory> = {
+  transcript: "input", merged_transcript: "input", notes: "input",
+  merged_notes: "input", manual: "input",
+  agent_output: "artifact", chain_previous: "artifact",
+};
 
 function srcMeta(source: string) {
-  return INPUT_SOURCES.find(s => s.value === source) ?? INPUT_SOURCES[6];
+  return ALL_INPUT_SOURCES.find(s => s.value === source) ?? ALL_INPUT_SOURCES[4];
+}
+
+function srcCategory(source: string): InputCategory {
+  return SOURCE_CATEGORY[source] ?? "input";
 }
 
 // ── Output formats ────────────────────────────────────────────────────────────
@@ -282,40 +301,66 @@ function AgentEditor({
               <Plus className="w-3 h-3" /> Add
             </button>
           </div>
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             {draft.inputs.map((inp, i) => {
-              const sm = srcMeta(inp.source);
+              const cat = srcCategory(inp.source);
+              const sm  = srcMeta(inp.source);
               const SrcIcon = sm.icon;
+              const catSources = INPUT_SOURCES_BY_CAT[cat];
               return (
-                <div key={i} className="flex items-center gap-1.5 bg-gray-800/40 rounded-lg p-2 border border-gray-700/50">
-                  <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
-                    <SrcIcon className="w-3 h-3" />
-                  </span>
-                  <input
-                    value={inp.key}
-                    onChange={e => updateInput(i, { key: e.target.value })}
-                    placeholder="key"
-                    className="w-20 bg-transparent text-[10px] text-amber-300 font-mono outline-none border-b border-transparent focus:border-amber-700"
-                  />
-                  <select value={inp.source}
-                    onChange={e => updateInput(i, { source: e.target.value as SourceValue })}
-                    className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
-                    {INPUT_SOURCES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
-                  </select>
-                  {inp.source === "agent_output" && (
-                    <select value={inp.agent_id ?? ""}
-                      onChange={e => updateInput(i, { agent_id: e.target.value })}
-                      className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
-                      <option value="">— agent —</option>
-                      {allAgents.filter(a => a.id !== agent.id).map(a => (
-                        <option key={a.id} value={a.id}>{a.name}</option>
+                <div key={i} className="rounded-lg border border-gray-700/50 bg-gray-800/40 overflow-hidden">
+                  {/* Row 1: key + category toggle + remove */}
+                  <div className="flex items-center gap-1.5 px-2 pt-2 pb-1">
+                    <span className={cn("p-0.5 rounded border shrink-0", sm.badge)}>
+                      <SrcIcon className="w-3 h-3" />
+                    </span>
+                    <input
+                      value={inp.key}
+                      onChange={e => updateInput(i, { key: e.target.value })}
+                      placeholder="key"
+                      className="w-20 bg-transparent text-[10px] text-amber-300 font-mono outline-none border-b border-transparent focus:border-amber-700"
+                    />
+                    <div className="flex items-center rounded border border-gray-700 overflow-hidden text-[9px] font-medium ml-auto">
+                      {(["input", "artifact"] as InputCategory[]).map(c => (
+                        <button key={c} onClick={() => {
+                          const defaultSrc = INPUT_SOURCES_BY_CAT[c][0].value as SourceValue;
+                          updateInput(i, { source: defaultSrc, agent_id: undefined });
+                        }}
+                          className={cn(
+                            "px-2 py-0.5 transition-colors capitalize",
+                            cat === c
+                              ? c === "input"
+                                ? "bg-cyan-800/60 text-cyan-300"
+                                : "bg-purple-800/60 text-purple-300"
+                              : "text-gray-600 hover:text-gray-400",
+                          )}>
+                          {c}
+                        </button>
                       ))}
+                    </div>
+                    <button onClick={() => removeInput(i)}
+                      className="p-0.5 text-gray-600 hover:text-red-400 transition-colors shrink-0">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                  {/* Row 2: source within category (+ agent picker) */}
+                  <div className="flex items-center gap-1.5 px-2 pb-2">
+                    <select value={inp.source}
+                      onChange={e => updateInput(i, { source: e.target.value as SourceValue, agent_id: undefined })}
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
+                      {catSources.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
-                  )}
-                  <button onClick={() => removeInput(i)}
-                    className="p-0.5 text-gray-600 hover:text-red-400 transition-colors shrink-0">
-                    <X className="w-3 h-3" />
-                  </button>
+                    {inp.source === "agent_output" && (
+                      <select value={inp.agent_id ?? ""}
+                        onChange={e => updateInput(i, { agent_id: e.target.value })}
+                        className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
+                        <option value="">— agent —</option>
+                        {allAgents.filter(a => a.id !== agent.id).map(a => (
+                          <option key={a.id} value={a.id}>{a.name}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
                 </div>
               );
             })}
