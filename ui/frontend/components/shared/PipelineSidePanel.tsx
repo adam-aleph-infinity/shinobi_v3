@@ -4,7 +4,7 @@ import useSWR from "swr";
 import {
   Workflow, Play, Loader2, AlertCircle,
   ChevronDown, ChevronUp, CheckCircle2, SkipForward,
-  Download, Eye, EyeOff, ChevronLeft, ChevronRight,
+  Download, Eye, EyeOff, ChevronLeft, ChevronRight, X,
   Mic2, FileText, Bot, StickyNote, Layers, BookOpen,
   GitBranch, PenLine,
 } from "lucide-react";
@@ -94,12 +94,153 @@ interface CanvasNode {
   };
 }
 
-function ArrowDown() {
+// ── Mini pipeline canvas ─────────────────────────────────────────────────────
+
+function MiniCanvas({
+  stages, nodes, edges, procStepIdx, outputProcId, flowSteps, selectedKey, onNodeClick,
+}: {
+  stages: string[];
+  nodes: CanvasNode[];
+  edges: { id: string; source: string; target: string }[];
+  procStepIdx: Map<string, number>;
+  outputProcId: Map<string, string>;
+  flowSteps: StepState[];
+  selectedKey: string | null;
+  onNodeClick: (key: string) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [cw, setCw] = useState(280);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const fn = () => setCw(el.getBoundingClientRect().width || 280);
+    fn();
+    const ro = new ResizeObserver(fn); ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  if (!nodes.length) return null;
+
+  // Layout constants matching pipeline/page.tsx
+  const SLEEVE_H = 180, Y_INIT = 20, NW = 200, NH = 52;
+  const minX = Math.min(...nodes.map(n => n.position.x));
+  const maxX = Math.max(...nodes.map(n => n.position.x)) + NW;
+  const scale = Math.max(0.18, (cw - 8) / (maxX - minX));
+  const totalH = (Y_INIT + stages.length * SLEEVE_H) * scale;
+  const nw = NW * scale, nh = NH * scale;
+  const fs = Math.max(7, Math.round(10 * scale));
+
+  const nx = (n: CanvasNode) => (n.position.x - minX) * scale;
+  const ny = (n: CanvasNode) => n.position.y * scale;
+
+  function stepSt(nodeId: string, type: string): StepStatus {
+    if (type === "processing") {
+      const i = procStepIdx.get(nodeId); return i != null ? (flowSteps[i]?.status ?? "pending") : "pending";
+    }
+    if (type === "output") {
+      const pid = outputProcId.get(nodeId);
+      const i = pid ? procStepIdx.get(pid) : undefined;
+      return i != null ? (flowSteps[i]?.status ?? "pending") : "pending";
+    }
+    return "pending";
+  }
+
+  function nkey(n: CanvasNode) {
+    return n.type === "processing" ? `proc:${n.id}` : n.type === "output" ? `out:${n.id}` : `input:${n.id}`;
+  }
+
+  function nstyle(n: CanvasNode, st: StepStatus): { bg: string; border: string; text: string } {
+    const done = st === "done" || st === "cached";
+    const busy = st === "loading";
+    const err  = st === "error";
+    if (n.type === "input")      return { bg: "#0d1f3c",  border: "#1e40af", text: "#93c5fd" };
+    if (done)                    return { bg: "#052e16",  border: "#15803d", text: "#86efac" };
+    if (busy)                    return { bg: "#042f2e",  border: "#0f766e", text: "#5eead4" };
+    if (err)                     return { bg: "#2d0a0a",  border: "#b91c1c", text: "#fca5a5" };
+    if (n.type === "processing") return { bg: "#0f0e1f",  border: "#3730a3", text: "#a5b4fc" };
+    return                              { bg: "#150b2e",  border: "#6d28d9", text: "#c4b5fd" };
+  }
+
   return (
-    <div className="flex justify-center py-0.5">
-      <div className="flex flex-col items-center">
-        <div className="w-px h-3 bg-gray-700" />
-        <div className="text-gray-700 text-[10px] leading-none">▾</div>
+    <div ref={ref} className="w-full px-2 py-2">
+      <div className="relative overflow-hidden rounded-xl border border-gray-800/60 bg-gray-950" style={{ height: totalH }}>
+
+        {/* Lane backgrounds */}
+        {stages.map((kind, i) => (
+          <div key={i} className="absolute left-0 right-0" style={{
+            top: (Y_INIT + i * SLEEVE_H) * scale,
+            height: SLEEVE_H * scale,
+            backgroundColor: kind === "input" ? "rgba(30,58,138,0.10)" : kind === "processing" ? "rgba(30,27,75,0.13)" : "rgba(46,16,101,0.10)",
+            borderBottom: "1px solid rgba(255,255,255,0.03)",
+          }}>
+            <span style={{ position: "absolute", left: 4, top: 2, fontSize: Math.max(5, 7 * scale), fontWeight: 700, opacity: 0.22, letterSpacing: "0.08em", textTransform: "uppercase",
+              color: kind === "input" ? "#60a5fa" : kind === "processing" ? "#818cf8" : "#a78bfa" }}>
+              {kind}
+            </span>
+          </div>
+        ))}
+
+        {/* Edges */}
+        <svg className="absolute inset-0 pointer-events-none" width="100%" height={totalH} style={{ overflow: "visible" }}>
+          {edges.map(e => {
+            const s = nodes.find(n => n.id === e.source);
+            const t = nodes.find(n => n.id === e.target);
+            if (!s || !t) return null;
+            const sx = nx(s) + nw / 2, sy = ny(s) + nh;
+            const tx = nx(t) + nw / 2, ty = ny(t);
+            const cy = (sy + ty) / 2;
+            const st = stepSt(s.id, s.type);
+            const done = st === "done" || st === "cached";
+            const stroke = done ? "#22c55e" : st === "loading" ? "#14b8a6" : "#374151";
+            const aw = Math.max(3, 4.5 * scale);
+            return (
+              <g key={e.id}>
+                <path d={`M${sx},${sy} C${sx},${cy} ${tx},${cy} ${tx},${ty}`}
+                  fill="none" stroke={stroke} strokeWidth={Math.max(1, 1.5 * scale)} opacity={0.55} />
+                <polygon points={`${tx},${ty} ${tx - aw},${ty - aw * 1.5} ${tx + aw},${ty - aw * 1.5}`}
+                  fill={stroke} opacity={0.6} />
+              </g>
+            );
+          })}
+        </svg>
+
+        {/* Nodes */}
+        {nodes.map(n => {
+          const st  = stepSt(n.id, n.type);
+          const c   = nstyle(n, st);
+          const k   = nkey(n);
+          const sel = selectedKey === k;
+          const done = st === "done" || st === "cached";
+          const lbl = n.type === "input"
+            ? (SOURCE_META[n.data.inputSource ?? ""]?.label ?? n.data.label)
+            : (n.data.agentName || n.data.label);
+
+          return (
+            <div key={n.id} onClick={() => onNodeClick(k)}
+              className="absolute cursor-pointer rounded-md transition-colors select-none"
+              style={{
+                left: nx(n), top: ny(n), width: nw, height: nh,
+                background: c.bg,
+                border: `${Math.max(1, 1.2 * scale)}px solid ${c.border}`,
+                outline: sel ? `2px solid ${c.border}` : undefined,
+                outlineOffset: sel ? 2 : undefined,
+                boxShadow: done ? `0 0 8px rgba(34,197,94,0.15)` : undefined,
+              }}
+            >
+              <div className="flex items-center h-full overflow-hidden"
+                style={{ padding: `2px ${Math.max(3, 7 * scale)}px`, gap: Math.max(2, 4 * scale) }}>
+                {n.type !== "input" && (
+                  <span className="shrink-0" style={{ fontSize: fs, lineHeight: 1 }}>
+                    {done    ? <span style={{ color: "#22c55e" }}>✓</span> :
+                     st === "loading" ? <span style={{ color: "#14b8a6" }}>⟳</span> :
+                     st === "error"   ? <span style={{ color: "#ef4444" }}>✕</span> :
+                                        <span style={{ color: c.border, opacity: 0.5 }}>●</span>}
+                  </span>
+                )}
+                <span className="truncate" style={{ fontSize: fs, color: c.text, fontWeight: 600, lineHeight: 1.2 }}>{lbl}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -631,280 +772,147 @@ export function PipelineSidePanel({
             </div>
           )}
 
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-0.5">
+          {canvasNodes && pipeline?.canvas ? (
+            <>
+              {/* ── Mini canvas (visual replica of pipeline canvas) ── */}
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <MiniCanvas
+                  stages={pipeline.canvas.stages ?? []}
+                  nodes={canvasNodes}
+                  edges={pipeline.canvas.edges}
+                  procStepIdx={procStepIdx}
+                  outputProcId={outputProcId}
+                  flowSteps={flowSteps}
+                  selectedKey={flowSelectedKey}
+                  onNodeClick={key => {
+                    setFlowSelectedKey(prev => prev === key ? null : key);
+                    if (key.startsWith("input:")) {
+                      const nodeId = key.slice(6);
+                      const node = canvasNodes.find(n => n.id === nodeId);
+                      if (node?.data.inputSource) fetchInputPreview(node.data.inputSource);
+                    } else {
+                      setInputPreview({ loading: false, content: "", error: "" });
+                    }
+                  }}
+                />
+              </div>
 
-            {canvasStageGroups ? (
-              /* ── Canvas-driven rendering: exact nodes from saved canvas ── */
-              canvasStageGroups.map((group, gi) => (
-                <div key={gi}>
-                  {gi > 0 && <ArrowDown />}
-                  <div className="space-y-1">
-                    {group.map(node => {
+              {/* ── Detail panel (shown when a node is selected) ── */}
+              {flowSelectedKey && (() => {
+                const colonIdx = flowSelectedKey.indexOf(":");
+                const prefix = flowSelectedKey.slice(0, colonIdx);
+                const nodeId = flowSelectedKey.slice(colonIdx + 1);
+                const node = canvasNodes.find(n => n.id === nodeId);
+                if (!node) return null;
 
-                      /* ── INPUT NODE ── */
-                      if (node.type === "input") {
-                        const src = node.data.inputSource ?? "";
-                        const m = SOURCE_META[src] ?? GENERIC_SOURCE;
-                        const Icon = m.icon;
-                        const key = `input:${node.id}`;
-                        const isSelected = flowSelectedKey === key;
-                        return (
-                          <div key={node.id}>
-                            <button
-                              onClick={() => {
-                                if (isSelected) { setFlowSelectedKey(null); setInputPreview({ loading: false, content: "", error: "" }); }
-                                else { setFlowSelectedKey(key); fetchInputPreview(src); }
-                              }}
-                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all", m.bg, m.border,
-                                isSelected ? "opacity-100 ring-1 ring-inset ring-current/30" : "opacity-75 hover:opacity-100")}
-                            >
-                              <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
-                              <div className="flex-1 min-w-0">
-                                <p className={cn("text-xs font-semibold truncate", m.color)}>{m.label}</p>
-                                <p className="text-[9px] text-gray-600">input</p>
-                              </div>
-                              {isSelected ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                            </button>
-                            {isSelected && (
-                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                                {inputPreview.loading && <div className="p-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>}
-                                {inputPreview.error && <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>}
-                                {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
-                                  <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-56 overflow-y-auto">{inputPreview.content}</pre>
-                                )}
-                                {!inputPreview.loading && !inputPreview.error && !inputPreview.content && (
-                                  <p className="p-3 text-[11px] text-gray-600 text-center">Select agent + customer to preview</p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
+                const dismiss = () => { setFlowSelectedKey(null); setInputPreview({ loading: false, content: "", error: "" }); };
 
-                      /* ── PROCESSING NODE ── */
-                      if (node.type === "processing") {
-                        const stepIdx = procStepIdx.get(node.id) ?? 0;
-                        const st = flowSteps[stepIdx];
-                        const status = st?.status ?? "pending";
-                        const key = `proc:${node.id}`;
-                        const isSel = flowSelectedKey === key;
-                        const hasContent = !!(st?.content);
-                        const hasStream = !!(st?.stream);
-                        const borderClass =
-                          status === "loading" ? "border-teal-700/60 bg-teal-950/20" :
-                          status === "cached"  ? "border-amber-700/40 bg-amber-950/10" :
-                          status === "done"    ? "border-indigo-700/40 bg-indigo-950/20" :
-                          status === "error"   ? "border-red-700/40 bg-red-950/20" :
-                                                "border-gray-700/50 bg-gray-900/60";
-                        return (
-                          <div key={node.id}>
-                            <button
-                              onClick={() => setFlowSelectedKey(isSel ? null : key)}
-                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
-                                borderClass, isSel ? "opacity-100 ring-1 ring-inset ring-indigo-500/30" : "opacity-80 hover:opacity-100")}
-                            >
-                              {status === "loading" && !hasStream && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400 shrink-0" />}
-                              {status === "loading" && hasStream   && <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0" />}
-                              {status === "cached"  && <SkipForward  className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
-                              {status === "done"    && <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" />}
-                              {status === "error"   && <AlertCircle  className="w-3.5 h-3.5 text-red-400 shrink-0" />}
-                              {status === "pending" && <Bot          className="w-3.5 h-3.5 text-indigo-400 shrink-0" />}
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold text-gray-200 truncate">{node.data.agentName || node.data.label}</p>
-                                <p className="text-[9px] text-gray-600">Step {stepIdx + 1} · agent</p>
-                              </div>
-                              {status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
-                              {status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
-                              {status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
-                              {status === "pending" && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">pending</span>}
-                              {isSel ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                            </button>
-                            {isSel && (
-                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                                {hasStream && (
-                                  <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
-                                    {st!.stream}<div ref={streamEndRef} />
-                                  </pre>
-                                )}
-                                {!hasStream && (status === "pending" || status === "error") && (
-                                  <div className="p-3 flex flex-col items-center gap-2">
-                                    <p className="text-[11px] text-gray-600">{status === "error" ? "Step failed" : "Not yet executed"}</p>
-                                    <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
-                                      disabled={anyRunning || !contextOk}
-                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
-                                      <Play className="w-3 h-3" />
-                                      {isPerCall ? "Run All Calls" : "Run Pipeline"}
-                                    </button>
-                                  </div>
-                                )}
-                                {!hasStream && (status === "done" || status === "cached") && hasContent && (
-                                  <div className="p-2 border-t border-gray-800">
-                                    <p className="px-1 pb-1 text-[9px] text-gray-600 uppercase tracking-widest font-bold">Raw output</p>
-                                    <pre className="text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto px-1">{st!.content.slice(0, 500)}{st!.content.length > 500 ? "…" : ""}</pre>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
-
-                      /* ── OUTPUT NODE ── */
-                      if (node.type === "output") {
-                        const connProcId = outputProcId.get(node.id);
-                        const stepIdx = connProcId != null ? procStepIdx.get(connProcId) : undefined;
-                        const st = stepIdx != null ? flowSteps[stepIdx] : undefined;
-                        const hasContent = !!(st?.content);
-                        const subType = node.data.subType ?? "";
-                        const art = ARTIFACT_NODE_META[subType] ?? DEFAULT_ARTIFACT_STYLE;
-                        const key = `out:${node.id}`;
-                        const isSel = flowSelectedKey === key;
-                        return (
-                          <div key={node.id}>
-                            <button
-                              onClick={() => hasContent ? setFlowSelectedKey(isSel ? null : key) : undefined}
-                              disabled={!hasContent}
-                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all",
-                                art.bg, art.border,
-                                hasContent ? (isSel ? "opacity-100 ring-1 ring-inset ring-current/20" : "opacity-80 hover:opacity-100") : "opacity-35 cursor-default")}
-                            >
-                              <FileText className={cn("w-3.5 h-3.5 shrink-0", art.color)} />
-                              <div className="flex-1 min-w-0">
-                                <p className={cn("text-xs font-semibold truncate", art.color)}>{node.data.label}</p>
-                                <p className="text-[9px] text-gray-600">output</p>
-                              </div>
-                              {hasContent
-                                ? (isSel ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />)
-                                : <span className="text-[9px] text-gray-700 shrink-0">awaiting</span>}
-                            </button>
-                            {isSel && hasContent && (
-                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                                <div className="max-h-72 overflow-y-auto p-1">
-                                  <SectionContent content={st!.content} />
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
-
-                      return null;
-                    })}
-                  </div>
-                </div>
-              ))
-            ) : (
-              /* ── Legacy fallback: no canvas data saved yet ── */
-              <>
-                {flowInputSources.length > 0 && (
-                  <>
-                    <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">Inputs</p>
-                    <div className="space-y-1">
-                      {flowInputSources.map(src => {
-                        const m = SOURCE_META[src] ?? GENERIC_SOURCE;
-                        const Icon = m.icon;
-                        const key = `input:${src}`;
-                        const isSelected = flowSelectedKey === key;
-                        return (
-                          <div key={src}>
-                            <button
-                              onClick={() => {
-                                if (isSelected) { setFlowSelectedKey(null); setInputPreview({ loading: false, content: "", error: "" }); }
-                                else { setFlowSelectedKey(key); fetchInputPreview(src); }
-                              }}
-                              className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all", m.bg, m.border,
-                                isSelected ? "opacity-100 ring-1 ring-inset ring-current/30" : "opacity-75 hover:opacity-100")}
-                            >
-                              <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
-                              <span className={cn("text-xs font-semibold flex-1 truncate", m.color)}>{m.label}</span>
-                              <span className="text-[9px] text-gray-600 shrink-0">input</span>
-                              {isSelected ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                            </button>
-                            {isSelected && (
-                              <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                                {inputPreview.loading && <div className="p-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>}
-                                {inputPreview.error && <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>}
-                                {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
-                                  <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-56 overflow-y-auto">{inputPreview.content}</pre>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
+                /* ── Input detail ── */
+                if (prefix === "input") {
+                  const src = node.data.inputSource ?? "";
+                  const m = SOURCE_META[src] ?? GENERIC_SOURCE;
+                  const Icon = m.icon;
+                  return (
+                    <div className="shrink-0 border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "55%" }}>
+                      <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
+                        <Icon className={cn("w-3.5 h-3.5 shrink-0", m.color)} />
+                        <span className={cn("text-xs font-semibold flex-1 truncate", m.color)}>{m.label}</span>
+                        <span className="text-[9px] text-gray-600 shrink-0">input</span>
+                        <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        {inputPreview.loading && <div className="p-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>}
+                        {inputPreview.error && <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>}
+                        {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
+                          <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed">{inputPreview.content}</pre>
+                        )}
+                        {!inputPreview.loading && !inputPreview.error && !inputPreview.content && (
+                          <p className="p-3 text-[11px] text-gray-600 text-center">Select agent + customer to preview</p>
+                        )}
+                      </div>
                     </div>
-                    {pipeline && pipeline.steps.length > 0 && <ArrowDown />}
-                  </>
-                )}
-                {pipeline && pipeline.steps.length > 0 && (
-                  <>
-                    <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold px-1 pb-1">Pipeline Steps</p>
-                    {pipeline.steps.map((step, i) => {
-                      const agent = agents?.find(a => a.id === step.agent_id);
-                      const st = flowSteps[i];
-                      const status = st?.status ?? "pending";
-                      const key = `agent:${i}`;
-                      const isSel = flowSelectedKey === key;
-                      const hasContent = !!(st?.content);
-                      const hasStream = !!(st?.stream);
-                      const borderClass =
-                        status === "loading" ? "border-teal-700/60 bg-teal-950/20" :
-                        status === "cached"  ? "border-amber-700/40 bg-amber-950/10" :
-                        status === "done"    ? "border-indigo-700/40 bg-indigo-950/20" :
-                        status === "error"   ? "border-red-700/40 bg-red-950/20" :
-                                              "border-gray-700/50 bg-gray-900/60";
-                      return (
-                        <div key={i}>
-                          <button onClick={() => setFlowSelectedKey(isSel ? null : key)}
-                            className={cn("w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all", borderClass,
-                              isSel ? "opacity-100 ring-1 ring-inset ring-indigo-500/30" : "opacity-80 hover:opacity-100")}>
-                            {status === "loading" && !hasStream && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400 shrink-0" />}
-                            {status === "loading" && hasStream   && <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0" />}
-                            {status === "cached"  && <SkipForward  className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
-                            {status === "done"    && <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" />}
-                            {status === "error"   && <AlertCircle  className="w-3.5 h-3.5 text-red-400 shrink-0" />}
-                            {status === "pending" && <Bot          className="w-3.5 h-3.5 text-indigo-500 shrink-0" />}
-                            <div className="flex-1 min-w-0">
-                              <p className="text-xs font-semibold text-gray-200 truncate">{agent?.name ?? step.agent_id}</p>
-                              <p className="text-[9px] text-gray-600">Step {i + 1}</p>
-                            </div>
-                            {status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
-                            {status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
-                            {status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
-                            {status === "pending" && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">pending</span>}
-                            {isSel ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-                          </button>
-                          {isSel && (
-                            <div className="mt-1 rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
-                              {(status === "done" || status === "cached") && hasContent
-                                ? <div className="max-h-56 overflow-y-auto p-1"><SectionContent content={st!.content} /></div>
-                                : hasStream
-                                  ? <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-y-auto">{st!.stream}<div ref={streamEndRef} /></pre>
-                                  : <div className="p-3 flex flex-col items-center gap-2">
-                                      <p className="text-[11px] text-gray-600">{status === "error" ? "Step failed" : "Not yet executed"}</p>
-                                      <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }} disabled={anyRunning || !contextOk}
-                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
-                                        <Play className="w-3 h-3" /> {isPerCall ? "Run All Calls" : "Run Pipeline"}
-                                      </button>
-                                    </div>
-                              }
-                            </div>
-                          )}
-                          {i < pipeline.steps.length - 1 && <ArrowDown />}
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-                {(!pipeline || pipeline.steps.length === 0) && (
-                  <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
-                    <Workflow className="w-8 h-8 opacity-20" />
-                    <p className="text-xs text-center">No steps in this pipeline</p>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
+                  );
+                }
+
+                /* ── Processing detail ── */
+                if (prefix === "proc") {
+                  const stepIdx = procStepIdx.get(nodeId) ?? 0;
+                  const st = flowSteps[stepIdx];
+                  const status = st?.status ?? "pending";
+                  const hasContent = !!(st?.content);
+                  const hasStream = !!(st?.stream);
+                  const statusColor = status === "done" ? "text-green-400" : status === "cached" ? "text-amber-400" :
+                    status === "loading" ? "text-teal-400" : status === "error" ? "text-red-400" : "text-gray-500";
+                  return (
+                    <div className="shrink-0 border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "60%" }}>
+                      <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
+                        {status === "done" || status === "cached" ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" /> : <Bot className="w-3.5 h-3.5 text-indigo-400 shrink-0" />}
+                        <span className="text-xs font-semibold text-gray-200 flex-1 truncate">{node.data.agentName || node.data.label}</span>
+                        <span className={cn("text-[9px] shrink-0 font-medium", statusColor)}>{status}</span>
+                        <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        {hasStream && (
+                          <pre className="p-3 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">
+                            {st!.stream}<div ref={streamEndRef} />
+                          </pre>
+                        )}
+                        {!hasStream && (status === "pending" || status === "error") && (
+                          <div className="p-3 flex flex-col items-center gap-2">
+                            <p className="text-[11px] text-gray-600">{status === "error" ? "Step failed" : "Not yet executed"}</p>
+                            <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
+                              disabled={anyRunning || !contextOk}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
+                              <Play className="w-3 h-3" /> {isPerCall ? "Run All Calls" : "Run Pipeline"}
+                            </button>
+                          </div>
+                        )}
+                        {!hasStream && hasContent && (
+                          <div className="p-1">
+                            <SectionContent content={st!.content} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+
+                /* ── Output detail ── */
+                if (prefix === "out") {
+                  const procId = outputProcId.get(nodeId);
+                  const stepIdx = procId != null ? procStepIdx.get(procId) : undefined;
+                  const st = stepIdx != null ? flowSteps[stepIdx] : undefined;
+                  const hasContent = !!(st?.content);
+                  const subType = node.data.subType ?? "";
+                  const art = ARTIFACT_NODE_META[subType] ?? DEFAULT_ARTIFACT_STYLE;
+                  return (
+                    <div className="shrink-0 border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "65%" }}>
+                      <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
+                        <FileText className={cn("w-3.5 h-3.5 shrink-0", art.color)} />
+                        <span className={cn("text-xs font-semibold flex-1 truncate", art.color)}>{node.data.label}</span>
+                        {!hasContent && <span className="text-[9px] text-gray-600 shrink-0">awaiting</span>}
+                        <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
+                      </div>
+                      {hasContent
+                        ? <div className="flex-1 min-h-0 overflow-y-auto p-1"><SectionContent content={st!.content} /></div>
+                        : <p className="p-3 text-[11px] text-gray-600 text-center">Run the pipeline to see results</p>
+                      }
+                    </div>
+                  );
+                }
+
+                return null;
+              })()}
+            </>
+          ) : (
+            /* ── Legacy fallback for pipelines without saved canvas ── */
+            <div className="flex-1 min-h-0 overflow-y-auto p-3">
+              <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
+                <Workflow className="w-8 h-8 opacity-20" />
+                <p className="text-xs text-center">Open this pipeline in the Pipeline editor and save it to enable the visual flow view</p>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
