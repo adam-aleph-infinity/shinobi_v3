@@ -542,10 +542,12 @@ export default function ArtifactsPage() {
   const runsUrl = pairQs
     ? `/api/history/runs?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}&limit=50`
     : null;
-  const { data: historyRuns, mutate: mutateRuns } = useSWR<PipelineRun[]>(runsUrl, fetcher);
+  const { data: historyRuns, isLoading: loadRuns, mutate: mutateRuns } = useSWR<PipelineRun[]>(
+    runsUrl, fetcher, { refreshInterval: 8000, dedupingInterval: 500 },
+  );
 
-  // personas/notes/rollup loading blocks Panel 3; merged transcript doesn't
-  const isLoadingPair = loadP || loadN || loadR;
+  // All core data must load before Panel 3 renders (avoids "No artifacts" flash)
+  const isLoadingPair = loadP || loadN || loadR || (!!runsUrl && loadRuns);
 
   // Build items per kind
   const itemsByKind: Record<ArtifactKind, ArtifactItem[]> = {
