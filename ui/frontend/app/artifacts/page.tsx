@@ -40,7 +40,7 @@ interface Note {
 interface PipelineRun {
   id: string; pipeline_name: string; sales_agent: string; customer: string;
   started_at: string; finished_at: string | null; status: string;
-  steps_json: string;
+  steps_json: string; canvas_json: string;
 }
 interface RunStep {
   agent_id: string; agent_name: string; status: string;
@@ -54,6 +54,10 @@ type ArtifactKind =
   | "notes_rollup"
   | "note"
   | "compliance_note"
+  | "pipeline_persona"
+  | "pipeline_score"
+  | "pipeline_notes"
+  | "pipeline_compliance"
   | "pipeline_output";
 
 type ArtifactItem =
@@ -63,7 +67,11 @@ type ArtifactItem =
   | { kind: "notes_rollup";      id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
   | { kind: "note";              id: string; date: string; chars: number; label: string; data: Note }
   | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note }
-  | { kind: "pipeline_output";   id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } };
+  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
+  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
+  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
+  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } }
+  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string } };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
 
@@ -76,9 +84,45 @@ const ARTIFACT_TYPE_META: Record<ArtifactKind, {
   persona_score:     { label: "Persona Scores",      icon: BadgeCheck, bg: "bg-violet-900/30",  text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
   notes_rollup:      { label: "Merged Notes",        icon: Layers,     bg: "bg-amber-900/40",   text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
   note:              { label: "Call Notes",          icon: StickyNote, bg: "bg-teal-900/40",    text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
-  compliance_note:   { label: "Compliance Notes",    icon: ShieldCheck, bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40", dot: "bg-emerald-500" },
-  pipeline_output:   { label: "Pipeline Outputs",    icon: GitBranch,   bg: "bg-indigo-900/40",  text: "text-indigo-300",  border: "border-indigo-700/40",  dot: "bg-indigo-500"  },
+  compliance_note:    { label: "Compliance Notes",    icon: ShieldCheck, bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40", dot: "bg-emerald-500" },
+  pipeline_persona:   { label: "Persona (Pipeline)",  icon: User,        bg: "bg-violet-900/50",  text: "text-violet-300",  border: "border-violet-700/40",  dot: "bg-violet-500"  },
+  pipeline_score:     { label: "Score (Pipeline)",    icon: BadgeCheck,  bg: "bg-violet-900/30",  text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
+  pipeline_notes:     { label: "Notes (Pipeline)",    icon: StickyNote,  bg: "bg-amber-900/40",   text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
+  pipeline_compliance:{ label: "Compliance (Pipeline)",icon: ShieldCheck,bg: "bg-emerald-900/30", text: "text-emerald-400", border: "border-emerald-700/30", dot: "bg-emerald-400" },
+  pipeline_output:    { label: "Pipeline Outputs",    icon: GitBranch,   bg: "bg-indigo-900/40",  text: "text-indigo-300",  border: "border-indigo-700/40",  dot: "bg-indigo-500"  },
 };
+
+// ── Pipeline canvas helpers ───────────────────────────────────────────────────
+
+/** Parse canvas_json and return a map of agent_id → artifact subType */
+function getAgentArtifactMap(canvasJson: string): Record<string, string> {
+  try {
+    const canvas = JSON.parse(canvasJson) as {
+      nodes: Array<{ id: string; type: string; data: { agentId?: string; subType?: string } }>;
+      edges: Array<{ source: string; target: string }>;
+    };
+    const map: Record<string, string> = {};
+    for (const node of canvas.nodes) {
+      if (node.type !== "processing") continue;
+      const agentId = node.data.agentId;
+      if (!agentId) continue;
+      const outEdge = canvas.edges.find(e => e.source === node.id);
+      if (!outEdge) continue;
+      const outNode = canvas.nodes.find(n => n.id === outEdge.target);
+      if (!outNode || outNode.type !== "output") continue;
+      map[agentId] = outNode.data.subType ?? "general";
+    }
+    return map;
+  } catch { return {}; }
+}
+
+function subTypeToKind(subType: string): ArtifactKind {
+  if (subType === "persona")          return "pipeline_persona";
+  if (subType === "persona_score")    return "pipeline_score";
+  if (subType === "notes")            return "pipeline_notes";
+  if (subType === "notes_compliance") return "pipeline_compliance";
+  return "pipeline_output";
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -299,11 +343,21 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
     );
   }
 
-  if (item.kind === "pipeline_output") {
+  if (
+    item.kind === "pipeline_output" ||
+    item.kind === "pipeline_persona" ||
+    item.kind === "pipeline_score" ||
+    item.kind === "pipeline_notes" ||
+    item.kind === "pipeline_compliance"
+  ) {
     const md = item.data.content;
+    const m = ARTIFACT_TYPE_META[item.kind];
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+          <span className={cn("p-1 rounded border shrink-0", m.bg, m.text, m.border)}>
+            <m.icon className="w-3.5 h-3.5" />
+          </span>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
             <p className="text-[10px] text-gray-500">
@@ -450,6 +504,10 @@ export default function ArtifactsPage() {
     notes_rollup: [],
     note: [],
     compliance_note: [],
+    pipeline_persona: [],
+    pipeline_score: [],
+    pipeline_notes: [],
+    pipeline_compliance: [],
     pipeline_output: [],
   };
 
@@ -512,16 +570,18 @@ export default function ArtifactsPage() {
     }
   });
 
-  // Pipeline step outputs — from history runs, newest first
+  // Pipeline step outputs — routed by artifact class from canvas_json
   (historyRuns ?? [])
     .filter(r => r.status === "done")
     .forEach(run => {
       let steps: RunStep[] = [];
       try { steps = JSON.parse(run.steps_json); } catch { return; }
+      const agentMap = getAgentArtifactMap(run.canvas_json ?? "");
       steps.forEach((step, idx) => {
         if (step.status !== "done" || !step.content) return;
-        itemsByKind.pipeline_output.push({
-          kind: "pipeline_output",
+        const kind = subTypeToKind(agentMap[step.agent_id] ?? "");
+        (itemsByKind[kind] as ArtifactItem[]).push({
+          kind,
           id: `${run.id}_${idx}`,
           date: run.finished_at ?? run.started_at,
           chars: step.content.length,
@@ -532,7 +592,7 @@ export default function ArtifactsPage() {
             pipeline_name: run.pipeline_name,
             model: step.model ?? "",
           },
-        });
+        } as ArtifactItem);
       });
     });
 
