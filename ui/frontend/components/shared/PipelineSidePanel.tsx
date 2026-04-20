@@ -583,6 +583,8 @@ export function PipelineSidePanel({
   // ── per_pair run ──────────────────────────────────────────────────────────────
   async function run(force = false) {
     if (!activePipelineId || !contextOk || running || !pipeline || !agents) return;
+    setFlowSelectedKey(null); // close detail panel so canvas is fully visible
+    setInputPreview({ loading: false, content: "", error: "" });
     setRunning(true); setRunError(""); setDone(false); setLoaded(true);
     setSteps(initStepsFor(pipeline, agents));
     try {
@@ -617,6 +619,9 @@ export function PipelineSidePanel({
       : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
     if (sorted.length === 0) { setCallsRunError("No calls found for this pair"); return; }
 
+    setFlowSelectedKey(null); // close detail panel so canvas is fully visible
+    setInputPreview({ loading: false, content: "", error: "" });
+    setFlowCallIdx(0); // start watching from call 0
     setCallsRunning(true); setCallsRunError(""); setCallsLoaded(true);
     setCallResults(sorted.map(([cid, date]) => ({
       callId: cid, date,
@@ -626,6 +631,7 @@ export function PipelineSidePanel({
     })));
 
     const runSingle = async (cid: string, ci: number) => {
+      setFlowCallIdx(ci); // auto-advance flow view to the currently running call
       setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, runStatus: "running", expanded: true } : cr));
       let hadLLM = false;
       try {
