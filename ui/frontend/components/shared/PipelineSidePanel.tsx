@@ -143,7 +143,10 @@ function MiniCanvas({
     if (type === "output") {
       const pid = outputProcId.get(nodeId);
       const i = pid ? procStepIdx.get(pid) : undefined;
-      return i != null ? (flowSteps[i]?.status ?? "pending") : "pending";
+      if (i == null) return "pending";
+      const st = flowSteps[i]?.status ?? "pending";
+      // Output stays dim while its agent is running — only lights up once agent finishes
+      return st === "loading" ? "pending" : st;
     }
     if (type === "input") {
       const procIds = inputProcIds.get(nodeId) ?? [];
@@ -152,11 +155,19 @@ function MiniCanvas({
         const i = procStepIdx.get(pid);
         return (i != null ? (flowSteps[i]?.status ?? "pending") : "pending") as StepStatus;
       });
+      if (statuses.some(s => s === "error")) return "error";
+      // While any consumer is actively loading, show orange
       if (statuses.some(s => s === "loading")) return "loading";
-      if (statuses.some(s => s === "error"))   return "error";
-      if (statuses.some(s => s === "done"))    return "done";
-      if (statuses.every(s => s === "cached")) return "cached";
-      if (statuses.some(s => s === "cached"))  return "cached";
+      // Once consumed (done or cached), determine color by source type:
+      if (statuses.some(s => s === "done" || s === "cached")) {
+        const node = nodes.find(n => n.id === nodeId);
+        const src = node?.data.inputSource ?? "";
+        // External/file sources (pre-existing data) → always yellow (the file existed)
+        // Internal sources (agent_output, chain_previous) → green if freshly computed
+        const isExternal = !["agent_output", "chain_previous"].includes(src);
+        if (isExternal) return "cached"; // yellow: pre-existing data was available
+        return statuses.some(s => s === "done") ? "done" : "cached";
+      }
       return "pending";
     }
     return "pending";
