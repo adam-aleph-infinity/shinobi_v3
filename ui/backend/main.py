@@ -19,6 +19,7 @@ from ui.backend.models.comparison_file import ComparisonFile  # noqa: F401 — r
 from ui.backend.models.note import Note                     # noqa: F401 — registers table
 from ui.backend.models.agent_result import AgentResult      # noqa: F401 — registers table
 from ui.backend.models.uploaded_file import UploadedFile    # noqa: F401 — registers table
+from ui.backend.models.pipeline_run import PipelineRun      # noqa: F401 — registers table
 from ui.backend.routers import crm, jobs, personas, logs, workspace
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
