@@ -102,13 +102,20 @@ def create_agent(req: UniversalAgentIn):
 @router.get("/uploaded-files")
 def list_uploaded_files(
     provider: str = Query(""),
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: str = Query(""),
+    source: str = Query(""),
     db: Session = Depends(get_session),
 ):
-    """List all tracked uploaded files across providers."""
+    """List uploaded files, optionally filtered by context."""
     from ui.backend.models.uploaded_file import UploadedFile as UF
     stmt = select(UF).order_by(UF.created_at.desc())
-    if provider:
-        stmt = stmt.where(UF.provider == provider)
+    if provider:    stmt = stmt.where(UF.provider == provider)
+    if sales_agent: stmt = stmt.where(UF.sales_agent == sales_agent)
+    if customer:    stmt = stmt.where(UF.customer == customer)
+    if call_id:     stmt = stmt.where(UF.call_id == call_id)
+    if source:      stmt = stmt.where(UF.source == source)
     return db.exec(stmt).all()
 
 

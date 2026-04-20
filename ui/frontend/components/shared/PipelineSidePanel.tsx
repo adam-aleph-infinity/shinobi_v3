@@ -24,8 +24,12 @@ interface Pipeline {
   canvas?: { nodes: CanvasNode[]; edges: { id: string; source: string; target: string }[]; stages: string[] };
 }
 interface UniversalAgent {
-  id: string; name: string; agent_class?: string;
+  id: string; name: string; agent_class?: string; model?: string;
   inputs?: { key: string; source: string }[];
+}
+interface UploadedFileInfo {
+  id: string; provider: string; provider_file_id: string;
+  source: string; chars: number; created_at: string;
 }
 interface CachedStepResult {
   agent_id: string;
@@ -136,37 +140,32 @@ function MiniCanvas({
   const nx = (n: CanvasNode) => (n.position.x - minX) * scale;
   const ny = (n: CanvasNode) => n.position.y * scale;
 
-  function stepSt(nodeId: string, type: string): StepStatus {
-    if (type === "processing") {
+  function stepSt(cn: CanvasNode): StepStatus {
+    const nodeId = cn.id;
+    if (cn.type === "processing") {
       const i = procStepIdx.get(nodeId); return i != null ? (flowSteps[i]?.status ?? "pending") : "pending";
     }
-    if (type === "output") {
+    if (cn.type === "output") {
       const pid = outputProcId.get(nodeId);
       const i = pid ? procStepIdx.get(pid) : undefined;
       if (i == null) return "pending";
       const st = flowSteps[i]?.status ?? "pending";
-      // Output stays dim while its agent is running — only lights up once agent finishes
-      return st === "loading" ? "pending" : st;
+      return st === "loading" ? "pending" : st; // output stays dim while agent runs
     }
-    if (type === "input") {
+    if (cn.type === "input") {
       const procIds = inputProcIds.get(nodeId) ?? [];
       if (procIds.length === 0) return "pending";
       const statuses = procIds.map(pid => {
         const i = procStepIdx.get(pid);
         return (i != null ? (flowSteps[i]?.status ?? "pending") : "pending") as StepStatus;
       });
-      if (statuses.some(s => s === "error")) return "error";
-      // While any consumer is actively loading, show orange
+      if (statuses.some(s => s === "error"))   return "error";
       if (statuses.some(s => s === "loading")) return "loading";
-      // Once consumed (done or cached), determine color by source type:
       if (statuses.some(s => s === "done" || s === "cached")) {
-        const node = nodes.find(n => n.id === nodeId);
-        const src = node?.data.inputSource ?? "";
-        // External/file sources (pre-existing data) → always yellow (the file existed)
-        // Internal sources (agent_output, chain_previous) → green if freshly computed
-        const isExternal = !["agent_output", "chain_previous"].includes(src);
-        if (isExternal) return "cached"; // yellow: pre-existing data was available
-        return statuses.some(s => s === "done") ? "done" : "cached";
+        const src = cn.data.inputSource ?? "";
+        // External file sources (pre-existing data) always yellow; internal (agent_output, chain_previous) can be green
+        return !["agent_output", "chain_previous"].includes(src) ? "cached"
+          : statuses.some(s => s === "done") ? "done" : "cached";
       }
       return "pending";
     }
@@ -215,7 +214,7 @@ function MiniCanvas({
             const sx = nx(s) + nw / 2, sy = ny(s) + nh;
             const tx = nx(t) + nw / 2, ty = ny(t);
             const cy = (sy + ty) / 2;
-            const st = stepSt(s.id, s.type);
+            const st = stepSt(s);
             const stroke = st === "done" ? "#22c55e" : st === "cached" ? "#ca8a04" : st === "loading" ? "#ea580c" : st === "error" ? "#b91c1c" : "#374151";
             const aw = Math.max(3, 4.5 * scale);
             return (
@@ -231,7 +230,7 @@ function MiniCanvas({
 
         {/* Nodes */}
         {nodes.map(n => {
-          const st  = stepSt(n.id, n.type);
+          const st  = stepSt(n);
           const c   = nstyle(n, st);
           const k   = nkey(n);
           const sel = selectedKey === k;
@@ -299,6 +298,9 @@ export function PipelineSidePanel({
   const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
   const [inputPreview, setInputPreview] = useState<{ loading: boolean; content: string; error: string }>(
     { loading: false, content: "", error: "" }
+  );
+  const [nodeFileInfo, setNodeFileInfo] = useState<{ loading: boolean; files: UploadedFileInfo[] }>(
+    { loading: false, files: [] }
   );
   const [flowCallIdx, setFlowCallIdx] = useState(0);
 
@@ -534,14 +536,30 @@ export function PipelineSidePanel({
         const url = `/api/full-persona-agent/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        // Endpoint returns plain text (not JSON)
         content = await res.text();
       } else {
-        content = `Source type: ${source}\n\n(Data is resolved at pipeline execution time)`;
+        content = `(Source "${source}" is resolved at pipeline execution time)`;
       }
       setInputPreview({ loading: false, content, error: "" });
     } catch (e: any) {
-      setInputPreview({ loading: false, content: "", error: e.message ?? "Failed to load" });
+      setInputPreview({ loading: false, content: "", error: `Could not load preview: ${e.message ?? "fetch failed"}` });
+    }
+  }
+
+  // ── file info fetch (for node detail panels) ──────────────────────────────────
+  async function fetchNodeFiles(sources: string[]) {
+    setNodeFileInfo({ loading: true, files: [] });
+    try {
+      const all: UploadedFileInfo[] = [];
+      await Promise.all(sources.map(async src => {
+        const params = new URLSearchParams({ source: src, sales_agent: salesAgent, customer });
+        if (flowCallId) params.set("call_id", flowCallId);
+        const files: UploadedFileInfo[] = await fetch(`/api/universal-agents/uploaded-files?${params}`).then(r => r.ok ? r.json() : []);
+        all.push(...files.slice(0, 2));
+      }));
+      setNodeFileInfo({ loading: false, files: all });
+    } catch {
+      setNodeFileInfo({ loading: false, files: [] });
     }
   }
 
@@ -846,13 +864,36 @@ export function PipelineSidePanel({
                   flowSteps={flowSteps}
                   selectedKey={flowSelectedKey}
                   onNodeClick={key => {
-                    setFlowSelectedKey(prev => prev === key ? null : key);
+                    const isToggleOff = flowSelectedKey === key;
+                    setFlowSelectedKey(isToggleOff ? null : key);
+                    if (isToggleOff) {
+                      setInputPreview({ loading: false, content: "", error: "" });
+                      setNodeFileInfo({ loading: false, files: [] });
+                      return;
+                    }
                     if (key.startsWith("input:")) {
                       const nodeId = key.slice(6);
                       const node = canvasNodes.find(n => n.id === nodeId);
-                      if (node?.data.inputSource) fetchInputPreview(node.data.inputSource);
+                      const src = node?.data.inputSource ?? "";
+                      if (src) {
+                        fetchInputPreview(src);
+                        fetchNodeFiles([src]);
+                      }
+                    } else if (key.startsWith("proc:")) {
+                      setInputPreview({ loading: false, content: "", error: "" });
+                      const nodeId = key.slice(5);
+                      const stepIdx = procStepIdx.get(nodeId) ?? 0;
+                      const step = pipeline?.steps[stepIdx];
+                      const agentId = step?.agent_id ?? "";
+                      const agent = agents?.find(a => a.id === agentId);
+                      const inputSources = (agent?.inputs ?? []).map(inp =>
+                        step?.input_overrides?.[inp.key] ?? inp.source
+                      ).filter(s => ["transcript","merged_transcript","notes","merged_notes"].includes(s));
+                      if (inputSources.length) fetchNodeFiles([...new Set(inputSources)]);
+                      else setNodeFileInfo({ loading: false, files: [] });
                     } else {
                       setInputPreview({ loading: false, content: "", error: "" });
+                      setNodeFileInfo({ loading: false, files: [] });
                     }
                   }}
                 />
@@ -866,7 +907,11 @@ export function PipelineSidePanel({
                 const node = canvasNodes.find(n => n.id === nodeId);
                 if (!node) return null;
 
-                const dismiss = () => { setFlowSelectedKey(null); setInputPreview({ loading: false, content: "", error: "" }); };
+                const dismiss = () => {
+                  setFlowSelectedKey(null);
+                  setInputPreview({ loading: false, content: "", error: "" });
+                  setNodeFileInfo({ loading: false, files: [] });
+                };
 
                 /* ── Input detail ── */
                 if (prefix === "input") {
@@ -882,8 +927,21 @@ export function PipelineSidePanel({
                         <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
                       </div>
                       <div className="flex-1 min-h-0 overflow-y-auto">
+                        {/* File IDs */}
+                        {nodeFileInfo.files.length > 0 && (
+                          <div className="px-3 pt-2 pb-1 space-y-1 border-b border-gray-800/60">
+                            {nodeFileInfo.files.map(f => (
+                              <div key={f.id} className="flex items-center gap-1.5 text-[10px]">
+                                <span className="text-gray-600 shrink-0">{f.provider}</span>
+                                <code className="flex-1 text-teal-400 font-mono truncate" title={f.provider_file_id}>{f.provider_file_id}</code>
+                                <span className="text-gray-700 shrink-0">{(f.chars / 1000).toFixed(1)}k chars</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {/* Content preview */}
                         {inputPreview.loading && <div className="p-3 flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>}
-                        {inputPreview.error && <p className="p-3 text-[11px] text-red-400">{inputPreview.error}</p>}
+                        {inputPreview.error && <p className="p-3 text-[11px] text-amber-500/80">{inputPreview.error}</p>}
                         {!inputPreview.loading && !inputPreview.error && inputPreview.content && (
                           <pre className="p-3 text-[10px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed">{inputPreview.content}</pre>
                         )}
@@ -903,14 +961,44 @@ export function PipelineSidePanel({
                   const hasContent = !!(st?.content);
                   const hasStream = !!(st?.stream);
                   const statusColor = status === "done" ? "text-green-400" : status === "cached" ? "text-amber-400" :
-                    status === "loading" ? "text-teal-400" : status === "error" ? "text-red-400" : "text-gray-500";
+                    status === "loading" ? "text-orange-400" : status === "error" ? "text-red-400" : "text-gray-500";
+                  const agentId = node.data.agentId ?? "";
+                  const agent = agents?.find(a => a.id === agentId);
+                  const model = agent?.model ?? node.data.label ?? "—";
+                  const pipelineStep = pipeline?.steps[stepIdx];
+                  const resolvedInputs = (agent?.inputs ?? []).map(inp => ({
+                    key: inp.key,
+                    source: pipelineStep?.input_overrides?.[inp.key] ?? inp.source,
+                  }));
                   return (
-                    <div className="shrink-0 border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "60%" }}>
+                    <div className="shrink-0 border-t border-gray-800 bg-gray-950/90 flex flex-col" style={{ maxHeight: "65%" }}>
                       <div className="px-3 py-2 flex items-center gap-2 border-b border-gray-800 shrink-0">
                         {status === "done" || status === "cached" ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" /> : <Bot className="w-3.5 h-3.5 text-indigo-400 shrink-0" />}
                         <span className="text-xs font-semibold text-gray-200 flex-1 truncate">{node.data.agentName || node.data.label}</span>
                         <span className={cn("text-[9px] shrink-0 font-medium", statusColor)}>{status}</span>
                         <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
+                      </div>
+                      {/* Meta row: model + inputs */}
+                      <div className="px-3 py-1.5 border-b border-gray-800/60 shrink-0 space-y-1">
+                        <div className="flex items-center gap-1.5 text-[10px]">
+                          <span className="text-gray-600">model</span>
+                          <code className="text-indigo-300 font-mono">{model}</code>
+                        </div>
+                        {resolvedInputs.map(inp => (
+                          <div key={inp.key} className="flex items-center gap-1.5 text-[10px]">
+                            <span className="text-gray-600">{inp.key}</span>
+                            <span className="text-cyan-400">{inp.source}</span>
+                          </div>
+                        ))}
+                        {/* File IDs for this agent's file-based inputs */}
+                        {nodeFileInfo.loading && <span className="text-[10px] text-gray-600">Loading file IDs…</span>}
+                        {nodeFileInfo.files.map(f => (
+                          <div key={f.id} className="flex items-center gap-1.5 text-[10px]">
+                            <span className="text-gray-600 shrink-0">{f.provider}/{f.source}</span>
+                            <code className="flex-1 text-teal-400 font-mono truncate" title={f.provider_file_id}>{f.provider_file_id}</code>
+                            <span className="text-gray-700 shrink-0">{(f.chars / 1000).toFixed(1)}k</span>
+                          </div>
+                        ))}
                       </div>
                       <div className="flex-1 min-h-0 overflow-y-auto">
                         {hasStream && (
