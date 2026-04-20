@@ -1422,35 +1422,65 @@ function PipelineCanvas() {
               </div>
             </div>
 
-            {/* Connected inputs — auto-derived from canvas connections */}
+            {/* Connected inputs — auto-derived from canvas connections (input + artifact + agent nodes) */}
             {(() => {
+              type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
               const connectedSources = edges
                 .filter(e => e.target === selectedNode.id)
-                .map(e => {
+                .map((e): CS | null => {
                   const src = nodes.find(n => n.id === e.source);
-                  if (!src || src.type !== "input") return null;
+                  if (!src) return null;
                   const srcData = src.data as PipelineNodeData;
-                  const srcMeta = INPUT_SOURCES.find(s => s.value === srcData.inputSource) ?? null;
-                  return { nodeId: src.id, source: srcData.inputSource, label: srcData.label as string, srcMeta };
+
+                  if (src.type === "input") {
+                    const srcMeta = INPUT_SOURCES.find(s => s.value === srcData.inputSource) ?? null;
+                    const IconComp = srcMeta?.icon ?? Zap;
+                    return {
+                      nodeId: src.id,
+                      typeLabel: srcMeta?.label ?? "Input",
+                      nodeLabel: srcData.label as string,
+                      icon: <IconComp className="w-3 h-3 shrink-0" />,
+                      badge: srcMeta?.badge ?? "bg-gray-700/50 text-gray-300 border-gray-600/50",
+                    };
+                  }
+
+                  if (src.type === "output") {
+                    const am = (ARTIFACT_META as Record<string, Meta>)[srcData.subType as string] ?? GENERIC_ARTIFACT_META;
+                    return {
+                      nodeId: src.id,
+                      typeLabel: am.label,
+                      nodeLabel: srcData.label as string,
+                      icon: am.icon,
+                      badge: `${am.color.replace("-700", "-900/40").replace("-800", "-900/30")} ${am.text} ${am.border}`,
+                    };
+                  }
+
+                  if (src.type === "processing") {
+                    return {
+                      nodeId: src.id,
+                      typeLabel: "Agent Output",
+                      nodeLabel: srcData.label as string,
+                      icon: <Bot className="w-3 h-3 shrink-0" />,
+                      badge: "bg-purple-900/50 text-purple-300 border-purple-700/50",
+                    };
+                  }
+
+                  return null;
                 })
-                .filter(Boolean) as { nodeId: string; source: string; label: string; srcMeta: typeof INPUT_SOURCES[number] | null }[];
+                .filter(Boolean) as CS[];
 
               if (connectedSources.length === 0) return null;
               return (
                 <div className="p-3 border-b border-gray-800">
                   <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Connected Inputs</p>
                   <div className="space-y-1">
-                    {connectedSources.map(cs => {
-                      const Icon = cs.srcMeta?.icon ?? Zap;
-                      const badge = cs.srcMeta?.badge ?? "bg-gray-700/50 text-gray-300 border-gray-600/50";
-                      return (
-                        <div key={cs.nodeId} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[10px] ${badge}`}>
-                          <Icon className="w-3 h-3 shrink-0" />
-                          <span className="font-medium">{cs.srcMeta?.label ?? "Input"}</span>
-                          <span className="opacity-60 truncate ml-auto">{cs.label}</span>
-                        </div>
-                      );
-                    })}
+                    {connectedSources.map(cs => (
+                      <div key={cs.nodeId} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[10px] ${cs.badge}`}>
+                        {cs.icon}
+                        <span className="font-medium">{cs.typeLabel}</span>
+                        <span className="opacity-60 truncate ml-auto">{cs.nodeLabel}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               );
