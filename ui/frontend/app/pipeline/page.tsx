@@ -63,7 +63,7 @@ const ARTIFACT_META: Record<ArtifactSubType, Meta> = {
 const CUSTOM_ARTIFACT_REGISTRY: Record<string, Meta> = {};
 
 const GENERIC_ARTIFACT_META: Meta = {
-  label: "Artifact", icon: <Star className="w-4 h-4" />, color: "bg-gray-600", border: "border-gray-500", text: "text-gray-400", desc: "Pipeline output artifact",
+  label: "Output", icon: <Star className="w-4 h-4" />, color: "bg-yellow-700", border: "border-yellow-600", text: "text-yellow-400", desc: "Pipeline output artifact — click to set type",
 };
 
 function getMeta(kind: NodeKind, subType: string): Meta {
@@ -485,9 +485,13 @@ function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boo
         <span className="text-sm font-bold text-white truncate">{data.label}</span>
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
-        <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
-          ◆ Artifact · {m.label}
-        </span>
+        {(ARTIFACT_META as Record<string, Meta>)[data.subType as string] ? (
+          <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
+            ◆ {m.label}
+          </span>
+        ) : (
+          <span className="text-[11px] text-gray-600 italic">tap to configure</span>
+        )}
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
@@ -674,8 +678,6 @@ function PipelineCanvas() {
   const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [addingArtifact, setAddingArtifact] = useState(false);
-  const [newArtifactName, setNewArtifactName] = useState("");
   // Pipeline save state
   const [pipelineName, setPipelineName]     = useState("");
   const [pipelineId,   setPipelineId]       = useState<string | null>(null);
@@ -932,23 +934,6 @@ function PipelineCanvas() {
     const next: NodeKind[] = [...stagesRef.current, "processing", "output"];
     setStages(next);
     stagesRef.current = next;
-  }
-
-  function handleAddCustomArtifact() {
-    const name = newArtifactName.trim();
-    if (!name) return;
-    const key = `custom_${name.toLowerCase().replace(/\s+/g, "_")}`;
-    CUSTOM_ARTIFACT_REGISTRY[key] = {
-      label: name,
-      icon: <Star className="w-4 h-4" />,
-      color: "bg-gray-600",
-      border: "border-gray-500",
-      text: "text-gray-400",
-      desc: "Custom artifact",
-    };
-    addNodeToCanvas("output", key);
-    setAddingArtifact(false);
-    setNewArtifactName("");
   }
 
   function handleClear() {
@@ -1603,6 +1588,45 @@ function PipelineCanvas() {
           </div>
         )}
 
+        {selKind === "output" && (
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Artifact Type</label>
+            <div className="grid grid-cols-2 gap-1">
+              {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
+                const req = ARTIFACT_REQUIRES[k];
+                const blocked = req != null && !nodes.some(
+                  n => n.type === "output" && n.id !== selectedNode.id && (n.data as PipelineNodeData).subType === req
+                );
+                const isSel = selData.subType === k;
+                if (blocked) {
+                  return (
+                    <div key={k} title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
+                      className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-gray-700/30 bg-gray-800/20 opacity-35 cursor-not-allowed">
+                      <span className={`p-0.5 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-medium text-gray-500 truncate">{m.label}</p>
+                        <p className="text-[9px] text-gray-600 leading-tight">Needs {ARTIFACT_META[req!].label}</p>
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <button key={k}
+                    onClick={() => updateNodeData(selectedNode.id, { subType: k, label: m.label })}
+                    className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left transition-colors
+                      ${isSel ? `${m.border} bg-gray-800` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 text-gray-400"}`}>
+                    <span className={`p-0.5 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                    <div className="min-w-0 flex-1">
+                      <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : ""}`}>{m.label}</p>
+                    </div>
+                    {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
 
         <button onClick={() => deleteNode(selectedNode.id)}
@@ -1754,57 +1778,7 @@ function PipelineCanvas() {
             <div>
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">Artifacts</p>
               <div className="space-y-1">
-                {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
-                  const req     = ARTIFACT_REQUIRES[k];
-                  const blocked = req != null && !nodes.some(
-                    n => n.type === "output" && (n.data as PipelineNodeData).subType === req
-                  );
-                  return blocked ? (
-                    <div key={k}
-                      title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
-                      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-not-allowed opacity-40 select-none ${m.border} bg-gray-900/60`}>
-                      <span className={`p-1 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
-                      <div className="min-w-0 flex-1">
-                        <span className={`text-[11px] font-semibold ${m.text} leading-tight block`}>{m.label}</span>
-                        <span className="text-[9px] text-gray-600 leading-tight block">Needs {ARTIFACT_META[req!].label}</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
-                  );
-                })}
-                {Object.entries(CUSTOM_ARTIFACT_REGISTRY).map(([k, m]) => (
-                  <PaletteItem key={k} kind="output" subType={k} meta={m} onAdd={addNodeToCanvas} />
-                ))}
-
-                {addingArtifact ? (
-                  <div className="flex gap-1.5 mt-1">
-                    <input
-                      autoFocus
-                      value={newArtifactName}
-                      onChange={e => setNewArtifactName(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === "Enter") handleAddCustomArtifact();
-                        if (e.key === "Escape") { setAddingArtifact(false); setNewArtifactName(""); }
-                      }}
-                      placeholder="Artifact name…"
-                      className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
-                    />
-                    <button onClick={handleAddCustomArtifact}
-                      className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors">
-                      Add
-                    </button>
-                    <button onClick={() => { setAddingArtifact(false); setNewArtifactName(""); }}
-                      className="px-1.5 py-1 rounded-lg border border-gray-700 text-gray-500 hover:text-gray-300 text-xs transition-colors">
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <button onClick={() => setAddingArtifact(true)}
-                    className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-dashed border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 text-[11px] transition-colors mt-1">
-                    <Plus className="w-3 h-3" /> Add Artifact
-                  </button>
-                )}
+                <PaletteItem kind="output" subType="" meta={GENERIC_ARTIFACT_META} onAdd={addNodeToCanvas} />
               </div>
             </div>
           </div>
