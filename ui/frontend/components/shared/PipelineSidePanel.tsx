@@ -97,13 +97,14 @@ interface CanvasNode {
 // ── Mini pipeline canvas ─────────────────────────────────────────────────────
 
 function MiniCanvas({
-  stages, nodes, edges, procStepIdx, outputProcId, flowSteps, selectedKey, onNodeClick,
+  stages, nodes, edges, procStepIdx, outputProcId, inputProcIds, flowSteps, selectedKey, onNodeClick,
 }: {
   stages: string[];
   nodes: CanvasNode[];
   edges: { id: string; source: string; target: string }[];
   procStepIdx: Map<string, number>;
   outputProcId: Map<string, string>;
+  inputProcIds: Map<string, string[]>;
   flowSteps: StepState[];
   selectedKey: string | null;
   onNodeClick: (key: string) => void;
@@ -144,6 +145,20 @@ function MiniCanvas({
       const i = pid ? procStepIdx.get(pid) : undefined;
       return i != null ? (flowSteps[i]?.status ?? "pending") : "pending";
     }
+    if (type === "input") {
+      const procIds = inputProcIds.get(nodeId) ?? [];
+      if (procIds.length === 0) return "pending";
+      const statuses = procIds.map(pid => {
+        const i = procStepIdx.get(pid);
+        return (i != null ? (flowSteps[i]?.status ?? "pending") : "pending") as StepStatus;
+      });
+      if (statuses.some(s => s === "loading")) return "loading";
+      if (statuses.some(s => s === "error"))   return "error";
+      if (statuses.some(s => s === "done"))    return "done";
+      if (statuses.every(s => s === "cached")) return "cached";
+      if (statuses.some(s => s === "cached"))  return "cached";
+      return "pending";
+    }
     return "pending";
   }
 
@@ -151,16 +166,14 @@ function MiniCanvas({
     return n.type === "processing" ? `proc:${n.id}` : n.type === "output" ? `out:${n.id}` : `input:${n.id}`;
   }
 
-  function nstyle(n: CanvasNode, st: StepStatus): { bg: string; border: string; text: string } {
-    const done = st === "done" || st === "cached";
-    const busy = st === "loading";
-    const err  = st === "error";
-    if (n.type === "input")      return { bg: "#0d1f3c",  border: "#1e40af", text: "#93c5fd" };
-    if (done)                    return { bg: "#052e16",  border: "#15803d", text: "#86efac" };
-    if (busy)                    return { bg: "#042f2e",  border: "#0f766e", text: "#5eead4" };
-    if (err)                     return { bg: "#2d0a0a",  border: "#b91c1c", text: "#fca5a5" };
-    if (n.type === "processing") return { bg: "#0f0e1f",  border: "#3730a3", text: "#a5b4fc" };
-    return                              { bg: "#150b2e",  border: "#6d28d9", text: "#c4b5fd" };
+  function nstyle(n: CanvasNode, st: StepStatus): { bg: string; border: string; text: string; glow: string } {
+    if (st === "done")    return { bg: "#052e16", border: "#16a34a", text: "#86efac", glow: "0 0 10px rgba(34,197,94,0.35)" };
+    if (st === "cached")  return { bg: "#1c1400", border: "#ca8a04", text: "#fde68a", glow: "0 0 10px rgba(234,179,8,0.30)" };
+    if (st === "loading") return { bg: "#1c0a00", border: "#ea580c", text: "#fed7aa", glow: "0 0 12px rgba(249,115,22,0.45)" };
+    if (st === "error")   return { bg: "#2d0a0a", border: "#b91c1c", text: "#fca5a5", glow: "0 0 10px rgba(239,68,68,0.30)" };
+    if (n.type === "input")      return { bg: "#0d1f3c", border: "#1e40af", text: "#93c5fd", glow: "" };
+    if (n.type === "processing") return { bg: "#0f0e1f", border: "#3730a3", text: "#a5b4fc", glow: "" };
+    return                              { bg: "#150b2e", border: "#6d28d9", text: "#c4b5fd", glow: "" };
   }
 
   return (
@@ -192,8 +205,7 @@ function MiniCanvas({
             const tx = nx(t) + nw / 2, ty = ny(t);
             const cy = (sy + ty) / 2;
             const st = stepSt(s.id, s.type);
-            const done = st === "done" || st === "cached";
-            const stroke = done ? "#22c55e" : st === "loading" ? "#14b8a6" : "#374151";
+            const stroke = st === "done" ? "#22c55e" : st === "cached" ? "#ca8a04" : st === "loading" ? "#ea580c" : st === "error" ? "#b91c1c" : "#374151";
             const aw = Math.max(3, 4.5 * scale);
             return (
               <g key={e.id}>
@@ -212,7 +224,6 @@ function MiniCanvas({
           const c   = nstyle(n, st);
           const k   = nkey(n);
           const sel = selectedKey === k;
-          const done = st === "done" || st === "cached";
           const lbl = n.type === "input"
             ? (SOURCE_META[n.data.inputSource ?? ""]?.label ?? n.data.label)
             : (n.data.agentName || n.data.label);
@@ -223,18 +234,19 @@ function MiniCanvas({
               style={{
                 left: nx(n), top: ny(n), width: nw, height: nh,
                 background: c.bg,
-                border: `${Math.max(1, 1.2 * scale)}px solid ${c.border}`,
+                border: `${st !== "pending" ? Math.max(1.5, 2 * scale) : Math.max(1, 1.2 * scale)}px solid ${c.border}`,
                 outline: sel ? `2px solid ${c.border}` : undefined,
                 outlineOffset: sel ? 2 : undefined,
-                boxShadow: done ? `0 0 8px rgba(34,197,94,0.15)` : undefined,
+                boxShadow: c.glow || undefined,
               }}
             >
               <div className="flex items-center h-full overflow-hidden"
                 style={{ padding: `2px ${Math.max(3, 7 * scale)}px`, gap: Math.max(2, 4 * scale) }}>
-                {n.type !== "input" && (
+                {(n.type !== "input" || st !== "pending") && (
                   <span className="shrink-0" style={{ fontSize: fs, lineHeight: 1 }}>
-                    {done    ? <span style={{ color: "#22c55e" }}>✓</span> :
-                     st === "loading" ? <span style={{ color: "#14b8a6" }}>⟳</span> :
+                    {st === "done"    ? <span style={{ color: "#22c55e" }}>✓</span> :
+                     st === "cached"  ? <span style={{ color: "#eab308" }}>◎</span> :
+                     st === "loading" ? <span style={{ color: "#f97316" }}>⟳</span> :
                      st === "error"   ? <span style={{ color: "#ef4444" }}>✕</span> :
                                         <span style={{ color: c.border, opacity: 0.5 }}>●</span>}
                   </span>
@@ -460,6 +472,21 @@ export function PipelineSidePanel({
     const procSet = new Set(canvasNodes.filter(n => n.type === "processing").map(n => n.id));
     for (const e of pipeline.canvas.edges) {
       if (procSet.has(e.source)) map.set(e.target, e.source);
+    }
+    return map;
+  }, [canvasNodes, pipeline]);
+
+  // Input node id → connected processing node ids (to derive input status)
+  const inputProcIds = useMemo(() => {
+    const map = new Map<string, string[]>();
+    if (!canvasNodes || !pipeline?.canvas?.edges) return map;
+    const inputSet = new Set(canvasNodes.filter(n => n.type === "input").map(n => n.id));
+    for (const e of pipeline.canvas.edges) {
+      if (inputSet.has(e.source)) {
+        const list = map.get(e.source) ?? [];
+        list.push(e.target);
+        map.set(e.source, list);
+      }
     }
     return map;
   }, [canvasNodes, pipeline]);
@@ -785,6 +812,7 @@ export function PipelineSidePanel({
                   edges={pipeline.canvas.edges}
                   procStepIdx={procStepIdx}
                   outputProcId={outputProcId}
+                  inputProcIds={inputProcIds}
                   flowSteps={flowSteps}
                   selectedKey={flowSelectedKey}
                   onNodeClick={key => {
