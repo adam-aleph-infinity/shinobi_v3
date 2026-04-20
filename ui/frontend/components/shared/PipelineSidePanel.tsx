@@ -124,8 +124,11 @@ function MiniCanvas({
   const SLEEVE_H = 180, Y_INIT = 20, NW = 200, NH = 52;
   const minX = Math.min(...nodes.map(n => n.position.x));
   const maxX = Math.max(...nodes.map(n => n.position.x)) + NW;
-  const scale = Math.max(0.18, (cw - 8) / (maxX - minX));
-  const totalH = (Y_INIT + stages.length * SLEEVE_H) * scale;
+  const totalH_unscaled = Y_INIT + stages.length * SLEEVE_H;
+  const scaleByW = (cw - 8) / (maxX - minX);
+  const scaleByH = 190 / totalH_unscaled;
+  const scale = Math.max(0.12, Math.min(scaleByW, scaleByH));
+  const totalH = totalH_unscaled * scale;
   const nw = NW * scale, nh = NH * scale;
   const fs = Math.max(7, Math.round(10 * scale));
 
