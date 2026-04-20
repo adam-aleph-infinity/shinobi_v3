@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,6 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useResize } from "@/lib/useResize";
 import { DragHandle } from "@/components/shared/DragHandle";
+import { useAppCtx } from "@/lib/app-context";
 
 const fetcher = (url: string) =>
   fetch(url).then(r => {
@@ -37,14 +38,21 @@ interface Note {
   content_md: string; score_json?: unknown; model: string; created_at: string;
 }
 
-type ArtifactKind = "merged_transcript" | "persona" | "persona_score" | "notes_rollup" | "note";
+type ArtifactKind =
+  | "merged_transcript"
+  | "persona"
+  | "persona_score"
+  | "notes_rollup"
+  | "note"
+  | "compliance_note";
 
 type ArtifactItem =
   | { kind: "merged_transcript"; id: "merged_transcript"; date: string; chars: number; label: string; data: { content: string } }
-  | { kind: "persona";       id: string; date: string; chars: number; label: string; data: Persona }
-  | { kind: "persona_score"; id: string; date: string; chars: number; label: string; data: Persona }
-  | { kind: "notes_rollup";  id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
-  | { kind: "note";          id: string; date: string; chars: number; label: string; data: Note; hasCompliance: boolean };
+  | { kind: "persona";           id: string; date: string; chars: number; label: string; data: Persona }
+  | { kind: "persona_score";     id: string; date: string; chars: number; label: string; data: Persona }
+  | { kind: "notes_rollup";      id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
+  | { kind: "note";              id: string; date: string; chars: number; label: string; data: Note }
+  | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
 
@@ -52,11 +60,12 @@ const ARTIFACT_TYPE_META: Record<ArtifactKind, {
   label: string; icon: React.ComponentType<{ className?: string }>;
   bg: string; text: string; border: string; dot: string;
 }> = {
-  merged_transcript: { label: "Merged Transcript", icon: FileText,   bg: "bg-cyan-900/40",   text: "text-cyan-300",    border: "border-cyan-700/40",    dot: "bg-cyan-500"    },
-  persona:           { label: "Personas",           icon: User,       bg: "bg-violet-900/50", text: "text-violet-300",  border: "border-violet-700/40",  dot: "bg-violet-500"  },
-  persona_score:     { label: "Persona Scores",     icon: BadgeCheck, bg: "bg-violet-900/30", text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
-  notes_rollup:      { label: "Merged Notes",       icon: Layers,     bg: "bg-amber-900/40",  text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
-  note:              { label: "Call Notes",         icon: StickyNote, bg: "bg-teal-900/40",   text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
+  merged_transcript: { label: "Merged Transcript",  icon: FileText,   bg: "bg-cyan-900/40",    text: "text-cyan-300",    border: "border-cyan-700/40",    dot: "bg-cyan-500"    },
+  persona:           { label: "Personas",            icon: User,       bg: "bg-violet-900/50",  text: "text-violet-300",  border: "border-violet-700/40",  dot: "bg-violet-500"  },
+  persona_score:     { label: "Persona Scores",      icon: BadgeCheck, bg: "bg-violet-900/30",  text: "text-violet-400",  border: "border-violet-700/30",  dot: "bg-violet-400"  },
+  notes_rollup:      { label: "Merged Notes",        icon: Layers,     bg: "bg-amber-900/40",   text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
+  note:              { label: "Call Notes",          icon: StickyNote, bg: "bg-teal-900/40",    text: "text-teal-300",    border: "border-teal-700/40",    dot: "bg-teal-500"    },
+  compliance_note:   { label: "Compliance Notes",    icon: ShieldCheck, bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40", dot: "bg-emerald-500" },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -209,14 +218,12 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-white truncate">
-              {item.hasCompliance ? "Compliance Note" : "Call Note"} · {item.data.call_id.slice(-12)}
-            </p>
+            <p className="text-sm font-semibold text-white truncate">Call Note · {item.data.call_id.slice(-12)}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <CopyBtn text={md} />
         </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+        <div className="flex-1 overflow-y-auto p-5">
           {md ? (
             <div className="prose prose-invert prose-sm max-w-none">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
@@ -224,13 +231,56 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
           ) : (
             <p className="text-xs text-gray-600 italic">No content</p>
           )}
-          {item.data.score_json != null && (
-            <details className="border border-gray-800 rounded-lg overflow-hidden">
-              <summary className="px-3 py-2 text-[10px] text-gray-500 cursor-pointer bg-gray-900/60">Compliance Score</summary>
-              <pre className="p-3 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
-                {prettyJson(item.data.score_json)}
-              </pre>
-            </details>
+        </div>
+      </div>
+    );
+  }
+
+  if (item.kind === "compliance_note") {
+    const md   = item.data.content_md ?? "";
+    const raw  = prettyJson(item.data.score_json);
+    const parsed = (() => {
+      try { return typeof item.data.score_json === "string" ? JSON.parse(item.data.score_json) : item.data.score_json; }
+      catch { return null; }
+    })();
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white truncate">Compliance Note · {item.data.call_id.slice(-12)}</p>
+            <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
+          </div>
+          <CopyBtn text={md + (raw ? "\n\n" + raw : "")} />
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {/* Compliance score — shown first as primary artifact */}
+          {parsed && typeof parsed === "object" && (
+            <div>
+              <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
+              <div className="space-y-1.5">
+                {Object.entries(parsed as Record<string, unknown>).map(([k, v]) => (
+                  <div key={k} className="flex gap-3 text-xs border-b border-gray-800/60 pb-1.5 last:border-0">
+                    <span className="text-gray-500 w-48 shrink-0 font-medium">{k}</span>
+                    <span className="text-gray-300 break-words">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {!parsed && raw && (
+            <div>
+              <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
+              <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words">{raw}</pre>
+            </div>
+          )}
+          {/* Note content */}
+          {md && (
+            <div>
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Note Content</p>
+              <div className="prose prose-invert prose-sm max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -243,10 +293,7 @@ function ContentViewer({ item }: { item: ArtifactItem }) {
 // ── Item row ──────────────────────────────────────────────────────────────────
 
 function ItemRow({ item, selected, onClick }: { item: ArtifactItem; selected: boolean; onClick: () => void }) {
-  const isCompliance = item.kind === "note" && item.hasCompliance;
-  const m = isCompliance
-    ? { bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-700/40", icon: ShieldCheck }
-    : ARTIFACT_TYPE_META[item.kind];
+  const m = ARTIFACT_TYPE_META[item.kind];
   const Icon = m.icon;
   return (
     <button onClick={onClick}
@@ -285,10 +332,10 @@ function StatusDots({ salesAgent, customer }: { salesAgent: string; customer: st
     persona:    (personas ?? []).length > 0,
     score:      (personas ?? []).some(p => p.score_json != null),
     rollup:     !!rollup && !rollupErr,
-    notes:      (notes ?? []).length > 0,
+    notes:      (notes ?? []).some(n => n.score_json == null),
     compliance: (notes ?? []).some(n => n.score_json != null),
   };
-  if (!has.mt && !has.persona && !has.rollup && !has.notes) return null;
+  if (!has.mt && !has.persona && !has.rollup && !has.notes && !has.compliance) return null;
   return (
     <div className="flex items-center gap-0.5 shrink-0 ml-1">
       {has.mt         && <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"    title="Merged Transcript" />}
@@ -296,7 +343,7 @@ function StatusDots({ salesAgent, customer }: { salesAgent: string; customer: st
       {has.score      && <span className="w-1.5 h-1.5 rounded-full bg-violet-400"  title="Score" />}
       {has.rollup     && <span className="w-1.5 h-1.5 rounded-full bg-amber-500"   title="Merged Notes" />}
       {has.notes      && <span className="w-1.5 h-1.5 rounded-full bg-teal-500"    title="Call Notes" />}
-      {has.compliance && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title="Compliance" />}
+      {has.compliance && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title="Compliance Notes" />}
     </div>
   );
 }
@@ -316,6 +363,17 @@ export default function ArtifactsPage() {
   const [agentSearch,      setAgentSearch]      = useState("");
   const [customerSearch,   setCustomerSearch]   = useState("");
 
+  // Pre-populate from global context (ContextBar breadcrumb)
+  const { salesAgent: ctxAgent, customer: ctxCustomer } = useAppCtx();
+  const [ctxApplied, setCtxApplied] = useState(false);
+  useEffect(() => {
+    if (!ctxApplied && ctxAgent) {
+      setSelectedAgent(ctxAgent);
+      if (ctxCustomer) setSelectedCustomer(ctxCustomer);
+      setCtxApplied(true);
+    }
+  }, [ctxAgent, ctxCustomer, ctxApplied]);
+
   const { data: navAgents }    = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
   const { data: navCustomers } = useSWR<{ customer: string; call_count: number }[]>(
     selectedAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(selectedAgent)}` : null, fetcher,
@@ -334,14 +392,16 @@ export default function ArtifactsPage() {
   const { data: rollup, isLoading: loadR, error: rollupErr } = useSWR<Record<string, unknown>>(
     pairQs ? `/api/notes/rollup?${pairQs}` : null, fetcher,
   );
+  // Merged transcript loads independently — doesn't block the type panel
   const mtUrl = pairQs
     ? `/api/universal-agents/raw-input?source=merged_transcript&sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}`
     : null;
-  const { data: mergedTranscript, isLoading: loadMT } = useSWR<{ content: string; chars: number } | null>(
+  const { data: mergedTranscript } = useSWR<{ content: string; chars: number } | null>(
     mtUrl, fetcherOptional,
   );
 
-  const isLoadingPair = loadP || loadN || loadR || loadMT;
+  // personas/notes/rollup loading blocks Panel 3; merged transcript doesn't
+  const isLoadingPair = loadP || loadN || loadR;
 
   // Build items per kind
   const itemsByKind: Record<ArtifactKind, ArtifactItem[]> = {
@@ -350,6 +410,7 @@ export default function ArtifactsPage() {
     persona_score: [],
     notes_rollup: [],
     note: [],
+    compliance_note: [],
   };
 
   if (mergedTranscript != null) {
@@ -392,14 +453,23 @@ export default function ArtifactsPage() {
     });
   }
 
+  // Split call notes into regular and compliance
   (notes ?? []).sort((a, b) => b.created_at.localeCompare(a.created_at)).forEach(n => {
-    itemsByKind.note.push({
-      kind: "note", id: n.id, date: n.created_at,
-      chars: n.content_md?.length ?? 0,
-      label: `Call Note · ${n.call_id.slice(-12)}`,
-      data: n,
-      hasCompliance: n.score_json != null,
-    });
+    if (n.score_json != null) {
+      itemsByKind.compliance_note.push({
+        kind: "compliance_note", id: n.id, date: n.created_at,
+        chars: n.content_md?.length ?? 0,
+        label: `Compliance Note · ${n.call_id.slice(-12)}`,
+        data: n,
+      });
+    } else {
+      itemsByKind.note.push({
+        kind: "note", id: n.id, date: n.created_at,
+        chars: n.content_md?.length ?? 0,
+        label: `Call Note · ${n.call_id.slice(-12)}`,
+        data: n,
+      });
+    }
   });
 
   const typeGroups = (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
@@ -421,7 +491,7 @@ export default function ArtifactsPage() {
   }
 
   return (
-    <div className="min-h-[calc(100vh-5.25rem)] flex -m-6 overflow-hidden">
+    <div className="h-[calc(100vh-5.25rem)] flex overflow-hidden">
 
       {/* ── Panel 1: Agents ─────────────────────────────────────── */}
       <div className="flex shrink-0 overflow-hidden" style={{ width: agentW }}>
