@@ -42,6 +42,7 @@ type CallRunStatus = "queued"  | "running" | "cached" | "done" | "error";
 interface StepState {
   agentName: string; status: StepStatus;
   content: string; stream: string; expanded: boolean;
+  errorMsg?: string;
 }
 interface CallResult {
   callId: string; date: string;
@@ -302,6 +303,7 @@ export function PipelineSidePanel({
   const [nodeFileInfo, setNodeFileInfo] = useState<{ loading: boolean; files: UploadedFileInfo[] }>(
     { loading: false, files: [] }
   );
+  const [logLines, setLogLines] = useState<{ ts: string; text: string; level: string }[]>([]);
   const [flowCallIdx, setFlowCallIdx] = useState(0);
 
   // ── per_pair state ───────────────────────────────────────────────────────────
@@ -340,6 +342,26 @@ export function PipelineSidePanel({
       setCallResults([]); setCallsRunError(""); setCallsLoaded(false);
     }
   }, [contextKey, running, callsRunning]);
+
+  // ── Live backend log tail ────────────────────────────────────────────────────
+  const anyRunning = running || callsRunning;
+  const logEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!anyRunning) return;
+    setLogLines([]);
+    const es = new EventSource("/api/logs/stream");
+    es.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (d.heartbeat) return;
+        setLogLines(prev => [...prev.slice(-49), d]);
+      } catch { /* ignore malformed */ }
+    };
+    return () => es.close();
+  }, [anyRunning]);
+  useEffect(() => {
+    if (logLines.length) logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logLines]);
 
   // ── per_pair: fetch cached results ──────────────────────────────────────────
   const cacheUrl = !isPerCall && activePipelineId && hasPair
@@ -629,7 +651,7 @@ export function PipelineSidePanel({
           if (type === "step_cached") setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached",  content: evt.content } : st));
           if (type === "stream")      setSteps(p => { const n = p.map((st, i) => i === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
           if (type === "step_done")   { hadLLM = true; setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "" } : st)); }
-          if (type === "error" && evt.step != null) setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error" } : st));
+          if (type === "error" && evt.step != null) setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st));
           if (type === "pipeline_done") { setDone(true); mutateCache(); }
         },
       );
@@ -674,7 +696,7 @@ export function PipelineSidePanel({
           if (type === "step_cached") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "cached", content: evt.content } : st) } : cr));
           if (type === "stream")      setCallResults(p => { const n = p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st) } : cr); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
           if (type === "step_done")   { hadLLM = true; setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "done", content: evt.content, stream: "" } : st) } : cr)); }
-          if (type === "error" && evt.step != null) setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === evt.step ? { ...st, status: "error" } : st) } : cr));
+          if (type === "error" && evt.step != null) setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st) } : cr));
           if (type === "pipeline_done") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, done: true, runStatus: hadLLM ? "done" : "cached", expanded: hadLLM } : cr));
         });
       } catch (e: any) {
@@ -704,8 +726,6 @@ export function PipelineSidePanel({
       }
     }
   }
-
-  const anyRunning = running || callsRunning;
 
   // ── per_call progress stats ───────────────────────────────────────────────────
   const callStats = callResults.length > 0 ? (() => {
@@ -899,6 +919,22 @@ export function PipelineSidePanel({
                 />
               </div>
 
+              {/* ── Live log tail ── */}
+              {logLines.length > 0 && (
+                <div className="shrink-0 border-t border-gray-800 bg-black/60 max-h-28 overflow-y-auto">
+                  {logLines.map((l, i) => (
+                    <div key={i} className={cn(
+                      "px-2 py-px font-mono text-[9px] leading-relaxed whitespace-pre-wrap break-all",
+                      l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-400" :
+                      l.level === "stage" ? "text-teal-400" : l.level === "llm" ? "text-indigo-300" : "text-gray-500"
+                    )}>
+                      <span className="text-gray-700 mr-1">{l.ts}</span>{l.text}
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              )}
+
               {/* ── Detail panel (shown when a node is selected) ── */}
               {flowSelectedKey && (() => {
                 const colonIdx = flowSelectedKey.indexOf(":");
@@ -1006,9 +1042,21 @@ export function PipelineSidePanel({
                             {st!.stream}<div ref={streamEndRef} />
                           </pre>
                         )}
-                        {!hasStream && (status === "pending" || status === "error") && (
+                        {!hasStream && status === "error" && (
+                          <div className="p-3 space-y-2">
+                            {st?.errorMsg && (
+                              <pre className="text-[10px] text-red-400 font-mono whitespace-pre-wrap break-words bg-red-950/20 rounded p-2 border border-red-900/40">{st.errorMsg}</pre>
+                            )}
+                            <button onClick={() => { if (isPerCall) runAllCalls(true); else run(true); }}
+                              disabled={anyRunning || !contextOk}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-900/60 hover:bg-orange-800 border border-orange-700/50 disabled:opacity-50 text-orange-300 text-[11px] font-medium rounded-lg transition-colors">
+                              <Play className="w-3 h-3" /> Force Re-run
+                            </button>
+                          </div>
+                        )}
+                        {!hasStream && status === "pending" && (
                           <div className="p-3 flex flex-col items-center gap-2">
-                            <p className="text-[11px] text-gray-600">{status === "error" ? "Step failed" : "Not yet executed"}</p>
+                            <p className="text-[11px] text-gray-600">Not yet executed</p>
                             <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
                               disabled={anyRunning || !contextOk}
                               className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
