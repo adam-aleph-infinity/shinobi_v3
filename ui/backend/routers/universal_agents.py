@@ -590,6 +590,22 @@ def _get_or_upload_openai(
     except Exception as exc:
         log_buffer.emit(f"[FILE] ⚠ {provider} upload failed ({source} · {cid_short}): {exc} — tracking locally as {file_id}")
 
+    # If uploading a user_data file, delete any stale assistants-purpose records for
+    # the same content so they don't appear as duplicates in the Provider Files view.
+    if purpose == "user_data":
+        try:
+            stale = db.exec(
+                select(UF).where(
+                    UF.provider == provider,
+                    UF.content_hash == chash,
+                    UF.provider_file_uri != "user_data",
+                )
+            ).all()
+            for s in stale:
+                db.delete(s)
+        except Exception:
+            pass
+
     record = UF(
         id=str(uuid.uuid4()),
         provider=provider,
