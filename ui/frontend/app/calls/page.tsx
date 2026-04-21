@@ -447,6 +447,10 @@ export default function CallsPage() {
     });
   }
 
+  function selectAll() {
+    setCheckedCallIds(new Set(calls.map(c => c.call_id)));
+  }
+
   function selectUntranscribed() {
     const ids = calls
       .filter(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path)
@@ -598,17 +602,26 @@ export default function CallsPage() {
               {calls.length} calls · {calls.filter(c => c.tx?.has_llm_smoothed || c.tx?.has_llm_voted).length} transcribed
             </p>
           )}
-          {calls.some(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path) && (
+          {calls.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                onClick={selectUntranscribed}
+                onClick={checkedCallIds.size === calls.length ? () => setCheckedCallIds(new Set()) : selectAll}
                 className="text-[10px] text-gray-500 hover:text-gray-300 underline transition-colors"
               >
-                Select untranscribed
+                {checkedCallIds.size === calls.length ? "Deselect all" : "Select all"}
               </button>
+              {calls.some(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path) && (
+                <button
+                  onClick={selectUntranscribed}
+                  className="text-[10px] text-gray-500 hover:text-gray-300 underline transition-colors"
+                >
+                  Select untranscribed
+                </button>
+              )}
               {checkedCallIds.size > 0 && (
                 <>
                   <span className="text-[10px] text-gray-700">·</span>
+                  <span className="text-[10px] text-gray-600">{checkedCallIds.size} selected</span>
                   <button
                     onClick={handleBatchTranscribe}
                     disabled={batchTranscribing}
