@@ -15,7 +15,7 @@ from sqlalchemy import text as _sql_text
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
-from ui.backend.database import get_session
+from ui.backend.database import get_session, engine as _db_engine
 from ui.backend.services import log_buffer
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -241,16 +241,16 @@ async def run_pipeline(
         prev_content = ""
 
         def save_steps():
-            """Persist current step states via raw SQL UPDATE — avoids ORM expiry issues.
-            Rolls back first to clear any failed-transaction state left by a prior commit."""
+            """Persist current step states via a fresh DB session — fully isolated from
+            the main request session so ORM expiry / failed-transaction state on `db`
+            can never silently prevent the write."""
             try:
-                try: db.rollback()
-                except Exception: pass
-                db.execute(
-                    _sql_text("UPDATE pipeline_run SET steps_json = :steps_json WHERE id = :id"),
-                    {"steps_json": json.dumps(run_steps), "id": run_id},
-                )
-                db.commit()
+                with Session(_db_engine) as _s:
+                    _s.execute(
+                        _sql_text("UPDATE pipeline_run SET steps_json = :steps_json WHERE id = :id"),
+                        {"steps_json": json.dumps(run_steps), "id": run_id},
+                    )
+                    _s.commit()
             except Exception:
                 pass
 
@@ -495,22 +495,21 @@ async def run_pipeline(
                     {"ts": l.ts, "text": l.text, "level": l.level}
                     for l in log_buffer.get_after(start_seq)
                 ]
-                try: db.rollback()
-                except Exception: pass
-                db.execute(
-                    _sql_text(
-                        "UPDATE pipeline_run SET finished_at = :finished_at, status = :status,"
-                        " steps_json = :steps_json, log_json = :log_json WHERE id = :id"
-                    ),
-                    {
-                        "finished_at": datetime.utcnow().isoformat(),
-                        "status": run_final_status,
-                        "steps_json": json.dumps(run_steps),
-                        "log_json": json.dumps(log_lines[-200:]),
-                        "id": run_id,
-                    },
-                )
-                db.commit()
+                with Session(_db_engine) as _s:
+                    _s.execute(
+                        _sql_text(
+                            "UPDATE pipeline_run SET finished_at = :finished_at, status = :status,"
+                            " steps_json = :steps_json, log_json = :log_json WHERE id = :id"
+                        ),
+                        {
+                            "finished_at": datetime.utcnow().isoformat(),
+                            "status": run_final_status,
+                            "steps_json": json.dumps(run_steps),
+                            "log_json": json.dumps(log_lines[-200:]),
+                            "id": run_id,
+                        },
+                    )
+                    _s.commit()
             except Exception:
                 pass
 
