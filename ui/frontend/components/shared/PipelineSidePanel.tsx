@@ -414,6 +414,11 @@ export function PipelineSidePanel({
     })();
     const hasProgress = runSteps.some((s: any) => s.status && s.status !== "pending");
 
+    // For non-running restores: "loading" in the DB means a step was interrupted —
+    // never display as orange when no run is active. Show "error" instead.
+    const fixStatus = (s: string): StepStatus =>
+      s === "loading" ? "error" : s as StepStatus;
+
     // While a run is in progress, keep updating steps from the polled run record.
     // Guard !done: after the frontend finishes a run (done=true), skip DB polling —
     // the final SQL UPDATE in `finally` may not have committed yet, so the DB can
@@ -447,7 +452,7 @@ export function PipelineSidePanel({
         const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
         return {
           agentName: s.agent_name || a?.name || "",
-          status: s.status as StepStatus,
+          status: fixStatus(s.status),
           content: s.content || "",
           stream: "",
           expanded: false,
@@ -472,7 +477,7 @@ export function PipelineSidePanel({
         const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
         return {
           agentName: s.agent_name || a?.name || "",
-          status: s.status as StepStatus,
+          status: fixStatus(s.status),
           content: s.content || "",
           stream: "",
           expanded: false,

@@ -241,8 +241,11 @@ async def run_pipeline(
         prev_content = ""
 
         def save_steps():
-            """Persist current step states via raw SQL UPDATE — avoids ORM expiry issues."""
+            """Persist current step states via raw SQL UPDATE — avoids ORM expiry issues.
+            Rolls back first to clear any failed-transaction state left by a prior commit."""
             try:
+                try: db.rollback()
+                except Exception: pass
                 db.execute(
                     _sql_text("UPDATE pipeline_run SET steps_json = :steps_json WHERE id = :id"),
                     {"steps_json": json.dumps(run_steps), "id": run_id},
@@ -492,6 +495,8 @@ async def run_pipeline(
                     {"ts": l.ts, "text": l.text, "level": l.level}
                     for l in log_buffer.get_after(start_seq)
                 ]
+                try: db.rollback()
+                except Exception: pass
                 db.execute(
                     _sql_text(
                         "UPDATE pipeline_run SET finished_at = :finished_at, status = :status,"
