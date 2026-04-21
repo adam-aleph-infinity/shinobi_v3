@@ -118,7 +118,7 @@ function utcHmsToIsrael(hms: string): string {
 // ── Mini pipeline canvas ─────────────────────────────────────────────────────
 
 function MiniCanvas({
-  stages, nodes, edges, procStepIdx, outputProcId, inputProcIds, flowSteps, selectedKey, onNodeClick,
+  stages, nodes, edges, procStepIdx, outputProcId, inputProcIds, flowSteps, stepInputStatus, selectedKey, onNodeClick,
 }: {
   stages: string[];
   nodes: CanvasNode[];
@@ -127,6 +127,7 @@ function MiniCanvas({
   outputProcId: Map<string, string>;
   inputProcIds: Map<string, string[]>;
   flowSteps: StepState[];
+  stepInputStatus: StepStatus[];  // per-step input fetch status (set by input_ready event)
   selectedKey: string | null;
   onNodeClick: (key: string) => void;
 }) {
@@ -172,14 +173,30 @@ function MiniCanvas({
     if (cn.type === "input") {
       const procIds = inputProcIds.get(nodeId) ?? [];
       if (procIds.length === 0) return "pending";
+      // Use stepInputStatus (driven by input_ready event) for precise input lifecycle.
+      // When stepInputStatus[i] is available it transitions independently of the LLM call:
+      //   step_start  → loading  (inputs being fetched — orange briefly)
+      //   input_ready → done     (inputs fetched, LLM starting — green)
+      //   step_cached → cached   (whole step was cached — yellow)
+      //   step_done   → done     (fallback if input_ready was missed)
+      // Fall back to processing step status for per_call mode / restored runs.
       const statuses = procIds.map(pid => {
         const i = procStepIdx.get(pid);
-        return (i != null ? (flowSteps[i]?.status ?? "pending") : "pending") as StepStatus;
+        if (i == null) return "pending" as StepStatus;
+        const inputSt = stepInputStatus[i];
+        if (inputSt != null) return inputSt;
+        // Fallback: derive from processing status (same logic as before)
+        const procSt = flowSteps[i]?.status ?? "pending";
+        if (procSt === "error")   return "error"  as StepStatus;
+        if (procSt === "done")    return "done"   as StepStatus;
+        if (procSt === "cached")  return "cached" as StepStatus;
+        if (procSt === "loading") return "cached" as StepStatus; // data available
+        return "pending" as StepStatus;
       });
-      if (statuses.some(s => s === "error"))  return "error";
-      if (statuses.some(s => s === "done"))   return "done";   // fresh run used this input
-      // loading = input was already fetched to start the step → data available (yellow)
-      if (statuses.some(s => s === "cached" || s === "loading")) return "cached";
+      if (statuses.some(s => s === "error"))   return "error";
+      if (statuses.some(s => s === "done"))    return "done";
+      if (statuses.some(s => s === "cached"))  return "cached";
+      if (statuses.some(s => s === "loading")) return "loading";
       return "pending";
     }
     return "pending";
@@ -242,15 +259,17 @@ function MiniCanvas({
         </svg>
 
         {/* Nodes */}
-        {nodes.map(n => {
-          const st  = stepSt(n);
-          const c   = nstyle(n, st);
-          const k   = nkey(n);
-          const sel = selectedKey === k;
+        {nodes.map((n, nodeIdx) => {
+          const st    = stepSt(n);
+          const c     = nstyle(n, st);
+          const k     = nkey(n);
+          const sel   = selectedKey === k;
+          const num   = nodeIdx + 1;  // sequential number across all canvas nodes
           const lbl = n.type === "input"
             ? (SOURCE_META[n.data.inputSource ?? ""]?.label ?? n.data.label)
             : n.type === "output" ? "Output"
             : (n.data.agentName || n.data.label);
+          const statusText = st === "done" ? "done" : st === "cached" ? "cached" : st === "loading" ? "…" : st === "error" ? "err" : "";
 
           return (
             <div key={n.id} onClick={() => onNodeClick(k)}
@@ -265,17 +284,30 @@ function MiniCanvas({
               }}
             >
               <div className="flex items-center h-full overflow-hidden"
-                style={{ padding: `2px ${Math.max(3, 7 * scale)}px`, gap: Math.max(2, 4 * scale) }}>
-                {(n.type !== "input" || st !== "pending") && (
-                  <span className="shrink-0" style={{ fontSize: fs, lineHeight: 1 }}>
-                    {st === "done"    ? <span style={{ color: "#22c55e" }}>✓</span> :
-                     st === "cached"  ? <span style={{ color: "#eab308" }}>◎</span> :
-                     st === "loading" ? <span style={{ color: "#f97316" }}>⟳</span> :
-                     st === "error"   ? <span style={{ color: "#ef4444" }}>✕</span> :
-                                        <span style={{ color: c.border, opacity: 0.5 }}>●</span>}
-                  </span>
+                style={{ padding: `2px ${Math.max(3, 7 * scale)}px`, gap: Math.max(2, 3 * scale) }}>
+                {/* Step number */}
+                <span className="shrink-0 tabular-nums" style={{
+                  fontSize: Math.max(5, fs * 0.78), lineHeight: 1,
+                  color: c.text, opacity: 0.38, fontWeight: 700, letterSpacing: "0.01em",
+                }}>#{num}</span>
+                {/* Status icon */}
+                <span className="shrink-0" style={{ fontSize: fs, lineHeight: 1 }}>
+                  {st === "done"    ? <span style={{ color: "#22c55e" }}>✓</span> :
+                   st === "cached"  ? <span style={{ color: "#eab308" }}>◎</span> :
+                   st === "loading" ? <span style={{ color: "#f97316" }}>⟳</span> :
+                   st === "error"   ? <span style={{ color: "#ef4444" }}>✕</span> :
+                                      <span style={{ color: c.border, opacity: 0.4 }}>·</span>}
+                </span>
+                {/* Label */}
+                <span className="truncate flex-1" style={{ fontSize: fs, color: c.text, fontWeight: 600, lineHeight: 1.2 }}>{lbl}</span>
+                {/* Status text badge */}
+                {statusText && (
+                  <span className="shrink-0" style={{
+                    fontSize: Math.max(5, fs * 0.72), lineHeight: 1,
+                    color: st === "done" ? "#22c55e" : st === "cached" ? "#eab308" : st === "loading" ? "#f97316" : "#ef4444",
+                    opacity: 0.75, fontWeight: 700, letterSpacing: "0.02em",
+                  }}>{statusText}</span>
                 )}
-                <span className="truncate" style={{ fontSize: fs, color: c.text, fontWeight: 600, lineHeight: 1.2 }}>{lbl}</span>
               </div>
             </div>
           );
@@ -320,7 +352,8 @@ export function PipelineSidePanel({
   const [flowCallIdx, setFlowCallIdx] = useState(0);
 
   // ── per_pair state ───────────────────────────────────────────────────────────
-  const [steps,    setSteps]    = useState<StepState[]>([]);
+  const [steps,           setSteps]           = useState<StepState[]>([]);
+  const [stepInputStatus, setStepInputStatus] = useState<StepStatus[]>([]);  // per-step input fetch status
   const [running,  setRunning]  = useState(false);
   const [runError, setRunError] = useState("");
   const [done,     setDone]     = useState(false);
@@ -353,7 +386,7 @@ export function PipelineSidePanel({
     setInputPreview({ loading: false, content: "", error: "" });
     setFlowCallIdx(0);
     if (!running && !callsRunning) {
-      setSteps([]); setDone(false); setRunError(""); setLoaded(false);
+      setSteps([]); setStepInputStatus([]); setDone(false); setRunError(""); setLoaded(false);
       setCallResults([]); setCallsRunError(""); setCallsLoaded(false);
       prevCachedRef.current = null;
     }
@@ -417,6 +450,12 @@ export function PipelineSidePanel({
     const fixStatus = (s: string): StepStatus =>
       s === "loading" ? "error" : s as StepStatus;
 
+    // Derive input status from stored step status for canvas input nodes
+    const deriveInputSt = (s: string): StepStatus => {
+      const fixed = fixStatus(s);
+      return (fixed === "done" || fixed === "cached" || fixed === "error") ? fixed : "pending";
+    };
+
     // While a run is in progress, keep updating steps from the polled run record.
     // Guard !done: after the frontend finishes a run (done=true), skip DB polling —
     // the final SQL UPDATE in `finally` may not have committed yet, so the DB can
@@ -438,6 +477,7 @@ export function PipelineSidePanel({
           outputTokenEst: s.output_token_est ?? undefined,
         };
       }));
+      setStepInputStatus(runSteps.map((s: any) => deriveInputSt(s.status)));
       setLoaded(true);
       return;
     }
@@ -461,6 +501,7 @@ export function PipelineSidePanel({
           outputTokenEst: s.output_token_est ?? undefined,
         };
       }));
+      setStepInputStatus(runSteps.map((s: any) => deriveInputSt(s.status)));
       setDone(true);
       return;
     }
@@ -486,6 +527,7 @@ export function PipelineSidePanel({
           outputTokenEst: s.output_token_est ?? undefined,
         };
       }));
+      setStepInputStatus(runSteps.map((s: any) => deriveInputSt(s.status)));
       setDone(latestRun.status !== "running");
       return;
     }
@@ -766,6 +808,7 @@ export function PipelineSidePanel({
     prevCachedRef.current = cachedResults ?? null; // snapshot prev results for comparison
     setRunning(true); setRunError(""); setDone(false); setLoaded(true);
     setSteps(initStepsFor(pipeline, agents));
+    setStepInputStatus(new Array(pipeline.steps.length).fill("pending") as StepStatus[]);
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -775,12 +818,26 @@ export function PipelineSidePanel({
       let hadLLM = false;
       await readPipelineSSE(res,
         (type, evt, s) => {
-          if (type === "step_start")  setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st));
-          if (type === "step_cached") setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st));
+          if (type === "step_start")  {
+            setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st));
+            setStepInputStatus(p => { const n = [...p]; n[s] = "loading"; return n; });
+          }
+          if (type === "input_ready") setStepInputStatus(p => { const n = [...p]; n[s] = "done"; return n; });
+          if (type === "step_cached") {
+            setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st));
+            setStepInputStatus(p => { const n = [...p]; n[s] = "cached"; return n; });
+          }
           if (type === "stream")      setSteps(p => { const n = p.map((st, i) => i === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
           if (type === "thinking")    setSteps(p => p.map((st, i) => i === s ? { ...st, thinking: evt.content ?? "" } : st));
-          if (type === "step_done")   { hadLLM = true; setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "", model: evt.model, execTimeS: evt.execution_time_s, inputTokenEst: evt.input_token_est, outputTokenEst: evt.output_token_est } : st)); }
-          if (type === "error" && evt.step != null) setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st));
+          if (type === "step_done")   {
+            hadLLM = true;
+            setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "", model: evt.model, execTimeS: evt.execution_time_s, inputTokenEst: evt.input_token_est, outputTokenEst: evt.output_token_est } : st));
+            setStepInputStatus(p => { const n = [...p]; n[s] = "done"; return n; });
+          }
+          if (type === "error" && evt.step != null) {
+            setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st));
+            setStepInputStatus(p => { const n = [...p]; n[evt.step] = "error"; return n; });
+          }
           if (type === "pipeline_done") { setDone(true); mutateCache(); }
         },
       );
@@ -1018,6 +1075,7 @@ export function PipelineSidePanel({
                   outputProcId={outputProcId}
                   inputProcIds={inputProcIds}
                   flowSteps={flowSteps}
+                  stepInputStatus={isPerCall ? [] : stepInputStatus}
                   selectedKey={flowSelectedKey}
                   onNodeClick={key => {
                     const isToggleOff = flowSelectedKey === key;

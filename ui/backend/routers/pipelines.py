@@ -399,6 +399,10 @@ async def run_pipeline(
                     file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
                     inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
+                    # Inputs resolved — notify frontend so input nodes can turn green
+                    # before the LLM call starts (which may take many seconds).
+                    yield _sse("input_ready", {"step": step_idx})
+
                     # ── Call LLM ─────────────────────────────────────────────
                     inline_chars = sum(len(v) for v in inline_inputs.values())
                     file_chars   = sum(len(v) for v in file_inputs.values())
