@@ -386,10 +386,76 @@ export function PipelineSidePanel({
     : null;
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
+  // ── per_pair: latest run — poll while running so refresh restores live state ─
+  const latestRunUrl = !isPerCall && activePipelineId && hasPair
+    ? `/api/pipelines/${activePipelineId}/runs?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}&limit=1`
+    : null;
+  const { data: latestRunData } = useSWR<any[]>(latestRunUrl, fetcher, {
+    refreshInterval: (data) => (data?.[0]?.status === "running" ? 3000 : 0),
+  });
+  const latestRun = latestRunData?.[0] ?? null;
 
+  // ── per_pair: restore step state from latest run or cached results ───────────
   useEffect(() => {
-    if (isPerCall || loaded || running || !cachedResults || !pipeline || !agents) return;
-    setLoaded(true);
+    if (isPerCall || running || !pipeline || !agents) return;
+
+    const runSteps: any[] = (() => {
+      try { return latestRun?.steps_json ? JSON.parse(latestRun.steps_json) : []; } catch { return []; }
+    })();
+    const hasProgress = runSteps.some((s: any) => s.status && s.status !== "pending");
+
+    // While a run is in progress, keep updating steps from the polled run record
+    if (latestRun?.status === "running" && hasProgress) {
+      setSteps(prev => runSteps.map((s: any, i: number) => {
+        const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
+        return {
+          agentName: s.agent_name || a?.name || "",
+          status: s.status as StepStatus,
+          content: s.content || "",
+          stream: "",
+          expanded: prev[i]?.expanded ?? false,
+          errorMsg: s.error_msg || undefined,
+          model: s.model || undefined,
+          execTimeS: s.execution_time_s ?? undefined,
+          inputTokenEst: s.input_token_est ?? undefined,
+          outputTokenEst: s.output_token_est ?? undefined,
+        };
+      }));
+      setLoaded(true);
+      return;
+    }
+
+    // Past this point: only apply once (on initial load)
+    if (loaded) return;
+
+    // Completed/errored run with step data — restore exact run state
+    if (latestRun && hasProgress) {
+      setLoaded(true);
+      setSteps(runSteps.map((s: any, i: number) => {
+        const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
+        return {
+          agentName: s.agent_name || a?.name || "",
+          status: s.status as StepStatus,
+          content: s.content || "",
+          stream: "",
+          expanded: false,
+          errorMsg: s.error_msg || undefined,
+          model: s.model || undefined,
+          execTimeS: s.execution_time_s ?? undefined,
+          inputTokenEst: s.input_token_est ?? undefined,
+          outputTokenEst: s.output_token_est ?? undefined,
+        };
+      }));
+      setDone(latestRun.status !== "running");
+      return;
+    }
+
+    // No run data yet — wait for latestRunData fetch before showing cached results
+    // (avoids a flash of old cache before the run record arrives)
+    if (latestRunData === undefined) return;
+
+    // Fall back to AgentResult cache
+    if (!cachedResults) return;
     const initialSteps = pipeline.steps.map((s, i) => {
       const a = agents.find(x => x.id === s.agent_id);
       const cr = cachedResults[i];
@@ -401,9 +467,9 @@ export function PipelineSidePanel({
       };
     });
     if (initialSteps.some(st => st.status === "cached")) {
-      setSteps(initialSteps); setDone(true);
+      setSteps(initialSteps); setDone(true); setLoaded(true);
     }
-  }, [cachedResults, pipeline, agents, running, loaded, isPerCall]);
+  }, [latestRunData, cachedResults, latestRun, pipeline, agents, running, loaded, isPerCall]);
 
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
@@ -863,6 +929,12 @@ export function PipelineSidePanel({
             </button>
           )}
         </div>
+        {!running && !callsRunning && latestRun?.status === "running" && (
+          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-400 bg-amber-950/20 border border-amber-800/30 rounded-lg">
+            <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+            Pipeline running in background…
+          </div>
+        )}
         {(runError || callsRunError) && (
           <p className="text-[11px] text-red-400 break-words">{runError || callsRunError}</p>
         )}

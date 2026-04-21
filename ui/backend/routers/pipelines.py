@@ -239,6 +239,15 @@ async def run_pipeline(
         loop = asyncio.get_event_loop()
         prev_content = ""
 
+        def save_steps():
+            """Persist current step states to DB so the frontend can restore live state on refresh."""
+            try:
+                run_record.steps_json = json.dumps(run_steps)
+                db.add(run_record)
+                db.commit()
+            except Exception:
+                pass
+
         try:
             log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
             yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name, "run_id": run_id})
@@ -252,6 +261,7 @@ async def run_pipeline(
                     run_steps[step_idx]["status"] = "error"
                     run_steps[step_idx]["error_msg"] = f"Agent '{agent_id}' not found"
                     yield _sse("error", {"msg": f"Step {step_idx + 1}: agent '{agent_id}' not found", "step": step_idx})
+                    save_steps()
                     return
 
                 agent_name = agent_def.get("name", agent_id)
@@ -295,6 +305,7 @@ async def run_pipeline(
                             "step": step_idx, "agent_name": agent_name,
                             "result_id": cached.id, "content": cached.content,
                         })
+                        save_steps()
                         continue
 
                 # ── Resolve inputs ───────────────────────────────────────────
@@ -330,6 +341,7 @@ async def run_pipeline(
                     except Exception as exc:
                         run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
                         yield _sse("error", {"msg": str(exc), "step": step_idx})
+                        save_steps()
                         return
 
                 file_keys = {
@@ -379,6 +391,7 @@ async def run_pipeline(
                     if error_holder:
                         run_steps[step_idx].update({"status": "error", "error_msg": error_holder[0]})
                         yield _sse("error", {"msg": error_holder[0], "step": step_idx})
+                        save_steps()
                         return
 
                     content, thinking = result_holder[0]
@@ -395,6 +408,7 @@ async def run_pipeline(
                     except Exception as exc:
                         run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
                         yield _sse("error", {"msg": str(exc), "step": step_idx})
+                        save_steps()
                         return
 
                 exec_time_s    = round(time.time() - step_start_t, 1)
@@ -441,6 +455,7 @@ async def run_pipeline(
                     "input_token_est":  input_tok_est,
                     "output_token_est": output_tok_est,
                 })
+                save_steps()
 
             run_final_status = "done"
             log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
