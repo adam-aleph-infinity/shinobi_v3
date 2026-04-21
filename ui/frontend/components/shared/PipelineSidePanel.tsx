@@ -1245,6 +1245,8 @@ export function PipelineSidePanel({
           )}
           {steps.map((st, i) => (
             <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
+              hasCached={!!cachedResults?.[i]?.result}
+              pendingLabel={!running && latestRun?.status === "running" ? "waiting" : "not run"}
               onToggle={() => setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />
           ))}
         </div>
@@ -1308,16 +1310,19 @@ export function PipelineSidePanel({
 }
 
 // ── Shared step row ───────────────────────────────────────────────────────────
-function StepRow({ st, index, streamEndRef, onToggle }: {
+function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel }: {
   st: StepState; index: number;
   streamEndRef: React.RefObject<HTMLDivElement>;
   onToggle: () => void;
+  hasCached?: boolean;    // DB has a previous AgentResult for this step
+  pendingLabel?: string;  // "waiting" | "not run" — label for pending steps
 }) {
+  const isOpen = st.status === "done" || st.status === "cached";
   return (
-    <div className={cn("border rounded-xl overflow-hidden", (st.status === "done" || st.status === "cached") ? "border-gray-700/60" : "border-gray-800")}>
+    <div className={cn("border rounded-xl overflow-hidden", isOpen ? "border-gray-700/60" : "border-gray-800")}>
       <div
-        className={cn("flex items-center gap-2 px-3 py-2", (st.status === "done" || st.status === "cached") && "cursor-pointer hover:bg-gray-800/40")}
-        onClick={() => { if (st.status === "done" || st.status === "cached") onToggle(); }}
+        className={cn("flex items-center gap-2 px-3 py-2", isOpen && "cursor-pointer hover:bg-gray-800/40")}
+        onClick={() => { if (isOpen) onToggle(); }}
       >
         {st.status === "loading" && !st.stream && <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />}
         {st.status === "loading" && st.stream  && <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse shrink-0" />}
@@ -1327,10 +1332,17 @@ function StepRow({ st, index, streamEndRef, onToggle }: {
         {st.status === "pending" && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
         <span className="text-[10px] text-gray-500 font-mono shrink-0">#{index + 1}</span>
         <span className={cn("text-xs flex-1 font-medium truncate", st.status === "loading" ? "text-teal-300" : "text-gray-300")}>{st.agentName}</span>
-        {st.status === "cached" && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40">cached</span>}
-        {st.status === "done"   && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40">done</span>}
-        {st.status === "error"  && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40">error</span>}
-        {(st.status === "done" || st.status === "cached") && (
+        {/* Previous cached result indicator — shown when a DB result exists but step isn't done yet */}
+        {hasCached && (st.status === "pending" || st.status === "error" || st.status === "loading") && (
+          <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700/40 shrink-0">prev ↩</span>
+        )}
+        {/* Current run status badge */}
+        {st.status === "loading" && <span className="text-[9px] px-1 py-0.5 rounded bg-teal-900/40 text-teal-400 border border-teal-700/40 shrink-0">running</span>}
+        {st.status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
+        {st.status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
+        {st.status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+        {st.status === "pending" && <span className="text-[9px] text-gray-600 shrink-0">{pendingLabel ?? "not run"}</span>}
+        {isOpen && (
           st.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />
         )}
       </div>
