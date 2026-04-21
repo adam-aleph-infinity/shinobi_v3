@@ -412,8 +412,12 @@ export function PipelineSidePanel({
     })();
     const hasProgress = runSteps.some((s: any) => s.status && s.status !== "pending");
 
-    // While a run is in progress, keep updating steps from the polled run record
-    if (latestRun?.status === "running" && hasProgress) {
+    // While a run is in progress, keep updating steps from the polled run record.
+    // Guard !done: after the frontend finishes a run (done=true), skip DB polling —
+    // the final SQL UPDATE in `finally` may not have committed yet, so the DB can
+    // still have status="running" with stale "loading" steps, which would override
+    // the correct "done" states the SSE events already applied.
+    if (latestRun?.status === "running" && hasProgress && !done) {
       setSteps(prev => runSteps.map((s: any, i: number) => {
         const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
         return {
@@ -1116,6 +1120,7 @@ export function PipelineSidePanel({
                         {status === "done" || status === "cached" ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" /> : <Bot className="w-3.5 h-3.5 text-indigo-400 shrink-0" />}
                         <span className="text-xs font-semibold text-gray-200 flex-1 truncate">{node.data.agentName || node.data.label}</span>
                         <span className={cn("text-[9px] shrink-0 font-medium", statusColor)}>{status}</span>
+                        {status === "loading" && st?.stepStartTs && <ElapsedTimer startTs={st.stepStartTs} />}
                         <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
                       </div>
                       {/* Meta row: model + timing + tokens + inputs */}
@@ -1322,6 +1327,22 @@ export function PipelineSidePanel({
   );
 }
 
+// ── Live elapsed timer ────────────────────────────────────────────────────────
+function ElapsedTimer({ startTs }: { startTs: number }) {
+  const [elapsed, setElapsed] = useState(() => Math.floor((Date.now() - startTs) / 1000));
+  useEffect(() => {
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - startTs) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [startTs]);
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  return (
+    <span className="text-[9px] font-mono text-orange-400/70 shrink-0 tabular-nums">
+      {m > 0 ? `${m}m ${s}s` : `${s}s`}
+    </span>
+  );
+}
+
 // ── Shared step row ───────────────────────────────────────────────────────────
 function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, prevContent }: {
   st: StepState; index: number;
@@ -1350,8 +1371,9 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
         {hasCached && (st.status === "pending" || st.status === "error" || st.status === "loading") && (
           <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700/40 shrink-0">prev ↩</span>
         )}
-        {/* Current run status badge */}
-        {st.status === "loading" && <span className="text-[9px] px-1 py-0.5 rounded bg-teal-900/40 text-teal-400 border border-teal-700/40 shrink-0">running</span>}
+        {/* Current run status badge + elapsed timer */}
+        {st.status === "loading" && <span className="text-[9px] px-1 py-0.5 rounded bg-orange-900/40 text-orange-400 border border-orange-700/40 shrink-0">running</span>}
+        {st.status === "loading" && st.stepStartTs && <ElapsedTimer startTs={st.stepStartTs} />}
         {st.status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
         {st.status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
         {st.status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
