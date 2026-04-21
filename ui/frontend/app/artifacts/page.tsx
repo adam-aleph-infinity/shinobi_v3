@@ -5,7 +5,7 @@ import useSWR from "swr";
 import {
   User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText, GitBranch,
   Loader2, Copy, Archive, Search, CalendarDays, ChevronRight, Trash2,
-  CloudUpload, AlertTriangle, Clock,
+  CloudUpload, AlertTriangle, Clock, Code2, Eye,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useResize } from "@/lib/useResize";
@@ -207,9 +207,27 @@ function JsonKVTable({ value, accentColor = "text-gray-500" }: { value: unknown;
   return <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words">{raw}</pre>;
 }
 
+// ── Raw/rendered toggle ───────────────────────────────────────────────────────
+
+function RawToggle({ raw, onToggle }: { raw: boolean; onToggle: () => void }) {
+  return (
+    <button onClick={onToggle} title={raw ? "Show rendered" : "Show raw"}
+      className="flex items-center gap-1 text-[9px] text-gray-600 hover:text-gray-400 transition-colors shrink-0">
+      {raw ? <Eye className="w-3 h-3" /> : <Code2 className="w-3 h-3" />}
+      {raw ? "Rendered" : "Raw"}
+    </button>
+  );
+}
+
+const RAW_PRE = "text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed";
+
 // ── Content viewer ────────────────────────────────────────────────────────────
 
 function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () => Promise<void> }) {
+  // useState must be unconditional (rules of hooks)
+  const [rawMode, setRawMode] = useState(false);
+  const toggle = () => setRawMode(r => !r);
+
   if (item.kind === "merged_transcript") {
     const text = item.data.content;
     return (
@@ -222,7 +240,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
           <CopyBtn text={text} />
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed">{text}</pre>
+          <pre className={RAW_PRE}>{text}</pre>
         </div>
       </div>
     );
@@ -237,18 +255,19 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
           </div>
+          <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <SectionContent content={md} />
+          {rawMode ? <pre className={RAW_PRE}>{md}</pre> : <SectionContent content={md} />}
         </div>
       </div>
     );
   }
 
   if (item.kind === "persona_score" && item.data.score_json != null) {
-    const raw = prettyJson(item.data.score_json);
+    const rawText = prettyJson(item.data.score_json);
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -256,11 +275,14 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
-          <CopyBtn text={raw} />
+          <RawToggle raw={rawMode} onToggle={toggle} />
+          <CopyBtn text={rawText} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <JsonKVTable value={item.data.score_json} accentColor="text-gray-500" />
+          {rawMode
+            ? <pre className={RAW_PRE}>{rawText}</pre>
+            : <JsonKVTable value={item.data.score_json} accentColor="text-gray-500" />}
         </div>
       </div>
     );
@@ -268,7 +290,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
 
   if (item.kind === "notes_rollup") {
     const d = item.data;
-    const raw = JSON.stringify(d, null, 2);
+    const rawText = JSON.stringify(d, null, 2);
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -280,39 +302,44 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
               {d._note_count ? ` · ${d._note_count} notes` : ""}
             </p>
           </div>
-          <CopyBtn text={raw} />
+          <RawToggle raw={rawMode} onToggle={toggle} />
+          <CopyBtn text={rawText} />
         </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {!!d.summary && (
-            <div>
-              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Summary</p>
-              <p className="text-sm text-gray-300">{String(d.summary)}</p>
+        <div className="flex-1 overflow-y-auto p-5">
+          {rawMode ? <pre className={RAW_PRE}>{rawText}</pre> : (
+            <div className="space-y-4">
+              {!!d.summary && (
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Summary</p>
+                  <p className="text-sm text-gray-300">{String(d.summary)}</p>
+                </div>
+              )}
+              {Array.isArray(d.key_patterns) && d.key_patterns.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Key Patterns</p>
+                  <ul className="space-y-0.5">
+                    {(d.key_patterns as unknown[]).map((p, i) => (
+                      <li key={i} className="text-xs text-gray-400 flex gap-2"><span className="text-gray-700">·</span>{String(p)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {Array.isArray(d.next_steps) && d.next_steps.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Next Steps</p>
+                  <ul className="space-y-0.5">
+                    {(d.next_steps as unknown[]).map((s, i) => (
+                      <li key={i} className="text-xs text-gray-400 flex gap-2"><span className="text-gray-700">·</span>{String(s)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <details className="border border-gray-800 rounded-lg overflow-hidden">
+                <summary className="px-3 py-2 text-[10px] text-gray-500 cursor-pointer bg-gray-900/60">Raw JSON</summary>
+                <pre className="p-3 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{rawText}</pre>
+              </details>
             </div>
           )}
-          {Array.isArray(d.key_patterns) && d.key_patterns.length > 0 && (
-            <div>
-              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Key Patterns</p>
-              <ul className="space-y-0.5">
-                {(d.key_patterns as unknown[]).map((p, i) => (
-                  <li key={i} className="text-xs text-gray-400 flex gap-2"><span className="text-gray-700">·</span>{String(p)}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {Array.isArray(d.next_steps) && d.next_steps.length > 0 && (
-            <div>
-              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Next Steps</p>
-              <ul className="space-y-0.5">
-                {(d.next_steps as unknown[]).map((s, i) => (
-                  <li key={i} className="text-xs text-gray-400 flex gap-2"><span className="text-gray-700">·</span>{String(s)}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          <details className="border border-gray-800 rounded-lg overflow-hidden">
-            <summary className="px-3 py-2 text-[10px] text-gray-500 cursor-pointer bg-gray-900/60">Raw JSON</summary>
-            <pre className="p-3 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{raw}</pre>
-          </details>
         </div>
       </div>
     );
@@ -327,19 +354,22 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className="text-sm font-semibold text-white truncate">Call Note · {item.data.call_id.slice(-12)}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
+          <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {md ? <SectionContent content={md} /> : <p className="text-xs text-gray-600 italic">No content</p>}
+          {rawMode
+            ? <pre className={RAW_PRE}>{md || "(empty)"}</pre>
+            : (md ? <SectionContent content={md} /> : <p className="text-xs text-gray-600 italic">No content</p>)}
         </div>
       </div>
     );
   }
 
   if (item.kind === "compliance_note") {
-    const md  = item.data.content_md ?? "";
-    const raw = prettyJson(item.data.score_json);
+    const md      = item.data.content_md ?? "";
+    const rawText = prettyJson(item.data.score_json);
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -347,18 +377,25 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className="text-sm font-semibold text-white truncate">Compliance Note · {item.data.call_id.slice(-12)}</p>
             <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
           </div>
-          <CopyBtn text={md + (raw ? "\n\n" + raw : "")} />
+          <RawToggle raw={rawMode} onToggle={toggle} />
+          <CopyBtn text={md + (rawText ? "\n\n" + rawText : "")} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          <div>
-            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
-            <JsonKVTable value={item.data.score_json} accentColor="text-emerald-700" />
-          </div>
-          {md && (
-            <div>
-              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Note Content</p>
-              <SectionContent content={md} />
+        <div className="flex-1 overflow-y-auto p-5">
+          {rawMode ? (
+            <pre className={RAW_PRE}>{rawText}{md ? "\n\n" + md : ""}</pre>
+          ) : (
+            <div className="space-y-5">
+              <div>
+                <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mb-2">Compliance Score</p>
+                <JsonKVTable value={item.data.score_json} accentColor="text-emerald-700" />
+              </div>
+              {md && (
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Note Content</p>
+                  <SectionContent content={md} />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -376,7 +413,6 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
   ) {
     const m = ARTIFACT_TYPE_META[item.kind];
     const content = item.data.content;
-    // If the content is valid JSON object, display as key-value table; otherwise render as markdown
     const parsedJson = (() => {
       try {
         const p = JSON.parse(content);
@@ -400,14 +436,16 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
               {item.data.model ? ` · ${item.data.model}` : ""}
             </p>
           </div>
+          <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={content} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {parsedJson
-            ? <JsonKVTable value={parsedJson} accentColor={accentColor} />
-            : <SectionContent content={content} />
-          }
+          {rawMode
+            ? <pre className={RAW_PRE}>{content}</pre>
+            : parsedJson
+              ? <JsonKVTable value={parsedJson} accentColor={accentColor} />
+              : <SectionContent content={content} />}
         </div>
       </div>
     );
