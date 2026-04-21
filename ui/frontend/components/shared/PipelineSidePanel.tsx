@@ -381,8 +381,10 @@ export function PipelineSidePanel({
   }, [logLines]);
 
   // ── per_pair: fetch cached results ──────────────────────────────────────────
+  // per_pair results are saved with call_id="" — always query with empty call_id
+  // so results are found regardless of which call is currently selected in context.
   const cacheUrl = !isPerCall && activePipelineId && hasPair
-    ? `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`
+    ? `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=`
     : null;
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 

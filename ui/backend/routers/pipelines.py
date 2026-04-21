@@ -484,19 +484,21 @@ async def run_pipeline(
                     pass
             try:
                 try:
-                    db.rollback()  # clear any dirty session state from earlier save_steps() commits
+                    db.rollback()  # clear any dirty state from failed save_steps() commits
                 except Exception:
                     pass
-                log_lines = [
-                    {"ts": l.ts, "text": l.text, "level": l.level}
-                    for l in log_buffer.get_after(start_seq)
-                ]
-                run_record.finished_at = datetime.utcnow()
-                run_record.status      = run_final_status
-                run_record.steps_json  = json.dumps(run_steps)
-                run_record.log_json    = json.dumps(log_lines[-200:])
-                db.add(run_record)
-                db.commit()
+                # Re-fetch a fresh instance after rollback — avoids stale/expired object issues
+                fresh = db.exec(select(PR).where(PR.id == run_id)).first()
+                if fresh:
+                    log_lines = [
+                        {"ts": l.ts, "text": l.text, "level": l.level}
+                        for l in log_buffer.get_after(start_seq)
+                    ]
+                    fresh.finished_at = datetime.utcnow()
+                    fresh.status      = run_final_status
+                    fresh.steps_json  = json.dumps(run_steps)
+                    fresh.log_json    = json.dumps(log_lines[-200:])
+                    db.commit()
             except Exception:
                 pass
 
