@@ -341,7 +341,10 @@ async def run_pipeline(
                 inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
                 # ── Call LLM ─────────────────────────────────────────────────
-                total_chars    = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
+                # Grok pastes files inline; all other providers use file references
+                total_chars = sum(len(v) for v in inline_inputs.values())
+                if model.startswith("grok"):
+                    total_chars += sum(len(v) for v in file_inputs.values())
                 input_tok_est  = (total_chars + len(system_prompt)) // 4
                 log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input · {cid_short}")
 
@@ -444,6 +447,26 @@ async def run_pipeline(
             yield _sse("pipeline_done", {})
 
         finally:
+            # On force rerun: delete stale cached results for errored steps so that
+            # a page refresh won't show old successful data instead of the error state.
+            if req.force:
+                try:
+                    for s in run_steps:
+                        if s.get("status") == "error" and s.get("agent_id"):
+                            aid = s["agent_id"]
+                            stale_stmt = select(AR).where(
+                                AR.agent_id == aid,
+                                AR.sales_agent == req.sales_agent,
+                                AR.customer == req.customer,
+                            )
+                            if req.call_id:
+                                stale_stmt = stale_stmt.where(AR.call_id == req.call_id)
+                            stale = db.exec(stale_stmt).first()
+                            if stale:
+                                db.delete(stale)
+                    db.commit()
+                except Exception:
+                    pass
             try:
                 log_lines = [
                     {"ts": l.ts, "text": l.text, "level": l.level}

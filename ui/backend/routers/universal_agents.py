@@ -578,7 +578,7 @@ def _get_or_upload_openai(
     try:
         resp = client.files.create(
             file=(filename, upload_content.encode("utf-8"), "text/plain"),
-            purpose="assistants",
+            purpose="user_data" if provider == "openai" else "assistants",
         )
         file_id = resp.id
         log_buffer.emit(f"[FILE] ↑ {provider}:{file_id} ({source} · {cid_short})")
@@ -781,6 +781,57 @@ def _llm_call_anthropic_files_streaming(
     return _clean_result("".join(text_acc)), "".join(thinking_acc).strip()
 
 
+def _llm_call_openai_responses_files(
+    system: str, user_template: str,
+    file_inputs: dict, inline_inputs: dict,
+    model: str, temperature: float,
+    db: Session,
+) -> tuple[str, str]:
+    """Call OpenAI Responses API with file references — no inline content pasting."""
+    from openai import OpenAI
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    client = OpenAI(api_key=api_key)
+    ctx = getattr(db, "_agent_run_ctx", {})
+
+    # Upload (or reuse cached) each file input — returns (file_id, _) tuple
+    file_ids: dict[str, str] = {}
+    for k, v in file_inputs.items():
+        fid, _ = _get_or_upload_openai(
+            v, k,
+            ctx.get("source_for_key", {}).get(k, ""),
+            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
+            "openai", api_key, db,
+        )
+        file_ids[k] = fid
+
+    # Strip file placeholders; substitute inline inputs
+    user_text = user_template
+    for k in file_ids:
+        user_text = user_text.replace(f"{{{k}}}", "")
+    for k, v in inline_inputs.items():
+        user_text = user_text.replace(f"{{{k}}}", v)
+    user_text = user_text.strip()
+
+    # Build Responses API input: file blocks first, then text
+    input_parts: list = []
+    for fid in file_ids.values():
+        input_parts.append({"type": "input_file", "file_id": fid})
+    if user_text:
+        input_parts.append({"type": "input_text", "text": user_text})
+
+    kwargs: dict = {"model": model, "input": input_parts}
+    if system:
+        kwargs["instructions"] = system
+    if temperature > 0:
+        kwargs["temperature"] = temperature
+
+    response = client.responses.create(**kwargs)
+    return _clean_result(response.output_text or ""), ""
+
+
 def _llm_call_with_files(
     system: str, user_template: str,
     file_inputs: dict, inline_inputs: dict,
@@ -796,20 +847,20 @@ def _llm_call_with_files(
         return _llm_call_anthropic_files(
             system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
-    # OpenAI / Grok — upload to their Files API (tracked + logged), then include inline
-    # (Chat Completions doesn't support file references; file_id is for audit/tracking only)
+    # OpenAI — Responses API with file references (no inline content pasting)
+    if not model.startswith("grok"):
+        return _llm_call_openai_responses_files(
+            system, user_template, file_inputs, inline_inputs, model, temperature, db)
+
+    # Grok — Chat Completions with inline content (xAI doesn't support file references)
     import sys
     sys.path.insert(0, str(settings.project_root))
-    from shared.llm_client import LLMClient
+    from shared.llm_client import LLMClient, resolve_grok_key
 
-    provider = "grok" if model.startswith("grok") else "openai"
-    if provider == "grok":
-        from shared.llm_client import resolve_grok_key
-        api_key = resolve_grok_key() or ""
-    else:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+    provider = "grok"
+    api_key = resolve_grok_key() or ""
     if not api_key:
-        raise RuntimeError(f"API key not set for provider '{provider}'")
+        raise RuntimeError("API key not set for provider 'grok'")
 
     ctx = getattr(db, "_agent_run_ctx", {})
 
@@ -999,7 +1050,10 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 },
             }
 
-            total_chars = sum(len(v) for v in {**file_inputs, **inline_inputs}.values())
+            # Grok pastes files inline; all other providers use file references
+            total_chars = sum(len(v) for v in inline_inputs.values())
+            if model.startswith("grok"):
+                total_chars += sum(len(v) for v in file_inputs.values())
             log_buffer.emit(f"[AGENT] ▶ {agent_def.get('name', agent_id)} · {model}")
             log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input")
             yield _sse("progress", {
