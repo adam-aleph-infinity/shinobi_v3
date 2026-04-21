@@ -820,14 +820,17 @@ def _llm_call_openai_responses_files(
         user_text = user_text.replace(f"{{{k}}}", v)
     user_text = user_text.strip()
 
-    # Build Responses API input: file blocks first, then text
-    input_parts: list = []
+    # Build Responses API input: file blocks + text wrapped in a user message
+    content: list = []
     for fid in file_ids.values():
-        input_parts.append({"type": "input_file", "file_id": fid})
+        content.append({"type": "input_file", "file_id": fid})
     if user_text:
-        input_parts.append({"type": "input_text", "text": user_text})
+        content.append({"type": "input_text", "text": user_text})
 
-    kwargs: dict = {"model": model, "input": input_parts}
+    kwargs: dict = {
+        "model": model,
+        "input": [{"type": "message", "role": "user", "content": content}],
+    }
     if system:
         kwargs["instructions"] = system
     if temperature > 0:
