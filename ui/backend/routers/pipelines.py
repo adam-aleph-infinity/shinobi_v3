@@ -278,7 +278,7 @@ async def run_pipeline(
                 run_steps[step_idx]["status"]     = "loading"
                 save_steps()  # persist "loading" so a mid-run refresh shows orange, not yellow
 
-                log_buffer.emit(f"[PIPELINE] Step {step_idx + 1}/{len(steps)}: {agent_name} · {cid_short}")
+                log_buffer.emit(f"[PIPELINE] ▶ Step {step_idx + 1}/{len(steps)}: {agent_name} [{model}] · {cid_short}")
                 yield _sse("step_start", {
                     "step": step_idx, "total": len(steps),
                     "agent_id": agent_id, "agent_name": agent_name, "model": model,
@@ -309,6 +309,7 @@ async def run_pipeline(
                             "status": "cached",
                             "content": cached.content,
                         })
+                        log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
                         yield _sse("step_cached", {
                             "step": step_idx, "agent_name": agent_name,
                             "result_id": cached.id, "content": cached.content,
@@ -348,6 +349,7 @@ async def run_pipeline(
                         resolved[key] = text
                     except Exception as exc:
                         run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
+                        log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error (resolve input) · {cid_short}")
                         yield _sse("error", {"msg": str(exc), "step": step_idx})
                         save_steps()
                         return
@@ -366,7 +368,8 @@ async def run_pipeline(
                 if model.startswith("grok"):
                     total_chars += sum(len(v) for v in file_inputs.values())
                 input_tok_est  = (total_chars + len(system_prompt)) // 4
-                log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input · {cid_short}")
+                file_note = f" + {len(file_inputs)} file(s)" if file_inputs else ""
+                log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars{file_note} input · {cid_short}")
 
                 step_start_t = time.time()
 
@@ -398,6 +401,7 @@ async def run_pipeline(
 
                     if error_holder:
                         run_steps[step_idx].update({"status": "error", "error_msg": error_holder[0]})
+                        log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
                         yield _sse("error", {"msg": error_holder[0], "step": step_idx})
                         save_steps()
                         return
@@ -415,6 +419,7 @@ async def run_pipeline(
                         )
                     except Exception as exc:
                         run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
+                        log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
                         yield _sse("error", {"msg": str(exc), "step": step_idx})
                         save_steps()
                         return
@@ -452,7 +457,7 @@ async def run_pipeline(
                 if thinking:
                     yield _sse("thinking", {"content": thinking[:5000], "step": step_idx})
 
-                log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1}: {agent_name} · {cid_short}")
+                log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1}/{len(steps)}: {agent_name} → done ({exec_time_s}s) · {cid_short}")
                 yield _sse("step_done", {
                     "step":             step_idx,
                     "agent_name":       agent_name,
