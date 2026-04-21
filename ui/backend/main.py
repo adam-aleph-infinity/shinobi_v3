@@ -241,6 +241,36 @@ async def on_startup():
 
     asyncio.create_task(_merge_alias_pairs())
 
+    # Mark orphaned pipeline runs as error — any run still "running" when the
+    # server starts was interrupted (crash / restart) and can never resume.
+    # Without this, the frontend sees status="running" forever and shows orange.
+    with engine.connect() as conn:
+        try:
+            import json as _json
+            from ui.backend.models.pipeline_run import PipelineRun as _PR
+            with Session(engine) as db:
+                orphans = db.exec(
+                    select(_PR).where(_PR.status == "running")
+                ).all()
+                for run in orphans:
+                    # Flip any "loading" steps to "error"
+                    try:
+                        rss = _json.loads(run.steps_json) if run.steps_json else []
+                        for s in rss:
+                            if s.get("status") == "loading":
+                                s["status"] = "error"
+                                s["error_msg"] = "interrupted by server restart"
+                        run.steps_json = _json.dumps(rss)
+                    except Exception:
+                        pass
+                    run.status = "error"
+                    db.add(run)
+                    print(f"[startup] Marked orphaned pipeline run {run.id[:8]} as error")
+                if orphans:
+                    db.commit()
+        except Exception as e:
+            print(f"[startup] Pipeline run cleanup failed: {e}")
+
     log_buffer.install()
 
     # Seed crm_pair in background — only when DB is empty
