@@ -935,7 +935,7 @@ export function PipelineSidePanel({
         {!running && !callsRunning && latestRun?.status === "running" && (
           <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-400 bg-amber-950/20 border border-amber-800/30 rounded-lg">
             <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
-            Pipeline running in background…
+            <span className="truncate">{activePipelineName} running — {salesAgent} × {customer}</span>
           </div>
         )}
         {(runError || callsRunError) && (
