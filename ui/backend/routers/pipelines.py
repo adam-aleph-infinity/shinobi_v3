@@ -400,12 +400,13 @@ async def run_pipeline(
                     inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
                     # ── Call LLM ─────────────────────────────────────────────
-                    total_chars = sum(len(v) for v in inline_inputs.values())
-                    if model.startswith("grok"):
-                        total_chars += sum(len(v) for v in file_inputs.values())
+                    inline_chars = sum(len(v) for v in inline_inputs.values())
+                    file_chars   = sum(len(v) for v in file_inputs.values())
+                    total_chars  = inline_chars + (file_chars if model.startswith("grok") else 0)
                     input_tok_est = (total_chars + len(system_prompt)) // 4
+                    log_chars = inline_chars + file_chars  # all content, for display
                     file_note = f" + {len(file_inputs)} file(s)" if file_inputs else ""
-                    log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars{file_note} input · {cid_short}")
+                    log_buffer.emit(f"[LLM] {model} — {log_chars:,} chars{file_note} input · {cid_short}")
 
                     step_start_t = time.time()
                     llm_err = False
@@ -607,12 +608,12 @@ async def run_pipeline(
                                 _par_fi = {k: v for k, v in _par_resolved.items() if k in _par_fkeys}
                                 _par_ii = {k: v for k, v in _par_resolved.items() if k not in _par_fkeys}
 
-                                _par_tc = sum(len(v) for v in _par_ii.values())
-                                if _par_model.startswith("grok"):
-                                    _par_tc += sum(len(v) for v in _par_fi.values())
+                                _par_ic  = sum(len(v) for v in _par_ii.values())
+                                _par_fc  = sum(len(v) for v in _par_fi.values())
+                                _par_tc  = _par_ic + (_par_fc if _par_model.startswith("grok") else 0)
                                 _par_tok = (_par_tc + len(_par_sysp)) // 4
                                 _par_fn  = f" + {len(_par_fi)} file(s)" if _par_fi else ""
-                                log_buffer.emit(f"[LLM] {_par_model} — {_par_tc:,} chars{_par_fn} input · {cid_short}")
+                                log_buffer.emit(f"[LLM] {_par_model} — {_par_ic + _par_fc:,} chars{_par_fn} input · {cid_short}")
 
                                 _par_t0 = time.time()
                                 _par_content, _par_thinking = await loop.run_in_executor(
