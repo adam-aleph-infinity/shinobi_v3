@@ -337,6 +337,8 @@ export function PipelineSidePanel({
   const [callsLoaded,   setCallsLoaded]   = useState(false);
 
   const streamEndRef = useRef<HTMLDivElement>(null);
+  // Snapshot of cachedResults taken just before a run starts — used to show "prev cached result" comparison
+  const prevCachedRef = useRef<CachedStepResult[] | null>(null);
 
   // Fetch all call dates for per_call scope
   const callDatesUrl = isPerCall && hasPair
@@ -357,6 +359,7 @@ export function PipelineSidePanel({
     if (!running && !callsRunning) {
       setSteps([]); setDone(false); setRunError(""); setLoaded(false);
       setCallResults([]); setCallsRunError(""); setCallsLoaded(false);
+      prevCachedRef.current = null;
     }
   }, [contextKey, running, callsRunning]);
 
@@ -728,6 +731,7 @@ export function PipelineSidePanel({
     if (!activePipelineId || !contextOk || running || !pipeline || !agents) return;
     setFlowSelectedKey(null); // close detail panel so canvas is fully visible
     setInputPreview({ loading: false, content: "", error: "" });
+    prevCachedRef.current = cachedResults ?? null; // snapshot prev results for comparison
     setRunning(true); setRunError(""); setDone(false); setLoaded(true);
     setSteps(initStepsFor(pipeline, agents));
     try {
@@ -1254,6 +1258,7 @@ export function PipelineSidePanel({
           {steps.map((st, i) => (
             <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
               hasCached={!!cachedResults?.[i]?.result}
+              prevContent={prevCachedRef.current?.[i]?.result?.content}
               pendingLabel={!running && latestRun?.status === "running" ? "waiting" : "not run"}
               onToggle={() => setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />
           ))}
@@ -1318,12 +1323,13 @@ export function PipelineSidePanel({
 }
 
 // ── Shared step row ───────────────────────────────────────────────────────────
-function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel }: {
+function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, prevContent }: {
   st: StepState; index: number;
   streamEndRef: React.RefObject<HTMLDivElement>;
   onToggle: () => void;
   hasCached?: boolean;    // DB has a previous AgentResult for this step
   pendingLabel?: string;  // "waiting" | "not run" — label for pending steps
+  prevContent?: string;   // cached result snapshot taken before this run started
 }) {
   const isOpen = st.status === "done" || st.status === "cached";
   return (
@@ -1362,7 +1368,17 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel }:
         </div>
       )}
       {st.expanded && (st.status === "done" || st.status === "cached") && st.content && (
-        <div className="px-3 pb-3 bg-gray-950"><SectionContent content={st.content} /></div>
+        <div className="px-3 pb-3 bg-gray-950">
+          <SectionContent content={st.content} />
+          {prevContent && prevContent !== st.content && (
+            <details className="mt-3 border border-amber-900/40 rounded-lg overflow-hidden">
+              <summary className="px-3 py-1.5 text-[10px] text-amber-400/80 font-semibold bg-amber-950/20 cursor-pointer list-none flex items-center gap-1.5">
+                <span className="text-amber-500">▶</span> Previous cached result
+              </summary>
+              <div className="px-3 pt-2 pb-3 bg-gray-950/60"><SectionContent content={prevContent} /></div>
+            </details>
+          )}
+        </div>
       )}
     </div>
   );

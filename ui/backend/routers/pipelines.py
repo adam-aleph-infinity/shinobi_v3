@@ -11,7 +11,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import update as _sa_update
+from sqlalchemy import text as _sql_text
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -241,11 +241,11 @@ async def run_pipeline(
         prev_content = ""
 
         def save_steps():
-            """Persist current step states via direct SQL UPDATE — avoids ORM expiry issues."""
+            """Persist current step states via raw SQL UPDATE — avoids ORM expiry issues."""
             try:
                 db.execute(
-                    _sa_update(PR).where(PR.id == run_id)
-                    .values(steps_json=json.dumps(run_steps))
+                    _sql_text("UPDATE pipeline_run SET steps_json = :steps_json WHERE id = :id"),
+                    {"steps_json": json.dumps(run_steps), "id": run_id},
                 )
                 db.commit()
             except Exception:
@@ -272,6 +272,8 @@ async def run_pipeline(
 
                 run_steps[step_idx]["agent_name"] = agent_name
                 run_steps[step_idx]["model"]      = model
+                run_steps[step_idx]["status"]     = "loading"
+                save_steps()  # persist "loading" so a mid-run refresh shows orange, not yellow
 
                 log_buffer.emit(f"[PIPELINE] Step {step_idx + 1}/{len(steps)}: {agent_name} · {cid_short}")
                 yield _sse("step_start", {
@@ -491,13 +493,17 @@ async def run_pipeline(
                     for l in log_buffer.get_after(start_seq)
                 ]
                 db.execute(
-                    _sa_update(PR).where(PR.id == run_id)
-                    .values(
-                        finished_at=datetime.utcnow(),
-                        status=run_final_status,
-                        steps_json=json.dumps(run_steps),
-                        log_json=json.dumps(log_lines[-200:]),
-                    )
+                    _sql_text(
+                        "UPDATE pipeline_run SET finished_at = :finished_at, status = :status,"
+                        " steps_json = :steps_json, log_json = :log_json WHERE id = :id"
+                    ),
+                    {
+                        "finished_at": datetime.utcnow().isoformat(),
+                        "status": run_final_status,
+                        "steps_json": json.dumps(run_steps),
+                        "log_json": json.dumps(log_lines[-200:]),
+                        "id": run_id,
+                    },
                 )
                 db.commit()
             except Exception:
