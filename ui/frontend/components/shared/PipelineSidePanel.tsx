@@ -362,11 +362,7 @@ export function PipelineSidePanel({
   }, [contextKey, running, callsRunning]);
 
   // ── Live backend log tail ────────────────────────────────────────────────────
-  // bgRunning: a run is active in the DB but this frontend tab didn't start it
-  // (e.g. page was refreshed mid-run). Used to disable the Run button and show
-  // the correct "Running…" indicator even when running/callsRunning are false.
-  const bgRunning  = !isPerCall && !running && latestRun?.status === "running";
-  const anyRunning = running || callsRunning || bgRunning;
+  const anyRunning = running || callsRunning;
   const logEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!anyRunning) return;
@@ -404,6 +400,10 @@ export function PipelineSidePanel({
     refreshInterval: (data) => (data?.[0]?.status === "running" ? 3000 : 0),
   });
   const latestRun = latestRunData?.[0] ?? null;
+  // bgRunning: a run is active in the DB but this tab didn't start it
+  // (e.g. page refreshed mid-run). anyBusy includes this for button disabled/label.
+  const bgRunning = !isPerCall && !running && latestRun?.status === "running";
+  const anyBusy   = anyRunning || bgRunning;
 
   // ── per_pair: restore step state from latest run or cached results ───────────
   useEffect(() => {
@@ -945,11 +945,11 @@ export function PipelineSidePanel({
         <div className="flex gap-1.5">
           <button
             onClick={() => isPerCall ? runAllCalls(false) : run(false)}
-            disabled={anyRunning || !contextOk}
+            disabled={anyBusy || !contextOk}
             className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
           >
-            {anyRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-            {anyRunning ? "Running…"
+            {anyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+            {anyBusy ? "Running…"
               : isPerCall
                 ? (hasCallResults
                     ? `Re-run (${callResults.length} call${callResults.length !== 1 ? "s" : ""})`
@@ -961,7 +961,7 @@ export function PipelineSidePanel({
           {(hasResults || hasCallResults) && (
             <button
               onClick={() => isPerCall ? runAllCalls(true) : run(true)}
-              disabled={anyRunning || !contextOk}
+              disabled={anyBusy || !contextOk}
               title="Force re-run — ignore cache, re-run all steps"
               className="flex items-center gap-1.5 px-2.5 py-2 bg-orange-900/60 hover:bg-orange-800/70 border border-orange-700/50 hover:border-orange-600 disabled:opacity-50 text-orange-300 text-[11px] font-medium rounded-lg transition-colors shrink-0"
             >
@@ -1197,7 +1197,7 @@ export function PipelineSidePanel({
                               <pre className="text-[10px] text-red-400 font-mono whitespace-pre-wrap break-words bg-red-950/20 rounded p-2 border border-red-900/40">{st.errorMsg}</pre>
                             )}
                             <button onClick={() => { if (isPerCall) runAllCalls(true); else run(true); }}
-                              disabled={anyRunning || !contextOk}
+                              disabled={anyBusy || !contextOk}
                               className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-900/60 hover:bg-orange-800 border border-orange-700/50 disabled:opacity-50 text-orange-300 text-[11px] font-medium rounded-lg transition-colors">
                               <Play className="w-3 h-3" /> Force Re-run
                             </button>
@@ -1207,7 +1207,7 @@ export function PipelineSidePanel({
                           <div className="p-3 flex flex-col items-center gap-2">
                             <p className="text-[11px] text-gray-600">Not yet executed</p>
                             <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
-                              disabled={anyRunning || !contextOk}
+                              disabled={anyBusy || !contextOk}
                               className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
                               <Play className="w-3 h-3" /> {isPerCall ? "Run All Calls" : "Run Pipeline"}
                             </button>
