@@ -179,10 +179,8 @@ function MiniCanvas({
       if (statuses.some(s => s === "error"))   return "error";
       if (statuses.some(s => s === "loading")) return "loading";
       if (statuses.some(s => s === "done" || s === "cached")) {
-        const src = cn.data.inputSource ?? "";
-        // External file sources (pre-existing data) always yellow; internal (agent_output, chain_previous) can be green
-        return !["agent_output", "chain_previous"].includes(src) ? "cached"
-          : statuses.some(s => s === "done") ? "done" : "cached";
+        // Green when any connected step ran fresh (done); yellow when all used cache
+        return statuses.some(s => s === "done") ? "done" : "cached";
       }
       return "pending";
     }
@@ -364,7 +362,11 @@ export function PipelineSidePanel({
   }, [contextKey, running, callsRunning]);
 
   // ── Live backend log tail ────────────────────────────────────────────────────
-  const anyRunning = running || callsRunning;
+  // bgRunning: a run is active in the DB but this frontend tab didn't start it
+  // (e.g. page was refreshed mid-run). Used to disable the Run button and show
+  // the correct "Running…" indicator even when running/callsRunning are false.
+  const bgRunning  = !isPerCall && !running && latestRun?.status === "running";
+  const anyRunning = running || callsRunning || bgRunning;
   const logEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!anyRunning) return;
@@ -434,6 +436,29 @@ export function PipelineSidePanel({
         };
       }));
       setLoaded(true);
+      return;
+    }
+
+    // Background monitoring: the run we were watching just finished — do a final
+    // state update. Without this, `if (loaded) return` below would block the update
+    // and the UI would stay stuck on the last-polled "loading" step forever.
+    if (loaded && !done && latestRun && hasProgress && latestRun.status !== "running") {
+      setSteps(runSteps.map((s: any, i: number) => {
+        const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
+        return {
+          agentName: s.agent_name || a?.name || "",
+          status: s.status as StepStatus,
+          content: s.content || "",
+          stream: "",
+          expanded: false,
+          errorMsg: s.error_msg || undefined,
+          model: s.model || undefined,
+          execTimeS: s.execution_time_s ?? undefined,
+          inputTokenEst: s.input_token_est ?? undefined,
+          outputTokenEst: s.output_token_est ?? undefined,
+        };
+      }));
+      setDone(true);
       return;
     }
 
