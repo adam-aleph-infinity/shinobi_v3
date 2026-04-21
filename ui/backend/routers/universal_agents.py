@@ -560,11 +560,16 @@ def _get_or_upload_openai(
     header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
     upload_content = header + content
 
-    # Try existing record
-    existing = db.exec(
-        select(UF).where(UF.provider == provider, UF.content_hash == chash)
-        .order_by(UF.created_at.desc())
-    ).first()
+    # OpenAI Responses API requires purpose="user_data"; old records used purpose="assistants"
+    # and cannot be reused. Distinguish them via provider_file_uri ("user_data" vs "").
+    purpose = "user_data" if provider == "openai" else "assistants"
+
+    # Try existing record — for user_data purpose, only match records that were also
+    # uploaded with user_data (provider_file_uri == "user_data"); ignore old assistants files.
+    existing_stmt = select(UF).where(UF.provider == provider, UF.content_hash == chash)
+    if purpose == "user_data":
+        existing_stmt = existing_stmt.where(UF.provider_file_uri == "user_data")
+    existing = db.exec(existing_stmt.order_by(UF.created_at.desc())).first()
 
     if existing:
         log_buffer.emit(f"[FILE] ✓ {provider}:{existing.provider_file_id} ({source} · {cid_short})")
@@ -578,7 +583,7 @@ def _get_or_upload_openai(
     try:
         resp = client.files.create(
             file=(filename, upload_content.encode("utf-8"), "text/plain"),
-            purpose="user_data" if provider == "openai" else "assistants",
+            purpose=purpose,
         )
         file_id = resp.id
         log_buffer.emit(f"[FILE] ↑ {provider}:{file_id} ({source} · {cid_short})")
@@ -589,7 +594,7 @@ def _get_or_upload_openai(
         id=str(uuid.uuid4()),
         provider=provider,
         provider_file_id=file_id,
-        provider_file_uri="",
+        provider_file_uri="user_data" if purpose == "user_data" else "",
         content_hash=chash,
         input_key=key,
         source=source,
