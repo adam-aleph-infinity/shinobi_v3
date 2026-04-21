@@ -543,7 +543,7 @@ export default function ArtifactsPage() {
     ? `/api/history/runs?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}&limit=50`
     : null;
   const { data: historyRuns, isLoading: loadRuns, mutate: mutateRuns } = useSWR<PipelineRun[]>(
-    runsUrl, fetcher, { refreshInterval: 8000, dedupingInterval: 500 },
+    runsUrl, fetcher, { refreshInterval: 15000 },
   );
 
   // All core data must load before Panel 3 renders (avoids "No artifacts" flash)
