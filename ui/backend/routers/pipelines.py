@@ -11,6 +11,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import update as _sa_update
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -240,10 +241,12 @@ async def run_pipeline(
         prev_content = ""
 
         def save_steps():
-            """Persist current step states to DB so the frontend can restore live state on refresh."""
+            """Persist current step states via direct SQL UPDATE — avoids ORM expiry issues."""
             try:
-                run_record.steps_json = json.dumps(run_steps)
-                db.add(run_record)
+                db.execute(
+                    _sa_update(PR).where(PR.id == run_id)
+                    .values(steps_json=json.dumps(run_steps))
+                )
                 db.commit()
             except Exception:
                 pass
@@ -483,22 +486,20 @@ async def run_pipeline(
                 except Exception:
                     pass
             try:
-                try:
-                    db.rollback()  # clear any dirty state from failed save_steps() commits
-                except Exception:
-                    pass
-                # Re-fetch a fresh instance after rollback — avoids stale/expired object issues
-                fresh = db.exec(select(PR).where(PR.id == run_id)).first()
-                if fresh:
-                    log_lines = [
-                        {"ts": l.ts, "text": l.text, "level": l.level}
-                        for l in log_buffer.get_after(start_seq)
-                    ]
-                    fresh.finished_at = datetime.utcnow()
-                    fresh.status      = run_final_status
-                    fresh.steps_json  = json.dumps(run_steps)
-                    fresh.log_json    = json.dumps(log_lines[-200:])
-                    db.commit()
+                log_lines = [
+                    {"ts": l.ts, "text": l.text, "level": l.level}
+                    for l in log_buffer.get_after(start_seq)
+                ]
+                db.execute(
+                    _sa_update(PR).where(PR.id == run_id)
+                    .values(
+                        finished_at=datetime.utcnow(),
+                        status=run_final_status,
+                        steps_json=json.dumps(run_steps),
+                        log_json=json.dumps(log_lines[-200:]),
+                    )
+                )
+                db.commit()
             except Exception:
                 pass
 

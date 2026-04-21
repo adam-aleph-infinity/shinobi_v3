@@ -461,17 +461,20 @@ export function PipelineSidePanel({
 
     // Fall back to AgentResult cache
     if (!cachedResults) return;
+    // If a completed run exists, its AgentResult records ARE from that run — show "done".
+    // Only fall back to "cached" when there's no matching run record at all.
+    const runWasDone = latestRun?.status === "done";
     const initialSteps = pipeline.steps.map((s, i) => {
       const a = agents.find(x => x.id === s.agent_id);
       const cr = cachedResults[i];
       return {
         agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
-        status: (cr?.result ? "cached" : "pending") as StepStatus,
+        status: (cr?.result ? (runWasDone ? "done" : "cached") : "pending") as StepStatus,
         content: cr?.result?.content ?? "",
         stream: "", expanded: false,
       };
     });
-    if (initialSteps.some(st => st.status === "cached")) {
+    if (initialSteps.some(st => st.status === "done" || st.status === "cached")) {
       setSteps(initialSteps); setDone(true); setLoaded(true);
     }
   }, [latestRunData, cachedResults, latestRun, pipeline, agents, running, loaded, isPerCall]);
