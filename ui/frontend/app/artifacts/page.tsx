@@ -2,8 +2,6 @@
 
 import { useState, useEffect } from "react";
 import useSWR from "swr";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText, GitBranch,
   Loader2, Copy, Archive, Search, CalendarDays, ChevronRight, Trash2,
@@ -12,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { useResize } from "@/lib/useResize";
 import { DragHandle } from "@/components/shared/DragHandle";
 import { useAppCtx } from "@/lib/app-context";
+import { SectionContent } from "@/components/shared/SectionCards";
 
 const fetcher = (url: string) =>
   fetch(url).then(r => {
@@ -198,14 +197,6 @@ function JsonKVTable({ value, accentColor = "text-gray-500" }: { value: unknown;
   return <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-words">{raw}</pre>;
 }
 
-function MarkdownBody({ content }: { content: string }) {
-  return (
-    <div className="prose prose-invert prose-sm max-w-none">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-    </div>
-  );
-}
-
 // ── Content viewer ────────────────────────────────────────────────────────────
 
 function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () => Promise<void> }) {
@@ -240,7 +231,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <MarkdownBody content={md} />
+          <SectionContent content={md} />
         </div>
       </div>
     );
@@ -330,7 +321,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {md ? <MarkdownBody content={md} /> : <p className="text-xs text-gray-600 italic">No content</p>}
+          {md ? <SectionContent content={md} /> : <p className="text-xs text-gray-600 italic">No content</p>}
         </div>
       </div>
     );
@@ -357,7 +348,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
           {md && (
             <div>
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Note Content</p>
-              <MarkdownBody content={md} />
+              <SectionContent content={md} />
             </div>
           )}
         </div>
@@ -405,7 +396,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="flex-1 overflow-y-auto p-5">
           {parsedJson
             ? <JsonKVTable value={parsedJson} accentColor={accentColor} />
-            : <MarkdownBody content={content} />
+            : <SectionContent content={content} />
           }
         </div>
       </div>
