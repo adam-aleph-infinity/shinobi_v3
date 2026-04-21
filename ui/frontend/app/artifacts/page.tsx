@@ -417,65 +417,28 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
 
 // ── Item row ──────────────────────────────────────────────────────────────────
 
-/** Strip common markdown syntax and return a plain-text excerpt. */
-function stripMd(raw: string, maxLen = 160): string {
-  return raw
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/\*{1,2}([^*\n]+)\*{1,2}/g, "$1")
-    .replace(/_([^_\n]+)_/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/`[^`\n]+`/g, "")
-    .replace(/^\s*[-*+>]\s*/gm, "")
-    .replace(/\n+/g, " ")
-    .trim()
-    .slice(0, maxLen);
-}
-
-function itemPreview(item: ArtifactItem): string {
-  if (item.kind === "merged_transcript") return stripMd(item.data.content);
-  if (item.kind === "persona")           return stripMd(item.data.content_md ?? "");
-  if (item.kind === "persona_score") {
-    const raw = typeof item.data.score_json === "string"
-      ? item.data.score_json
-      : JSON.stringify(item.data.score_json ?? "");
-    return stripMd(raw);
-  }
-  if (item.kind === "notes_rollup")    return stripMd(String(item.data.summary ?? ""));
-  if (item.kind === "note")            return stripMd(item.data.content_md ?? "");
-  if (item.kind === "compliance_note") return stripMd(item.data.content_md ?? "");
-  // pipeline kinds all have data.content
-  return stripMd(item.data.content);
-}
-
 function ItemRow({ item, selected, onClick }: { item: ArtifactItem; selected: boolean; onClick: () => void }) {
   const m = ARTIFACT_TYPE_META[item.kind];
   const Icon = m.icon;
-  const preview = itemPreview(item);
   return (
     <button onClick={onClick}
       className={cn(
-        "w-full flex items-start gap-2 px-3 py-2.5 text-left transition-colors border-l-2",
+        "w-full flex items-center gap-2 px-3 py-2 text-left transition-colors border-l-2",
         selected
           ? "bg-indigo-900/30 border-indigo-500"
           : "border-transparent hover:bg-gray-800/40",
       )}>
-      <span className={cn("p-0.5 rounded border shrink-0 mt-0.5", m.bg, m.text, m.border)}>
+      <span className={cn("p-0.5 rounded border shrink-0", m.bg, m.text, m.border)}>
         <Icon className="w-3 h-3" />
       </span>
       <div className="flex-1 min-w-0">
         <p className={cn("text-[11px] font-medium truncate", selected ? "text-white" : "text-gray-300")}>{item.label}</p>
-        <p className="text-[9px] text-gray-600 flex items-center gap-1.5 mb-1">
+        <p className="text-[9px] text-gray-600 flex items-center gap-1.5">
           <CalendarDays className="w-2.5 h-2.5" />{item.date.slice(0, 10)}
           <span className="text-gray-700">{item.chars.toLocaleString()} chars</span>
         </p>
-        {preview && (
-          <p className={cn(
-            "text-[9px] leading-relaxed line-clamp-3 break-words",
-            selected ? "text-gray-400" : "text-gray-600",
-          )}>{preview}</p>
-        )}
       </div>
-      <ChevronRight className="w-3 h-3 text-gray-700 shrink-0 mt-0.5" />
+      <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
     </button>
   );
 }
