@@ -5,6 +5,7 @@ import useSWR from "swr";
 import {
   User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText, GitBranch,
   Loader2, Copy, Archive, Search, CalendarDays, ChevronRight, Trash2,
+  CloudUpload, AlertTriangle, Clock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useResize } from "@/lib/useResize";
@@ -45,6 +46,12 @@ interface RunStep {
   agent_id: string; agent_name: string; status: string;
   content: string; model?: string;
 }
+interface UploadedFile {
+  id: string; provider: string; provider_file_id: string; provider_file_uri?: string;
+  content_hash: string; input_key: string; source: string;
+  sales_agent: string; customer: string; call_id?: string;
+  chars: number; created_at: string; expires_at?: string;
+}
 
 type ArtifactKind =
   | "merged_transcript"
@@ -57,7 +64,8 @@ type ArtifactKind =
   | "pipeline_score"
   | "pipeline_notes"
   | "pipeline_compliance"
-  | "pipeline_output";
+  | "pipeline_output"
+  | "provider_file";
 
 type ArtifactItem =
   | { kind: "merged_transcript"; id: "merged_transcript"; date: string; chars: number; label: string; data: { content: string } }
@@ -70,7 +78,8 @@ type ArtifactItem =
   | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
   | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
   | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
-  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } };
+  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
+  | { kind: "provider_file";       id: string; date: string; chars: number; label: string; data: UploadedFile };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
 
@@ -89,6 +98,7 @@ const ARTIFACT_TYPE_META: Record<ArtifactKind, {
   pipeline_notes:     { label: "Notes (Pipeline)",    icon: StickyNote,  bg: "bg-amber-900/40",   text: "text-amber-300",   border: "border-amber-700/40",   dot: "bg-amber-500"   },
   pipeline_compliance:{ label: "Compliance (Pipeline)",icon: ShieldCheck,bg: "bg-emerald-900/30", text: "text-emerald-400", border: "border-emerald-700/30", dot: "bg-emerald-400" },
   pipeline_output:    { label: "Pipeline Outputs",    icon: GitBranch,   bg: "bg-indigo-900/40",  text: "text-indigo-300",  border: "border-indigo-700/40",  dot: "bg-indigo-500"  },
+  provider_file:      { label: "Provider Files",      icon: CloudUpload, bg: "bg-sky-900/40",     text: "text-sky-300",     border: "border-sky-700/40",     dot: "bg-sky-500"     },
 };
 
 // ── Pipeline canvas helpers ───────────────────────────────────────────────────
@@ -403,6 +413,113 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
     );
   }
 
+  if (item.kind === "provider_file") {
+    const f = item.data;
+    const isExpired  = f.expires_at ? new Date(f.expires_at) < new Date() : false;
+    const expiringSoon = !isExpired && f.expires_at
+      ? new Date(f.expires_at) < new Date(Date.now() + 4 * 60 * 60 * 1000) : false;
+
+    const providerColor: Record<string, string> = {
+      openai:    "text-emerald-400",
+      anthropic: "text-orange-400",
+      gemini:    "text-sky-400",
+      grok:      "text-slate-400",
+    };
+    const providerBg: Record<string, string> = {
+      openai:    "bg-emerald-900/30 border-emerald-700/40",
+      anthropic: "bg-orange-900/30 border-orange-700/40",
+      gemini:    "bg-sky-900/30 border-sky-700/40",
+      grok:      "bg-slate-900/30 border-slate-700/40",
+    };
+    const pColor = providerColor[f.provider] ?? "text-gray-400";
+    const pBg    = providerBg[f.provider]    ?? "bg-gray-800/40 border-gray-700/40";
+
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
+          <span className="p-1 rounded border shrink-0 bg-sky-900/40 text-sky-300 border-sky-700/40">
+            <CloudUpload className="w-3.5 h-3.5" />
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className={cn("text-xs font-bold uppercase tracking-wider", pColor)}>{f.provider}</p>
+            <p className="text-sm font-semibold text-white truncate">{f.source.replace(/_/g, " ")}</p>
+            <p className="text-[10px] text-gray-500">
+              {f.created_at.slice(0, 10)} · {f.chars.toLocaleString()} chars
+              {f.input_key ? ` · key: ${f.input_key}` : ""}
+            </p>
+          </div>
+          <CopyBtn text={f.provider_file_id} />
+          {onDelete && <DeleteBtn onDelete={onDelete} />}
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {/* File ID — primary piece of info */}
+          <div>
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1.5">File ID</p>
+            <div className={cn("flex items-center gap-2 px-3 py-2 rounded-lg border font-mono text-sm break-all", pBg, pColor)}>
+              <span className="flex-1">{f.provider_file_id}</span>
+              <button onClick={() => navigator.clipboard.writeText(f.provider_file_id)}
+                className="shrink-0 text-gray-500 hover:text-gray-300 transition-colors">
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Gemini URI if present */}
+          {f.provider_file_uri && (
+            <div>
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1.5">File URI</p>
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-sky-700/40 bg-sky-900/20 font-mono text-xs text-sky-300 break-all">
+                <span className="flex-1">{f.provider_file_uri}</span>
+                <button onClick={() => navigator.clipboard.writeText(f.provider_file_uri!)}
+                  className="shrink-0 text-gray-500 hover:text-gray-300 transition-colors">
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Metadata grid */}
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: "Provider",    value: f.provider },
+              { label: "Source",      value: f.source.replace(/_/g, " ") },
+              { label: "Input Key",   value: f.input_key || "—" },
+              { label: "Size",        value: `${f.chars.toLocaleString()} chars` },
+              { label: "Call ID",     value: f.call_id ? f.call_id.slice(-16) : "—" },
+              { label: "Content Hash",value: f.content_hash },
+              { label: "Uploaded",    value: f.created_at.slice(0, 19).replace("T", " ") },
+            ].map(({ label, value }) => (
+              <div key={label} className="border border-gray-800/60 rounded-lg px-3 py-2">
+                <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">{label}</p>
+                <p className="text-xs text-gray-300 font-mono break-all">{value}</p>
+              </div>
+            ))}
+
+            {/* Expiry — separate because of status coloring */}
+            <div className={cn("border rounded-lg px-3 py-2", isExpired ? "border-red-800/60 bg-red-950/20" : expiringSoon ? "border-amber-800/60 bg-amber-950/20" : "border-gray-800/60")}>
+              <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">Expiry</p>
+              {f.expires_at ? (
+                <div className="flex items-center gap-1">
+                  {isExpired
+                    ? <AlertTriangle className="w-3 h-3 text-red-400 shrink-0" />
+                    : expiringSoon
+                    ? <Clock className="w-3 h-3 text-amber-400 shrink-0" />
+                    : null}
+                  <p className={cn("text-xs font-mono", isExpired ? "text-red-400" : expiringSoon ? "text-amber-400" : "text-gray-300")}>
+                    {f.expires_at.slice(0, 19).replace("T", " ")}
+                    {isExpired ? " (expired)" : expiringSoon ? " (soon)" : ""}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-400">persistent</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return null;
 }
 
@@ -521,6 +638,12 @@ export default function ArtifactsPage() {
   const { data: historyRuns, isLoading: loadRuns, mutate: mutateRuns } = useSWR<PipelineRun[]>(
     runsUrl, fetcher,
   );
+  const uploadedFilesUrl = pairQs
+    ? `/api/universal-agents/uploaded-files?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}`
+    : null;
+  const { data: uploadedFiles, mutate: mutateUploadedFiles } = useSWR<UploadedFile[]>(
+    uploadedFilesUrl, fetcher,
+  );
 
   // All core data must load before Panel 3 renders (avoids "No artifacts" flash)
   const isLoadingPair = loadP || loadN || loadR || (!!runsUrl && loadRuns);
@@ -538,6 +661,7 @@ export default function ArtifactsPage() {
     pipeline_notes: [],
     pipeline_compliance: [],
     pipeline_output: [],
+    provider_file: [],
   };
 
   if (mergedTranscript != null) {
@@ -626,6 +750,17 @@ export default function ArtifactsPage() {
       });
     });
 
+  // Provider-uploaded files
+  (uploadedFiles ?? []).sort((a, b) => b.created_at.localeCompare(a.created_at)).forEach(f => {
+    const srcLabel = f.source.replace(/_/g, " ");
+    itemsByKind.provider_file.push({
+      kind: "provider_file", id: f.id,
+      date: f.created_at, chars: f.chars,
+      label: `${f.provider} · ${srcLabel}${f.call_id ? ` · ${f.call_id.slice(-8)}` : ""}`,
+      data: f,
+    });
+  });
+
   async function handleDelete(item: ArtifactItem) {
     let url: string | null = null;
     if (item.kind === "persona") {
@@ -640,6 +775,8 @@ export default function ArtifactsPage() {
       item.kind === "pipeline_output"
     ) {
       url = `/api/history/runs/${item.data.run_id}`;
+    } else if (item.kind === "provider_file") {
+      url = `/api/universal-agents/uploaded-files/${item.id}`;
     }
     if (!url) return;
     await fetch(url, { method: "DELETE" });
@@ -649,6 +786,8 @@ export default function ArtifactsPage() {
       await mutateNotes();
     } else if (item.kind.startsWith("pipeline_")) {
       await mutateRuns();
+    } else if (item.kind === "provider_file") {
+      await mutateUploadedFiles();
     }
     setSelectedItem(null);
   }
