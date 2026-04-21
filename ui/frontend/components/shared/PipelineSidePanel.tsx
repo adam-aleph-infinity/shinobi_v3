@@ -387,8 +387,11 @@ export function PipelineSidePanel({
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
   // ── per_pair: latest run — poll while running so refresh restores live state ─
+  // per_pair runs are always saved with call_id="" (pair-level, not call-specific).
+  // Always query with call_id="" so the restore finds the run regardless of which
+  // call is currently selected in context, and per_call batch runs are excluded.
   const latestRunUrl = !isPerCall && activePipelineId && hasPair
-    ? `/api/pipelines/${activePipelineId}/runs?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}&limit=1`
+    ? `/api/pipelines/${activePipelineId}/runs?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=&limit=1`
     : null;
   const { data: latestRunData } = useSWR<any[]>(latestRunUrl, fetcher, {
     refreshInterval: (data) => (data?.[0]?.status === "running" ? 3000 : 0),
@@ -725,7 +728,7 @@ export function PipelineSidePanel({
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: callId, force }),
+        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force }),
       });
       if (!res.body) throw new Error("No response body");
       let hadLLM = false;
