@@ -148,7 +148,7 @@ def list_pipeline_runs(
     pipeline_id: str,
     sales_agent: str = Query(""),
     customer: str = Query(""),
-    call_id: str = Query(""),
+    call_id: Optional[str] = Query(None),
     limit: int = Query(30),
     db: Session = Depends(get_session),
 ):
@@ -156,9 +156,9 @@ def list_pipeline_runs(
     from ui.backend.models.pipeline_run import PipelineRun as PR
 
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
-    if sales_agent: stmt = stmt.where(PR.sales_agent == sales_agent)
-    if customer:    stmt = stmt.where(PR.customer == customer)
-    if call_id:     stmt = stmt.where(PR.call_id == call_id)
+    if sales_agent:          stmt = stmt.where(PR.sales_agent == sales_agent)
+    if customer:             stmt = stmt.where(PR.customer == customer)
+    if call_id is not None:  stmt = stmt.where(PR.call_id == call_id)
     stmt = stmt.order_by(PR.started_at.desc()).limit(limit)
     rows = db.exec(stmt).all()
     return [
@@ -483,6 +483,10 @@ async def run_pipeline(
                 except Exception:
                     pass
             try:
+                try:
+                    db.rollback()  # clear any dirty session state from earlier save_steps() commits
+                except Exception:
+                    pass
                 log_lines = [
                     {"ts": l.ts, "text": l.text, "level": l.level}
                     for l in log_buffer.get_after(start_seq)
