@@ -365,14 +365,26 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
     );
   }
 
-  // ── Pipeline artifact kinds ────────────────────────────────────────────────
+  // ── Pipeline artifact kinds — all share the same layout ──────────────────
   if (
     item.kind === "pipeline_persona" ||
-    item.kind === "pipeline_notes" ||
+    item.kind === "pipeline_score"   ||
+    item.kind === "pipeline_notes"   ||
+    item.kind === "pipeline_compliance" ||
     item.kind === "pipeline_output"
   ) {
-    // Markdown output
     const m = ARTIFACT_TYPE_META[item.kind];
+    const content = item.data.content;
+    // If the content is valid JSON object, display as key-value table; otherwise render as markdown
+    const parsedJson = (() => {
+      try {
+        const p = JSON.parse(content);
+        return p && typeof p === "object" && !Array.isArray(p) ? p as Record<string, unknown> : null;
+      } catch { return null; }
+    })();
+    const accentColor = item.kind === "pipeline_compliance" ? "text-emerald-700"
+                      : item.kind === "pipeline_score"      ? "text-violet-400"
+                      : "text-gray-500";
     return (
       <div className="h-full flex flex-col overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
@@ -380,48 +392,21 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <m.icon className="w-3.5 h-3.5" />
           </span>
           <div className="flex-1 min-w-0">
+            <p className={cn("text-xs font-semibold uppercase tracking-wide", m.text)}>{m.label}</p>
             <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
             <p className="text-[10px] text-gray-500">
               {item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
               {item.data.model ? ` · ${item.data.model}` : ""}
             </p>
           </div>
-          <CopyBtn text={item.data.content} />
+          <CopyBtn text={content} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          <MarkdownBody content={item.data.content} />
-        </div>
-      </div>
-    );
-  }
-
-  if (item.kind === "pipeline_score" || item.kind === "pipeline_compliance") {
-    // JSON key-value output — same style as persona_score / compliance_note
-    const m = ARTIFACT_TYPE_META[item.kind];
-    const accentColor = item.kind === "pipeline_compliance" ? "text-emerald-700" : "text-gray-500";
-    const sectionLabel = item.kind === "pipeline_compliance" ? "Compliance Score" : "Score";
-    return (
-      <div className="h-full flex flex-col overflow-hidden">
-        <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
-          <span className={cn("p-1 rounded border shrink-0", m.bg, m.text, m.border)}>
-            <m.icon className="w-3.5 h-3.5" />
-          </span>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
-            <p className="text-[10px] text-gray-500">
-              {item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
-              {item.data.model ? ` · ${item.data.model}` : ""}
-            </p>
-          </div>
-          <CopyBtn text={item.data.content} />
-          {onDelete && <DeleteBtn onDelete={onDelete} />}
-        </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          <div>
-            <p className={cn("text-[10px] font-bold uppercase tracking-wide mb-2", accentColor)}>{sectionLabel}</p>
-            <JsonKVTable value={item.data.content} accentColor={accentColor} />
-          </div>
+          {parsedJson
+            ? <JsonKVTable value={parsedJson} accentColor={accentColor} />
+            : <MarkdownBody content={content} />
+          }
         </div>
       </div>
     );
@@ -529,8 +514,8 @@ export default function ArtifactsPage() {
   const { data: notes, isLoading: loadN, mutate: mutateNotes } = useSWR<Note[]>(
     pairQs ? `/api/notes?${pairQs}` : null, fetcher,
   );
-  const { data: rollup, isLoading: loadR, error: rollupErr } = useSWR<Record<string, unknown>>(
-    pairQs ? `/api/notes/rollup?${pairQs}` : null, fetcher,
+  const { data: rollup, isLoading: loadR, error: rollupErr } = useSWR<Record<string, unknown> | null>(
+    pairQs ? `/api/notes/rollup?${pairQs}` : null, fetcherOptional,
   );
   // Merged transcript + pipeline runs load independently — don't block the type panel
   const mtUrl = pairQs
@@ -543,7 +528,7 @@ export default function ArtifactsPage() {
     ? `/api/history/runs?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer)}&limit=50`
     : null;
   const { data: historyRuns, isLoading: loadRuns, mutate: mutateRuns } = useSWR<PipelineRun[]>(
-    runsUrl, fetcher, { refreshInterval: 15000 },
+    runsUrl, fetcher,
   );
 
   // All core data must load before Panel 3 renders (avoids "No artifacts" flash)
