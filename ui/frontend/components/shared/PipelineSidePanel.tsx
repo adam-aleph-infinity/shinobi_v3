@@ -176,12 +176,10 @@ function MiniCanvas({
         const i = procStepIdx.get(pid);
         return (i != null ? (flowSteps[i]?.status ?? "pending") : "pending") as StepStatus;
       });
-      if (statuses.some(s => s === "error"))   return "error";
-      if (statuses.some(s => s === "loading")) return "loading";
-      if (statuses.some(s => s === "done" || s === "cached")) {
-        // Green when any connected step ran fresh (done); yellow when all used cache
-        return statuses.some(s => s === "done") ? "done" : "cached";
-      }
+      if (statuses.some(s => s === "error"))  return "error";
+      if (statuses.some(s => s === "done"))   return "done";   // fresh run used this input
+      // loading = input was already fetched to start the step → data available (yellow)
+      if (statuses.some(s => s === "cached" || s === "loading")) return "cached";
       return "pending";
     }
     return "pending";
@@ -1382,7 +1380,7 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
   pendingLabel?: string;  // "waiting" | "not run" — label for pending steps
   prevContent?: string;   // cached result snapshot taken before this run started
 }) {
-  const isOpen = st.status === "done" || st.status === "cached";
+  const isOpen = st.status === "done" || st.status === "cached" || st.status === "error";
   return (
     <div className={cn("border rounded-xl overflow-hidden", isOpen ? "border-gray-700/60" : "border-gray-800")}>
       <div
@@ -1416,6 +1414,13 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
         <div className="px-3 pb-3 bg-gray-950">
           <pre className="text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
             {st.stream}<div ref={streamEndRef} />
+          </pre>
+        </div>
+      )}
+      {st.expanded && st.status === "error" && (
+        <div className="px-3 pb-3 bg-gray-950">
+          <pre className="text-[10px] text-red-400 font-mono whitespace-pre-wrap break-words bg-red-950/20 rounded p-2 border border-red-900/40">
+            {st.errorMsg || "Unknown error"}
           </pre>
         </div>
       )}

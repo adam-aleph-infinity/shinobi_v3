@@ -254,225 +254,469 @@ async def run_pipeline(
             except Exception:
                 pass
 
+        # ── Build stage groups from canvas ───────────────────────────────────
+        # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
+        # Steps with the same stageIndex belong to the same parallel stage.
+        _canvas_nodes = pipeline_def.get("canvas", {}).get("nodes", [])
+        _proc_nodes = sorted(
+            [n for n in _canvas_nodes if n.get("type") == "processing"],
+            key=lambda n: (n.get("data", {}).get("stageIndex", 0), n.get("position", {}).get("x", 0)),
+        )
+        _step_canvas_stage: dict[int, int] = {}
+        for _i, _n in enumerate(_proc_nodes):
+            if _i < len(steps):
+                _step_canvas_stage[_i] = _n.get("data", {}).get("stageIndex", _i)
+        if not _step_canvas_stage:  # no canvas → each step is its own sequential stage
+            _step_canvas_stage = {_i: _i for _i in range(len(steps))}
+
+        # Ordered list of (canvas_stage_key, [step_indices]) preserving first-occurrence order
+        _seen_stages: list[int] = []
+        _grp: dict[int, list[int]] = {}
+        for _si in range(len(steps)):
+            _cs = _step_canvas_stage.get(_si, _si)
+            if _cs not in _grp:
+                _grp[_cs] = []
+                _seen_stages.append(_cs)
+            _grp[_cs].append(_si)
+        _ordered_stages = [(_cs, _grp[_cs]) for _cs in _seen_stages]
+
         try:
             log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
             yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name, "run_id": run_id})
 
-            for step_idx, step in enumerate(steps):
-                agent_id  = step.get("agent_id", "")
-                overrides = step.get("input_overrides", {})
-                agent_def = agent_map.get(agent_id)
+            fatal_error = False
 
-                if not agent_def:
-                    run_steps[step_idx]["status"] = "error"
-                    run_steps[step_idx]["error_msg"] = f"Agent '{agent_id}' not found"
-                    yield _sse("error", {"msg": f"Step {step_idx + 1}: agent '{agent_id}' not found", "step": step_idx})
-                    save_steps()
-                    return
+            for _canvas_stage, step_indices in _ordered_stages:
+                if fatal_error:
+                    break
 
-                agent_name = agent_def.get("name", agent_id)
-                model      = agent_def.get("model", "gpt-5.4")
+                # ── Single-step stage (streaming ok) ─────────────────────────
+                if len(step_indices) == 1:
+                    step_idx  = step_indices[0]
+                    step      = steps[step_idx]
+                    agent_id  = step.get("agent_id", "")
+                    overrides = step.get("input_overrides", {})
+                    agent_def = agent_map.get(agent_id)
 
-                run_steps[step_idx]["agent_name"] = agent_name
-                run_steps[step_idx]["model"]      = model
-                run_steps[step_idx]["status"]     = "loading"
-                save_steps()  # persist "loading" so a mid-run refresh shows orange, not yellow
-
-                log_buffer.emit(f"[PIPELINE] ▶ Step {step_idx + 1}/{len(steps)}: {agent_name} [{model}] · {cid_short}")
-                yield _sse("step_start", {
-                    "step": step_idx, "total": len(steps),
-                    "agent_id": agent_id, "agent_name": agent_name, "model": model,
-                })
-
-                # ── Capture input source declarations ────────────────────────
-                input_sources = [
-                    {"key": inp.get("key", ""), "source": overrides.get(inp.get("key", ""), inp.get("source", "manual"))}
-                    for inp in agent_def.get("inputs", [])
-                ]
-                run_steps[step_idx]["input_sources"] = input_sources
-
-                # ── Check cache ──────────────────────────────────────────────
-                if not req.force:
-                    stmt = select(AR).where(
-                        AR.agent_id == agent_id,
-                        AR.sales_agent == req.sales_agent,
-                        AR.customer == req.customer,
-                    )
-                    if req.call_id:
-                        stmt = stmt.where(AR.call_id == req.call_id)
-                    stmt = stmt.order_by(AR.created_at.desc())
-                    cached = db.exec(stmt).first()
-
-                    if cached:
-                        prev_content = cached.content
-                        run_steps[step_idx].update({
-                            "status": "cached",
-                            "content": cached.content,
-                        })
-                        log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
-                        yield _sse("step_cached", {
-                            "step": step_idx, "agent_name": agent_name,
-                            "result_id": cached.id, "content": cached.content,
-                        })
+                    if not agent_def:
+                        run_steps[step_idx]["status"] = "error"
+                        run_steps[step_idx]["error_msg"] = f"Agent '{agent_id}' not found"
+                        yield _sse("error", {"msg": f"Step {step_idx + 1}: agent '{agent_id}' not found", "step": step_idx})
                         save_steps()
-                        continue
+                        fatal_error = True
+                        break
 
-                # ── Resolve inputs ───────────────────────────────────────────
-                temperature   = float(agent_def.get("temperature", 0.0))
-                system_prompt = agent_def.get("system_prompt", "")
-                user_template = agent_def.get("user_prompt", "")
-                manual_inputs = {"_chain_previous": prev_content}
+                    agent_name = agent_def.get("name", agent_id)
+                    model      = agent_def.get("model", "gpt-5.4")
 
-                db._agent_run_ctx = {
-                    "sales_agent": req.sales_agent,
-                    "customer":    req.customer,
-                    "call_id":     req.call_id,
-                    "source_for_key": {
-                        inp.get("key", ""): overrides.get(inp.get("key", ""), inp.get("source", ""))
+                    run_steps[step_idx]["agent_name"] = agent_name
+                    run_steps[step_idx]["model"]      = model
+                    run_steps[step_idx]["status"]     = "loading"
+                    save_steps()  # persist "loading" so mid-run refresh shows orange
+
+                    log_buffer.emit(f"[PIPELINE] ▶ Step {step_idx + 1}/{len(steps)}: {agent_name} [{model}] · {cid_short}")
+                    yield _sse("step_start", {
+                        "step": step_idx, "total": len(steps),
+                        "agent_id": agent_id, "agent_name": agent_name, "model": model,
+                    })
+
+                    # ── Capture input source declarations ────────────────────
+                    run_steps[step_idx]["input_sources"] = [
+                        {"key": inp.get("key", ""), "source": overrides.get(inp.get("key", ""), inp.get("source", "manual"))}
                         for inp in agent_def.get("inputs", [])
-                    },
-                }
+                    ]
 
-                resolved: dict[str, str] = {}
-                for inp in agent_def.get("inputs", []):
-                    key    = inp.get("key", "input")
-                    source = overrides.get(key, inp.get("source", "manual"))
-                    ref_id = inp.get("agent_id")
-                    try:
-                        text = await loop.run_in_executor(
-                            None,
-                            lambda s=source, a=ref_id: _resolve_input(
-                                s, a, req.sales_agent, req.customer, req.call_id,
-                                manual_inputs, db,
-                            ),
+                    # ── Check cache ──────────────────────────────────────────
+                    if not req.force:
+                        stmt = select(AR).where(
+                            AR.agent_id == agent_id,
+                            AR.sales_agent == req.sales_agent,
+                            AR.customer == req.customer,
                         )
-                        resolved[key] = text
-                    except Exception as exc:
-                        run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
-                        log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error (resolve input) · {cid_short}")
-                        yield _sse("error", {"msg": str(exc), "step": step_idx})
-                        save_steps()
-                        return
+                        if req.call_id:
+                            stmt = stmt.where(AR.call_id == req.call_id)
+                        stmt = stmt.order_by(AR.created_at.desc())
+                        cached = db.exec(stmt).first()
 
-                file_keys = {
-                    inp.get("key", "")
-                    for inp in agent_def.get("inputs", [])
-                    if overrides.get(inp.get("key", ""), inp.get("source", "manual")) in _FILE_SOURCES
-                }
-                file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
-                inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
+                        if cached:
+                            prev_content = cached.content
+                            run_steps[step_idx].update({"status": "cached", "content": cached.content})
+                            log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
+                            yield _sse("step_cached", {
+                                "step": step_idx, "agent_name": agent_name,
+                                "result_id": cached.id, "content": cached.content,
+                            })
+                            save_steps()
+                            continue  # advance to next canvas stage
 
-                # ── Call LLM ─────────────────────────────────────────────────
-                # Grok pastes files inline; all other providers use file references
-                total_chars = sum(len(v) for v in inline_inputs.values())
-                if model.startswith("grok"):
-                    total_chars += sum(len(v) for v in file_inputs.values())
-                input_tok_est  = (total_chars + len(system_prompt)) // 4
-                file_note = f" + {len(file_inputs)} file(s)" if file_inputs else ""
-                log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars{file_note} input · {cid_short}")
+                    # ── Resolve inputs ───────────────────────────────────────
+                    temperature   = float(agent_def.get("temperature", 0.0))
+                    system_prompt = agent_def.get("system_prompt", "")
+                    user_template = agent_def.get("user_prompt", "")
+                    manual_inputs = {"_chain_previous": prev_content}
 
-                step_start_t = time.time()
+                    db._agent_run_ctx = {
+                        "sales_agent": req.sales_agent,
+                        "customer":    req.customer,
+                        "call_id":     req.call_id,
+                        "source_for_key": {
+                            inp.get("key", ""): overrides.get(inp.get("key", ""), inp.get("source", ""))
+                            for inp in agent_def.get("inputs", [])
+                        },
+                    }
 
-                if model.startswith("claude-"):
-                    q: _queue.Queue = _queue.Queue()
-                    result_holder: list = []
-                    error_holder:  list = []
-
-                    def _do(fi=file_inputs, ii=inline_inputs, m=model, sp=system_prompt, ut=user_template):
+                    resolved: dict[str, str] = {}
+                    resolve_err = False
+                    for inp in agent_def.get("inputs", []):
+                        key    = inp.get("key", "input")
+                        source = overrides.get(key, inp.get("source", "manual"))
+                        ref_id = inp.get("agent_id")
                         try:
-                            c, t = _llm_call_anthropic_files_streaming(
-                                sp, ut, fi, ii, m, db,
-                                on_text=lambda chunk: q.put(("stream", chunk)),
+                            text = await loop.run_in_executor(
+                                None,
+                                lambda s=source, a=ref_id: _resolve_input(
+                                    s, a, req.sales_agent, req.customer, req.call_id,
+                                    manual_inputs, db,
+                                ),
                             )
-                            result_holder.append((c, t))
+                            resolved[key] = text
                         except Exception as exc:
-                            error_holder.append(str(exc))
-                        finally:
-                            q.put(None)
-
-                    threading.Thread(target=_do, daemon=True).start()
-
-                    while True:
-                        item = await loop.run_in_executor(None, q.get)
-                        if item is None:
+                            run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
+                            log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error (resolve input) · {cid_short}")
+                            yield _sse("error", {"msg": str(exc), "step": step_idx})
+                            save_steps()
+                            fatal_error = True
+                            resolve_err = True
                             break
-                        _, data = item
-                        yield _sse("stream", {"text": data, "step": step_idx})
+                    if resolve_err:
+                        break
 
-                    if error_holder:
-                        run_steps[step_idx].update({"status": "error", "error_msg": error_holder[0]})
-                        log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
-                        yield _sse("error", {"msg": error_holder[0], "step": step_idx})
-                        save_steps()
-                        return
+                    file_keys = {
+                        inp.get("key", "")
+                        for inp in agent_def.get("inputs", [])
+                        if overrides.get(inp.get("key", ""), inp.get("source", "manual")) in _FILE_SOURCES
+                    }
+                    file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
+                    inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
-                    content, thinking = result_holder[0]
+                    # ── Call LLM ─────────────────────────────────────────────
+                    total_chars = sum(len(v) for v in inline_inputs.values())
+                    if model.startswith("grok"):
+                        total_chars += sum(len(v) for v in file_inputs.values())
+                    input_tok_est = (total_chars + len(system_prompt)) // 4
+                    file_note = f" + {len(file_inputs)} file(s)" if file_inputs else ""
+                    log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars{file_note} input · {cid_short}")
+
+                    step_start_t = time.time()
+                    llm_err = False
+
+                    if model.startswith("claude-"):
+                        q: _queue.Queue = _queue.Queue()
+                        result_holder: list = []
+                        error_holder:  list = []
+
+                        def _do(fi=file_inputs, ii=inline_inputs, m=model, sp=system_prompt, ut=user_template):
+                            try:
+                                c, t = _llm_call_anthropic_files_streaming(
+                                    sp, ut, fi, ii, m, db,
+                                    on_text=lambda chunk: q.put(("stream", chunk)),
+                                )
+                                result_holder.append((c, t))
+                            except Exception as exc:
+                                error_holder.append(str(exc))
+                            finally:
+                                q.put(None)
+
+                        threading.Thread(target=_do, daemon=True).start()
+
+                        while True:
+                            item = await loop.run_in_executor(None, q.get)
+                            if item is None:
+                                break
+                            _, data = item
+                            yield _sse("stream", {"text": data, "step": step_idx})
+
+                        if error_holder:
+                            run_steps[step_idx].update({"status": "error", "error_msg": error_holder[0]})
+                            log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
+                            yield _sse("error", {"msg": error_holder[0], "step": step_idx})
+                            save_steps()
+                            fatal_error = True
+                            llm_err = True
+
+                        if not llm_err:
+                            content, thinking = result_holder[0]
+                    else:
+                        try:
+                            content, thinking = await loop.run_in_executor(
+                                None,
+                                lambda: _llm_call_with_files(
+                                    system_prompt, user_template,
+                                    file_inputs, inline_inputs,
+                                    model, temperature, db,
+                                ),
+                            )
+                        except Exception as exc:
+                            run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
+                            log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
+                            yield _sse("error", {"msg": str(exc), "step": step_idx})
+                            save_steps()
+                            fatal_error = True
+                            llm_err = True
+
+                    if llm_err:
+                        break
+
+                    exec_time_s    = round(time.time() - step_start_t, 1)
+                    output_tok_est = len(content) // 4
+
+                    # ── Persist AgentResult ───────────────────────────────────
+                    result_id = str(uuid.uuid4())
+                    db.add(AR(
+                        id=result_id,
+                        agent_id=agent_id,
+                        agent_name=agent_name,
+                        sales_agent=req.sales_agent,
+                        customer=req.customer,
+                        call_id=req.call_id,
+                        content=content,
+                        model=model,
+                    ))
+                    db.commit()
+
+                    prev_content = content
+                    run_steps[step_idx].update({
+                        "status":           "done",
+                        "content":          content,
+                        "execution_time_s": exec_time_s,
+                        "input_token_est":  input_tok_est,
+                        "output_token_est": output_tok_est,
+                        "thinking":         (thinking or "")[:8000],
+                    })
+
+                    log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars, {exec_time_s}s) · {cid_short}")
+
+                    if thinking:
+                        yield _sse("thinking", {"content": thinking[:5000], "step": step_idx})
+
+                    log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1}/{len(steps)}: {agent_name} → done ({exec_time_s}s) · {cid_short}")
+                    yield _sse("step_done", {
+                        "step":             step_idx,
+                        "agent_name":       agent_name,
+                        "result_id":        result_id,
+                        "content":          content,
+                        "model":            model,
+                        "execution_time_s": exec_time_s,
+                        "input_token_est":  input_tok_est,
+                        "output_token_est": output_tok_est,
+                    })
+                    save_steps()
+
+                # ── Parallel stage (multiple steps, non-streaming) ────────────
                 else:
-                    try:
-                        content, thinking = await loop.run_in_executor(
-                            None,
-                            lambda: _llm_call_with_files(
-                                system_prompt, user_template,
-                                file_inputs, inline_inputs,
-                                model, temperature, db,
-                            ),
-                        )
-                    except Exception as exc:
-                        run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
-                        log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
-                        yield _sse("error", {"msg": str(exc), "step": step_idx})
-                        save_steps()
-                        return
+                    n_par = len(step_indices)
+                    log_buffer.emit(f"[PIPELINE] ▶ Stage {_canvas_stage}: {n_par} parallel steps · {cid_short}")
 
-                exec_time_s    = round(time.time() - step_start_t, 1)
-                output_tok_est = len(content) // 4
+                    # Validate all agents before starting
+                    for _sidx in step_indices:
+                        _aid = steps[_sidx].get("agent_id", "")
+                        if not agent_map.get(_aid):
+                            run_steps[_sidx]["status"] = "error"
+                            run_steps[_sidx]["error_msg"] = f"Agent '{_aid}' not found"
+                            yield _sse("error", {"msg": f"Step {_sidx + 1}: agent '{_aid}' not found", "step": _sidx})
+                            fatal_error = True
+                            break
+                    if fatal_error:
+                        break
 
-                # ── Persist AgentResult ───────────────────────────────────────
-                result_id = str(uuid.uuid4())
-                record = AR(
-                    id=result_id,
-                    agent_id=agent_id,
-                    agent_name=agent_name,
-                    sales_agent=req.sales_agent,
-                    customer=req.customer,
-                    call_id=req.call_id,
-                    content=content,
-                    model=model,
-                )
-                db.add(record)
-                db.commit()
+                    # Set loading + emit step_start for all parallel steps simultaneously
+                    for _sidx in step_indices:
+                        _s = steps[_sidx]
+                        _aid = _s.get("agent_id", "")
+                        _adef = agent_map[_aid]
+                        _aname = _adef.get("name", _aid)
+                        _model = _adef.get("model", "gpt-5.4")
+                        run_steps[_sidx]["agent_name"] = _aname
+                        run_steps[_sidx]["model"]      = _model
+                        run_steps[_sidx]["status"]     = "loading"
+                        log_buffer.emit(f"[PIPELINE] ▶ Step {_sidx + 1}/{len(steps)}: {_aname} [{_model}] · {cid_short}")
+                        yield _sse("step_start", {
+                            "step": _sidx, "total": len(steps),
+                            "agent_id": _aid, "agent_name": _aname, "model": _model,
+                        })
+                    save_steps()
 
-                prev_content = content
-                run_steps[step_idx].update({
-                    "status":           "done",
-                    "content":          content,
-                    "execution_time_s": exec_time_s,
-                    "input_token_est":  input_tok_est,
-                    "output_token_est": output_tok_est,
-                    "thinking":         (thinking or "")[:8000],
-                })
+                    _stage_prev = prev_content  # all parallel steps share the same prev stage output
 
-                log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars, {exec_time_s}s) · {cid_short}")
+                    async def _run_parallel_step(par_idx: int, _sp: str = _stage_prev) -> dict:
+                        """Execute one parallel step without streaming. Never raises — returns error dict on failure."""
+                        _par_step   = steps[par_idx]
+                        _par_aid    = _par_step.get("agent_id", "")
+                        _par_ov     = _par_step.get("input_overrides", {})
+                        _par_adef   = agent_map[_par_aid]
+                        _par_aname  = _par_adef.get("name", _par_aid)
+                        _par_model  = _par_adef.get("model", "gpt-5.4")
+                        try:
+                            with Session(_db_engine) as _par_db:
+                                # Cache check
+                                if not req.force:
+                                    _cs = select(AR).where(
+                                        AR.agent_id == _par_aid,
+                                        AR.sales_agent == req.sales_agent,
+                                        AR.customer == req.customer,
+                                    )
+                                    if req.call_id:
+                                        _cs = _cs.where(AR.call_id == req.call_id)
+                                    _cs = _cs.order_by(AR.created_at.desc())
+                                    _cached = _par_db.exec(_cs).first()
+                                    if _cached:
+                                        return {"step_idx": par_idx, "status": "cached", "content": _cached.content,
+                                                "result_id": _cached.id, "agent_name": _par_aname, "model": _par_model}
 
-                if thinking:
-                    yield _sse("thinking", {"content": thinking[:5000], "step": step_idx})
+                                # Resolve inputs
+                                _par_temp = float(_par_adef.get("temperature", 0.0))
+                                _par_sysp = _par_adef.get("system_prompt", "")
+                                _par_ut   = _par_adef.get("user_prompt", "")
+                                _par_mi   = {"_chain_previous": _sp}
+                                _par_db._agent_run_ctx = {
+                                    "sales_agent": req.sales_agent,
+                                    "customer":    req.customer,
+                                    "call_id":     req.call_id,
+                                    "source_for_key": {
+                                        inp.get("key", ""): _par_ov.get(inp.get("key", ""), inp.get("source", ""))
+                                        for inp in _par_adef.get("inputs", [])
+                                    },
+                                }
+                                _par_resolved: dict[str, str] = {}
+                                for _inp in _par_adef.get("inputs", []):
+                                    _k   = _inp.get("key", "input")
+                                    _src = _par_ov.get(_k, _inp.get("source", "manual"))
+                                    _rid = _inp.get("agent_id")
+                                    _par_resolved[_k] = await loop.run_in_executor(
+                                        None,
+                                        lambda s=_src, a=_rid, pdb=_par_db: _resolve_input(
+                                            s, a, req.sales_agent, req.customer, req.call_id, _par_mi, pdb,
+                                        ),
+                                    )
 
-                log_buffer.emit(f"[PIPELINE] ✓ Step {step_idx + 1}/{len(steps)}: {agent_name} → done ({exec_time_s}s) · {cid_short}")
-                yield _sse("step_done", {
-                    "step":             step_idx,
-                    "agent_name":       agent_name,
-                    "result_id":        result_id,
-                    "content":          content,
-                    "model":            model,
-                    "execution_time_s": exec_time_s,
-                    "input_token_est":  input_tok_est,
-                    "output_token_est": output_tok_est,
-                })
-                save_steps()
+                                _par_fkeys = {
+                                    _inp.get("key", "")
+                                    for _inp in _par_adef.get("inputs", [])
+                                    if _par_ov.get(_inp.get("key", ""), _inp.get("source", "manual")) in _FILE_SOURCES
+                                }
+                                _par_fi = {k: v for k, v in _par_resolved.items() if k in _par_fkeys}
+                                _par_ii = {k: v for k, v in _par_resolved.items() if k not in _par_fkeys}
 
-            run_final_status = "done"
-            log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
-            yield _sse("pipeline_done", {})
+                                _par_tc = sum(len(v) for v in _par_ii.values())
+                                if _par_model.startswith("grok"):
+                                    _par_tc += sum(len(v) for v in _par_fi.values())
+                                _par_tok = (_par_tc + len(_par_sysp)) // 4
+                                _par_fn  = f" + {len(_par_fi)} file(s)" if _par_fi else ""
+                                log_buffer.emit(f"[LLM] {_par_model} — {_par_tc:,} chars{_par_fn} input · {cid_short}")
+
+                                _par_t0 = time.time()
+                                _par_content, _par_thinking = await loop.run_in_executor(
+                                    None,
+                                    lambda: _llm_call_with_files(
+                                        _par_sysp, _par_ut, _par_fi, _par_ii,
+                                        _par_model, _par_temp, _par_db,
+                                    ),
+                                )
+                                _par_exec = round(time.time() - _par_t0, 1)
+
+                                _par_rid = str(uuid.uuid4())
+                                _par_db.add(AR(
+                                    id=_par_rid,
+                                    agent_id=_par_aid,
+                                    agent_name=_par_aname,
+                                    sales_agent=req.sales_agent,
+                                    customer=req.customer,
+                                    call_id=req.call_id,
+                                    content=_par_content,
+                                    model=_par_model,
+                                ))
+                                _par_db.commit()
+
+                                return {
+                                    "step_idx":     par_idx,
+                                    "status":       "done",
+                                    "content":      _par_content,
+                                    "thinking":     _par_thinking,
+                                    "exec_time_s":  _par_exec,
+                                    "input_tok":    _par_tok,
+                                    "output_tok":   len(_par_content) // 4,
+                                    "result_id":    _par_rid,
+                                    "model":        _par_model,
+                                    "agent_name":   _par_aname,
+                                }
+                        except Exception as exc:
+                            return {"step_idx": par_idx, "status": "error", "error_msg": str(exc),
+                                    "agent_name": _par_aname, "model": _par_model}
+
+                    par_results = list(await asyncio.gather(*[_run_parallel_step(idx) for idx in step_indices]))
+
+                    stage_had_error = False
+                    for _res in par_results:
+                        _ri   = _res["step_idx"]
+                        _rst  = _res["status"]
+                        _rn   = _res.get("agent_name", "")
+                        _rm   = _res.get("model", "")
+                        if _rst == "cached":
+                            run_steps[_ri].update({"status": "cached", "content": _res["content"]})
+                            log_buffer.emit(f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached · {cid_short}")
+                            yield _sse("step_cached", {"step": _ri, "agent_name": _rn,
+                                                        "result_id": _res.get("result_id", ""), "content": _res["content"]})
+                        elif _rst == "done":
+                            _rc  = _res["content"]
+                            _ret = _res["exec_time_s"]
+                            run_steps[_ri].update({
+                                "status":           "done",
+                                "content":          _rc,
+                                "execution_time_s": _ret,
+                                "input_token_est":  _res["input_tok"],
+                                "output_token_est": _res["output_tok"],
+                                "thinking":         (_res.get("thinking") or "")[:8000],
+                            })
+                            log_buffer.emit(f"[LLM] {_rm} — done ({len(_rc):,} chars, {_ret}s) · {cid_short}")
+                            log_buffer.emit(f"[PIPELINE] ✓ Step {_ri + 1}/{len(steps)}: {_rn} → done ({_ret}s) · {cid_short}")
+                            if _res.get("thinking"):
+                                yield _sse("thinking", {"content": _res["thinking"][:5000], "step": _ri})
+                            yield _sse("step_done", {
+                                "step":             _ri,
+                                "agent_name":       _rn,
+                                "result_id":        _res["result_id"],
+                                "content":          _rc,
+                                "model":            _rm,
+                                "execution_time_s": _ret,
+                                "input_token_est":  _res["input_tok"],
+                                "output_token_est": _res["output_tok"],
+                            })
+                        else:  # error
+                            _remsg = _res.get("error_msg", "Unknown error")
+                            run_steps[_ri].update({"status": "error", "error_msg": _remsg})
+                            log_buffer.emit(f"[PIPELINE] ✗ Step {_ri + 1}/{len(steps)}: {_rn} → error · {cid_short}")
+                            yield _sse("error", {"msg": _remsg, "step": _ri})
+                            stage_had_error = True
+
+                    save_steps()
+
+                    if stage_had_error:
+                        fatal_error = True
+                        break
+
+                    # prev_content for next stage: last parallel step's output (by index)
+                    _last = max(
+                        (_r for _r in par_results if _r["status"] in ("done", "cached")),
+                        key=lambda _r: _r["step_idx"],
+                        default=None,
+                    )
+                    if _last:
+                        prev_content = _last["content"]
+
+            if not fatal_error:
+                run_final_status = "done"
+                log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
+                yield _sse("pipeline_done", {})
 
         finally:
             # On force rerun: delete stale cached results for errored steps so that
