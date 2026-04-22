@@ -892,8 +892,9 @@ async def run_pipeline(
                                     )
 
                             _future = loop.run_in_executor(None, _do_llm)
+                            yield _sse("progress", {"step": step_idx, "msg": f"Calling {model}…"})
                             _deadline = time.monotonic() + LLM_TIMEOUT_S
-                            _next_heartbeat = time.monotonic() + 10.0
+                            _next_heartbeat = time.monotonic() + 3.0
                             while True:
                                 _raise_if_stop_requested()
                                 _remaining = _deadline - time.monotonic()
@@ -905,7 +906,7 @@ async def run_pipeline(
                                     break
                                 if time.monotonic() >= _next_heartbeat:
                                     waited_s = int(LLM_TIMEOUT_S - _remaining)
-                                    _next_heartbeat = time.monotonic() + 10.0
+                                    _next_heartbeat = time.monotonic() + 3.0
                                     log_buffer.emit(
                                         f"[PIPELINE] … Step {step_idx + 1}/{len(steps)} waiting on {model} ({waited_s}s) · {cid_short}"
                                     )
@@ -1163,7 +1164,7 @@ async def run_pipeline(
                         _par_model = _par_adef.get("model", "gpt-5.4")
                         _future = loop.run_in_executor(None, lambda: _run_parallel_step_sync(par_idx, _sp))
                         _deadline = time.monotonic() + LLM_TIMEOUT_S
-                        _next_heartbeat = time.monotonic() + 10.0
+                        _next_heartbeat = time.monotonic() + 3.0
                         while True:
                             _raise_if_stop_requested()
                             _remaining = _deadline - time.monotonic()
@@ -1180,7 +1181,7 @@ async def run_pipeline(
                                 return _future.result()
                             if time.monotonic() >= _next_heartbeat:
                                 waited_s = int(LLM_TIMEOUT_S - _remaining)
-                                _next_heartbeat = time.monotonic() + 10.0
+                                _next_heartbeat = time.monotonic() + 3.0
                                 log_buffer.emit(
                                     f"[PIPELINE] … Step {par_idx + 1}/{len(steps)} waiting on {_par_model} ({waited_s}s) · {cid_short}"
                                 )
