@@ -363,8 +363,6 @@ export function PipelineSidePanel({
   const [stepInputStatus, setStepInputStatus] = useState<StepStatus[]>([]);  // per-step input fetch status
   const [running,  setRunning]  = useState(false);
   const [runError, setRunError] = useState("");
-  const [done,     setDone]     = useState(false);
-  const [loaded,   setLoaded]   = useState(false);
 
   // ── per_call state ───────────────────────────────────────────────────────────
   const [callResults,   setCallResults]   = useState<CallResult[]>([]);
@@ -395,7 +393,7 @@ export function PipelineSidePanel({
     setInputPreview({ loading: false, content: "", error: "" });
     setFlowCallIdx(0);
     if (!running && !callsRunning) {
-      setSteps([]); setStepInputStatus([]); setDone(false); setRunError(""); setLoaded(false);
+      setSteps([]); setStepInputStatus([]); setRunError("");
       setCallResults([]); setCallsRunError(""); setCallsLoaded(false);
       prevCachedRef.current = null;
     }
@@ -429,10 +427,8 @@ export function PipelineSidePanel({
     : null;
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
-  // ── per_pair: live state file — written by backend on every step, never in finally ─
-  // When the client disconnects mid-stream (page refresh), the Python generator's
-  // finally block is NOT updated — so the file stays status="running" with the last
-  // known step states.  Frontend reads "running" → shows orange, not red error.
+  // ── per_pair: live state file ───────────────────────────────────────────────
+  // Canvas status is derived from this JSON only.
   const stateUrl = !isPerCall && activePipelineId && hasPair
     ? `/api/pipelines/${activePipelineId}/state?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
     : null;
@@ -443,18 +439,20 @@ export function PipelineSidePanel({
   const bgRunning = !isPerCall && !running && pipelineState?.status === "running";
   const anyBusy   = anyRunning || bgRunning;
 
-  // ── per_pair: restore step state from state file or cached results ────────────
+  // ── per_pair: restore step state from state file (single source of truth) ────
   useEffect(() => {
-    if (isPerCall || running || !pipeline || !agents) return;
+    if (isPerCall || !pipeline || !agents) return;
 
     // Wait for state file SWR to resolve before doing anything.
     if (pipelineState === undefined) return;
 
     // State file is the ONLY source of truth for the canvas.
-    // If the file doesn't exist (null), show empty/pending — never mix with cachedResults.
-    if (!pipelineState) { setLoaded(true); return; }
-
-    if (done && loaded) return; // SSE confirmed completion — trust live state, not SWR snapshot
+    // If the file doesn't exist (null), show pending.
+    if (!pipelineState) {
+      setSteps(initStepsFor(pipeline, agents));
+      setStepInputStatus(new Array(pipeline.steps.length).fill("pending") as StepStatus[]);
+      return;
+    }
 
     const runSteps: any[] = pipelineState.steps ?? [];
     const status: string  = pipelineState.status ?? "";
@@ -477,7 +475,7 @@ export function PipelineSidePanel({
       }
     };
 
-    const mapStep = (s: any, i: number) => {
+    const mapStep = (s: any, i: number, prevStep?: StepState) => {
       const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
       const rawStatus = toStepStatus(s);
       // If pipeline finished but step still shows "running/loading", treat it as "done"
@@ -488,8 +486,8 @@ export function PipelineSidePanel({
         agentName:      s.agent_name || a?.name || "",
         status:         resolvedStatus,
         content:        s.content || "",
-        stream:         "",
-        expanded:       false,
+        stream:         prevStep?.stream || "",
+        expanded:       prevStep?.expanded ?? false,
         errorMsg:       s.error_msg || undefined,
         model:          s.model || undefined,
         execTimeS:      s.execution_time_s ?? undefined,
@@ -508,14 +506,12 @@ export function PipelineSidePanel({
       return (st === "done" || st === "cached" || st === "error") ? st : "pending";
     };
 
-    setSteps(runSteps.map(mapStep));
+    setSteps(prev => runSteps.map((s: any, i: number) => mapStep(s, i, prev[i])));
     setStepInputStatus(runSteps.map((s: any) => {
       const st = toStepStatus(s);
       return status === "running" ? inputStRunning(st) : inputStDone(st);
     }));
-    setDone(status !== "running");
-    setLoaded(true);
-  }, [pipelineState, pipeline, agents, running, loaded, done, isPerCall]);
+  }, [pipelineState, pipeline, agents, isPerCall]);
 
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
@@ -829,9 +825,6 @@ export function PipelineSidePanel({
 
     setRunning(false);
     setRunError(stopMsg);
-    setDone(false);
-    setSteps(prev => prev.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: stopMsg } : st));
-    setStepInputStatus(prev => prev.map(st => st === "loading" ? "error" : st));
     mutatePipelineState();
   }
 
@@ -846,9 +839,7 @@ export function PipelineSidePanel({
     setInputPreview({ loading: false, content: "", error: "" });
     prevCachedRef.current = cachedResults ?? null; // snapshot prev results for comparison
     setCachedView(false);
-    setRunning(true); setRunError(""); setDone(false); setLoaded(true);
-    setSteps(initStepsFor(pipeline, agents));
-    setStepInputStatus(new Array(pipeline.steps.length).fill("pending") as StepStatus[]);
+    setRunning(true); setRunError("");
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -860,30 +851,16 @@ export function PipelineSidePanel({
         throw new Error(`Pipeline run failed (${res.status})${txt ? `: ${txt.slice(0, 160)}` : ""}`);
       }
       if (!res.body) throw new Error("No response body");
-      let hadLLM = false;
+      mutatePipelineState();
       const summary = await readPipelineSSE(res,
-        (type, evt, s) => {
-          if (type === "step_start")  {
-            setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st));
-            setStepInputStatus(p => { const n = [...p]; n[s] = "loading"; return n; });
-          }
-          if (type === "input_ready") setStepInputStatus(p => { const n = [...p]; n[s] = "done"; return n; });
-          if (type === "step_cached") {
-            setSteps(p => p.map((st, i) => i === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st));
-            setStepInputStatus(p => { const n = [...p]; n[s] = "cached"; return n; });
-          }
-          if (type === "stream")      setSteps(p => { const n = p.map((st, i) => i === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
-          if (type === "thinking")    setSteps(p => p.map((st, i) => i === s ? { ...st, thinking: evt.content ?? "" } : st));
-          if (type === "step_done")   {
-            hadLLM = true;
-            setSteps(p => p.map((st, i) => i === s ? { ...st, status: "done", content: evt.content, stream: "", model: evt.model, execTimeS: evt.execution_time_s, inputTokenEst: evt.input_token_est, outputTokenEst: evt.output_token_est } : st));
-            setStepInputStatus(p => { const n = [...p]; n[s] = "done"; return n; });
-          }
+        (type, evt, _s) => {
           if (type === "error" && evt.step != null) {
-            setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st));
-            setStepInputStatus(p => { const n = [...p]; n[evt.step] = "error"; return n; });
+            setRunError(prev => prev || (evt.msg ?? "Pipeline ended with an error."));
           }
-          if (type === "pipeline_done") { setDone(true); mutateCache(); mutatePipelineState(); }
+          if (type === "pipeline_done") mutateCache();
+          if (type === "step_start" || type === "input_ready" || type === "step_cached" || type === "step_done" || type === "error" || type === "pipeline_done") {
+            mutatePipelineState();
+          }
         },
       );
       if (!summary.sawPipelineDone && !ctrl.signal.aborted) {
@@ -891,18 +868,11 @@ export function PipelineSidePanel({
           ? "Pipeline ended with an error."
           : "Pipeline stream ended before completion.";
         setRunError(prev => prev || fallbackMsg);
-        setSteps(p => p.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: fallbackMsg } : st));
-        setStepInputStatus(p => p.map(st => st === "loading" ? "error" : st));
-      } else if (summary.sawPipelineDone && !hadLLM) {
-        // Full cache hit path.
-        setDone(true);
       }
     } catch (e: any) {
       if (e.name !== "AbortError") {
         const msg = e.message ?? "Unexpected error";
         setRunError(msg);
-        setSteps(p => p.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: msg } : st));
-        setStepInputStatus(p => p.map(st => st === "loading" ? "error" : st));
       }
     } finally {
       setRunning(false);

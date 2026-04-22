@@ -44,9 +44,7 @@ def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
                 status: str, steps: list, force: bool = False,
                 start_datetime: str = "") -> None:
     """Write live run state to a JSON file keyed by pipeline+pair hash.
-    Called from save_steps() (status='running') and on normal completion/error.
-    NOT called from finally — so interrupted runs stay 'running' and the
-    frontend shows orange rather than red on refresh.
+    Called from save_steps() (status='running') and on completion/cancellation/error.
 
     force=True: always write (used for the initial claim by a new run).
     force=False: skip if a *different* run_id already owns the file (kill-and-restart guard —
@@ -558,8 +556,7 @@ async def run_pipeline(
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
             Always written with status='running'; the state file is only promoted to
-            'done'/'error' after the main loop finishes (never in the finally block,
-            so interrupted runs stay 'running' for clean frontend restore)."""
+            'pass'/'failed' on completion/cancellation/error."""
             try:
                 with Session(_db_engine) as _s:
                     _s.execute(
@@ -1272,35 +1269,27 @@ async def run_pipeline(
                 yield _sse("pipeline_done", {})
             else:
                 # Explicit error (agent failure, resolve error, etc.) — mark file as failed.
-                # Note: if the generator is killed mid-stream (client disconnect), this
-                # branch is never reached; the file stays "running" from the last save_steps().
                 _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
                             start_datetime=run_start_dt)
 
         except asyncio.CancelledError:
             cancel_msg = cancel_state["reason"]
+            now_iso = datetime.utcnow().isoformat()
+            for s in run_steps:
+                if s.get("state") == "running":
+                    s["state"] = "failed"
+                    s["end_time"] = now_iso
+                    s["error_msg"] = cancel_msg
             if cancel_msg == "run stopped by user":
-                now_iso = datetime.utcnow().isoformat()
-                for s in run_steps:
-                    if s.get("state") == "running":
-                        s["state"] = "failed"
-                        s["end_time"] = now_iso
-                        s["error_msg"] = cancel_msg
                 run_final_status = "error"
-                _save_state(
-                    pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
-                    start_datetime=run_start_dt,
-                )
                 log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
             else:
-                # Browser refresh/disconnect should not turn the run red.
-                # Keep the last known snapshot as running so the UI can recover gracefully.
                 run_final_status = "cancelled"
-                _save_state(
-                    pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
-                    start_datetime=run_start_dt,
-                )
-                log_buffer.emit(f"[PIPELINE] … Stream disconnected: {pipeline_name} · {cid_short}")
+                log_buffer.emit(f"[PIPELINE] ✗ Stream disconnected: {pipeline_name} · {cid_short}")
+            _save_state(
+                pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                start_datetime=run_start_dt,
+            )
             raise
         except Exception as exc:
             err_msg = f"Pipeline execution failed: {exc}"
