@@ -1170,19 +1170,24 @@ function PipelineCanvas() {
             .filter(src => src?.type === "input")
             .map(src => (src!.data as PipelineNodeData).inputSource)
             .filter(Boolean);
-          // Edges from output nodes (e.g. Persona → pazi notes) mean the previous
-          // stage's result feeds this step → use chain_previous as the source.
-          const hasOutputPredecessor = edges.some(e =>
-            e.target === n.id && nodes.find(x => x.id === e.source)?.type === "output"
-          );
+          // Edges from output nodes (e.g. Persona → pazi notes) carry semantic artifact type.
+          // Use artifact_{subType} (e.g. artifact_persona) so the display shows "Persona"
+          // instead of the generic "chain_previous". Both resolve identically at runtime.
+          const outputPredecessor = edges
+            .filter(e => e.target === n.id)
+            .map(e => nodes.find(x => x.id === e.source))
+            .find(src => src?.type === "output");
+          const artifactSrc = outputPredecessor
+            ? `artifact_${(outputPredecessor.data as PipelineNodeData).subType || "output"}`
+            : null;
           // Map each agent input key to the canvas-provided source if it differs
           agent.inputs.forEach((inp, idx) => {
             const canvasSrc = connectedInputSources[idx];
             if (canvasSrc && canvasSrc !== inp.source) {
               input_overrides[inp.key] = canvasSrc;
-            } else if (!canvasSrc && hasOutputPredecessor && inp.source !== "chain_previous") {
-              // No explicit input node for this key, but an output node is wired in
-              input_overrides[inp.key] = "chain_previous";
+            } else if (!canvasSrc && artifactSrc && inp.source !== artifactSrc) {
+              // No explicit input node for this key, but an artifact output is wired in
+              input_overrides[inp.key] = artifactSrc;
             }
           });
         }

@@ -1000,7 +1000,9 @@ def _resolve_input(source: str, agent_id: Optional[str],
             raise RuntimeError(f"No stored result for agent {agent_id} in this context")
         return result.content
 
-    if source == "chain_previous":
+    if source == "chain_previous" or source.startswith("artifact_"):
+        # artifact_persona / artifact_persona_score / artifact_notes / etc.
+        # all resolve to the previous stage's output (chain_previous).
         return manual_inputs.get("_chain_previous", "")
 
     if source == "manual":

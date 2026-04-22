@@ -78,8 +78,12 @@ const SOURCE_META: Record<string, {
   notes:             { label: "Notes",             icon: StickyNote, color: "text-green-400", bg: "bg-green-950/30",  border: "border-green-700/50" },
   merged_notes:      { label: "Merged Notes",      icon: BookOpen,  color: "text-teal-400",   bg: "bg-teal-950/30",   border: "border-teal-700/50" },
   agent_output:      { label: "Agent Output",      icon: Bot,       color: "text-purple-400", bg: "bg-purple-950/30", border: "border-purple-700/50" },
-  chain_previous:    { label: "Previous Step",     icon: GitBranch, color: "text-amber-400",  bg: "bg-amber-950/30",  border: "border-amber-700/50" },
-  manual:            { label: "Manual Input",      icon: PenLine,   color: "text-gray-400",   bg: "bg-gray-800/40",   border: "border-gray-700/50" },
+  chain_previous:          { label: "Previous Step",    icon: GitBranch, color: "text-amber-400",  bg: "bg-amber-950/30",  border: "border-amber-700/50" },
+  manual:                  { label: "Manual Input",     icon: PenLine,   color: "text-gray-400",   bg: "bg-gray-800/40",   border: "border-gray-700/50" },
+  // Artifact sources — emitted by canvas output nodes, resolved as chain_previous at runtime
+  artifact_persona:        { label: "Persona",          icon: Bot,       color: "text-violet-400", bg: "bg-violet-950/20", border: "border-violet-700/40" },
+  artifact_persona_score:  { label: "Persona Score",    icon: Bot,       color: "text-violet-300", bg: "bg-violet-950/15", border: "border-violet-800/40" },
+  artifact_notes:          { label: "Notes Artifact",   icon: StickyNote,color: "text-amber-400",  bg: "bg-amber-950/20",  border: "border-amber-700/40" },
 };
 const GENERIC_SOURCE = SOURCE_META.transcript; // fallback
 
