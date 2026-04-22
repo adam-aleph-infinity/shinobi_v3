@@ -495,7 +495,7 @@ export function PipelineSidePanel({
     //   • done=true already set by SSE pipeline_done: don't overwrite SSE-derived state
     //     with a possibly-stale SWR snapshot (SWR might lag 2 s behind the SSE event)
     if (status && hasProgress) {
-      if (done) return; // SSE already confirmed completion — trust SSE state, not SWR
+      if (done && loaded) return; // SSE already confirmed completion — trust SSE state unless explicit reload
       setSteps(runSteps.map(mapStep));
       setStepInputStatus(runSteps.map((s: any) =>
         status === "running" ? inputStRunning(s.status) : inputStDone(s.status)
@@ -1007,15 +1007,15 @@ export function PipelineSidePanel({
                     : selectedCallIds?.length ? `Run ${selectedCallIds.length} selected` : "Run all calls")
                 : "Run"}
           </button>
-          {/* Toggle: switch between Flow and Steps view */}
+          {/* Cached: show flow canvas with cached step states */}
           <button
-            onClick={() => setPanelView(v => v === "flow" ? "steps" : "flow")}
-            title={panelView === "flow" ? "Switch to steps view" : "Switch to flow view"}
-            className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
+            onClick={() => { setPanelView("flow"); setLoaded(false); mutatePipelineState(); }}
+            disabled={!hasPair}
+            title="View cached pipeline state in flow canvas"
+            className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
           >
-            {panelView === "flow"
-              ? <><FileText className="w-3 h-3" />Steps</>
-              : <><Workflow className="w-3 h-3" />Flow</>}
+            <Zap className="w-3 h-3" />
+            Cached
           </button>
         </div>
         {!running && !callsRunning && pipelineState?.status === "running" && (
