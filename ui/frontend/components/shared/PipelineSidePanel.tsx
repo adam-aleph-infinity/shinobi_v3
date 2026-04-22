@@ -495,16 +495,18 @@ export function PipelineSidePanel({
     //   • done=true already set by SSE pipeline_done: don't overwrite SSE-derived state
     //     with a possibly-stale SWR snapshot (SWR might lag 2 s behind the SSE event)
     // Stale guard: if state says "running" but updated_at is >10 min old, the run was
-    // interrupted — fall through to cachedResults rather than showing a hung canvas.
+    // interrupted — still use state file steps but treat the run as "error" so the canvas
+    // shows the last-known step states rather than silently switching to cachedResults.
     const updatedAt = pipelineState?.updated_at ? new Date(pipelineState.updated_at).getTime() : 0;
     const isStaleRunning = status === "running" && (Date.now() - updatedAt) > 10 * 60 * 1000;
-    if (status && hasProgress && !isStaleRunning) {
+    const effectiveStatus = isStaleRunning ? "error" : status;
+    if (effectiveStatus && hasProgress) {
       if (done && loaded) return; // SSE already confirmed completion — trust SSE state unless explicit reload
       setSteps(runSteps.map(mapStep));
       setStepInputStatus(runSteps.map((s: any) =>
-        status === "running" ? inputStRunning(s.status) : inputStDone(s.status)
+        effectiveStatus === "running" ? inputStRunning(s.status) : inputStDone(s.status)
       ));
-      setDone(status !== "running");
+      setDone(effectiveStatus !== "running");
       setLoaded(true);
       return;
     }
@@ -1135,16 +1137,14 @@ export function PipelineSidePanel({
                   <span>status: <span className={pipelineState?.status === "running" ? "text-orange-400" : pipelineState?.status === "done" ? "text-green-400" : "text-gray-400"}>{pipelineState?.status ?? "—"}</span></span>
                 </div>
                 {(pipelineState?.steps ?? []).map((s: any, i: number) => {
-                  const live = steps[i];
-                  const st = live?.status ?? s.status ?? "pending";
+                  const st: string = s.status ?? "pending";
                   const color = st === "done" ? "text-green-400" : st === "cached" ? "text-amber-400" : st === "loading" ? "text-orange-400" : st === "error" ? "text-red-400" : "text-gray-500";
                   return (
                     <div key={i} className="px-2 py-0.5 font-mono text-[9px] border-b border-gray-800/40 flex gap-3 flex-wrap">
                       <span className="text-gray-600 w-4 shrink-0">{i}</span>
-                      <span className="text-gray-300 truncate max-w-[120px]">{s.agent_name || live?.agentName || "—"}</span>
+                      <span className="text-gray-300 truncate max-w-[120px]">{s.agent_name || "—"}</span>
                       <span className={color}>{st}</span>
                       {s.execution_time_s != null && <span className="text-gray-600">{s.execution_time_s.toFixed(1)}s</span>}
-                      {live?.execTimeS != null && live.execTimeS !== s.execution_time_s && <span className="text-gray-500">live:{live.execTimeS.toFixed(1)}s</span>}
                     </div>
                   );
                 })}
