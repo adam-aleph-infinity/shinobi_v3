@@ -448,15 +448,19 @@ export function PipelineSidePanel({
     // Wait for state file SWR to resolve before doing anything.
     if (pipelineState === undefined) return;
 
-    const runSteps: any[] = pipelineState?.steps ?? [];
-    const status: string  = pipelineState?.status ?? "";
-    const hasProgress     = runSteps.some((s: any) => s.status && s.status !== "pending");
+    // State file is the ONLY source of truth for the canvas.
+    // If the file doesn't exist (null), show empty/pending — never mix with cachedResults.
+    if (!pipelineState) { setLoaded(true); return; }
+
+    if (done && loaded) return; // SSE confirmed completion — trust live state, not SWR snapshot
+
+    const runSteps: any[] = pipelineState.steps ?? [];
+    const status: string  = pipelineState.status ?? "";
 
     const mapStep = (s: any, i: number) => {
       const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
       const rawStatus = s.status as StepStatus;
       // If pipeline finished but step still shows "loading", treat it as "done"
-      // (handles write-failure edge case where final save didn't update step status).
       const resolvedStatus: StepStatus =
         (status !== "running" && rawStatus === "loading") ? "done" : rawStatus;
       return {
@@ -473,65 +477,25 @@ export function PipelineSidePanel({
       };
     };
 
-    // Input status for canvas input nodes.
-    // "loading" means the LLM is running but input_ready has already fired — data IS available.
-    // Map "loading" → "done" so the input node stays green on refresh, matching the live view.
+    // Input node color: "loading" means input_ready already fired — data available → green.
     const inputStRunning = (s: string): StepStatus => {
       const st = s as StepStatus;
       if (st === "done" || st === "cached" || st === "error") return st;
-      if (st === "loading") return "done"; // input data available; LLM still running
+      if (st === "loading") return "done";
       return "pending";
     };
-    // Completed/errored path: no "loading" in state file after normal finish.
     const inputStDone = (s: string): StepStatus => {
       const st = s as StepStatus;
       return (st === "done" || st === "cached" || st === "error") ? st : "pending";
     };
 
-    // State file has data — it is the single source of truth.
-    // Apply whenever not actively running (SSE is live). Guards:
-    //   • status=running + !done: background/interrupted run visible in this tab
-    //   • status=done/error + !done: run just finished (background monitoring catches the transition)
-    //   • done=true already set by SSE pipeline_done: don't overwrite SSE-derived state
-    //     with a possibly-stale SWR snapshot (SWR might lag 2 s behind the SSE event)
-    // Stale guard: if state says "running" but updated_at is >10 min old, the run was
-    // interrupted — still use state file steps but treat the run as "error" so the canvas
-    // shows the last-known step states rather than silently switching to cachedResults.
-    const updatedAt = pipelineState?.updated_at ? new Date(pipelineState.updated_at).getTime() : 0;
-    const isStaleRunning = status === "running" && (Date.now() - updatedAt) > 10 * 60 * 1000;
-    const effectiveStatus = isStaleRunning ? "error" : status;
-    if (effectiveStatus && hasProgress) {
-      if (done && loaded) return; // SSE already confirmed completion — trust SSE state unless explicit reload
-      setSteps(runSteps.map(mapStep));
-      setStepInputStatus(runSteps.map((s: any) =>
-        effectiveStatus === "running" ? inputStRunning(s.status) : inputStDone(s.status)
-      ));
-      setDone(effectiveStatus !== "running");
-      setLoaded(true);
-      return;
-    }
-
-    // No state file data (pipelineState is null — file doesn't exist yet or pair never run).
-    // Fall back to AgentResult cache for first-time view. Show as "done" (not "cached")
-    // because we don't know whether the last run was forced or cached.
-    if (loaded) return; // already set up from a previous effect run
-    if (!cachedResults) return;
-    const initialSteps = pipeline.steps.map((s, i) => {
-      const a = agents.find(x => x.id === s.agent_id);
-      const cr = cachedResults[i];
-      return {
-        agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
-        status: (cr?.result ? "done" : "pending") as StepStatus,
-        content: cr?.result?.content ?? "",
-        stream: "", expanded: false,
-      };
-    });
-    if (initialSteps.some(st => st.status === "done")) {
-      setSteps(initialSteps);
-      setDone(true);
-      setLoaded(true);
-    }
-  }, [pipelineState, cachedResults, pipeline, agents, running, loaded, done, isPerCall]);
+    setSteps(runSteps.map(mapStep));
+    setStepInputStatus(runSteps.map((s: any) =>
+      status === "running" ? inputStRunning(s.status) : inputStDone(s.status)
+    ));
+    setDone(status !== "running");
+    setLoaded(true);
+  }, [pipelineState, pipeline, agents, running, loaded, done, isPerCall]);
 
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
