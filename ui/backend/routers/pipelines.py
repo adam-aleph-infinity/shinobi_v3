@@ -21,6 +21,30 @@ from ui.backend.services import log_buffer
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
 _DIR = settings.ui_data_dir / "_pipelines"
+_STATE_DIR = settings.ui_data_dir / "_pipeline_states"
+
+
+def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
+                status: str, steps: list) -> None:
+    """Write live run state to a JSON file.  Called from save_steps() (status='running')
+    and on normal completion/error.  NOT called from finally — so interrupted runs stay
+    'running' and the frontend shows orange rather than red on refresh."""
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        (_STATE_DIR / f"{pipeline_id}.json").write_text(
+            json.dumps({
+                "pipeline_id": pipeline_id,
+                "run_id": run_id,
+                "sales_agent": sales_agent,
+                "customer": customer,
+                "status": status,
+                "steps": steps,
+                "updated_at": datetime.utcnow().isoformat(),
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 class PipelineStep(BaseModel):
@@ -182,6 +206,27 @@ def list_pipeline_runs(
     ]
 
 
+@router.get("/{pipeline_id}/state")
+def get_pipeline_state(
+    pipeline_id: str,
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+):
+    """Return the live run state for a pipeline from the state file."""
+    path = _STATE_DIR / f"{pipeline_id}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if sales_agent and data.get("sales_agent") != sales_agent:
+            return None
+        if customer and data.get("customer") != customer:
+            return None
+        return data
+    except Exception:
+        return None
+
+
 @router.post("/{pipeline_id}/run")
 async def run_pipeline(
     pipeline_id: str, req: PipelineRunRequest, db: Session = Depends(get_session)
@@ -236,15 +281,18 @@ async def run_pipeline(
         )
         db.add(run_record)
         db.commit()
+        # Write initial state file (all steps pending) so frontend can find it immediately.
+        _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps)
 
         run_final_status = "error"
         loop = asyncio.get_event_loop()
         prev_content = ""
 
         def save_steps():
-            """Persist current step states via a fresh DB session — fully isolated from
-            the main request session so ORM expiry / failed-transaction state on `db`
-            can never silently prevent the write."""
+            """Persist current step states — writes both the DB and the live state file.
+            Always written with status='running'; the state file is only promoted to
+            'done'/'error' after the main loop finishes (never in the finally block,
+            so interrupted runs stay 'running' for clean frontend restore)."""
             try:
                 with Session(_db_engine) as _s:
                     _s.execute(
@@ -254,6 +302,7 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                 pass
+            _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps)
 
         # ── Build stage groups from canvas ───────────────────────────────────
         # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
@@ -732,8 +781,14 @@ async def run_pipeline(
 
             if not fatal_error:
                 run_final_status = "done"
+                _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "done", run_steps)
                 log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
                 yield _sse("pipeline_done", {})
+            else:
+                # Explicit error (agent failure, resolve error, etc.) — mark file as error.
+                # Note: if the generator is killed mid-stream (client disconnect), this
+                # branch is never reached; the file stays "running" from the last save_steps().
+                _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "error", run_steps)
 
         finally:
             # On force rerun: delete stale cached results for errored steps so that

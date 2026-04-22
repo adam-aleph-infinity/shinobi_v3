@@ -425,135 +425,91 @@ export function PipelineSidePanel({
     : null;
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
-  // ── per_pair: latest run — poll while running so refresh restores live state ─
-  // per_pair runs are always saved with call_id="" (pair-level, not call-specific).
-  // Always query with call_id="" so the restore finds the run regardless of which
-  // call is currently selected in context, and per_call batch runs are excluded.
-  const latestRunUrl = !isPerCall && activePipelineId && hasPair
-    ? `/api/pipelines/${activePipelineId}/runs?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=&limit=1`
+  // ── per_pair: live state file — written by backend on every step, never in finally ─
+  // When the client disconnects mid-stream (page refresh), the Python generator's
+  // finally block is NOT updated — so the file stays status="running" with the last
+  // known step states.  Frontend reads "running" → shows orange, not red error.
+  const stateUrl = !isPerCall && activePipelineId && hasPair
+    ? `/api/pipelines/${activePipelineId}/state?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
     : null;
-  const { data: latestRunData } = useSWR<any[]>(latestRunUrl, fetcher, {
-    refreshInterval: (data) => (data?.[0]?.status === "running" ? 3000 : 0),
+  const { data: pipelineState } = useSWR<any>(stateUrl, fetcher, {
+    refreshInterval: (data) => (data?.status === "running" ? 2000 : 0),
   });
-  const latestRun = latestRunData?.[0] ?? null;
-  // bgRunning: a run is active in the DB but this tab didn't start it
-  // (e.g. page refreshed mid-run). anyBusy includes this for button disabled/label.
-  const bgRunning = !isPerCall && !running && latestRun?.status === "running";
+  // bgRunning: a run is active (state file says running) but this tab didn't start it.
+  const bgRunning = !isPerCall && !running && pipelineState?.status === "running";
   const anyBusy   = anyRunning || bgRunning;
 
-  // ── per_pair: restore step state from latest run or cached results ───────────
+  // ── per_pair: restore step state from state file or cached results ────────────
   useEffect(() => {
     if (isPerCall || running || !pipeline || !agents) return;
 
-    const runSteps: any[] = (() => {
-      try { return latestRun?.steps_json ? JSON.parse(latestRun.steps_json) : []; } catch { return []; }
-    })();
-    const hasProgress = runSteps.some((s: any) => s.status && s.status !== "pending");
+    // Wait for state file SWR to resolve before doing anything.
+    if (pipelineState === undefined) return;
 
-    // For non-running restores: "loading" in the DB means a step was interrupted —
-    // never display as orange when no run is active. Show "error" instead.
-    const fixStatus = (s: string): StepStatus =>
-      s === "loading" ? "error" : s as StepStatus;
+    const runSteps: any[] = pipelineState?.steps ?? [];
+    const status: string  = pipelineState?.status ?? "";
+    const hasProgress     = runSteps.some((s: any) => s.status && s.status !== "pending");
 
-    // Derive input status from stored step status for canvas input nodes
-    const deriveInputSt = (s: string): StepStatus => {
-      const fixed = fixStatus(s);
-      return (fixed === "done" || fixed === "cached" || fixed === "error") ? fixed : "pending";
+    const mapStep = (s: any, i: number) => {
+      const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
+      return {
+        agentName:      s.agent_name || a?.name || "",
+        status:         s.status as StepStatus,
+        content:        s.content || "",
+        stream:         "",
+        expanded:       false,
+        errorMsg:       s.error_msg || undefined,
+        model:          s.model || undefined,
+        execTimeS:      s.execution_time_s ?? undefined,
+        inputTokenEst:  s.input_token_est ?? undefined,
+        outputTokenEst: s.output_token_est ?? undefined,
+      };
     };
 
-    // Derive input status for a running pipeline — preserve "loading" (orange) as-is.
-    const deriveInputStRunning = (s: string): StepStatus => {
+    // Input status for canvas input nodes — running path preserves "loading" (orange).
+    const inputStRunning = (s: string): StepStatus => {
       const st = s as StepStatus;
       return (st === "done" || st === "cached" || st === "error" || st === "loading") ? st : "pending";
     };
+    // Completed/errored path: no "loading" in state file after normal finish.
+    const inputStDone = (s: string): StepStatus => {
+      const st = s as StepStatus;
+      return (st === "done" || st === "cached" || st === "error") ? st : "pending";
+    };
 
-    // While a run is in progress, keep updating steps from the polled run record.
-    // Guard !done: after the frontend finishes a run (done=true), skip DB polling —
-    // the final SQL UPDATE in `finally` may not have committed yet, so the DB can
-    // still have status="running" with stale "loading" steps, which would override
-    // the correct "done" states the SSE events already applied.
-    if (latestRun?.status === "running" && hasProgress && !done) {
-      setSteps(prev => runSteps.map((s: any, i: number) => {
-        const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
-        return {
-          agentName: s.agent_name || a?.name || "",
-          status: s.status as StepStatus,
-          content: s.content || "",
-          stream: "",
-          expanded: prev[i]?.expanded ?? false,
-          errorMsg: s.error_msg || undefined,
-          model: s.model || undefined,
-          execTimeS: s.execution_time_s ?? undefined,
-          inputTokenEst: s.input_token_est ?? undefined,
-          outputTokenEst: s.output_token_est ?? undefined,
-        };
-      }));
-      setStepInputStatus(runSteps.map((s: any) => deriveInputStRunning(s.status)));
+    // Running (or interrupted — file stays "running" on disconnect): show live state.
+    // No fixStatus needed — "loading" in the file always means the run is/was active.
+    if (status === "running" && hasProgress && !done) {
+      setSteps(runSteps.map(mapStep));
+      setStepInputStatus(runSteps.map((s: any) => inputStRunning(s.status)));
       setLoaded(true);
       return;
     }
 
-    // Background monitoring: the run we were watching just finished — do a final
-    // state update. Without this, `if (loaded) return` below would block the update
-    // and the UI would stay stuck on the last-polled "loading" step forever.
-    if (loaded && !done && latestRun && hasProgress && latestRun.status !== "running") {
-      setSteps(runSteps.map((s: any, i: number) => {
-        const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
-        return {
-          agentName: s.agent_name || a?.name || "",
-          status: fixStatus(s.status),
-          content: s.content || "",
-          stream: "",
-          expanded: false,
-          errorMsg: s.error_msg || undefined,
-          model: s.model || undefined,
-          execTimeS: s.execution_time_s ?? undefined,
-          inputTokenEst: s.input_token_est ?? undefined,
-          outputTokenEst: s.output_token_est ?? undefined,
-        };
-      }));
-      setStepInputStatus(runSteps.map((s: any) => deriveInputSt(s.status)));
+    // Background monitoring: run just finished — file status changed to done/error.
+    if (loaded && !done && status && status !== "running" && hasProgress) {
+      setSteps(runSteps.map(mapStep));
+      setStepInputStatus(runSteps.map((s: any) => inputStDone(s.status)));
       setDone(true);
       return;
     }
 
-    // Past this point: only apply once (on initial load)
     if (loaded) return;
 
-    // Completed/errored run with step data — restore exact run state.
-    // Explicitly exclude running runs: fixStatus maps "loading"→"error" which
-    // is wrong for a step that is actively in progress.
-    if (latestRun && hasProgress && latestRun.status !== "running") {
+    // Initial page-load restore from state file.
+    if (status && hasProgress) {
+      setSteps(runSteps.map(mapStep));
+      setStepInputStatus(runSteps.map((s: any) =>
+        status === "running" ? inputStRunning(s.status) : inputStDone(s.status)
+      ));
+      setDone(status !== "running");
       setLoaded(true);
-      setSteps(runSteps.map((s: any, i: number) => {
-        const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
-        return {
-          agentName: s.agent_name || a?.name || "",
-          status: fixStatus(s.status),
-          content: s.content || "",
-          stream: "",
-          expanded: false,
-          errorMsg: s.error_msg || undefined,
-          model: s.model || undefined,
-          execTimeS: s.execution_time_s ?? undefined,
-          inputTokenEst: s.input_token_est ?? undefined,
-          outputTokenEst: s.output_token_est ?? undefined,
-        };
-      }));
-      setStepInputStatus(runSteps.map((s: any) => deriveInputSt(s.status)));
-      setDone(latestRun.status !== "running");
       return;
     }
 
-    // No run data yet — wait for latestRunData fetch before showing cached results
-    // (avoids a flash of old cache before the run record arrives)
-    if (latestRunData === undefined) return;
-
-    // Fall back to AgentResult cache
+    // No state file data — fall back to AgentResult cache.
     if (!cachedResults) return;
-    // If a completed run exists, its AgentResult records ARE from that run — show "done".
-    // Only fall back to "cached" when there's no matching run record at all.
-    const runWasDone = latestRun?.status === "done";
+    const runWasDone = status === "done";
     const initialSteps = pipeline.steps.map((s, i) => {
       const a = agents.find(x => x.id === s.agent_id);
       const cr = cachedResults[i];
@@ -566,12 +522,10 @@ export function PipelineSidePanel({
     });
     if (initialSteps.some(st => st.status === "done" || st.status === "cached")) {
       setSteps(initialSteps);
-      // Don't mark done=true if the DB run is still active — the running branch
-      // needs done=false so it can fire and override with live step data on the next poll.
-      setDone(latestRun?.status !== "running");
+      setDone(status !== "running");
       setLoaded(true);
     }
-  }, [latestRunData, cachedResults, latestRun, pipeline, agents, running, loaded, isPerCall]);
+  }, [pipelineState, cachedResults, pipeline, agents, running, loaded, done, isPerCall]);
 
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
@@ -1050,7 +1004,7 @@ export function PipelineSidePanel({
             Cached
           </button>
         </div>
-        {!running && !callsRunning && latestRun?.status === "running" && (
+        {!running && !callsRunning && pipelineState?.status === "running" && (
           <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-400 bg-amber-950/20 border border-amber-800/30 rounded-lg">
             <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
             <span className="truncate">{activePipelineName} running — {salesAgent} × {customer}</span>
@@ -1382,7 +1336,7 @@ export function PipelineSidePanel({
             <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
               hasCached={!!cachedResults?.[i]?.result}
               prevContent={prevCachedRef.current?.[i]?.result?.content}
-              pendingLabel={!running && latestRun?.status === "running" ? "waiting" : "not run"}
+              pendingLabel={!running && pipelineState?.status === "running" ? "waiting" : "not run"}
               onToggle={() => setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />
           ))}
         </div>
