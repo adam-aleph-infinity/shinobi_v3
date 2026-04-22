@@ -1010,7 +1010,6 @@ export function PipelineSidePanel({
           {/* Cached: show flow canvas with cached step states */}
           <button
             onClick={() => { setPanelView("flow"); setLoaded(false); mutatePipelineState(); }}
-            disabled={!hasPair}
             title="View cached pipeline state in flow canvas"
             className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
           >
