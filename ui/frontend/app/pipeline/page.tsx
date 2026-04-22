@@ -587,6 +587,12 @@ function validatePipeline(nodes: Node[], edges: Edge[]): string | null {
   if (!nodes.some(n => n.type === "input"))      return "Add at least one Input node.";
   if (!nodes.some(n => n.type === "processing")) return "Add at least one Processing node.";
   if (!nodes.some(n => n.type === "output"))     return "Pipeline must end with an Artifact node.";
+  const unassigned = nodes.filter(
+    n => n.type === "processing" && !(n.data as PipelineNodeData).agentId,
+  );
+  if (unassigned.length > 0) {
+    return `Assign agents to all Processing nodes before saving (${unassigned.length} missing).`;
+  }
 
   const edgeMap: Record<string, string[]> = {};
   edges.forEach(e => { (edgeMap[e.source] ??= []).push(e.target); });
@@ -1171,6 +1177,9 @@ function PipelineCanvas() {
 
   async function handleSavePipeline() {
     if (!pipelineName.trim()) { showToast("Enter a pipeline name first", false); return; }
+    const validationErr = validatePipeline(nodes, edges);
+    if (validationErr) { showToast(validationErr, false); return; }
+
     // Build steps from processing nodes that have an agent assigned.
     // For each step, derive input_overrides from canvas edges:
     // if a canvas Input node is connected whose inputSource differs from the agent's default source
@@ -1186,12 +1195,22 @@ function PipelineCanvas() {
         const agent = allAgents.find(a => a.id === d.agentId);
         const input_overrides: Record<string, string> = {};
         if (agent && agent.inputs.length > 0) {
-          const connectedInputSources = edges
+          const connectedInputNodes = edges
             .filter(e => e.target === n.id)
             .map(e => nodes.find(x => x.id === e.source))
             .filter(src => src?.type === "input")
-            .map(src => (src!.data as PipelineNodeData).inputSource)
-            .filter(Boolean);
+            .sort((a, b) => {
+              const da = a!.data as PipelineNodeData;
+              const db = b!.data as PipelineNodeData;
+              if (da.stageIndex !== db.stageIndex) return da.stageIndex - db.stageIndex;
+              if (a!.position.x !== b!.position.x) return a!.position.x - b!.position.x;
+              return a!.id.localeCompare(b!.id);
+            });
+          const connectedInputSources = Array.from(new Set(
+            connectedInputNodes
+              .map(src => (src!.data as PipelineNodeData).inputSource)
+              .filter(Boolean),
+          ));
           // Edges from output nodes (e.g. Persona → pazi notes) carry semantic artifact type.
           // Use artifact_{subType} (e.g. artifact_persona) so the display shows "Persona"
           // instead of the generic "chain_previous". Both resolve identically at runtime.
@@ -1202,13 +1221,31 @@ function PipelineCanvas() {
           const artifactSrc = outputPredecessor
             ? `artifact_${(outputPredecessor.data as PipelineNodeData).subType || "output"}`
             : null;
-          // Map each agent input key to the canvas-provided source if it differs
+          const defaultSourceSet = new Set(agent.inputs.map(inp => inp.source));
+          const nonDefaultConnected = connectedInputSources.filter(src => !defaultSourceSet.has(src));
+          const hasInputConnections = connectedInputSources.length > 0;
+          const canUsePositionalMap = connectedInputSources.length === agent.inputs.length && connectedInputSources.length > 1;
+
+          // Prefer deterministic matching by source value. Use positional mapping only when
+          // cardinality is equal (avoids edge-order-induced override corruption).
           agent.inputs.forEach((inp, idx) => {
-            const canvasSrc = connectedInputSources[idx];
-            if (canvasSrc && canvasSrc !== inp.source) {
-              input_overrides[inp.key] = canvasSrc;
-            } else if (!canvasSrc && artifactSrc && inp.source !== artifactSrc) {
-              // No explicit input node for this key, but an artifact output is wired in
+            if (connectedInputSources.includes(inp.source)) return;
+            if (connectedInputSources.length === 1) {
+              const onlySrc = connectedInputSources[0];
+              if (onlySrc && onlySrc !== inp.source) input_overrides[inp.key] = onlySrc;
+              return;
+            }
+            if (canUsePositionalMap) {
+              const canvasSrc = connectedInputSources[idx];
+              if (canvasSrc && canvasSrc !== inp.source) input_overrides[inp.key] = canvasSrc;
+              return;
+            }
+            if (nonDefaultConnected.length === 1) {
+              const onlyNonDefault = nonDefaultConnected[0];
+              if (onlyNonDefault && onlyNonDefault !== inp.source) input_overrides[inp.key] = onlyNonDefault;
+              return;
+            }
+            if (!hasInputConnections && artifactSrc && inp.source !== artifactSrc) {
               input_overrides[inp.key] = artifactSrc;
             }
           });
@@ -1219,18 +1256,11 @@ function PipelineCanvas() {
     // Derive scope: if any step reads a merged source → per_pair, else → per_call
     const MERGED_SOURCES = new Set(["merged_transcript", "merged_notes"]);
     let scope = "per_call";
-    for (const n of nodes.filter(n => n.type === "processing" && (n.data as PipelineNodeData).agentId)) {
-      const d = n.data as PipelineNodeData;
-      const agent = allAgents.find(a => a.id === d.agentId);
+    for (const step of steps) {
+      const agent = allAgents.find(a => a.id === step.agent_id);
       if (!agent) continue;
-      const connectedSrcs = edges
-        .filter(e => e.target === n.id)
-        .map(e => nodes.find(x => x.id === e.source))
-        .filter(s => s?.type === "input")
-        .map(s => (s!.data as PipelineNodeData).inputSource as string)
-        .filter(Boolean);
-      agent.inputs.forEach((inp, idx) => {
-        const src = connectedSrcs[idx] ?? inp.source;
+      agent.inputs.forEach((inp) => {
+        const src = step.input_overrides?.[inp.key] ?? inp.source;
         if (MERGED_SOURCES.has(src)) scope = "per_pair";
       });
     }

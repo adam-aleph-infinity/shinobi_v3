@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -577,7 +578,8 @@ def _get_or_upload_openai(
 
     # Upload fresh
     base_url = "https://api.x.ai/v1" if provider == "grok" else None
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    upload_timeout_s = float(os.environ.get("OPENAI_UPLOAD_TIMEOUT_S", os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "30")))
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=upload_timeout_s)
     filename = f"{source}_{customer}_{call_id or 'pair'}.txt"
     file_id = f"local:{chash[:16]}"  # fallback if upload fails
     try:
@@ -808,13 +810,14 @@ def _llm_call_openai_responses_files(
     model: str, temperature: float,
     db: Session,
 ) -> tuple[str, str]:
-    """Call OpenAI Responses API with file references — no inline content pasting."""
-    from openai import OpenAI
-
+    """Call OpenAI Responses API with file references — no inline content pasting.
+    Uses direct HTTP with explicit connect/read timeouts to avoid SDK-level hangs."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
-    client = OpenAI(api_key=api_key, timeout=180.0)  # 3-min hard timeout — prevents hung threads
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    connect_timeout_s = float(os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "20"))
+    read_timeout_s = float(os.environ.get("OPENAI_RESPONSES_TIMEOUT_S", "180"))
     ctx = getattr(db, "_agent_run_ctx", {})
 
     # Upload (or reuse cached) each file input — returns (file_id, _) tuple
@@ -843,17 +846,85 @@ def _llm_call_openai_responses_files(
     if user_text:
         content.append({"type": "input_text", "text": user_text})
 
-    kwargs: dict = {
+    payload: dict = {
         "model": model,
         "input": [{"type": "message", "role": "user", "content": content}],
     }
     if system:
-        kwargs["instructions"] = system
+        payload["instructions"] = system
     if temperature > 0:
-        kwargs["temperature"] = temperature
+        payload["temperature"] = temperature
 
-    response = client.responses.create(**kwargs)
-    return _clean_result(response.output_text or ""), ""
+    def _extract_text_and_thinking(data: dict) -> tuple[str, str]:
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+
+        top_text = data.get("output_text")
+        if isinstance(top_text, str) and top_text.strip():
+            text_parts.append(top_text)
+
+        for item in data.get("output", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "reasoning":
+                for summary in item.get("summary", []) or []:
+                    if isinstance(summary, dict):
+                        t = summary.get("text")
+                        if isinstance(t, str) and t.strip():
+                            thinking_parts.append(t.strip())
+
+            for block in item.get("content", []) or []:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype in ("output_text", "text"):
+                    t = block.get("text", "")
+                    if isinstance(t, str) and t.strip():
+                        text_parts.append(t)
+                elif btype == "reasoning":
+                    t = block.get("text", "")
+                    if isinstance(t, str) and t.strip():
+                        thinking_parts.append(t)
+
+        text = _clean_result("\n\n".join(x.strip() for x in text_parts if x and x.strip()))
+        thinking = "\n\n".join(x.strip() for x in thinking_parts if x and x.strip())
+        return text, thinking
+
+    try:
+        log_buffer.emit(f"[LLM] {model} — OpenAI responses request started")
+        resp = requests.post(
+            f"{base_url}/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=(connect_timeout_s, read_timeout_s),
+        )
+    except requests.Timeout as exc:
+        raise RuntimeError(
+            f"OpenAI Responses API timed out after {int(read_timeout_s)}s (model: {model})"
+        ) from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(f"OpenAI Responses API request failed: {exc}") from exc
+
+    if not resp.ok:
+        body = (resp.text or "").strip()
+        if len(body) > 800:
+            body = body[:800] + "…"
+        raise RuntimeError(f"OpenAI Responses API HTTP {resp.status_code}: {body or 'empty response'}")
+
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError("OpenAI Responses API returned invalid JSON") from exc
+
+    text, thinking = _extract_text_and_thinking(data)
+    if not text:
+        raise RuntimeError("OpenAI Responses API returned empty output")
+
+    log_buffer.emit(f"[LLM] {model} — OpenAI responses complete ({len(text):,} chars)")
+    return text, thinking
 
 
 def _llm_call_with_files(
@@ -1008,7 +1079,7 @@ def _resolve_input(source: str, agent_id: Optional[str],
     if source == "manual":
         return manual_inputs.get("manual", "")
 
-    return ""
+    raise RuntimeError(f"Unknown input source '{source}'")
 
 
 class RunRequest(BaseModel):

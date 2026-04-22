@@ -643,7 +643,7 @@ export function PipelineSidePanel({
     if (!canvasNodes) return map;
     let idx = 0;
     for (const n of canvasNodes) {
-      if (n.type === "processing") map.set(n.id, idx++);
+      if (n.type === "processing" && !!n.data?.agentId) map.set(n.id, idx++);
     }
     return map;
   }, [canvasNodes]);
@@ -799,9 +799,13 @@ export function PipelineSidePanel({
         body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force, force_step_indices: forceStepIndices }),
         signal: ctrl.signal,
       });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Pipeline run failed (${res.status})${txt ? `: ${txt.slice(0, 160)}` : ""}`);
+      }
       if (!res.body) throw new Error("No response body");
       let hadLLM = false;
-      await readPipelineSSE(res,
+      const summary = await readPipelineSSE(res,
         (type, evt, s) => {
           if (type === "step_start")  {
             setSteps(p => p.map((st, i) => i === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st));
@@ -826,9 +830,28 @@ export function PipelineSidePanel({
           if (type === "pipeline_done") { setDone(true); mutateCache(); mutatePipelineState(); }
         },
       );
+      if (!summary.sawPipelineDone && !ctrl.signal.aborted) {
+        const fallbackMsg = summary.sawError
+          ? "Pipeline ended with an error."
+          : "Pipeline stream ended before completion.";
+        setRunError(prev => prev || fallbackMsg);
+        setSteps(p => p.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: fallbackMsg } : st));
+        setStepInputStatus(p => p.map(st => st === "loading" ? "error" : st));
+      } else if (summary.sawPipelineDone && !hadLLM) {
+        // Full cache hit path.
+        setDone(true);
+      }
     } catch (e: any) {
-      if (e.name !== "AbortError") setRunError(e.message ?? "Unexpected error");
-    } finally { setRunning(false); }
+      if (e.name !== "AbortError") {
+        const msg = e.message ?? "Unexpected error";
+        setRunError(msg);
+        setSteps(p => p.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: msg } : st));
+        setStepInputStatus(p => p.map(st => st === "loading" ? "error" : st));
+      }
+    } finally {
+      setRunning(false);
+      mutatePipelineState();
+    }
   }
 
   // ── rerun single step (force just that index, use cache for all others) ────────
@@ -873,44 +896,101 @@ export function PipelineSidePanel({
           body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: cid, force }),
           signal: ctrl.signal,
         });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(`Pipeline run failed (${res.status})${txt ? `: ${txt.slice(0, 160)}` : ""}`);
+        }
         if (!res.body) throw new Error("No response body");
-        await readPipelineSSE(res, (type, evt, s) => {
+        const summary = await readPipelineSSE(res, (type, evt, s) => {
           if (type === "step_start")  setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st) } : cr));
           if (type === "step_cached") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st) } : cr));
           if (type === "stream")      setCallResults(p => { const n = p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st) } : cr); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
           if (type === "thinking")    setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, thinking: evt.content ?? "" } : st) } : cr));
           if (type === "step_done")   { hadLLM = true; setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "done", content: evt.content, stream: "", model: evt.model, execTimeS: evt.execution_time_s, inputTokenEst: evt.input_token_est, outputTokenEst: evt.output_token_est } : st) } : cr)); }
-          if (type === "error" && evt.step != null) setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st) } : cr));
+          if (type === "error" && evt.step != null) setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st), runStatus: "error", done: true } : cr));
           if (type === "pipeline_done") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, done: true, runStatus: hadLLM ? "done" : "cached", expanded: hadLLM } : cr));
         });
+        if (!summary.sawPipelineDone && !ctrl.signal.aborted) {
+          const fallbackMsg = summary.sawError
+            ? "Pipeline ended with an error."
+            : "Pipeline stream ended before completion.";
+          setCallResults(p => p.map((cr, i) => i === ci ? {
+            ...cr,
+            error: cr.error || fallbackMsg,
+            runStatus: "error",
+            done: true,
+            steps: cr.steps.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: fallbackMsg } : st),
+          } : cr));
+        }
       } catch (e: any) {
         if ((e as any).name === "AbortError") return; // killed by re-run, stop silently
-        setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, error: e.message ?? "Error", runStatus: "error" } : cr));
+        const msg = e.message ?? "Error";
+        setCallResults(p => p.map((cr, i) => i === ci ? {
+          ...cr,
+          error: msg,
+          runStatus: "error",
+          done: true,
+          steps: cr.steps.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: msg } : st),
+        } : cr));
       }
     };
 
-    for (let ci = 0; ci < sorted.length; ci++) {
-      if (ctrl.signal.aborted) break;
-      await runSingle(sorted[ci][0], ci);
+    try {
+      for (let ci = 0; ci < sorted.length; ci++) {
+        if (ctrl.signal.aborted) break;
+        await runSingle(sorted[ci][0], ci);
+      }
+    } finally {
+      setCallsRunning(false);
     }
-    setCallsRunning(false);
   }
 
   // ── SSE reader ────────────────────────────────────────────────────────────────
-  async function readPipelineSSE(res: Response, onEvent: (type: string, data: any, step: number) => void) {
+  async function readPipelineSSE(
+    res: Response,
+    onEvent: (type: string, data: any, step: number) => void,
+  ): Promise<{ sawPipelineDone: boolean; sawError: boolean; sawAnyStep: boolean }> {
     const reader = res.body!.getReader();
     const dec = new TextDecoder();
+    const summary = { sawPipelineDone: false, sawError: false, sawAnyStep: false };
+    let buffer = "";
+
+    const processEventBlock = (rawBlock: string) => {
+      const block = rawBlock.replace(/\r/g, "");
+      const dataLines = block
+        .split("\n")
+        .filter(line => line.startsWith("data:"))
+        .map(line => line.slice(5).trimStart());
+      if (dataLines.length === 0) return;
+      try {
+        const evt = JSON.parse(dataLines.join("\n"));
+        const type = evt.type as string;
+        const data = evt.data ?? {};
+        const step = data?.step ?? 0;
+        if (type === "step_start" || type === "step_cached" || type === "step_done") summary.sawAnyStep = true;
+        if (type === "pipeline_done") summary.sawPipelineDone = true;
+        if (type === "error") summary.sawError = true;
+        onEvent(type, data, step);
+      } catch {
+        // Ignore malformed SSE payloads.
+      }
+    };
+
     while (true) {
       const { done: eof, value } = await reader.read();
       if (eof) break;
-      for (const line of dec.decode(value).split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        try {
-          const evt = JSON.parse(line.slice(5).trim());
-          onEvent(evt.type, evt.data ?? {}, evt.data?.step ?? 0);
-        } catch { /* skip malformed */ }
+      buffer += dec.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      while (true) {
+        const sep = buffer.indexOf("\n\n");
+        if (sep < 0) break;
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        processEventBlock(block);
       }
     }
+    buffer += dec.decode().replace(/\r\n/g, "\n");
+    if (buffer.trim()) processEventBlock(buffer);
+    return summary;
   }
 
   // ── per_call progress stats ───────────────────────────────────────────────────

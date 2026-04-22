@@ -91,6 +91,62 @@ class PipelineIn(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _hash_text(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
+def _build_input_fingerprint(
+    pipeline_id: str,
+    step_idx: int,
+    agent_id: str,
+    model: str,
+    temperature: float,
+    system_prompt: str,
+    user_template: str,
+    overrides: dict[str, str],
+    resolved_inputs: dict[str, str],
+) -> str:
+    payload = {
+        "pipeline_id": pipeline_id,
+        "step_idx": step_idx,
+        "agent_id": agent_id,
+        "model": model,
+        "temperature": temperature,
+        "system_prompt_hash": _hash_text(system_prompt),
+        "user_prompt_hash": _hash_text(user_template),
+        "overrides": overrides,
+        "resolved_hashes": {k: _hash_text(v) for k, v in sorted(resolved_inputs.items())},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_pipeline_payload(req: PipelineIn) -> None:
+    for i, step in enumerate(req.steps):
+        if not (step.agent_id or "").strip():
+            raise HTTPException(400, f"Pipeline step {i + 1} is missing agent_id")
+
+    canvas_nodes = (req.canvas or {}).get("nodes", []) if isinstance(req.canvas, dict) else []
+    if not canvas_nodes:
+        return
+
+    proc_nodes = [n for n in canvas_nodes if n.get("type") == "processing"]
+    unassigned = [n for n in proc_nodes if not (n.get("data", {}) or {}).get("agentId")]
+    if unassigned:
+        raise HTTPException(
+            400,
+            f"Canvas has {len(unassigned)} processing node(s) without an assigned agent. "
+            "Assign an agent or remove those nodes before saving.",
+        )
+
+    proc_with_agent = [n for n in proc_nodes if (n.get("data", {}) or {}).get("agentId")]
+    if proc_with_agent and len(proc_with_agent) < len(req.steps):
+        raise HTTPException(
+            400,
+            "Canvas/step mismatch: fewer assigned processing nodes than pipeline steps.",
+        )
+
 def _load_all() -> list[dict]:
     _DIR.mkdir(parents=True, exist_ok=True)
     out = []
@@ -122,6 +178,7 @@ def list_pipelines():
 
 @router.post("")
 def create_pipeline(req: PipelineIn):
+    _validate_pipeline_payload(req)
     _DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.utcnow().isoformat()
     record = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()}
@@ -139,6 +196,7 @@ def get_pipeline(pipeline_id: str):
 
 @router.put("/{pipeline_id}")
 def update_pipeline(pipeline_id: str, req: PipelineIn):
+    _validate_pipeline_payload(req)
     f, data = _find_file(pipeline_id)
     data.update({**req.model_dump(), "updated_at": datetime.utcnow().isoformat()})
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -165,7 +223,7 @@ def get_pipeline_results(
     pipeline_id: str,
     sales_agent: str = "",
     customer: str = "",
-    call_id: str = "",
+    call_id: Optional[str] = Query(None),
     db: Session = Depends(get_session),
 ):
     """Return the latest cached AgentResult for each pipeline step."""
@@ -175,17 +233,30 @@ def get_pipeline_results(
     steps = pipeline_def.get("steps", [])
 
     out = []
-    for step in steps:
+    for idx, step in enumerate(steps):
         agent_id = step.get("agent_id", "")
         stmt = select(AR).where(
             AR.agent_id == agent_id,
             AR.sales_agent == sales_agent,
             AR.customer == customer,
+            AR.pipeline_id == pipeline_id,
+            AR.pipeline_step_index == idx,
         )
-        if call_id:
+        if call_id is not None:
             stmt = stmt.where(AR.call_id == call_id)
         stmt = stmt.order_by(AR.created_at.desc())
         cached = db.exec(stmt).first()
+        if not cached:
+            # Legacy fallback for pre-v4 records without pipeline dimensions
+            stmt2 = select(AR).where(
+                AR.agent_id == agent_id,
+                AR.sales_agent == sales_agent,
+                AR.customer == customer,
+            )
+            if call_id is not None:
+                stmt2 = stmt2.where(AR.call_id == call_id)
+            stmt2 = stmt2.order_by(AR.created_at.desc())
+            cached = db.exec(stmt2).first()
         out.append({
             "agent_id": agent_id,
             "result": {
@@ -296,6 +367,7 @@ async def run_pipeline(
                 "output_token_est": 0,
                 "thinking":         "",
                 "input_sources":    [],
+                "input_fingerprint": "",
             }
             for s in steps
         ]
@@ -319,6 +391,7 @@ async def run_pipeline(
         run_final_status = "error"
         loop = asyncio.get_event_loop()
         prev_content = ""
+        LLM_TIMEOUT_S = 180.0
 
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
@@ -341,10 +414,12 @@ async def run_pipeline(
         # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
         # Steps with the same stageIndex belong to the same parallel stage.
         _canvas_nodes = pipeline_def.get("canvas", {}).get("nodes", [])
-        _proc_nodes = sorted(
+        _proc_nodes_all = sorted(
             [n for n in _canvas_nodes if n.get("type") == "processing"],
             key=lambda n: (n.get("data", {}).get("stageIndex", 0), n.get("position", {}).get("x", 0)),
         )
+        _proc_nodes_with_agent = [n for n in _proc_nodes_all if (n.get("data", {}) or {}).get("agentId")]
+        _proc_nodes = _proc_nodes_with_agent if len(_proc_nodes_with_agent) >= len(steps) else _proc_nodes_all
         _step_canvas_stage: dict[int, int] = {}
         for _i, _n in enumerate(_proc_nodes):
             if _i < len(steps):
@@ -411,52 +486,24 @@ async def run_pipeline(
                         for inp in agent_def.get("inputs", [])
                     ]
 
-                    # ── Check cache ──────────────────────────────────────────
-                    if not req.force and step_idx not in req.force_step_indices:
-                        stmt = select(AR).where(
-                            AR.agent_id == agent_id,
-                            AR.sales_agent == req.sales_agent,
-                            AR.customer == req.customer,
-                        )
-                        if req.call_id:
-                            stmt = stmt.where(AR.call_id == req.call_id)
-                        stmt = stmt.order_by(AR.created_at.desc())
-                        cached = db.exec(stmt).first()
-
-                        if cached:
-                            prev_content = cached.content
-                            run_steps[step_idx].update({
-                                "state":            "completed",
-                                "end_time":         datetime.utcnow().isoformat(),
-                                "content":          cached.content,
-                                "cached_locations": [{"type": "agent_result", "id": cached.id, "created_at": cached.created_at.isoformat() if cached.created_at else None}],
-                            })
-                            save_steps()  # write state BEFORE yield so file is correct if client disconnects
-                            log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
-                            yield _sse("step_cached", {
-                                "step": step_idx, "agent_name": agent_name,
-                                "result_id": cached.id, "content": cached.content,
-                            })
-                            continue  # advance to next canvas stage
-
                     # ── Resolve inputs ───────────────────────────────────────
                     temperature   = float(agent_def.get("temperature", 0.0))
                     system_prompt = agent_def.get("system_prompt", "")
                     user_template = agent_def.get("user_prompt", "")
                     manual_inputs = {"_chain_previous": prev_content}
-
-                    db._agent_run_ctx = {
-                        "sales_agent": req.sales_agent,
-                        "customer":    req.customer,
-                        "call_id":     req.call_id,
-                        "source_for_key": {
-                            inp.get("key", ""): overrides.get(inp.get("key", ""), inp.get("source", ""))
-                            for inp in agent_def.get("inputs", [])
-                        },
+                    source_for_key = {
+                        inp.get("key", ""): overrides.get(inp.get("key", ""), inp.get("source", ""))
+                        for inp in agent_def.get("inputs", [])
                     }
 
                     resolved: dict[str, str] = {}
                     resolve_err = False
+                    def _resolve_input_worker(_source: str, _ref_id: Optional[str], _manual_inputs: dict[str, str]) -> str:
+                        with Session(_db_engine) as _ldb:
+                            return _resolve_input(
+                                _source, _ref_id, req.sales_agent, req.customer, req.call_id,
+                                _manual_inputs, _ldb,
+                            )
                     for inp in agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
                         source = overrides.get(key, inp.get("source", "manual"))
@@ -464,10 +511,7 @@ async def run_pipeline(
                         try:
                             text = await loop.run_in_executor(
                                 None,
-                                lambda s=source, a=ref_id: _resolve_input(
-                                    s, a, req.sales_agent, req.customer, req.call_id,
-                                    manual_inputs, db,
-                                ),
+                                lambda s=source, a=ref_id, m=manual_inputs: _resolve_input_worker(s, a, m),
                             )
                             resolved[key] = text
                         except Exception as exc:
@@ -488,6 +532,52 @@ async def run_pipeline(
                     }
                     file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
                     inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
+
+                    input_fingerprint = _build_input_fingerprint(
+                        pipeline_id=pipeline_id,
+                        step_idx=step_idx,
+                        agent_id=agent_id,
+                        model=model,
+                        temperature=temperature,
+                        system_prompt=system_prompt,
+                        user_template=user_template,
+                        overrides=overrides,
+                        resolved_inputs=resolved,
+                    )
+                    run_steps[step_idx]["input_fingerprint"] = input_fingerprint
+
+                    # ── Check cache (pipeline+step+input fingerprint) ────────
+                    if not req.force and step_idx not in req.force_step_indices:
+                        stmt = select(AR).where(
+                            AR.agent_id == agent_id,
+                            AR.sales_agent == req.sales_agent,
+                            AR.customer == req.customer,
+                            AR.pipeline_id == pipeline_id,
+                            AR.pipeline_step_index == step_idx,
+                            AR.input_fingerprint == input_fingerprint,
+                        )
+                        if req.call_id:
+                            stmt = stmt.where(AR.call_id == req.call_id)
+                        else:
+                            stmt = stmt.where(AR.call_id == "")
+                        stmt = stmt.order_by(AR.created_at.desc())
+                        cached = db.exec(stmt).first()
+
+                        if cached:
+                            prev_content = cached.content
+                            run_steps[step_idx].update({
+                                "state":            "completed",
+                                "end_time":         datetime.utcnow().isoformat(),
+                                "content":          cached.content,
+                                "cached_locations": [{"type": "agent_result", "id": cached.id, "created_at": cached.created_at.isoformat() if cached.created_at else None}],
+                            })
+                            save_steps()  # write state BEFORE yield so file is correct if client disconnects
+                            log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
+                            yield _sse("step_cached", {
+                                "step": step_idx, "agent_name": agent_name,
+                                "result_id": cached.id, "content": cached.content,
+                            })
+                            continue  # advance to next canvas stage
 
                     # Inputs resolved — notify frontend so input nodes can turn green
                     # before the LLM call starts (which may take many seconds).
@@ -518,10 +608,17 @@ async def run_pipeline(
 
                         def _do(fi=file_inputs, ii=inline_inputs, m=model, sp=system_prompt, ut=user_template):
                             try:
-                                c, t = _llm_call_anthropic_files_streaming(
-                                    sp, ut, fi, ii, m, db,
-                                    on_text=lambda chunk: q.put(("stream", chunk)),
-                                )
+                                with Session(_db_engine) as _ldb:
+                                    _ldb._agent_run_ctx = {
+                                        "sales_agent": req.sales_agent,
+                                        "customer": req.customer,
+                                        "call_id": req.call_id,
+                                        "source_for_key": source_for_key,
+                                    }
+                                    c, t = _llm_call_anthropic_files_streaming(
+                                        sp, ut, fi, ii, m, _ldb,
+                                        on_text=lambda chunk: q.put(("stream", chunk)),
+                                    )
                                 result_holder.append((c, t))
                             except Exception as exc:
                                 error_holder.append(str(exc))
@@ -549,19 +646,43 @@ async def run_pipeline(
                             content, thinking = result_holder[0]
                     else:
                         try:
-                            content, thinking = await asyncio.wait_for(
-                                loop.run_in_executor(
-                                    None,
-                                    lambda: _llm_call_with_files(
+                            def _do_llm():
+                                with Session(_db_engine) as _ldb:
+                                    _ldb._agent_run_ctx = {
+                                        "sales_agent": req.sales_agent,
+                                        "customer": req.customer,
+                                        "call_id": req.call_id,
+                                        "source_for_key": source_for_key,
+                                    }
+                                    return _llm_call_with_files(
                                         system_prompt, user_template,
                                         file_inputs, inline_inputs,
-                                        model, temperature, db,
-                                    ),
-                                ),
-                                timeout=180.0,
-                            )
+                                        model, temperature, _ldb,
+                                    )
+
+                            _future = loop.run_in_executor(None, _do_llm)
+                            _deadline = time.monotonic() + LLM_TIMEOUT_S
+                            _next_heartbeat = time.monotonic() + 10.0
+                            while True:
+                                _remaining = _deadline - time.monotonic()
+                                if _remaining <= 0:
+                                    raise asyncio.TimeoutError
+                                done_set, _ = await asyncio.wait({_future}, timeout=min(2.0, _remaining))
+                                if done_set:
+                                    content, thinking = _future.result()
+                                    break
+                                if time.monotonic() >= _next_heartbeat:
+                                    waited_s = int(LLM_TIMEOUT_S - _remaining)
+                                    _next_heartbeat = time.monotonic() + 10.0
+                                    log_buffer.emit(
+                                        f"[PIPELINE] … Step {step_idx + 1}/{len(steps)} waiting on {model} ({waited_s}s) · {cid_short}"
+                                    )
+                                    yield _sse("progress", {
+                                        "step": step_idx,
+                                        "msg": f"Waiting for {model} response… {waited_s}s",
+                                    })
                         except asyncio.TimeoutError:
-                            err_msg = f"LLM call timed out after 180s (model: {model})"
+                            err_msg = f"LLM call timed out after {int(LLM_TIMEOUT_S)}s (model: {model})"
                             run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": err_msg})
                             log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → timeout · {cid_short}")
                             yield _sse("error", {"msg": err_msg, "step": step_idx})
@@ -591,6 +712,9 @@ async def run_pipeline(
                         sales_agent=req.sales_agent,
                         customer=req.customer,
                         call_id=req.call_id,
+                        pipeline_id=pipeline_id,
+                        pipeline_step_index=step_idx,
+                        input_fingerprint=input_fingerprint,
                         content=content,
                         model=model,
                     ))
@@ -647,11 +771,16 @@ async def run_pipeline(
                     for _sidx in step_indices:
                         _s = steps[_sidx]
                         _aid = _s.get("agent_id", "")
+                        _ov = _s.get("input_overrides", {})
                         _adef = agent_map[_aid]
                         _aname = _adef.get("name", _aid)
                         _model = _adef.get("model", "gpt-5.4")
                         run_steps[_sidx]["agent_name"] = _aname
                         run_steps[_sidx]["model"]      = _model
+                        run_steps[_sidx]["input_sources"] = [
+                            {"key": inp.get("key", ""), "source": _ov.get(inp.get("key", ""), inp.get("source", "manual"))}
+                            for inp in _adef.get("inputs", [])
+                        ]
                         run_steps[_sidx]["state"]      = "running"
                         run_steps[_sidx]["start_time"] = datetime.utcnow().isoformat()
                         log_buffer.emit(f"[PIPELINE] ▶ Step {_sidx + 1}/{len(steps)}: {_aname} [{_model}] · {cid_short}")
@@ -663,55 +792,39 @@ async def run_pipeline(
 
                     _stage_prev = prev_content  # all parallel steps share the same prev stage output
 
-                    async def _run_parallel_step(par_idx: int, _sp: str = _stage_prev) -> dict:
-                        """Execute one parallel step without streaming. Never raises — returns error dict on failure."""
+                    def _run_parallel_step_sync(par_idx: int, _sp: str) -> dict:
+                        """Execute one parallel step in a worker thread. Never raises."""
                         _par_step   = steps[par_idx]
                         _par_aid    = _par_step.get("agent_id", "")
                         _par_ov     = _par_step.get("input_overrides", {})
                         _par_adef   = agent_map[_par_aid]
                         _par_aname  = _par_adef.get("name", _par_aid)
                         _par_model  = _par_adef.get("model", "gpt-5.4")
+                        _par_temp   = float(_par_adef.get("temperature", 0.0))
+                        _par_sysp   = _par_adef.get("system_prompt", "")
+                        _par_ut     = _par_adef.get("user_prompt", "")
+                        _par_mi     = {"_chain_previous": _sp}
+                        _par_fp     = ""
                         try:
                             with Session(_db_engine) as _par_db:
-                                # Cache check
-                                if not req.force and par_idx not in req.force_step_indices:
-                                    _cs = select(AR).where(
-                                        AR.agent_id == _par_aid,
-                                        AR.sales_agent == req.sales_agent,
-                                        AR.customer == req.customer,
-                                    )
-                                    if req.call_id:
-                                        _cs = _cs.where(AR.call_id == req.call_id)
-                                    _cs = _cs.order_by(AR.created_at.desc())
-                                    _cached = _par_db.exec(_cs).first()
-                                    if _cached:
-                                        return {"step_idx": par_idx, "status": "cached", "content": _cached.content,
-                                                "result_id": _cached.id, "agent_name": _par_aname, "model": _par_model}
-
-                                # Resolve inputs
-                                _par_temp = float(_par_adef.get("temperature", 0.0))
-                                _par_sysp = _par_adef.get("system_prompt", "")
-                                _par_ut   = _par_adef.get("user_prompt", "")
-                                _par_mi   = {"_chain_previous": _sp}
+                                _source_for_key = {
+                                    inp.get("key", ""): _par_ov.get(inp.get("key", ""), inp.get("source", ""))
+                                    for inp in _par_adef.get("inputs", [])
+                                }
                                 _par_db._agent_run_ctx = {
                                     "sales_agent": req.sales_agent,
-                                    "customer":    req.customer,
-                                    "call_id":     req.call_id,
-                                    "source_for_key": {
-                                        inp.get("key", ""): _par_ov.get(inp.get("key", ""), inp.get("source", ""))
-                                        for inp in _par_adef.get("inputs", [])
-                                    },
+                                    "customer": req.customer,
+                                    "call_id": req.call_id,
+                                    "source_for_key": _source_for_key,
                                 }
+
                                 _par_resolved: dict[str, str] = {}
                                 for _inp in _par_adef.get("inputs", []):
                                     _k   = _inp.get("key", "input")
                                     _src = _par_ov.get(_k, _inp.get("source", "manual"))
                                     _rid = _inp.get("agent_id")
-                                    _par_resolved[_k] = await loop.run_in_executor(
-                                        None,
-                                        lambda s=_src, a=_rid, pdb=_par_db: _resolve_input(
-                                            s, a, req.sales_agent, req.customer, req.call_id, _par_mi, pdb,
-                                        ),
+                                    _par_resolved[_k] = _resolve_input(
+                                        _src, _rid, req.sales_agent, req.customer, req.call_id, _par_mi, _par_db,
                                     )
 
                                 _par_fkeys = {
@@ -721,6 +834,44 @@ async def run_pipeline(
                                 }
                                 _par_fi = {k: v for k, v in _par_resolved.items() if k in _par_fkeys}
                                 _par_ii = {k: v for k, v in _par_resolved.items() if k not in _par_fkeys}
+                                _par_fp = _build_input_fingerprint(
+                                    pipeline_id=pipeline_id,
+                                    step_idx=par_idx,
+                                    agent_id=_par_aid,
+                                    model=_par_model,
+                                    temperature=_par_temp,
+                                    system_prompt=_par_sysp,
+                                    user_template=_par_ut,
+                                    overrides=_par_ov,
+                                    resolved_inputs=_par_resolved,
+                                )
+
+                                if not req.force and par_idx not in req.force_step_indices:
+                                    _cs = select(AR).where(
+                                        AR.agent_id == _par_aid,
+                                        AR.sales_agent == req.sales_agent,
+                                        AR.customer == req.customer,
+                                        AR.pipeline_id == pipeline_id,
+                                        AR.pipeline_step_index == par_idx,
+                                        AR.input_fingerprint == _par_fp,
+                                    )
+                                    if req.call_id:
+                                        _cs = _cs.where(AR.call_id == req.call_id)
+                                    else:
+                                        _cs = _cs.where(AR.call_id == "")
+                                    _cs = _cs.order_by(AR.created_at.desc())
+                                    _cached = _par_db.exec(_cs).first()
+                                    if _cached:
+                                        return {
+                                            "step_idx": par_idx,
+                                            "status": "cached",
+                                            "content": _cached.content,
+                                            "result_id": _cached.id,
+                                            "cached_created_at": _cached.created_at.isoformat() if _cached.created_at else None,
+                                            "agent_name": _par_aname,
+                                            "model": _par_model,
+                                            "input_fingerprint": _par_fp,
+                                        }
 
                                 _par_ic  = sum(len(v) for v in _par_ii.values())
                                 _par_fc  = sum(len(v) for v in _par_fi.values())
@@ -735,15 +886,8 @@ async def run_pipeline(
                                 log_buffer.emit(f"[LLM] {_par_model} — {_par_log} input · {cid_short}")
 
                                 _par_t0 = time.time()
-                                _par_content, _par_thinking = await asyncio.wait_for(
-                                    loop.run_in_executor(
-                                        None,
-                                        lambda: _llm_call_with_files(
-                                            _par_sysp, _par_ut, _par_fi, _par_ii,
-                                            _par_model, _par_temp, _par_db,
-                                        ),
-                                    ),
-                                    timeout=180.0,
+                                _par_content, _par_thinking = _llm_call_with_files(
+                                    _par_sysp, _par_ut, _par_fi, _par_ii, _par_model, _par_temp, _par_db,
                                 )
                                 _par_exec = round(time.time() - _par_t0, 1)
 
@@ -755,30 +899,65 @@ async def run_pipeline(
                                     sales_agent=req.sales_agent,
                                     customer=req.customer,
                                     call_id=req.call_id,
+                                    pipeline_id=pipeline_id,
+                                    pipeline_step_index=par_idx,
+                                    input_fingerprint=_par_fp,
                                     content=_par_content,
                                     model=_par_model,
                                 ))
                                 _par_db.commit()
 
                                 return {
-                                    "step_idx":     par_idx,
-                                    "status":       "done",
-                                    "content":      _par_content,
-                                    "thinking":     _par_thinking,
-                                    "exec_time_s":  _par_exec,
-                                    "input_tok":    _par_tok,
-                                    "output_tok":   len(_par_content) // 4,
-                                    "result_id":    _par_rid,
-                                    "model":        _par_model,
-                                    "agent_name":   _par_aname,
+                                    "step_idx": par_idx,
+                                    "status": "done",
+                                    "content": _par_content,
+                                    "thinking": _par_thinking,
+                                    "exec_time_s": _par_exec,
+                                    "input_tok": _par_tok,
+                                    "output_tok": len(_par_content) // 4,
+                                    "result_id": _par_rid,
+                                    "model": _par_model,
+                                    "agent_name": _par_aname,
+                                    "input_fingerprint": _par_fp,
                                 }
-                        except asyncio.TimeoutError:
-                            return {"step_idx": par_idx, "status": "error",
-                                    "error_msg": f"LLM call timed out after 180s (model: {_par_model})",
-                                    "agent_name": _par_aname, "model": _par_model}
                         except Exception as exc:
-                            return {"step_idx": par_idx, "status": "error", "error_msg": str(exc),
-                                    "agent_name": _par_aname, "model": _par_model}
+                            return {
+                                "step_idx": par_idx,
+                                "status": "error",
+                                "error_msg": str(exc),
+                                "agent_name": _par_aname,
+                                "model": _par_model,
+                                "input_fingerprint": _par_fp,
+                            }
+
+                    async def _run_parallel_step(par_idx: int, _sp: str = _stage_prev) -> dict:
+                        _par_step = steps[par_idx]
+                        _par_aid = _par_step.get("agent_id", "")
+                        _par_adef = agent_map[_par_aid]
+                        _par_aname = _par_adef.get("name", _par_aid)
+                        _par_model = _par_adef.get("model", "gpt-5.4")
+                        _future = loop.run_in_executor(None, lambda: _run_parallel_step_sync(par_idx, _sp))
+                        _deadline = time.monotonic() + LLM_TIMEOUT_S
+                        _next_heartbeat = time.monotonic() + 10.0
+                        while True:
+                            _remaining = _deadline - time.monotonic()
+                            if _remaining <= 0:
+                                return {
+                                    "step_idx": par_idx,
+                                    "status": "error",
+                                    "error_msg": f"LLM call timed out after {int(LLM_TIMEOUT_S)}s (model: {_par_model})",
+                                    "agent_name": _par_aname,
+                                    "model": _par_model,
+                                }
+                            done_set, _ = await asyncio.wait({_future}, timeout=min(2.0, _remaining))
+                            if done_set:
+                                return _future.result()
+                            if time.monotonic() >= _next_heartbeat:
+                                waited_s = int(LLM_TIMEOUT_S - _remaining)
+                                _next_heartbeat = time.monotonic() + 10.0
+                                log_buffer.emit(
+                                    f"[PIPELINE] … Step {par_idx + 1}/{len(steps)} waiting on {_par_model} ({waited_s}s) · {cid_short}"
+                                )
 
                     par_results = list(await asyncio.gather(*[_run_parallel_step(idx) for idx in step_indices]))
 
@@ -793,7 +972,12 @@ async def run_pipeline(
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
                                 "content":          _res["content"],
-                                "cached_locations": [{"type": "agent_result", "id": _res.get("result_id", ""), "created_at": None}],
+                                "cached_locations": [{
+                                    "type": "agent_result",
+                                    "id": _res.get("result_id", ""),
+                                    "created_at": _res.get("cached_created_at"),
+                                }],
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
                             })
                             save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached · {cid_short}")
@@ -810,6 +994,7 @@ async def run_pipeline(
                                 "input_token_est":  _res["input_tok"],
                                 "output_token_est": _res["output_tok"],
                                 "thinking":         (_res.get("thinking") or "")[:8000],
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
                             })
                             save_steps()  # write BEFORE yields so file is correct if client disconnects
                             log_buffer.emit(f"[LLM] {_rm} — done ({len(_rc):,} chars, {_ret}s) · {cid_short}")
@@ -828,7 +1013,12 @@ async def run_pipeline(
                             })
                         else:  # error
                             _remsg = _res.get("error_msg", "Unknown error")
-                            run_steps[_ri].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": _remsg})
+                            run_steps[_ri].update({
+                                "state": "failed",
+                                "end_time": datetime.utcnow().isoformat(),
+                                "error_msg": _remsg,
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
+                            })
                             save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ✗ Step {_ri + 1}/{len(steps)}: {_rn} → error · {cid_short}")
                             yield _sse("error", {"msg": _remsg, "step": _ri})
@@ -860,23 +1050,46 @@ async def run_pipeline(
                 _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
                             start_datetime=run_start_dt)
 
+        except asyncio.CancelledError:
+            cancel_msg = "run cancelled (client disconnected or server interrupted)"
+            now_iso = datetime.utcnow().isoformat()
+            for s in run_steps:
+                if s.get("state") == "running":
+                    s["state"] = "failed"
+                    s["end_time"] = now_iso
+                    s["error_msg"] = cancel_msg
+            run_final_status = "error"
+            _save_state(
+                pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                start_datetime=run_start_dt,
+            )
+            log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
+            raise
+
         finally:
             # On force rerun: delete stale cached results for errored steps so that
             # a page refresh won't show old successful data instead of the error state.
             if req.force:
                 try:
-                    for s in run_steps:
-                        if s.get("status") == "error" and s.get("agent_id"):
+                    for idx, s in enumerate(run_steps):
+                        if s.get("state") == "failed" and s.get("agent_id"):
                             aid = s["agent_id"]
                             stale_stmt = select(AR).where(
                                 AR.agent_id == aid,
                                 AR.sales_agent == req.sales_agent,
                                 AR.customer == req.customer,
+                                AR.pipeline_id == pipeline_id,
+                                AR.pipeline_step_index == idx,
                             )
                             if req.call_id:
                                 stale_stmt = stale_stmt.where(AR.call_id == req.call_id)
-                            stale = db.exec(stale_stmt).first()
-                            if stale:
+                            else:
+                                stale_stmt = stale_stmt.where(AR.call_id == "")
+                            fp = s.get("input_fingerprint", "")
+                            if fp:
+                                stale_stmt = stale_stmt.where(AR.input_fingerprint == fp)
+                            stale_rows = db.exec(stale_stmt).all()
+                            for stale in stale_rows:
                                 db.delete(stale)
                     db.commit()
                 except Exception:
@@ -904,4 +1117,12 @@ async def run_pipeline(
             except Exception:
                 pass
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

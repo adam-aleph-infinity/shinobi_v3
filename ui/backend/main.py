@@ -33,8 +33,9 @@ from ui.backend.routers.universal_agents import router as universal_agents_route
 from ui.backend.routers.pipelines import router as pipelines_router
 from ui.backend.routers.history import router as history_router
 from ui.backend.services import log_buffer
+from ui.backend.version import APP_VERSION
 
-app = FastAPI(title="Shinobi V3 API", version="1.0.0")
+app = FastAPI(title="Shinobi V3 API", version=APP_VERSION)
 
 _cors_origins = list({settings.frontend_origin, "http://localhost:3000", "http://localhost:3001"})
 app.add_middleware(
@@ -98,6 +99,9 @@ async def on_startup():
             "ALTER TABLE persona ADD COLUMN sections_json TEXT",
             "ALTER TABLE persona ADD COLUMN score_json TEXT",
             "ALTER TABLE comparison_file ADD COLUMN file_type TEXT NOT NULL DEFAULT 'transcript'",
+            "ALTER TABLE agent_result ADD COLUMN pipeline_id TEXT",
+            "ALTER TABLE agent_result ADD COLUMN pipeline_step_index INTEGER NOT NULL DEFAULT -1",
+            "ALTER TABLE agent_result ADD COLUMN input_fingerprint TEXT",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -257,7 +261,8 @@ async def on_startup():
                     try:
                         rss = _json.loads(run.steps_json) if run.steps_json else []
                         for s in rss:
-                            if s.get("status") == "loading":
+                            if s.get("state") == "running" or s.get("status") == "loading":
+                                s["state"] = "failed"
                                 s["status"] = "error"
                                 s["error_msg"] = "interrupted by server restart"
                         run.steps_json = _json.dumps(rss)
@@ -316,4 +321,4 @@ async def on_startup():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": APP_VERSION}
