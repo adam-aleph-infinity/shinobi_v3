@@ -240,6 +240,8 @@ def get_pipeline_results(
     db: Session = Depends(get_session),
 ):
     """Return the latest cached AgentResult for each pipeline step."""
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
     filter_by_call_id = call_id is not None and call_id != ""
@@ -261,11 +263,21 @@ def get_pipeline_results(
         if not row:
             return None
         m = getattr(row, "_mapping", row)
-        created_iso = _to_iso(m.get("created_at"))
+        if hasattr(m, "get"):
+            _id = m.get("id")
+            _content = m.get("content", "")
+            _agent_name = m.get("agent_name", "")
+            _created = m.get("created_at")
+        else:
+            _id = row[0] if len(row) > 0 else ""
+            _content = row[1] if len(row) > 1 else ""
+            _agent_name = row[2] if len(row) > 2 else ""
+            _created = row[3] if len(row) > 3 else None
+        created_iso = _to_iso(_created)
         return {
-            "id": m.get("id"),
-            "content": m.get("content", ""),
-            "agent_name": m.get("agent_name", ""),
+            "id": _id,
+            "content": _content,
+            "agent_name": _agent_name,
             "created_at": created_iso,
         }
 
@@ -273,29 +285,20 @@ def get_pipeline_results(
     fallback_run_id = ""
     fallback_created_at: Optional[str] = None
     try:
-        run_sql = (
-            "SELECT id, steps_json, finished_at, started_at "
-            "FROM pipeline_run "
-            "WHERE pipeline_id = :pipeline_id "
-            "AND sales_agent = :sales_agent "
-            "AND customer = :customer "
+        run_stmt = select(PR).where(
+            PR.pipeline_id == pipeline_id,
+            PR.sales_agent == sales_agent,
+            PR.customer == customer,
         )
-        run_params = {
-            "pipeline_id": pipeline_id,
-            "sales_agent": sales_agent,
-            "customer": customer,
-        }
         # For pipeline_run fallback, respect explicit call_id including empty string.
         if call_id is not None:
-            run_sql += "AND call_id = :call_id "
-            run_params["call_id"] = call_id
-        run_sql += "ORDER BY started_at DESC LIMIT 1"
-        run_row = db.exec(_sql_text(run_sql), run_params).first()
+            run_stmt = run_stmt.where(PR.call_id == call_id)
+        run_stmt = run_stmt.order_by(PR.started_at.desc())
+        run_row = db.exec(run_stmt).first()
         if run_row:
-            rm = getattr(run_row, "_mapping", run_row)
-            fallback_run_id = str(rm.get("id") or "")
-            fallback_created_at = _to_iso(rm.get("finished_at")) or _to_iso(rm.get("started_at"))
-            raw_steps = rm.get("steps_json")
+            fallback_run_id = str(run_row.id or "")
+            fallback_created_at = _to_iso(run_row.finished_at) or _to_iso(run_row.started_at)
+            raw_steps = run_row.steps_json
             if isinstance(raw_steps, str) and raw_steps.strip():
                 parsed = json.loads(raw_steps)
                 if isinstance(parsed, list):
