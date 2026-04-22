@@ -1278,18 +1278,28 @@ async def run_pipeline(
 
         except asyncio.CancelledError:
             cancel_msg = cancel_state["reason"]
-            now_iso = datetime.utcnow().isoformat()
-            for s in run_steps:
-                if s.get("state") == "running":
-                    s["state"] = "failed"
-                    s["end_time"] = now_iso
-                    s["error_msg"] = cancel_msg
-            run_final_status = "error"
-            _save_state(
-                pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
-                start_datetime=run_start_dt,
-            )
-            log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
+            if cancel_msg == "run stopped by user":
+                now_iso = datetime.utcnow().isoformat()
+                for s in run_steps:
+                    if s.get("state") == "running":
+                        s["state"] = "failed"
+                        s["end_time"] = now_iso
+                        s["error_msg"] = cancel_msg
+                run_final_status = "error"
+                _save_state(
+                    pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                    start_datetime=run_start_dt,
+                )
+                log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
+            else:
+                # Browser refresh/disconnect should not turn the run red.
+                # Keep the last known snapshot as running so the UI can recover gracefully.
+                run_final_status = "cancelled"
+                _save_state(
+                    pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
+                    start_datetime=run_start_dt,
+                )
+                log_buffer.emit(f"[PIPELINE] … Stream disconnected: {pipeline_name} · {cid_short}")
             raise
         except Exception as exc:
             err_msg = f"Pipeline execution failed: {exc}"
