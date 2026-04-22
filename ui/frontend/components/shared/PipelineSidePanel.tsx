@@ -434,7 +434,7 @@ export function PipelineSidePanel({
   const stateUrl = !isPerCall && activePipelineId && hasPair
     ? `/api/pipelines/${activePipelineId}/state?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
     : null;
-  const { data: pipelineState } = useSWR<any>(stateUrl, fetcher, {
+  const { data: pipelineState, mutate: mutatePipelineState } = useSWR<any>(stateUrl, fetcher, {
     refreshInterval: (data) => (data?.status === "running" ? 2000 : 0),
   });
   // bgRunning: a run is active (state file says running) but this tab didn't start it.
@@ -479,27 +479,14 @@ export function PipelineSidePanel({
       return (st === "done" || st === "cached" || st === "error") ? st : "pending";
     };
 
-    // Running (or interrupted — file stays "running" on disconnect): show live state.
-    // No fixStatus needed — "loading" in the file always means the run is/was active.
-    if (status === "running" && hasProgress && !done) {
-      setSteps(runSteps.map(mapStep));
-      setStepInputStatus(runSteps.map((s: any) => inputStRunning(s.status)));
-      setLoaded(true);
-      return;
-    }
-
-    // Background monitoring: run just finished — file status changed to done/error.
-    if (loaded && !done && status && status !== "running" && hasProgress) {
-      setSteps(runSteps.map(mapStep));
-      setStepInputStatus(runSteps.map((s: any) => inputStDone(s.status)));
-      setDone(true);
-      return;
-    }
-
-    if (loaded) return;
-
-    // Initial page-load restore from state file.
+    // State file has data — it is the single source of truth.
+    // Apply whenever not actively running (SSE is live). Guards:
+    //   • status=running + !done: background/interrupted run visible in this tab
+    //   • status=done/error + !done: run just finished (background monitoring catches the transition)
+    //   • done=true already set by SSE pipeline_done: don't overwrite SSE-derived state
+    //     with a possibly-stale SWR snapshot (SWR might lag 2 s behind the SSE event)
     if (status && hasProgress) {
+      if (done) return; // SSE already confirmed completion — trust SSE state, not SWR
       setSteps(runSteps.map(mapStep));
       setStepInputStatus(runSteps.map((s: any) =>
         status === "running" ? inputStRunning(s.status) : inputStDone(s.status)
@@ -509,22 +496,24 @@ export function PipelineSidePanel({
       return;
     }
 
-    // No state file data — fall back to AgentResult cache.
+    // No state file data (pipelineState is null — file doesn't exist yet or pair never run).
+    // Fall back to AgentResult cache for first-time view. Show as "done" (not "cached")
+    // because we don't know whether the last run was forced or cached.
+    if (loaded) return; // already set up from a previous effect run
     if (!cachedResults) return;
-    const runWasDone = status === "done";
     const initialSteps = pipeline.steps.map((s, i) => {
       const a = agents.find(x => x.id === s.agent_id);
       const cr = cachedResults[i];
       return {
         agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
-        status: (cr?.result ? (runWasDone ? "done" : "cached") : "pending") as StepStatus,
+        status: (cr?.result ? "done" : "pending") as StepStatus,
         content: cr?.result?.content ?? "",
         stream: "", expanded: false,
       };
     });
-    if (initialSteps.some(st => st.status === "done" || st.status === "cached")) {
+    if (initialSteps.some(st => st.status === "done")) {
       setSteps(initialSteps);
-      setDone(status !== "running");
+      setDone(true);
       setLoaded(true);
     }
   }, [pipelineState, cachedResults, pipeline, agents, running, loaded, done, isPerCall]);
@@ -816,7 +805,7 @@ export function PipelineSidePanel({
             setSteps(p => p.map((st, i) => i === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? "" } : st));
             setStepInputStatus(p => { const n = [...p]; n[evt.step] = "error"; return n; });
           }
-          if (type === "pipeline_done") { setDone(true); mutateCache(); }
+          if (type === "pipeline_done") { setDone(true); mutateCache(); mutatePipelineState(); }
         },
       );
     } catch (e: any) {

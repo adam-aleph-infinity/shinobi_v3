@@ -1,5 +1,6 @@
 """Pipelines — ordered chains of universal agents."""
 import asyncio
+import hashlib
 import json
 import queue as _queue
 import threading
@@ -24,18 +25,27 @@ _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 
 
+def _pair_key(pipeline_id: str, sales_agent: str, customer: str) -> str:
+    """Deterministic filename key for a pipeline+pair state file.
+    Uses an MD5 hash of the raw pair strings so the filename is stable and
+    never affected by URL-encoding, case, or whitespace differences."""
+    pair_hash = hashlib.md5(f"{sales_agent}::{customer}".encode("utf-8")).hexdigest()[:10]
+    return f"{pipeline_id}_{pair_hash}"
+
+
 def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
                 status: str, steps: list, force: bool = False) -> None:
-    """Write live run state to a JSON file.  Called from save_steps() (status='running')
-    and on normal completion/error.  NOT called from finally — so interrupted runs stay
-    'running' and the frontend shows orange rather than red on refresh.
+    """Write live run state to a JSON file keyed by pipeline+pair hash.
+    Called from save_steps() (status='running') and on normal completion/error.
+    NOT called from finally — so interrupted runs stay 'running' and the
+    frontend shows orange rather than red on refresh.
 
     force=True: always write (used for the initial claim by a new run).
     force=False: skip if a *different* run_id already owns the file (kill-and-restart guard —
                  prevents an orphaned old generator from overwriting the new run's state)."""
     try:
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        path = _STATE_DIR / f"{pipeline_id}.json"
+        path = _STATE_DIR / f"{_pair_key(pipeline_id, sales_agent, customer)}.json"
         if not force:
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))
@@ -224,17 +234,14 @@ def get_pipeline_state(
     sales_agent: str = Query(""),
     customer: str = Query(""),
 ):
-    """Return the live run state for a pipeline from the state file."""
-    path = _STATE_DIR / f"{pipeline_id}.json"
+    """Return the live run state for a pipeline+pair from the state file.
+    The file is keyed by a hash of (pipeline_id, sales_agent, customer) so
+    no string comparison filter is needed — the path IS the filter."""
+    path = _STATE_DIR / f"{_pair_key(pipeline_id, sales_agent, customer)}.json"
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if sales_agent and data.get("sales_agent") != sales_agent:
-            return None
-        if customer and data.get("customer") != customer:
-            return None
-        return data
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -742,6 +749,7 @@ async def run_pipeline(
                         _rm   = _res.get("model", "")
                         if _rst == "cached":
                             run_steps[_ri].update({"status": "cached", "content": _res["content"]})
+                            save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached · {cid_short}")
                             yield _sse("step_cached", {"step": _ri, "agent_name": _rn,
                                                         "result_id": _res.get("result_id", ""), "content": _res["content"]})
@@ -756,6 +764,7 @@ async def run_pipeline(
                                 "output_token_est": _res["output_tok"],
                                 "thinking":         (_res.get("thinking") or "")[:8000],
                             })
+                            save_steps()  # write BEFORE yields so file is correct if client disconnects
                             log_buffer.emit(f"[LLM] {_rm} — done ({len(_rc):,} chars, {_ret}s) · {cid_short}")
                             log_buffer.emit(f"[PIPELINE] ✓ Step {_ri + 1}/{len(steps)}: {_rn} → done ({_ret}s) · {cid_short}")
                             if _res.get("thinking"):
@@ -773,11 +782,10 @@ async def run_pipeline(
                         else:  # error
                             _remsg = _res.get("error_msg", "Unknown error")
                             run_steps[_ri].update({"status": "error", "error_msg": _remsg})
+                            save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ✗ Step {_ri + 1}/{len(steps)}: {_rn} → error · {cid_short}")
                             yield _sse("error", {"msg": _remsg, "step": _ri})
                             stage_had_error = True
-
-                    save_steps()
 
                     if stage_had_error:
                         fatal_error = True
