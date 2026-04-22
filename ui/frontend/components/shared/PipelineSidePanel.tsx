@@ -457,12 +457,31 @@ export function PipelineSidePanel({
     const runSteps: any[] = pipelineState.steps ?? [];
     const status: string  = pipelineState.status ?? "";
 
+    // Translate new state field names → internal StepStatus (with legacy fallback).
+    const toStepStatus = (s: any): StepStatus => {
+      const raw: string = s.state ?? s.status ?? "waiting";
+      switch (raw) {
+        case "waiting":   return "pending";
+        case "running":   return "loading";
+        case "completed": return "done";
+        case "failed":    return "error";
+        // legacy values (backward compat with old state files):
+        case "pending":   return "pending";
+        case "loading":   return "loading";
+        case "done":      return "done";
+        case "cached":    return "cached";
+        case "error":     return "error";
+        default:          return "pending";
+      }
+    };
+
     const mapStep = (s: any, i: number) => {
       const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
-      const rawStatus = s.status as StepStatus;
-      // If pipeline finished but step still shows "loading", treat it as "done"
+      const rawStatus = toStepStatus(s);
+      // If pipeline finished but step still shows "running/loading", treat it as "done"
+      const isFinished = status !== "running";
       const resolvedStatus: StepStatus =
-        (status !== "running" && rawStatus === "loading") ? "done" : rawStatus;
+        (isFinished && rawStatus === "loading") ? "done" : rawStatus;
       return {
         agentName:      s.agent_name || a?.name || "",
         status:         resolvedStatus,
@@ -477,22 +496,21 @@ export function PipelineSidePanel({
       };
     };
 
-    // Input node color: "loading" means input_ready already fired — data available → green.
-    const inputStRunning = (s: string): StepStatus => {
-      const st = s as StepStatus;
+    // Input node color: "loading/running" means input_ready already fired — data available → green.
+    const inputStRunning = (st: StepStatus): StepStatus => {
       if (st === "done" || st === "cached" || st === "error") return st;
       if (st === "loading") return "done";
       return "pending";
     };
-    const inputStDone = (s: string): StepStatus => {
-      const st = s as StepStatus;
+    const inputStDone = (st: StepStatus): StepStatus => {
       return (st === "done" || st === "cached" || st === "error") ? st : "pending";
     };
 
     setSteps(runSteps.map(mapStep));
-    setStepInputStatus(runSteps.map((s: any) =>
-      status === "running" ? inputStRunning(s.status) : inputStDone(s.status)
-    ));
+    setStepInputStatus(runSteps.map((s: any) => {
+      const st = toStepStatus(s);
+      return status === "running" ? inputStRunning(st) : inputStDone(st);
+    }));
     setDone(status !== "running");
     setLoaded(true);
   }, [pipelineState, pipeline, agents, running, loaded, done, isPerCall]);
@@ -1094,21 +1112,33 @@ export function PipelineSidePanel({
               </div>
 
               {/* ── State debug panel ── */}
-              <div className="shrink-0 border-t border-gray-800 bg-black/80 max-h-48 overflow-y-auto">
-                <div className="px-2 py-1 font-mono text-[9px] text-gray-600 border-b border-gray-800/60 flex gap-4">
+              <div className="shrink-0 border-t border-gray-800 bg-black/80 max-h-56 overflow-y-auto">
+                <div className="px-2 py-1 font-mono text-[9px] text-gray-600 border-b border-gray-800/60 flex gap-4 flex-wrap">
                   <span>run_id: <span className="text-gray-400">{pipelineState?.run_id ?? "—"}</span></span>
-                  <span>updated: <span className="text-gray-400">{pipelineState?.updated_at ? new Date(pipelineState.updated_at).toISOString().replace("T"," ").slice(0,19) : "—"}</span></span>
-                  <span>status: <span className={pipelineState?.status === "running" ? "text-orange-400" : pipelineState?.status === "done" ? "text-green-400" : "text-gray-400"}>{pipelineState?.status ?? "—"}</span></span>
+                  <span>start: <span className="text-gray-400">{pipelineState?.start_datetime ? pipelineState.start_datetime.replace("T"," ").slice(0,19) : "—"}</span></span>
+                  <span>status: <span className={
+                    pipelineState?.status === "running" ? "text-orange-400" :
+                    pipelineState?.status === "pass"    ? "text-green-400"  :
+                    pipelineState?.status === "failed"  ? "text-red-400"    : "text-gray-400"
+                  }>{pipelineState?.status ?? "—"}</span></span>
                 </div>
                 {(pipelineState?.steps ?? []).map((s: any, i: number) => {
-                  const st: string = s.status ?? "pending";
-                  const color = st === "done" ? "text-green-400" : st === "cached" ? "text-amber-400" : st === "loading" ? "text-orange-400" : st === "error" ? "text-red-400" : "text-gray-500";
+                  const st: string = s.state ?? s.status ?? "waiting";
+                  const color = st === "completed" || st === "done" ? "text-green-400"
+                    : st === "failed"  || st === "error"   ? "text-red-400"
+                    : st === "running" || st === "loading" ? "text-orange-400"
+                    : "text-gray-500";
+                  const fmt = (t: string | null) => t ? t.replace("T"," ").slice(11,19) : "—";
+                  const hasCached = s.cached_locations?.length > 0;
                   return (
                     <div key={i} className="px-2 py-0.5 font-mono text-[9px] border-b border-gray-800/40 flex gap-3 flex-wrap">
                       <span className="text-gray-600 w-4 shrink-0">{i}</span>
-                      <span className="text-gray-300 truncate max-w-[120px]">{s.agent_name || "—"}</span>
+                      <span className="text-gray-300 truncate max-w-[100px]">{s.agent_name || "—"}</span>
                       <span className={color}>{st}</span>
+                      <span className="text-gray-600">start:{fmt(s.start_time)}</span>
+                      <span className="text-gray-600">end:{fmt(s.end_time)}</span>
                       {s.execution_time_s != null && <span className="text-gray-600">{s.execution_time_s.toFixed(1)}s</span>}
+                      {hasCached && <span className="text-amber-600">cached:{s.cached_locations[0]?.id?.slice(0,8)}…</span>}
                     </div>
                   );
                 })}

@@ -34,7 +34,8 @@ def _pair_key(pipeline_id: str, sales_agent: str, customer: str) -> str:
 
 
 def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
-                status: str, steps: list, force: bool = False) -> None:
+                status: str, steps: list, force: bool = False,
+                start_datetime: str = "") -> None:
     """Write live run state to a JSON file keyed by pipeline+pair hash.
     Called from save_steps() (status='running') and on normal completion/error.
     NOT called from finally — so interrupted runs stay 'running' and the
@@ -42,7 +43,12 @@ def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
 
     force=True: always write (used for the initial claim by a new run).
     force=False: skip if a *different* run_id already owns the file (kill-and-restart guard —
-                 prevents an orphaned old generator from overwriting the new run's state)."""
+                 prevents an orphaned old generator from overwriting the new run's state).
+
+    State file schema:
+      pipeline status: idle | running | pass | failed
+      step state:      waiting | running | completed | failed
+      step fields:     start_time, end_time, cached_locations"""
     try:
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
         path = _STATE_DIR / f"{_pair_key(pipeline_id, sales_agent, customer)}.json"
@@ -55,13 +61,14 @@ def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
                 pass
         path.write_text(
             json.dumps({
-                "pipeline_id": pipeline_id,
-                "run_id": run_id,
-                "sales_agent": sales_agent,
-                "customer": customer,
-                "status": status,
-                "steps": steps,
-                "updated_at": datetime.utcnow().isoformat(),
+                "pipeline_id":    pipeline_id,
+                "run_id":         run_id,
+                "sales_agent":    sales_agent,
+                "customer":       customer,
+                "status":         status,
+                "start_datetime": start_datetime,
+                "updated_at":     datetime.utcnow().isoformat(),
+                "steps":          steps,
             }, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -272,19 +279,23 @@ async def run_pipeline(
         start_seq = recent[-1].seq if recent else 0
 
         run_id = str(uuid.uuid4())
+        run_start_dt = datetime.utcnow().isoformat()
         run_steps = [
             {
-                "agent_id": s.get("agent_id", ""),
-                "agent_name": "",
-                "model": "",
-                "status": "pending",
-                "content": "",
-                "error_msg": "",
+                "agent_id":         s.get("agent_id", ""),
+                "agent_name":       "",
+                "model":            "",
+                "state":            "waiting",
+                "start_time":       None,
+                "end_time":         None,
+                "cached_locations": [],
+                "content":          "",
+                "error_msg":        "",
                 "execution_time_s": None,
-                "input_token_est": 0,
+                "input_token_est":  0,
                 "output_token_est": 0,
-                "thinking": "",
-                "input_sources": [],
+                "thinking":         "",
+                "input_sources":    [],
             }
             for s in steps
         ]
@@ -300,9 +311,10 @@ async def run_pipeline(
         )
         db.add(run_record)
         db.commit()
-        # Write initial state file (all steps pending) so frontend can find it immediately.
+        # Write initial state file (all steps waiting) so frontend can find it immediately.
         # force=True so a new run always claims the file even if an old run still owns it.
-        _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps, force=True)
+        _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
+                    force=True, start_datetime=run_start_dt)
 
         run_final_status = "error"
         loop = asyncio.get_event_loop()
@@ -322,7 +334,8 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                 pass
-            _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps)
+            _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
+                        start_datetime=run_start_dt)
 
         # ── Build stage groups from canvas ───────────────────────────────────
         # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
@@ -369,7 +382,8 @@ async def run_pipeline(
                     agent_def = agent_map.get(agent_id)
 
                     if not agent_def:
-                        run_steps[step_idx]["status"] = "error"
+                        run_steps[step_idx]["state"]    = "failed"
+                        run_steps[step_idx]["end_time"] = datetime.utcnow().isoformat()
                         run_steps[step_idx]["error_msg"] = f"Agent '{agent_id}' not found"
                         yield _sse("error", {"msg": f"Step {step_idx + 1}: agent '{agent_id}' not found", "step": step_idx})
                         save_steps()
@@ -381,8 +395,9 @@ async def run_pipeline(
 
                     run_steps[step_idx]["agent_name"] = agent_name
                     run_steps[step_idx]["model"]      = model
-                    run_steps[step_idx]["status"]     = "loading"
-                    save_steps()  # persist "loading" so mid-run refresh shows orange
+                    run_steps[step_idx]["state"]      = "running"
+                    run_steps[step_idx]["start_time"] = datetime.utcnow().isoformat()
+                    save_steps()  # persist "running" so mid-run refresh shows orange
 
                     log_buffer.emit(f"[PIPELINE] ▶ Step {step_idx + 1}/{len(steps)}: {agent_name} [{model}] · {cid_short}")
                     yield _sse("step_start", {
@@ -410,7 +425,12 @@ async def run_pipeline(
 
                         if cached:
                             prev_content = cached.content
-                            run_steps[step_idx].update({"status": "cached", "content": cached.content})
+                            run_steps[step_idx].update({
+                                "state":            "completed",
+                                "end_time":         datetime.utcnow().isoformat(),
+                                "content":          cached.content,
+                                "cached_locations": [{"type": "agent_result", "id": cached.id, "created_at": cached.created_at.isoformat() if cached.created_at else None}],
+                            })
                             save_steps()  # write state BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
                             yield _sse("step_cached", {
@@ -451,7 +471,7 @@ async def run_pipeline(
                             )
                             resolved[key] = text
                         except Exception as exc:
-                            run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
+                            run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": str(exc)})
                             log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error (resolve input) · {cid_short}")
                             yield _sse("error", {"msg": str(exc), "step": step_idx})
                             save_steps()
@@ -518,7 +538,7 @@ async def run_pipeline(
                             yield _sse("stream", {"text": data, "step": step_idx})
 
                         if error_holder:
-                            run_steps[step_idx].update({"status": "error", "error_msg": error_holder[0]})
+                            run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": error_holder[0]})
                             log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
                             yield _sse("error", {"msg": error_holder[0], "step": step_idx})
                             save_steps()
@@ -538,7 +558,7 @@ async def run_pipeline(
                                 ),
                             )
                         except Exception as exc:
-                            run_steps[step_idx].update({"status": "error", "error_msg": str(exc)})
+                            run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": str(exc)})
                             log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
                             yield _sse("error", {"msg": str(exc), "step": step_idx})
                             save_steps()
@@ -567,7 +587,8 @@ async def run_pipeline(
 
                     prev_content = content
                     run_steps[step_idx].update({
-                        "status":           "done",
+                        "state":            "completed",
+                        "end_time":         datetime.utcnow().isoformat(),
                         "content":          content,
                         "execution_time_s": exec_time_s,
                         "input_token_est":  input_tok_est,
@@ -602,7 +623,8 @@ async def run_pipeline(
                     for _sidx in step_indices:
                         _aid = steps[_sidx].get("agent_id", "")
                         if not agent_map.get(_aid):
-                            run_steps[_sidx]["status"] = "error"
+                            run_steps[_sidx]["state"]    = "failed"
+                            run_steps[_sidx]["end_time"] = datetime.utcnow().isoformat()
                             run_steps[_sidx]["error_msg"] = f"Agent '{_aid}' not found"
                             yield _sse("error", {"msg": f"Step {_sidx + 1}: agent '{_aid}' not found", "step": _sidx})
                             fatal_error = True
@@ -619,7 +641,8 @@ async def run_pipeline(
                         _model = _adef.get("model", "gpt-5.4")
                         run_steps[_sidx]["agent_name"] = _aname
                         run_steps[_sidx]["model"]      = _model
-                        run_steps[_sidx]["status"]     = "loading"
+                        run_steps[_sidx]["state"]      = "running"
+                        run_steps[_sidx]["start_time"] = datetime.utcnow().isoformat()
                         log_buffer.emit(f"[PIPELINE] ▶ Step {_sidx + 1}/{len(steps)}: {_aname} [{_model}] · {cid_short}")
                         yield _sse("step_start", {
                             "step": _sidx, "total": len(steps),
@@ -748,7 +771,12 @@ async def run_pipeline(
                         _rn   = _res.get("agent_name", "")
                         _rm   = _res.get("model", "")
                         if _rst == "cached":
-                            run_steps[_ri].update({"status": "cached", "content": _res["content"]})
+                            run_steps[_ri].update({
+                                "state":            "completed",
+                                "end_time":         datetime.utcnow().isoformat(),
+                                "content":          _res["content"],
+                                "cached_locations": [{"type": "agent_result", "id": _res.get("result_id", ""), "created_at": None}],
+                            })
                             save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached · {cid_short}")
                             yield _sse("step_cached", {"step": _ri, "agent_name": _rn,
@@ -757,7 +785,8 @@ async def run_pipeline(
                             _rc  = _res["content"]
                             _ret = _res["exec_time_s"]
                             run_steps[_ri].update({
-                                "status":           "done",
+                                "state":            "completed",
+                                "end_time":         datetime.utcnow().isoformat(),
                                 "content":          _rc,
                                 "execution_time_s": _ret,
                                 "input_token_est":  _res["input_tok"],
@@ -781,7 +810,7 @@ async def run_pipeline(
                             })
                         else:  # error
                             _remsg = _res.get("error_msg", "Unknown error")
-                            run_steps[_ri].update({"status": "error", "error_msg": _remsg})
+                            run_steps[_ri].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": _remsg})
                             save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ✗ Step {_ri + 1}/{len(steps)}: {_rn} → error · {cid_short}")
                             yield _sse("error", {"msg": _remsg, "step": _ri})
@@ -802,14 +831,16 @@ async def run_pipeline(
 
             if not fatal_error:
                 run_final_status = "done"
-                _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "done", run_steps)
+                _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "pass", run_steps,
+                            start_datetime=run_start_dt)
                 log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
                 yield _sse("pipeline_done", {})
             else:
-                # Explicit error (agent failure, resolve error, etc.) — mark file as error.
+                # Explicit error (agent failure, resolve error, etc.) — mark file as failed.
                 # Note: if the generator is killed mid-stream (client disconnect), this
                 # branch is never reached; the file stays "running" from the last save_steps().
-                _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "error", run_steps)
+                _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                            start_datetime=run_start_dt)
 
         finally:
             # On force rerun: delete stale cached results for errored steps so that
