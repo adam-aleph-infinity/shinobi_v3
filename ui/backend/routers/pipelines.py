@@ -231,6 +231,7 @@ def get_pipeline_results(
 
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
+    filter_by_call_id = call_id is not None and call_id != ""
 
     out = []
     for idx, step in enumerate(steps):
@@ -242,7 +243,7 @@ def get_pipeline_results(
             AR.pipeline_id == pipeline_id,
             AR.pipeline_step_index == idx,
         )
-        if call_id is not None:
+        if filter_by_call_id:
             stmt = stmt.where(AR.call_id == call_id)
         stmt = stmt.order_by(AR.created_at.desc())
         cached = db.exec(stmt).first()
@@ -253,7 +254,7 @@ def get_pipeline_results(
                 AR.sales_agent == sales_agent,
                 AR.customer == customer,
             )
-            if call_id is not None:
+            if filter_by_call_id:
                 stmt2 = stmt2.where(AR.call_id == call_id)
             stmt2 = stmt2.order_by(AR.created_at.desc())
             cached = db.exec(stmt2).first()
