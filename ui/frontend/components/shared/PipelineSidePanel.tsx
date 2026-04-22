@@ -123,7 +123,7 @@ function utcHmsToIsrael(hms: string): string {
 // ── Mini pipeline canvas ─────────────────────────────────────────────────────
 
 function MiniCanvas({
-  stages, nodes, edges, procStepIdx, outputProcId, inputProcIds, flowSteps, stepInputStatus, selectedKey, onNodeClick,
+  stages, nodes, edges, procStepIdx, outputProcId, inputProcIds, flowSteps, stepInputStatus, nodeStatusById, selectedKey, onNodeClick,
 }: {
   stages: string[];
   nodes: CanvasNode[];
@@ -133,6 +133,7 @@ function MiniCanvas({
   inputProcIds: Map<string, string[]>;
   flowSteps: StepState[];
   stepInputStatus: StepStatus[];  // per-step input fetch status (set by input_ready event)
+  nodeStatusById?: Record<string, StepStatus>;
   selectedKey: string | null;
   onNodeClick: (key: string) => void;
 }) {
@@ -165,6 +166,8 @@ function MiniCanvas({
 
   function stepSt(cn: CanvasNode): StepStatus {
     const nodeId = cn.id;
+    const persisted = nodeStatusById?.[nodeId];
+    if (persisted) return persisted;
     if (cn.type === "processing") {
       const i = procStepIdx.get(nodeId); return i != null ? (flowSteps[i]?.status ?? "pending") : "pending";
     }
@@ -438,6 +441,29 @@ export function PipelineSidePanel({
   // bgRunning: a run is active (state file says running) but this tab didn't start it.
   const bgRunning = !isPerCall && !running && pipelineState?.status === "running";
   const anyBusy   = anyRunning || bgRunning;
+  const persistedNodeStatusById = useMemo((): Record<string, StepStatus> => {
+    const out: Record<string, StepStatus> = {};
+    const raw = pipelineState?.node_states;
+    if (!raw || typeof raw !== "object") return out;
+    const toSt = (v: any): StepStatus | null => {
+      const s = String(v || "").toLowerCase();
+      if (s === "pending" || s === "waiting") return "pending";
+      if (s === "running" || s === "loading") return "loading";
+      if (s === "completed" || s === "done") return "done";
+      if (s === "cached") return "cached";
+      if (s === "failed" || s === "error") return "error";
+      return null;
+    };
+    for (const bucket of ["input", "processing", "output"] as const) {
+      const b = (raw as any)?.[bucket];
+      if (!b || typeof b !== "object") continue;
+      for (const [nodeId, statusRaw] of Object.entries(b)) {
+        const st = toSt(statusRaw);
+        if (st) out[nodeId] = st;
+      }
+    }
+    return out;
+  }, [pipelineState]);
 
   // ── per_pair: restore step state from state file (single source of truth) ────
   useEffect(() => {
@@ -611,7 +637,7 @@ export function PipelineSidePanel({
       const cr = cachedResults[i];
       return {
         agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
-        status:    (cr?.result ? "done" : "pending") as StepStatus,
+        status:    (cr?.result ? "cached" : "pending") as StepStatus,
         content:   cr?.result?.content ?? "",
         stream: "",
         expanded: cachedExpanded[i] ?? false,
@@ -628,7 +654,7 @@ export function PipelineSidePanel({
   const perPairSteps = cachedView ? cachedDisplaySteps : steps;
   const hasCachedResults = !!cachedResults?.some(cr => !!cr.result?.content);
   const cachedInputStatus: StepStatus[] = cachedDisplaySteps.map(s =>
-    (s.status === "done" ? "done" : "pending") as StepStatus
+    (s.status === "cached" ? "cached" : "pending") as StepStatus
   );
 
   // ── Canvas-based flow nodes ──────────────────────────────────────────────────
@@ -1198,6 +1224,7 @@ export function PipelineSidePanel({
                   inputProcIds={inputProcIds}
                   flowSteps={flowSteps}
                   stepInputStatus={isPerCall ? [] : (cachedView ? cachedInputStatus : stepInputStatus)}
+                  nodeStatusById={!isPerCall && !cachedView ? persistedNodeStatusById : undefined}
                   selectedKey={flowSelectedKey}
                   onNodeClick={key => {
                     const isToggleOff = flowSelectedKey === key;

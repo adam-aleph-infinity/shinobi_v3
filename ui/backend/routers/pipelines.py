@@ -40,9 +40,17 @@ def _run_slot_key(pipeline_id: str, sales_agent: str, customer: str, call_id: st
     return f"{pipeline_id}::{sales_agent}::{customer}::{call_id or ''}"
 
 
-def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
-                status: str, steps: list, force: bool = False,
-                start_datetime: str = "") -> None:
+def _save_state(
+    pipeline_id: str,
+    run_id: str,
+    sales_agent: str,
+    customer: str,
+    status: str,
+    steps: list,
+    force: bool = False,
+    start_datetime: str = "",
+    node_states: Optional[dict] = None,
+) -> None:
     """Write live run state to a JSON file keyed by pipeline+pair hash.
     Called from save_steps() (status='running') and on completion/error.
     For browser refresh/disconnect, keep the last snapshot as 'running'
@@ -76,6 +84,7 @@ def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
                 "start_datetime": start_datetime,
                 "updated_at":     datetime.utcnow().isoformat(),
                 "steps":          steps,
+                "node_states":    node_states or {"input": {}, "processing": {}, "output": {}},
             }, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -281,9 +290,7 @@ def get_pipeline_results(
             "created_at": created_iso,
         }
 
-    fallback_steps: Optional[list] = None
-    fallback_run_id = ""
-    fallback_created_at: Optional[str] = None
+    fallback_by_step: dict[int, dict] = {}
     try:
         run_stmt = select(PR).where(
             PR.pipeline_id == pipeline_id,
@@ -293,18 +300,32 @@ def get_pipeline_results(
         # For pipeline_run fallback, respect explicit call_id including empty string.
         if call_id is not None:
             run_stmt = run_stmt.where(PR.call_id == call_id)
-        run_stmt = run_stmt.order_by(PR.started_at.desc())
-        run_row = db.exec(run_stmt).first()
-        if run_row:
-            fallback_run_id = str(run_row.id or "")
-            fallback_created_at = _to_iso(run_row.finished_at) or _to_iso(run_row.started_at)
+        run_stmt = run_stmt.order_by(PR.started_at.desc()).limit(40)
+        run_rows = db.exec(run_stmt).all()
+        for run_row in run_rows:
             raw_steps = run_row.steps_json
-            if isinstance(raw_steps, str) and raw_steps.strip():
-                parsed = json.loads(raw_steps)
-                if isinstance(parsed, list):
-                    fallback_steps = parsed
+            if not (isinstance(raw_steps, str) and raw_steps.strip()):
+                continue
+            parsed = json.loads(raw_steps)
+            if not isinstance(parsed, list):
+                continue
+            run_id = str(run_row.id or "")
+            created_at = _to_iso(run_row.finished_at) or _to_iso(run_row.started_at)
+            for i, raw_step in enumerate(parsed):
+                if i in fallback_by_step:
+                    continue
+                s = raw_step if isinstance(raw_step, dict) else {}
+                content = (s.get("content") or "") if isinstance(s, dict) else ""
+                if not content:
+                    continue
+                fallback_by_step[i] = {
+                    "id": f"pipeline_run:{run_id}:{i}",
+                    "content": content,
+                    "agent_name": (s.get("agent_name") or "") if isinstance(s, dict) else "",
+                    "created_at": created_at,
+                }
     except Exception:
-        fallback_steps = None
+        fallback_by_step = {}
 
     out = []
     for idx, step in enumerate(steps):
@@ -359,15 +380,14 @@ def get_pipeline_results(
                 cached_row = None
 
         cached = _row_to_result(cached_row)
-        if not cached and fallback_steps and idx < len(fallback_steps):
-            s = fallback_steps[idx] if isinstance(fallback_steps[idx], dict) else {}
-            content = (s.get("content") or "") if isinstance(s, dict) else ""
-            if content:
+        if not cached:
+            fb = fallback_by_step.get(idx)
+            if fb and fb.get("content"):
                 cached = {
-                    "id": f"pipeline_run:{fallback_run_id}:{idx}",
-                    "content": content,
-                    "agent_name": (s.get("agent_name") or agent_id) if isinstance(s, dict) else agent_id,
-                    "created_at": fallback_created_at,
+                    "id": fb.get("id"),
+                    "content": fb.get("content"),
+                    "agent_name": fb.get("agent_name") or agent_id,
+                    "created_at": fb.get("created_at"),
                 }
         out.append({
             "agent_id": agent_id,
@@ -406,6 +426,16 @@ async def stop_pipeline(pipeline_id: str, req: PipelineStopRequest):
                         s["status"] = "error"  # legacy compatibility
                         s["end_time"] = now_iso
                         s["error_msg"] = "stopped by user"
+                node_states = data.get("node_states")
+                if isinstance(node_states, dict):
+                    for bucket in ("input", "processing", "output"):
+                        b = node_states.get(bucket)
+                        if not isinstance(b, dict):
+                            continue
+                        for node_id, raw_st in list(b.items()):
+                            st = str(raw_st or "").lower()
+                            if st in ("running", "loading"):
+                                b[node_id] = "error"
                 data["status"] = "failed"
                 data["updated_at"] = now_iso
                 path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -514,6 +544,7 @@ async def run_pipeline(
                 "thinking":         "",
                 "input_sources":    [],
                 "input_fingerprint": "",
+                "input_ready":      False,
             }
             for s in steps
         ]
@@ -555,6 +586,77 @@ async def run_pipeline(
                 cancel_state["reason"] = "run stopped by user"
                 raise asyncio.CancelledError()
 
+        _proc_node_id_by_step_idx: dict[int, str] = {}
+        _output_node_to_step_idx: dict[str, int] = {}
+        _input_node_to_step_idxs: dict[str, list[int]] = {}
+        _input_node_ids: list[str] = []
+        _output_node_ids: list[str] = []
+
+        def _step_status_to_ui(_s: dict) -> str:
+            raw = (_s.get("state") or _s.get("status") or "waiting")
+            if raw in ("failed", "error"):
+                return "error"
+            if raw in ("running", "loading"):
+                return "loading"
+            if raw in ("completed", "done"):
+                return "cached" if (_s.get("cached_locations") or []) else "done"
+            return "pending"
+
+        def _step_input_status(_s: dict) -> str:
+            raw = (_s.get("state") or _s.get("status") or "waiting")
+            if raw in ("failed", "error"):
+                return "error"
+            if raw in ("running", "loading"):
+                return "done" if _s.get("input_ready") else "loading"
+            if raw in ("completed", "done"):
+                return "cached" if (_s.get("cached_locations") or []) else "done"
+            return "pending"
+
+        def _build_node_states() -> dict:
+            processing: dict[str, str] = {}
+            output: dict[str, str] = {}
+            input_nodes: dict[str, str] = {}
+
+            for _step_idx, _node_id in _proc_node_id_by_step_idx.items():
+                if _step_idx >= len(run_steps) or not _node_id:
+                    continue
+                processing[_node_id] = _step_status_to_ui(run_steps[_step_idx])
+
+            for _node_id in _output_node_ids:
+                _step_idx = _output_node_to_step_idx.get(_node_id)
+                if _step_idx is None or _step_idx >= len(run_steps):
+                    output[_node_id] = "pending"
+                    continue
+                _st = _step_status_to_ui(run_steps[_step_idx])
+                output[_node_id] = "pending" if _st == "loading" else _st
+
+            for _node_id in _input_node_ids:
+                _step_idxs = _input_node_to_step_idxs.get(_node_id, [])
+                if not _step_idxs:
+                    input_nodes[_node_id] = "pending"
+                    continue
+                _statuses = [
+                    _step_input_status(run_steps[_i])
+                    for _i in _step_idxs
+                    if 0 <= _i < len(run_steps)
+                ]
+                if any(_s == "error" for _s in _statuses):
+                    input_nodes[_node_id] = "error"
+                elif any(_s == "done" for _s in _statuses):
+                    input_nodes[_node_id] = "done"
+                elif any(_s == "cached" for _s in _statuses):
+                    input_nodes[_node_id] = "cached"
+                elif any(_s == "loading" for _s in _statuses):
+                    input_nodes[_node_id] = "loading"
+                else:
+                    input_nodes[_node_id] = "pending"
+
+            return {
+                "input": input_nodes,
+                "processing": processing,
+                "output": output,
+            }
+
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
             Always written with status='running'; the state file is only promoted to
@@ -569,8 +671,10 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                     pass
-            _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
-                        start_datetime=run_start_dt)
+            _save_state(
+                pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
+                start_datetime=run_start_dt, node_states=_build_node_states(),
+            )
 
         def _persist_agent_result(
             _agent_id: str,
@@ -643,6 +747,30 @@ async def run_pipeline(
         )
         _proc_nodes_with_agent = [n for n in _proc_nodes_all if (n.get("data", {}) or {}).get("agentId")]
         _proc_nodes = _proc_nodes_with_agent if len(_proc_nodes_with_agent) >= len(steps) else _proc_nodes_all
+        _proc_node_id_by_step_idx = {}
+        for _i, _n in enumerate(_proc_nodes):
+            if _i < len(steps):
+                _nid = _n.get("id") or ""
+                if _nid:
+                    _proc_node_id_by_step_idx[_i] = _nid
+        _proc_node_to_step_idx = {v: k for k, v in _proc_node_id_by_step_idx.items()}
+        _input_node_ids = [n.get("id") for n in _canvas_nodes if n.get("type") == "input" and (n.get("id") or "")]
+        _output_node_ids = [n.get("id") for n in _canvas_nodes if n.get("type") == "output" and (n.get("id") or "")]
+        _output_node_to_step_idx = {}
+        _input_node_to_step_idxs = {}
+        for _e in (pipeline_def.get("canvas", {}) or {}).get("edges", []):
+            _src = _e.get("source")
+            _tgt = _e.get("target")
+            if _src in _proc_node_to_step_idx and _tgt in _output_node_ids:
+                _output_node_to_step_idx[_tgt] = _proc_node_to_step_idx[_src]
+            if _src in _input_node_ids and _tgt in _proc_node_to_step_idx:
+                _arr = _input_node_to_step_idxs.get(_src, [])
+                _arr.append(_proc_node_to_step_idx[_tgt])
+                _input_node_to_step_idxs[_src] = _arr
+        # Keep deterministic order for stable JSON/state diffs.
+        for _k, _arr in list(_input_node_to_step_idxs.items()):
+            _input_node_to_step_idxs[_k] = sorted(set(_arr))
+
         _step_canvas_stage: dict[int, int] = {}
         for _i, _n in enumerate(_proc_nodes):
             if _i < len(steps):
@@ -660,6 +788,8 @@ async def run_pipeline(
                 _seen_stages.append(_cs)
             _grp[_cs].append(_si)
         _ordered_stages = [(_cs, _grp[_cs]) for _cs in _seen_stages]
+        # Rewrite once after canvas maps are available so JSON includes node_states.
+        save_steps()
 
         try:
             log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
@@ -695,6 +825,7 @@ async def run_pipeline(
                     run_steps[step_idx]["agent_name"] = agent_name
                     run_steps[step_idx]["model"]      = model
                     run_steps[step_idx]["state"]      = "running"
+                    run_steps[step_idx]["input_ready"] = False
                     run_steps[step_idx]["start_time"] = datetime.utcnow().isoformat()
                     save_steps()  # persist "running" so mid-run refresh shows orange
 
@@ -748,6 +879,8 @@ async def run_pipeline(
                             break
                     if resolve_err:
                         break
+                    run_steps[step_idx]["input_ready"] = True
+                    save_steps()  # input files/text resolved — persist input-node readiness
 
                     file_keys = {
                         inp.get("key", "")
@@ -800,6 +933,7 @@ async def run_pipeline(
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
                                 "content":          cached.content,
+                                "input_ready":      True,
                                 "cached_locations": [{"type": "agent_result", "id": cached.id, "created_at": cached.created_at.isoformat() if cached.created_at else None}],
                             })
                             save_steps()  # write state BEFORE yield so file is correct if client disconnects
@@ -951,6 +1085,7 @@ async def run_pipeline(
                         "state":            "completed",
                         "end_time":         datetime.utcnow().isoformat(),
                         "content":          content,
+                        "input_ready":      True,
                         "execution_time_s": exec_time_s,
                         "input_token_est":  input_tok_est,
                         "output_token_est": output_tok_est,
@@ -1008,6 +1143,7 @@ async def run_pipeline(
                             for inp in _adef.get("inputs", [])
                         ]
                         run_steps[_sidx]["state"]      = "running"
+                        run_steps[_sidx]["input_ready"] = False
                         run_steps[_sidx]["start_time"] = datetime.utcnow().isoformat()
                         log_buffer.emit(f"[PIPELINE] ▶ Step {_sidx + 1}/{len(steps)}: {_aname} [{_model}] · {cid_short}")
                         yield _sse("step_start", {
@@ -1031,6 +1167,7 @@ async def run_pipeline(
                         _par_ut     = _par_adef.get("user_prompt", "")
                         _par_mi     = {"_chain_previous": _sp}
                         _par_fp     = ""
+                        _par_input_ready = False
                         try:
                             with Session(_db_engine) as _par_db:
                                 _source_for_key = {
@@ -1052,6 +1189,7 @@ async def run_pipeline(
                                     _par_resolved[_k] = _resolve_input(
                                         _src, _rid, req.sales_agent, req.customer, req.call_id, _par_mi, _par_db,
                                     )
+                                _par_input_ready = True
 
                                 _par_fkeys = {
                                     _inp.get("key", "")
@@ -1104,6 +1242,7 @@ async def run_pipeline(
                                             "agent_name": _par_aname,
                                             "model": _par_model,
                                             "input_fingerprint": _par_fp,
+                                            "input_ready": _par_input_ready,
                                         }
 
                                 _par_ic  = sum(len(v) for v in _par_ii.values())
@@ -1145,6 +1284,7 @@ async def run_pipeline(
                                     "model": _par_model,
                                     "agent_name": _par_aname,
                                     "input_fingerprint": _par_fp,
+                                    "input_ready": _par_input_ready,
                                 }
                         except Exception as exc:
                             return {
@@ -1154,6 +1294,7 @@ async def run_pipeline(
                                 "agent_name": _par_aname,
                                 "model": _par_model,
                                 "input_fingerprint": _par_fp,
+                                "input_ready": _par_input_ready,
                             }
 
                     async def _run_parallel_step(par_idx: int, _sp: str = _stage_prev) -> dict:
@@ -1175,6 +1316,7 @@ async def run_pipeline(
                                     "error_msg": f"LLM call timed out after {int(LLM_TIMEOUT_S)}s (model: {_par_model})",
                                     "agent_name": _par_aname,
                                     "model": _par_model,
+                                    "input_ready": False,
                                 }
                             done_set, _ = await asyncio.wait({_future}, timeout=min(2.0, _remaining))
                             if done_set:
@@ -1199,6 +1341,7 @@ async def run_pipeline(
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
                                 "content":          _res["content"],
+                                "input_ready":      _res.get("input_ready", True),
                                 "cached_locations": [{
                                     "type": "agent_result",
                                     "id": _res.get("result_id", ""),
@@ -1217,6 +1360,7 @@ async def run_pipeline(
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
                                 "content":          _rc,
+                                "input_ready":      _res.get("input_ready", True),
                                 "execution_time_s": _ret,
                                 "input_token_est":  _res["input_tok"],
                                 "output_token_est": _res["output_tok"],
@@ -1245,6 +1389,7 @@ async def run_pipeline(
                                 "end_time": datetime.utcnow().isoformat(),
                                 "error_msg": _remsg,
                                 "input_fingerprint": _res.get("input_fingerprint", ""),
+                                "input_ready": _res.get("input_ready", False),
                             })
                             save_steps()  # write BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ✗ Step {_ri + 1}/{len(steps)}: {_rn} → error · {cid_short}")
@@ -1267,13 +1412,13 @@ async def run_pipeline(
             if not fatal_error:
                 run_final_status = "done"
                 _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "pass", run_steps,
-                            start_datetime=run_start_dt)
+                            start_datetime=run_start_dt, node_states=_build_node_states())
                 log_buffer.emit(f"[PIPELINE] ✅ Done: {pipeline_name} · {cid_short}")
                 yield _sse("pipeline_done", {})
             else:
                 # Explicit error (agent failure, resolve error, etc.) — mark file as failed.
                 _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
-                            start_datetime=run_start_dt)
+                            start_datetime=run_start_dt, node_states=_build_node_states())
 
         except asyncio.CancelledError:
             cancel_msg = cancel_state["reason"]
@@ -1288,13 +1433,13 @@ async def run_pipeline(
                 log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
                 _save_state(
                     pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
-                    start_datetime=run_start_dt,
+                    start_datetime=run_start_dt, node_states=_build_node_states(),
                 )
             else:
                 run_final_status = "cancelled"
                 _save_state(
                     pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
-                    start_datetime=run_start_dt,
+                    start_datetime=run_start_dt, node_states=_build_node_states(),
                 )
                 log_buffer.emit(f"[PIPELINE] … Stream disconnected: {pipeline_name} · {cid_short}")
             raise
@@ -1309,7 +1454,7 @@ async def run_pipeline(
             run_final_status = "error"
             _save_state(
                 pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
-                start_datetime=run_start_dt,
+                start_datetime=run_start_dt, node_states=_build_node_states(),
             )
             log_buffer.emit(f"[PIPELINE] ✗ Fatal: {pipeline_name} · {cid_short} · {exc}")
             try:
