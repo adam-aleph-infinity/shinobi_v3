@@ -461,6 +461,12 @@ export function PipelineSidePanel({
       return (fixed === "done" || fixed === "cached" || fixed === "error") ? fixed : "pending";
     };
 
+    // Derive input status for a running pipeline — preserve "loading" (orange) as-is.
+    const deriveInputStRunning = (s: string): StepStatus => {
+      const st = s as StepStatus;
+      return (st === "done" || st === "cached" || st === "error" || st === "loading") ? st : "pending";
+    };
+
     // While a run is in progress, keep updating steps from the polled run record.
     // Guard !done: after the frontend finishes a run (done=true), skip DB polling —
     // the final SQL UPDATE in `finally` may not have committed yet, so the DB can
@@ -482,7 +488,7 @@ export function PipelineSidePanel({
           outputTokenEst: s.output_token_est ?? undefined,
         };
       }));
-      setStepInputStatus(runSteps.map((s: any) => deriveInputSt(s.status)));
+      setStepInputStatus(runSteps.map((s: any) => deriveInputStRunning(s.status)));
       setLoaded(true);
       return;
     }

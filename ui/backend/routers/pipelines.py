@@ -408,9 +408,15 @@ async def run_pipeline(
                     file_chars   = sum(len(v) for v in file_inputs.values())
                     total_chars  = inline_chars + (file_chars if model.startswith("grok") else 0)
                     input_tok_est = (total_chars + len(system_prompt)) // 4
-                    log_chars = inline_chars + file_chars  # all content, for display
-                    file_note = f" + {len(file_inputs)} file(s)" if file_inputs else ""
-                    log_buffer.emit(f"[LLM] {model} — {log_chars:,} chars{file_note} input · {cid_short}")
+                    # Show inline chars and file count separately so large file content
+                    # doesn't obscure how much inline context is in the prompt.
+                    if inline_chars and file_inputs:
+                        _log_display = f"{inline_chars:,} chars + {len(file_inputs)} file(s)"
+                    elif inline_chars:
+                        _log_display = f"{inline_chars:,} chars"
+                    else:
+                        _log_display = f"{len(file_inputs)} file(s)"
+                    log_buffer.emit(f"[LLM] {model} — {_log_display} input · {cid_short}")
 
                     step_start_t = time.time()
                     llm_err = False
@@ -616,8 +622,13 @@ async def run_pipeline(
                                 _par_fc  = sum(len(v) for v in _par_fi.values())
                                 _par_tc  = _par_ic + (_par_fc if _par_model.startswith("grok") else 0)
                                 _par_tok = (_par_tc + len(_par_sysp)) // 4
-                                _par_fn  = f" + {len(_par_fi)} file(s)" if _par_fi else ""
-                                log_buffer.emit(f"[LLM] {_par_model} — {_par_ic + _par_fc:,} chars{_par_fn} input · {cid_short}")
+                                if _par_ic and _par_fi:
+                                    _par_log = f"{_par_ic:,} chars + {len(_par_fi)} file(s)"
+                                elif _par_ic:
+                                    _par_log = f"{_par_ic:,} chars"
+                                else:
+                                    _par_log = f"{len(_par_fi)} file(s)"
+                                log_buffer.emit(f"[LLM] {_par_model} — {_par_log} input · {cid_short}")
 
                                 _par_t0 = time.time()
                                 _par_content, _par_thinking = await loop.run_in_executor(

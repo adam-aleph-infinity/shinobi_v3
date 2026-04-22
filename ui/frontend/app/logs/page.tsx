@@ -249,6 +249,13 @@ function useLlmOps(lines: LogLine[]): LlmOp[] {
   return useMemo(() => {
     const ops: LlmOp[] = [];
     const seen = new Map<string, LlmOp>();
+    // Find the most recent still-running op for a given key prefix.
+    // Skipping already-done/error ops ensures parallel steps with the same model
+    // don't leave phantom "running" ops when one finishes before the other.
+    const findRunning = (prefix: string) =>
+      [...seen.keys()].reverse().find(k => k.startsWith(prefix) && seen.get(k)?.status === "running");
+
+    let llmSeq = 0; // unique sequence per [LLM] start in this computation
     for (const l of lines) {
       const t = l.text;
       // [vote] call_id — ...
@@ -258,7 +265,8 @@ function useLlmOps(lines: LogLine[]): LlmOp[] {
       const smoothStart = t.match(/^\[smooth(?:-batch)?\]\s+(\S+)\s+—\s+start/i);
       const smoothDone  = t.match(/^\[smooth(?:-batch)?\]\s+(\S+)\s+—\s+(✅|saving|done|finish)/i);
       const smoothErr   = t.match(/^\[smooth(?:-batch)?\]\s+(\S+)\s+—\s+ERROR/i);
-      const llmCall  = t.match(/^\[LLM\]\s+(\S+)\s+—\s+[\d,]+\s+chars\s+input/i);
+      // Match all [LLM] call formats: "N chars input", "N chars + M file(s) input", "M file(s) input"
+      const llmCall  = t.match(/^\[LLM\]\s+(\S+)\s+—\s+.+\binput\b/i);
       const llmDone  = t.match(/^\[LLM\]\s+(\S+)\s+—\s+done/i);
 
       if (voteStart) {
@@ -266,27 +274,29 @@ function useLlmOps(lines: LogLine[]): LlmOp[] {
         const op: LlmOp = { id: key, type: "vote", label: `Vote · ${voteStart[1]}`, status: "running", ts: l.ts };
         seen.set(key, op); ops.push(op);
       } else if (voteDone) {
-        const key = [...seen.keys()].reverse().find(k => k.startsWith(`vote:${voteDone[1]}`));
+        const key = findRunning(`vote:${voteDone[1]}`);
         if (key) seen.get(key)!.status = "done";
       } else if (voteErr) {
-        const key = [...seen.keys()].reverse().find(k => k.startsWith(`vote:${voteErr[1]}`));
+        const key = findRunning(`vote:${voteErr[1]}`);
         if (key) seen.get(key)!.status = "error";
       } else if (smoothStart) {
         const key = `smooth:${smoothStart[1]}:${l.ts}`;
         const op: LlmOp = { id: key, type: "smooth", label: `Smooth · ${smoothStart[1]}`, status: "running", ts: l.ts };
         seen.set(key, op); ops.push(op);
       } else if (smoothDone) {
-        const key = [...seen.keys()].reverse().find(k => k.startsWith(`smooth:${smoothDone[1]}`));
+        const key = findRunning(`smooth:${smoothDone[1]}`);
         if (key) seen.get(key)!.status = "done";
       } else if (smoothErr) {
-        const key = [...seen.keys()].reverse().find(k => k.startsWith(`smooth:${smoothErr[1]}`));
+        const key = findRunning(`smooth:${smoothErr[1]}`);
         if (key) seen.get(key)!.status = "error";
-      } else if (llmCall) {
-        const key = `llm:${llmCall[1]}:${l.ts}`;
+      } else if (llmCall && !llmDone) {
+        // Use a per-computation sequence number so parallel steps with identical
+        // model + timestamp get distinct keys and can each be closed independently.
+        const key = `llm:${llmCall[1]}:${llmSeq++}`;
         const op: LlmOp = { id: key, type: "llm", label: `LLM · ${llmCall[1]}`, status: "running", ts: l.ts };
         seen.set(key, op); ops.push(op);
       } else if (llmDone) {
-        const key = [...seen.keys()].reverse().find(k => k.startsWith(`llm:${llmDone[1]}`));
+        const key = findRunning(`llm:${llmDone[1]}`);
         if (key) seen.get(key)!.status = "done";
       }
     }
