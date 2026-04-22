@@ -1170,11 +1170,19 @@ function PipelineCanvas() {
             .filter(src => src?.type === "input")
             .map(src => (src!.data as PipelineNodeData).inputSource)
             .filter(Boolean);
+          // Edges from output nodes (e.g. Persona → pazi notes) mean the previous
+          // stage's result feeds this step → use chain_previous as the source.
+          const hasOutputPredecessor = edges.some(e =>
+            e.target === n.id && nodes.find(x => x.id === e.source)?.type === "output"
+          );
           // Map each agent input key to the canvas-provided source if it differs
           agent.inputs.forEach((inp, idx) => {
             const canvasSrc = connectedInputSources[idx];
             if (canvasSrc && canvasSrc !== inp.source) {
               input_overrides[inp.key] = canvasSrc;
+            } else if (!canvasSrc && hasOutputPredecessor && inp.source !== "chain_previous") {
+              // No explicit input node for this key, but an output node is wired in
+              input_overrides[inp.key] = "chain_previous";
             }
           });
         }
