@@ -250,23 +250,58 @@ def get_pipeline_results(
         cols = set()
     has_pipeline_cols = {"pipeline_id", "pipeline_step_index"}.issubset(cols)
 
+    def _to_iso(v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v)
+
     def _row_to_result(row: Any) -> Optional[dict]:
         if not row:
             return None
         m = getattr(row, "_mapping", row)
-        created = m.get("created_at")
-        if created is None:
-            created_iso = None
-        elif hasattr(created, "isoformat"):
-            created_iso = created.isoformat()
-        else:
-            created_iso = str(created)
+        created_iso = _to_iso(m.get("created_at"))
         return {
             "id": m.get("id"),
             "content": m.get("content", ""),
             "agent_name": m.get("agent_name", ""),
             "created_at": created_iso,
         }
+
+    fallback_steps: Optional[list] = None
+    fallback_run_id = ""
+    fallback_created_at: Optional[str] = None
+    try:
+        run_sql = (
+            "SELECT id, steps_json, finished_at, started_at "
+            "FROM pipeline_run "
+            "WHERE pipeline_id = :pipeline_id "
+            "AND sales_agent = :sales_agent "
+            "AND customer = :customer "
+        )
+        run_params = {
+            "pipeline_id": pipeline_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+        }
+        # For pipeline_run fallback, respect explicit call_id including empty string.
+        if call_id is not None:
+            run_sql += "AND call_id = :call_id "
+            run_params["call_id"] = call_id
+        run_sql += "ORDER BY started_at DESC LIMIT 1"
+        run_row = db.exec(_sql_text(run_sql), run_params).first()
+        if run_row:
+            rm = getattr(run_row, "_mapping", run_row)
+            fallback_run_id = str(rm.get("id") or "")
+            fallback_created_at = _to_iso(rm.get("finished_at")) or _to_iso(rm.get("started_at"))
+            raw_steps = rm.get("steps_json")
+            if isinstance(raw_steps, str) and raw_steps.strip():
+                parsed = json.loads(raw_steps)
+                if isinstance(parsed, list):
+                    fallback_steps = parsed
+    except Exception:
+        fallback_steps = None
 
     out = []
     for idx, step in enumerate(steps):
@@ -321,6 +356,16 @@ def get_pipeline_results(
                 cached_row = None
 
         cached = _row_to_result(cached_row)
+        if not cached and fallback_steps and idx < len(fallback_steps):
+            s = fallback_steps[idx] if isinstance(fallback_steps[idx], dict) else {}
+            content = (s.get("content") or "") if isinstance(s, dict) else ""
+            if content:
+                cached = {
+                    "id": f"pipeline_run:{fallback_run_id}:{idx}",
+                    "content": content,
+                    "agent_name": (s.get("agent_name") or agent_id) if isinstance(s, dict) else agent_id,
+                    "created_at": fallback_created_at,
+                }
         out.append({
             "agent_id": agent_id,
             "result": cached,
