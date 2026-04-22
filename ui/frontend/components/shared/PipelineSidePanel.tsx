@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import useSWR from "swr";
 import {
   Workflow, Play, Loader2, AlertCircle,
-  ChevronDown, ChevronUp, CheckCircle2, SkipForward,
+  ChevronDown, ChevronUp, CheckCircle2,
   Download, Eye, EyeOff, ChevronLeft, ChevronRight, X,
   Mic2, FileText, Bot, StickyNote, Layers, BookOpen,
   GitBranch, PenLine, Clock, Zap, Cpu,
@@ -1007,15 +1007,15 @@ export function PipelineSidePanel({
                     : selectedCallIds?.length ? `Run ${selectedCallIds.length} selected` : "Run all calls")
                 : "Run"}
           </button>
-          {/* Secondary: run with cache (skip already-computed steps) */}
+          {/* Toggle: switch between Flow and Steps view */}
           <button
-            onClick={() => isPerCall ? runAllCalls(false) : run(false)}
-            disabled={!contextOk}
-            title="Run from cache — skip steps that already have results"
-            className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
+            onClick={() => setPanelView(v => v === "flow" ? "steps" : "flow")}
+            title={panelView === "flow" ? "Switch to steps view" : "Switch to flow view"}
+            className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
           >
-            <SkipForward className="w-3 h-3" />
-            Cached
+            {panelView === "flow"
+              ? <><FileText className="w-3 h-3" />Steps</>
+              : <><Workflow className="w-3 h-3" />Flow</>}
           </button>
         </div>
         {!running && !callsRunning && pipelineState?.status === "running" && (
