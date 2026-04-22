@@ -494,7 +494,11 @@ export function PipelineSidePanel({
     //   • status=done/error + !done: run just finished (background monitoring catches the transition)
     //   • done=true already set by SSE pipeline_done: don't overwrite SSE-derived state
     //     with a possibly-stale SWR snapshot (SWR might lag 2 s behind the SSE event)
-    if (status && hasProgress) {
+    // Stale guard: if state says "running" but updated_at is >10 min old, the run was
+    // interrupted — fall through to cachedResults rather than showing a hung canvas.
+    const updatedAt = pipelineState?.updated_at ? new Date(pipelineState.updated_at).getTime() : 0;
+    const isStaleRunning = status === "running" && (Date.now() - updatedAt) > 10 * 60 * 1000;
+    if (status && hasProgress && !isStaleRunning) {
       if (done && loaded) return; // SSE already confirmed completion — trust SSE state unless explicit reload
       setSteps(runSteps.map(mapStep));
       setStepInputStatus(runSteps.map((s: any) =>
@@ -771,6 +775,28 @@ export function PipelineSidePanel({
     }
   }
 
+  // ── load cached results into flow canvas ─────────────────────────────────────
+  function loadCachedView() {
+    if (!pipeline || !agents || !cachedResults) return;
+    const initialSteps = pipeline.steps.map((s, i) => {
+      const a = agents.find(x => x.id === s.agent_id);
+      const cr = cachedResults[i];
+      return {
+        agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
+        status: (cr?.result ? "done" : "pending") as StepStatus,
+        content: cr?.result?.content ?? "",
+        stream: "", expanded: false,
+      };
+    });
+    setPanelView("flow");
+    setSteps(initialSteps);
+    setStepInputStatus(initialSteps.map(s => (s.status === "done" ? "done" : "pending") as StepStatus));
+    setDone(initialSteps.some(s => s.status === "done"));
+    setLoaded(true);
+    setRunning(false);
+    setRunError("");
+  }
+
   // ── per_pair run ──────────────────────────────────────────────────────────────
   async function run(force = true, forceStepIndices: number[] = []) {
     if (!activePipelineId || !contextOk || !pipeline || !agents) return;
@@ -1009,7 +1035,8 @@ export function PipelineSidePanel({
           </button>
           {/* Cached: show flow canvas with cached step states */}
           <button
-            onClick={() => { setPanelView("flow"); setLoaded(false); mutatePipelineState(); }}
+            onClick={loadCachedView}
+            disabled={!cachedResults?.some(cr => cr.result)}
             title="View cached pipeline state in flow canvas"
             className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
           >
