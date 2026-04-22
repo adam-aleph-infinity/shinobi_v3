@@ -804,12 +804,33 @@ function PipelineCanvas() {
   }, []);
 
   const onConnect = useCallback((conn: Connection) => {
+    // Compatibility check: output → processing edge
+    const srcNode = nodesRef.current.find(n => n.id === conn.source);
+    const tgtNode = nodesRef.current.find(n => n.id === conn.target);
+    if (srcNode?.type === "output" && tgtNode?.type === "processing") {
+      const subType = (srcNode.data as PipelineNodeData).subType;
+      const artifactSrc = `artifact_${subType}`;
+      const agentId = (tgtNode.data as PipelineNodeData).agentId;
+      const agent = agentId ? allAgents.find(a => a.id === agentId) : null;
+      if (agent) {
+        const hasMatch = agent.inputs.some(
+          inp => inp.source === artifactSrc || inp.source === "chain_previous"
+        );
+        if (!hasMatch) {
+          const artifactLabel = subType.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+          showToast(
+            `⚠ "${agent.name}" has no ${artifactLabel} input. Open the agent and add an "${artifactSrc}" input so the connection is explicit.`,
+            false,
+          );
+        }
+      }
+    }
     setEdges(es => addEdge({
       ...conn,
       markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
       style:     { stroke: "#818cf8", strokeWidth: 2 },
     }, es));
-  }, [setEdges]);
+  }, [setEdges, allAgents]);
 
   function showToast(msg: string, ok = false) {
     setToast({ ok, msg });
@@ -1031,7 +1052,8 @@ function PipelineCanvas() {
     // as top-level nodes when they come from an agent's DEFAULT — those are
     // resolved internally by the executor or chained from a prior step.
     const ALWAYS_TOPLEVEL = new Set(["transcript", "merged_transcript", "manual"]);
-    const VIRTUAL_SOURCES = new Set(["chain_previous", "agent_output"]);
+    // artifact_* sources are resolved as chain_previous at runtime — never create a top-level input node for them
+    const VIRTUAL_SOURCES = new Set(["chain_previous", "agent_output", "artifact_persona", "artifact_persona_score", "artifact_notes", "artifact_notes_compliance"]);
 
     const sourceSet = new Set<string>();
     pl.steps.forEach(step => {

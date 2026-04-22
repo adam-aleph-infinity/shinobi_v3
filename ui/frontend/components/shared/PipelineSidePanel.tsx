@@ -84,6 +84,7 @@ const SOURCE_META: Record<string, {
   artifact_persona:        { label: "Persona",          icon: Bot,       color: "text-violet-400", bg: "bg-violet-950/20", border: "border-violet-700/40" },
   artifact_persona_score:  { label: "Persona Score",    icon: Bot,       color: "text-violet-300", bg: "bg-violet-950/15", border: "border-violet-800/40" },
   artifact_notes:          { label: "Notes Artifact",   icon: StickyNote,color: "text-amber-400",  bg: "bg-amber-950/20",  border: "border-amber-700/40" },
+  artifact_notes_compliance: { label: "Compliance Notes", icon: StickyNote, color: "text-emerald-400", bg: "bg-emerald-950/20", border: "border-emerald-700/40" },
 };
 const GENERIC_SOURCE = SOURCE_META.transcript; // fallback
 
