@@ -391,12 +391,12 @@ async def run_pipeline(
                         if cached:
                             prev_content = cached.content
                             run_steps[step_idx].update({"status": "cached", "content": cached.content})
+                            save_steps()  # write state BEFORE yield so file is correct if client disconnects
                             log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
                             yield _sse("step_cached", {
                                 "step": step_idx, "agent_name": agent_name,
                                 "result_id": cached.id, "content": cached.content,
                             })
-                            save_steps()
                             continue  # advance to next canvas stage
 
                     # ── Resolve inputs ───────────────────────────────────────
@@ -554,6 +554,7 @@ async def run_pipeline(
                         "output_token_est": output_tok_est,
                         "thinking":         (thinking or "")[:8000],
                     })
+                    save_steps()  # write state BEFORE yields so file is correct if client disconnects
 
                     log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars, {exec_time_s}s) · {cid_short}")
 
@@ -571,7 +572,6 @@ async def run_pipeline(
                         "input_token_est":  input_tok_est,
                         "output_token_est": output_tok_est,
                     })
-                    save_steps()
 
                 # ── Parallel stage (multiple steps, non-streaming) ────────────
                 else:
