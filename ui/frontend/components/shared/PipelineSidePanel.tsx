@@ -818,7 +818,7 @@ export function PipelineSidePanel({
   }
 
   // ── per_pair run ──────────────────────────────────────────────────────────────
-  async function run(force = false) {
+  async function run(force = true, forceStepIndices: number[] = []) {
     if (!activePipelineId || !contextOk || running || !pipeline || !agents) return;
     setFlowSelectedKey(null); // close detail panel so canvas is fully visible
     setInputPreview({ loading: false, content: "", error: "" });
@@ -829,7 +829,7 @@ export function PipelineSidePanel({
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force }),
+        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force, force_step_indices: forceStepIndices }),
       });
       if (!res.body) throw new Error("No response body");
       let hadLLM = false;
@@ -863,8 +863,13 @@ export function PipelineSidePanel({
     } finally { setRunning(false); }
   }
 
+  // ── rerun single step (force just that index, use cache for all others) ────────
+  async function runStep(stepIdx: number) {
+    return run(false, [stepIdx]);
+  }
+
   // ── per_call parallel run ─────────────────────────────────────────────────────
-  async function runAllCalls(force = false) {
+  async function runAllCalls(force = true) {
     if (!activePipelineId || !hasPair || callsRunning || !pipeline || !agents) return;
     const hasSelection = selectedCallIds && selectedCallIds.length > 0;
     if (!hasSelection && !callDates) return;
@@ -1017,35 +1022,33 @@ export function PipelineSidePanel({
         </div>
       )}
 
-      {/* Run button */}
+      {/* Run buttons */}
       <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
         <div className="flex gap-1.5">
+          {/* Primary: force re-run (ignores all cache) */}
           <button
-            onClick={() => isPerCall ? runAllCalls(false) : run(false)}
+            onClick={() => isPerCall ? runAllCalls(true) : run(true)}
             disabled={anyBusy || !contextOk}
             className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
           >
             {anyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
             {anyBusy ? "Running…"
               : isPerCall
-                ? (hasCallResults
-                    ? `Re-run (${callResults.length} call${callResults.length !== 1 ? "s" : ""})`
-                    : callResults.length > 0
-                      ? `Run ${callResults.length} call${callResults.length !== 1 ? "s" : ""}`
-                      : selectedCallIds?.length ? `Run ${selectedCallIds.length} selected` : "Run all calls")
-                : (hasResults ? "Re-run" : "Run Pipeline")}
+                ? (callResults.length > 0
+                    ? `Run ${callResults.length} call${callResults.length !== 1 ? "s" : ""}`
+                    : selectedCallIds?.length ? `Run ${selectedCallIds.length} selected` : "Run all calls")
+                : "Run"}
           </button>
-          {(hasResults || hasCallResults) && (
-            <button
-              onClick={() => isPerCall ? runAllCalls(true) : run(true)}
-              disabled={anyBusy || !contextOk}
-              title="Force re-run — ignore cache, re-run all steps"
-              className="flex items-center gap-1.5 px-2.5 py-2 bg-orange-900/60 hover:bg-orange-800/70 border border-orange-700/50 hover:border-orange-600 disabled:opacity-50 text-orange-300 text-[11px] font-medium rounded-lg transition-colors shrink-0"
-            >
-              <Play className="w-3 h-3" />
-              Force
-            </button>
-          )}
+          {/* Secondary: run with cache (skip already-computed steps) */}
+          <button
+            onClick={() => isPerCall ? runAllCalls(false) : run(false)}
+            disabled={anyBusy || !contextOk}
+            title="Run from cache — skip steps that already have results"
+            className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
+          >
+            <SkipForward className="w-3 h-3" />
+            Cached
+          </button>
         </div>
         {!running && !callsRunning && latestRun?.status === "running" && (
           <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-400 bg-amber-950/20 border border-amber-800/30 rounded-lg">
@@ -1224,6 +1227,18 @@ export function PipelineSidePanel({
                         <span className="text-xs font-semibold text-gray-200 flex-1 truncate">{node.data.agentName || node.data.label}</span>
                         <span className={cn("text-[9px] shrink-0 font-medium", statusColor)}>{status}</span>
                         {status === "loading" && st?.stepStartTs && <ElapsedTimer startTs={st.stepStartTs} />}
+                        {/* Re-run this step only — uses cached results for all other steps */}
+                        {!isPerCall && (status === "done" || status === "cached" || status === "error") && (
+                          <button
+                            onClick={() => runStep(stepIdx)}
+                            disabled={anyBusy || !contextOk}
+                            title="Re-run this step only — other steps use cached results"
+                            className="flex items-center gap-1 px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-500 disabled:opacity-40 text-gray-400 hover:text-gray-200 text-[9px] font-medium rounded transition-colors shrink-0"
+                          >
+                            <Play className="w-2.5 h-2.5" />
+                            Re-run
+                          </button>
+                        )}
                         <button onClick={dismiss} className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 ml-1"><X className="w-3 h-3" /></button>
                       </div>
                       {/* Meta row: model + timing + tokens + inputs */}
@@ -1276,15 +1291,15 @@ export function PipelineSidePanel({
                             )}
                             <button onClick={() => { if (isPerCall) runAllCalls(true); else run(true); }}
                               disabled={anyBusy || !contextOk}
-                              className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-900/60 hover:bg-orange-800 border border-orange-700/50 disabled:opacity-50 text-orange-300 text-[11px] font-medium rounded-lg transition-colors">
-                              <Play className="w-3 h-3" /> Force Re-run
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
+                              <Play className="w-3 h-3" /> Run
                             </button>
                           </div>
                         )}
                         {!hasStream && status === "pending" && (
                           <div className="p-3 flex flex-col items-center gap-2">
                             <p className="text-[11px] text-gray-600">Not yet executed</p>
-                            <button onClick={() => { if (isPerCall) runAllCalls(); else run(); }}
+                            <button onClick={() => { if (isPerCall) runAllCalls(true); else run(true); }}
                               disabled={anyBusy || !contextOk}
                               className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
                               <Play className="w-3 h-3" /> {isPerCall ? "Run All Calls" : "Run Pipeline"}

@@ -104,6 +104,7 @@ class PipelineRunRequest(BaseModel):
     customer: str = ""
     call_id: str = ""
     force: bool = False
+    force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
 
 
 @router.get("/{pipeline_id}/results")
@@ -327,7 +328,7 @@ async def run_pipeline(
                     ]
 
                     # ── Check cache ──────────────────────────────────────────
-                    if not req.force:
+                    if not req.force and step_idx not in req.force_step_indices:
                         stmt = select(AR).where(
                             AR.agent_id == agent_id,
                             AR.sales_agent == req.sales_agent,
@@ -570,7 +571,7 @@ async def run_pipeline(
                         try:
                             with Session(_db_engine) as _par_db:
                                 # Cache check
-                                if not req.force:
+                                if not req.force and par_idx not in req.force_step_indices:
                                     _cs = select(AR).where(
                                         AR.agent_id == _par_aid,
                                         AR.sales_agent == req.sales_agent,
