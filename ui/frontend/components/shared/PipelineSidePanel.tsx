@@ -563,7 +563,11 @@ export function PipelineSidePanel({
       };
     });
     if (initialSteps.some(st => st.status === "done" || st.status === "cached")) {
-      setSteps(initialSteps); setDone(true); setLoaded(true);
+      setSteps(initialSteps);
+      // Don't mark done=true if the DB run is still active — the running branch
+      // needs done=false so it can fire and override with live step data on the next poll.
+      setDone(latestRun?.status !== "running");
+      setLoaded(true);
     }
   }, [latestRunData, cachedResults, latestRun, pipeline, agents, running, loaded, isPerCall]);
 
