@@ -25,13 +25,25 @@ _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 
 
 def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
-                status: str, steps: list) -> None:
+                status: str, steps: list, force: bool = False) -> None:
     """Write live run state to a JSON file.  Called from save_steps() (status='running')
     and on normal completion/error.  NOT called from finally — so interrupted runs stay
-    'running' and the frontend shows orange rather than red on refresh."""
+    'running' and the frontend shows orange rather than red on refresh.
+
+    force=True: always write (used for the initial claim by a new run).
+    force=False: skip if a *different* run_id already owns the file (kill-and-restart guard —
+                 prevents an orphaned old generator from overwriting the new run's state)."""
     try:
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        (_STATE_DIR / f"{pipeline_id}.json").write_text(
+        path = _STATE_DIR / f"{pipeline_id}.json"
+        if not force:
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if existing.get("run_id") and existing.get("run_id") != run_id:
+                    return  # a newer run has claimed this file — don't overwrite
+            except Exception:
+                pass
+        path.write_text(
             json.dumps({
                 "pipeline_id": pipeline_id,
                 "run_id": run_id,
@@ -282,7 +294,8 @@ async def run_pipeline(
         db.add(run_record)
         db.commit()
         # Write initial state file (all steps pending) so frontend can find it immediately.
-        _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps)
+        # force=True so a new run always claims the file even if an old run still owns it.
+        _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps, force=True)
 
         run_final_status = "error"
         loop = asyncio.get_event_loop()

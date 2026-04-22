@@ -370,7 +370,9 @@ export function PipelineSidePanel({
   const [callsRunError, setCallsRunError] = useState("");
   const [callsLoaded,   setCallsLoaded]   = useState(false);
 
-  const streamEndRef = useRef<HTMLDivElement>(null);
+  const streamEndRef  = useRef<HTMLDivElement>(null);
+  const abortCtrlRef  = useRef<AbortController | null>(null); // per_pair run abort
+  const callsAbortRef = useRef<AbortController | null>(null); // per_call run abort
   // Snapshot of cachedResults taken just before a run starts — used to show "prev cached result" comparison
   const prevCachedRef = useRef<CachedStepResult[] | null>(null);
 
@@ -773,7 +775,11 @@ export function PipelineSidePanel({
 
   // ── per_pair run ──────────────────────────────────────────────────────────────
   async function run(force = true, forceStepIndices: number[] = []) {
-    if (!activePipelineId || !contextOk || running || !pipeline || !agents) return;
+    if (!activePipelineId || !contextOk || !pipeline || !agents) return;
+    // Kill any in-progress run, then start fresh
+    abortCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    abortCtrlRef.current = ctrl;
     setFlowSelectedKey(null); // close detail panel so canvas is fully visible
     setInputPreview({ loading: false, content: "", error: "" });
     prevCachedRef.current = cachedResults ?? null; // snapshot prev results for comparison
@@ -784,6 +790,7 @@ export function PipelineSidePanel({
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force, force_step_indices: forceStepIndices }),
+        signal: ctrl.signal,
       });
       if (!res.body) throw new Error("No response body");
       let hadLLM = false;
@@ -824,13 +831,18 @@ export function PipelineSidePanel({
 
   // ── per_call parallel run ─────────────────────────────────────────────────────
   async function runAllCalls(force = true) {
-    if (!activePipelineId || !hasPair || callsRunning || !pipeline || !agents) return;
+    if (!activePipelineId || !hasPair || !pipeline || !agents) return;
     const hasSelection = selectedCallIds && selectedCallIds.length > 0;
     if (!hasSelection && !callDates) return;
     const sorted: [string, string][] = hasSelection
       ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""] as [string, string])
       : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
     if (sorted.length === 0) { setCallsRunError("No calls found for this pair"); return; }
+
+    // Kill any in-progress per_call run, then start fresh
+    callsAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    callsAbortRef.current = ctrl;
 
     setFlowSelectedKey(null); // close detail panel so canvas is fully visible
     setInputPreview({ loading: false, content: "", error: "" });
@@ -844,6 +856,7 @@ export function PipelineSidePanel({
     })));
 
     const runSingle = async (cid: string, ci: number) => {
+      if (ctrl.signal.aborted) return;
       setFlowCallIdx(ci); // auto-advance flow view to the currently running call
       setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, runStatus: "running", expanded: true } : cr));
       let hadLLM = false;
@@ -851,6 +864,7 @@ export function PipelineSidePanel({
         const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: cid, force }),
+          signal: ctrl.signal,
         });
         if (!res.body) throw new Error("No response body");
         await readPipelineSSE(res, (type, evt, s) => {
@@ -863,11 +877,13 @@ export function PipelineSidePanel({
           if (type === "pipeline_done") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, done: true, runStatus: hadLLM ? "done" : "cached", expanded: hadLLM } : cr));
         });
       } catch (e: any) {
+        if ((e as any).name === "AbortError") return; // killed by re-run, stop silently
         setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, error: e.message ?? "Error", runStatus: "error" } : cr));
       }
     };
 
     for (let ci = 0; ci < sorted.length; ci++) {
+      if (ctrl.signal.aborted) break;
       await runSingle(sorted[ci][0], ci);
     }
     setCallsRunning(false);
@@ -982,7 +998,7 @@ export function PipelineSidePanel({
           {/* Primary: force re-run (ignores all cache) */}
           <button
             onClick={() => isPerCall ? runAllCalls(true) : run(true)}
-            disabled={anyBusy || !contextOk}
+            disabled={!contextOk}
             className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
           >
             {anyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
@@ -996,7 +1012,7 @@ export function PipelineSidePanel({
           {/* Secondary: run with cache (skip already-computed steps) */}
           <button
             onClick={() => isPerCall ? runAllCalls(false) : run(false)}
-            disabled={anyBusy || !contextOk}
+            disabled={!contextOk}
             title="Run from cache — skip steps that already have results"
             className="flex items-center gap-1.5 px-2.5 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-[11px] font-medium rounded-lg transition-colors shrink-0"
           >
@@ -1185,7 +1201,7 @@ export function PipelineSidePanel({
                         {!isPerCall && (status === "done" || status === "cached" || status === "error") && (
                           <button
                             onClick={() => runStep(stepIdx)}
-                            disabled={anyBusy || !contextOk}
+                            disabled={!contextOk}
                             title="Re-run this step only — other steps use cached results"
                             className="flex items-center gap-1 px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-500 disabled:opacity-40 text-gray-400 hover:text-gray-200 text-[9px] font-medium rounded transition-colors shrink-0"
                           >
@@ -1244,7 +1260,7 @@ export function PipelineSidePanel({
                               <pre className="text-[10px] text-red-400 font-mono whitespace-pre-wrap break-words bg-red-950/20 rounded p-2 border border-red-900/40">{st.errorMsg}</pre>
                             )}
                             <button onClick={() => { if (isPerCall) runAllCalls(true); else run(true); }}
-                              disabled={anyBusy || !contextOk}
+                              disabled={!contextOk}
                               className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
                               <Play className="w-3 h-3" /> Run
                             </button>
@@ -1254,7 +1270,7 @@ export function PipelineSidePanel({
                           <div className="p-3 flex flex-col items-center gap-2">
                             <p className="text-[11px] text-gray-600">Not yet executed</p>
                             <button onClick={() => { if (isPerCall) runAllCalls(true); else run(true); }}
-                              disabled={anyBusy || !contextOk}
+                              disabled={!contextOk}
                               className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-[11px] font-medium rounded-lg transition-colors">
                               <Play className="w-3 h-3" /> {isPerCall ? "Run All Calls" : "Run Pipeline"}
                             </button>
