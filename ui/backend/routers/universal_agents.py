@@ -934,10 +934,14 @@ def _resolve_input(source: str, agent_id: Optional[str],
     ui_data = settings.ui_data_dir
 
     if source == "transcript":
-        path = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final" / "smoothed.txt"
-        if not path.exists():
-            raise RuntimeError(f"Transcript not found for call {call_id}")
-        return path.read_text(encoding="utf-8").strip()
+        if not call_id:
+            # Per-pair context: fall back to merged transcript
+            source = "merged_transcript"
+        else:
+            path = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final" / "smoothed.txt"
+            if not path.exists():
+                raise RuntimeError(f"Transcript not found for call {call_id}")
+            return path.read_text(encoding="utf-8").strip()
 
     if source == "merged_transcript":
         from ui.backend.routers.agent_comparison import _build_and_save_merged_transcript
@@ -957,13 +961,17 @@ def _resolve_input(source: str, agent_id: Optional[str],
         return content
 
     if source == "notes":
-        stmt = select(Note).where(
-            Note.agent == sales_agent, Note.customer == customer, Note.call_id == call_id
-        ).order_by(Note.created_at.desc())
-        note = db.exec(stmt).first()
-        if not note:
-            raise RuntimeError(f"No notes found for call {call_id}")
-        return note.content_md
+        if not call_id:
+            # Per-pair context: fall back to merged notes
+            source = "merged_notes"
+        else:
+            stmt = select(Note).where(
+                Note.agent == sales_agent, Note.customer == customer, Note.call_id == call_id
+            ).order_by(Note.created_at.desc())
+            note = db.exec(stmt).first()
+            if not note:
+                raise RuntimeError(f"No notes found for call {call_id}")
+            return note.content_md
 
     if source == "merged_notes":
         stmt = select(Note).where(
