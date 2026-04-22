@@ -26,6 +26,7 @@ _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
+_RUN_SUBSCRIBERS: dict[str, list[tuple[str, asyncio.Queue]]] = {}
 
 
 def _pair_key(pipeline_id: str, sales_agent: str, customer: str) -> str:
@@ -517,6 +518,8 @@ async def run_pipeline(
     steps = pipeline_def.get("steps", [])
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
 
+    run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
+
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
         cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
@@ -558,8 +561,9 @@ async def run_pipeline(
             status="running",
             canvas_json=json.dumps(pipeline_def.get("canvas", {})),
         )
-        db.add(run_record)
-        db.commit()
+        with Session(_db_engine) as _s:
+            _s.add(run_record)
+            _s.commit()
         # Write initial state file (all steps waiting) so frontend can find it immediately.
         # force=True so a new run always claims the file even if an old run still owns it.
         _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
@@ -569,7 +573,6 @@ async def run_pipeline(
         loop = asyncio.get_event_loop()
         prev_content = ""
         LLM_TIMEOUT_S = 600.0
-        run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
         cancel_state = {"reason": "run cancelled (client disconnected or server interrupted)"}
 
         with _ACTIVE_RUN_LOCK:
@@ -920,7 +923,8 @@ async def run_pipeline(
                             else:
                                 stmt = stmt.where(AR.call_id == "")
                             stmt = stmt.order_by(AR.created_at.desc())
-                            cached = db.exec(stmt).first()
+                            with Session(_db_engine) as _s:
+                                cached = _s.exec(stmt).first()
                         except Exception as _cache_exc:
                             log_buffer.emit(
                                 f"[PIPELINE] ⚠ Cache lookup (pipeline columns) failed for step {step_idx + 1}: {_cache_exc}"
@@ -1490,10 +1494,11 @@ async def run_pipeline(
                             fp = s.get("input_fingerprint", "")
                             if fp:
                                 stale_stmt = stale_stmt.where(AR.input_fingerprint == fp)
-                            stale_rows = db.exec(stale_stmt).all()
-                            for stale in stale_rows:
-                                db.delete(stale)
-                    db.commit()
+                            with Session(_db_engine) as _s:
+                                stale_rows = _s.exec(stale_stmt).all()
+                                for stale in stale_rows:
+                                    _s.delete(stale)
+                                _s.commit()
                 except Exception:
                     pass
             try:
@@ -1519,8 +1524,81 @@ async def run_pipeline(
             except Exception:
                 pass
 
+    # Run the pipeline in a background task that broadcasts SSE payloads to subscribers.
+    # This decouples execution from the client HTTP stream so page refresh/navigation
+    # does not cancel the run.
+    q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    sub_token = str(uuid.uuid4())
+
+    with _ACTIVE_RUN_LOCK:
+        old_ev = _STOP_REQUESTED.get(run_slot)
+        old_task = _ACTIVE_RUN_TASKS.get(run_slot)
+        if old_ev:
+            old_ev.set()
+        if old_task and not old_task.done():
+            old_task.cancel()
+        _RUN_SUBSCRIBERS.setdefault(run_slot, []).append((sub_token, q))
+
+    async def _broadcast_worker():
+        try:
+            async for payload in stream():
+                with _ACTIVE_RUN_LOCK:
+                    subs = list(_RUN_SUBSCRIBERS.get(run_slot, []))
+                for tok, sq in subs:
+                    if tok != sub_token:
+                        continue
+                    try:
+                        sq.put_nowait(payload)
+                    except Exception:
+                        pass
+        finally:
+            with _ACTIVE_RUN_LOCK:
+                subs = list(_RUN_SUBSCRIBERS.get(run_slot, []))
+                keep: list[tuple[str, asyncio.Queue]] = []
+                mine: list[asyncio.Queue] = []
+                for tok, sq in subs:
+                    if tok == sub_token:
+                        mine.append(sq)
+                    else:
+                        keep.append((tok, sq))
+                if keep:
+                    _RUN_SUBSCRIBERS[run_slot] = keep
+                else:
+                    _RUN_SUBSCRIBERS.pop(run_slot, None)
+            for sq in mine:
+                try:
+                    sq.put_nowait(None)
+                except Exception:
+                    pass
+
+    worker_task = asyncio.create_task(_broadcast_worker())
+    with _ACTIVE_RUN_LOCK:
+        _ACTIVE_RUN_TASKS[run_slot] = worker_task
+
+    async def stream_subscriber():
+        try:
+            while True:
+                item = await q.get()
+                if item is None:
+                    break
+                yield item
+        except asyncio.CancelledError:
+            # Client disconnected; keep background worker running.
+            return
+        finally:
+            with _ACTIVE_RUN_LOCK:
+                subs = _RUN_SUBSCRIBERS.get(run_slot, [])
+                pair = (sub_token, q)
+                if pair in subs:
+                    try:
+                        subs.remove(pair)
+                    except ValueError:
+                        pass
+                if not subs:
+                    _RUN_SUBSCRIBERS.pop(run_slot, None)
+
     return StreamingResponse(
-        stream(),
+        stream_subscriber(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
