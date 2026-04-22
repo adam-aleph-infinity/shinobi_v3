@@ -454,9 +454,14 @@ export function PipelineSidePanel({
 
     const mapStep = (s: any, i: number) => {
       const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
+      const rawStatus = s.status as StepStatus;
+      // If pipeline finished but step still shows "loading", treat it as "done"
+      // (handles write-failure edge case where final save didn't update step status).
+      const resolvedStatus: StepStatus =
+        (status !== "running" && rawStatus === "loading") ? "done" : rawStatus;
       return {
         agentName:      s.agent_name || a?.name || "",
-        status:         s.status as StepStatus,
+        status:         resolvedStatus,
         content:        s.content || "",
         stream:         "",
         expanded:       false,
@@ -468,10 +473,14 @@ export function PipelineSidePanel({
       };
     };
 
-    // Input status for canvas input nodes — running path preserves "loading" (orange).
+    // Input status for canvas input nodes.
+    // "loading" means the LLM is running but input_ready has already fired — data IS available.
+    // Map "loading" → "done" so the input node stays green on refresh, matching the live view.
     const inputStRunning = (s: string): StepStatus => {
       const st = s as StepStatus;
-      return (st === "done" || st === "cached" || st === "error" || st === "loading") ? st : "pending";
+      if (st === "done" || st === "cached" || st === "error") return st;
+      if (st === "loading") return "done"; // input data available; LLM still running
+      return "pending";
     };
     // Completed/errored path: no "loading" in state file after normal finish.
     const inputStDone = (s: string): StepStatus => {
