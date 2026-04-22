@@ -1023,7 +1023,7 @@ export function PipelineSidePanel({
             title={cachedView ? "Switch to current run view" : "Switch to cached results view"}
             className={`flex items-center gap-1.5 px-2.5 py-2 border disabled:opacity-50 text-[11px] font-medium rounded-lg transition-colors shrink-0 ${
               cachedView
-                ? "bg-amber-900/40 hover:bg-amber-900/60 border-amber-700/60 text-amber-300"
+                ? "bg-yellow-900/40 hover:bg-yellow-900/60 border-yellow-600/60 text-yellow-300"
                 : "bg-gray-800 hover:bg-gray-700 border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-200"
             }`}
           >
