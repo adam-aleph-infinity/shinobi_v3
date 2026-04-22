@@ -549,14 +549,25 @@ async def run_pipeline(
                             content, thinking = result_holder[0]
                     else:
                         try:
-                            content, thinking = await loop.run_in_executor(
-                                None,
-                                lambda: _llm_call_with_files(
-                                    system_prompt, user_template,
-                                    file_inputs, inline_inputs,
-                                    model, temperature, db,
+                            content, thinking = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None,
+                                    lambda: _llm_call_with_files(
+                                        system_prompt, user_template,
+                                        file_inputs, inline_inputs,
+                                        model, temperature, db,
+                                    ),
                                 ),
+                                timeout=180.0,
                             )
+                        except asyncio.TimeoutError:
+                            err_msg = f"LLM call timed out after 180s (model: {model})"
+                            run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": err_msg})
+                            log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → timeout · {cid_short}")
+                            yield _sse("error", {"msg": err_msg, "step": step_idx})
+                            save_steps()
+                            fatal_error = True
+                            llm_err = True
                         except Exception as exc:
                             run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": str(exc)})
                             log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error · {cid_short}")
@@ -724,12 +735,15 @@ async def run_pipeline(
                                 log_buffer.emit(f"[LLM] {_par_model} — {_par_log} input · {cid_short}")
 
                                 _par_t0 = time.time()
-                                _par_content, _par_thinking = await loop.run_in_executor(
-                                    None,
-                                    lambda: _llm_call_with_files(
-                                        _par_sysp, _par_ut, _par_fi, _par_ii,
-                                        _par_model, _par_temp, _par_db,
+                                _par_content, _par_thinking = await asyncio.wait_for(
+                                    loop.run_in_executor(
+                                        None,
+                                        lambda: _llm_call_with_files(
+                                            _par_sysp, _par_ut, _par_fi, _par_ii,
+                                            _par_model, _par_temp, _par_db,
+                                        ),
                                     ),
+                                    timeout=180.0,
                                 )
                                 _par_exec = round(time.time() - _par_t0, 1)
 
@@ -758,6 +772,10 @@ async def run_pipeline(
                                     "model":        _par_model,
                                     "agent_name":   _par_aname,
                                 }
+                        except asyncio.TimeoutError:
+                            return {"step_idx": par_idx, "status": "error",
+                                    "error_msg": f"LLM call timed out after 180s (model: {_par_model})",
+                                    "agent_name": _par_aname, "model": _par_model}
                         except Exception as exc:
                             return {"step_idx": par_idx, "status": "error", "error_msg": str(exc),
                                     "agent_name": _par_aname, "model": _par_model}
