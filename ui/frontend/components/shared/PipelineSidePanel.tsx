@@ -520,8 +520,10 @@ export function PipelineSidePanel({
     // Past this point: only apply once (on initial load)
     if (loaded) return;
 
-    // Completed/errored run with step data — restore exact run state
-    if (latestRun && hasProgress) {
+    // Completed/errored run with step data — restore exact run state.
+    // Explicitly exclude running runs: fixStatus maps "loading"→"error" which
+    // is wrong for a step that is actively in progress.
+    if (latestRun && hasProgress && latestRun.status !== "running") {
       setLoaded(true);
       setSteps(runSteps.map((s: any, i: number) => {
         const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
