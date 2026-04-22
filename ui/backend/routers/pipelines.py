@@ -12,7 +12,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import text as _sql_text
+from sqlalchemy import text as _sql_text, inspect as _sa_inspect
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -240,50 +240,90 @@ def get_pipeline_results(
     db: Session = Depends(get_session),
 ):
     """Return the latest cached AgentResult for each pipeline step."""
-    from ui.backend.models.agent_result import AgentResult as AR
-
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
     filter_by_call_id = call_id is not None and call_id != ""
+    try:
+        bind = db.get_bind()
+        cols = {c["name"] for c in _sa_inspect(bind).get_columns("agent_result")}
+    except Exception:
+        cols = set()
+    has_pipeline_cols = {"pipeline_id", "pipeline_step_index"}.issubset(cols)
+
+    def _row_to_result(row: Any) -> Optional[dict]:
+        if not row:
+            return None
+        m = getattr(row, "_mapping", row)
+        created = m.get("created_at")
+        if created is None:
+            created_iso = None
+        elif hasattr(created, "isoformat"):
+            created_iso = created.isoformat()
+        else:
+            created_iso = str(created)
+        return {
+            "id": m.get("id"),
+            "content": m.get("content", ""),
+            "agent_name": m.get("agent_name", ""),
+            "created_at": created_iso,
+        }
 
     out = []
     for idx, step in enumerate(steps):
         agent_id = step.get("agent_id", "")
-        cached = None
-        try:
-            stmt = select(AR).where(
-                AR.agent_id == agent_id,
-                AR.sales_agent == sales_agent,
-                AR.customer == customer,
-                AR.pipeline_id == pipeline_id,
-                AR.pipeline_step_index == idx,
+        cached_row = None
+        if has_pipeline_cols:
+            sql = (
+                "SELECT id, content, agent_name, created_at "
+                "FROM agent_result "
+                "WHERE agent_id = :agent_id "
+                "AND sales_agent = :sales_agent "
+                "AND customer = :customer "
+                "AND pipeline_id = :pipeline_id "
+                "AND pipeline_step_index = :step_idx "
             )
+            params = {
+                "agent_id": agent_id,
+                "sales_agent": sales_agent,
+                "customer": customer,
+                "pipeline_id": pipeline_id,
+                "step_idx": idx,
+            }
             if filter_by_call_id:
-                stmt = stmt.where(AR.call_id == call_id)
-            stmt = stmt.order_by(AR.created_at.desc())
-            cached = db.exec(stmt).first()
-        except Exception:
-            # Legacy schema fallback (older DB without pipeline columns)
-            cached = None
-        if not cached:
-            # Legacy fallback for pre-v4 records without pipeline dimensions
-            stmt2 = select(AR).where(
-                AR.agent_id == agent_id,
-                AR.sales_agent == sales_agent,
-                AR.customer == customer,
+                sql += "AND call_id = :call_id "
+                params["call_id"] = call_id or ""
+            sql += "ORDER BY created_at DESC LIMIT 1"
+            try:
+                cached_row = db.exec(_sql_text(sql), params).first()
+            except Exception:
+                cached_row = None
+
+        if not cached_row:
+            sql2 = (
+                "SELECT id, content, agent_name, created_at "
+                "FROM agent_result "
+                "WHERE agent_id = :agent_id "
+                "AND sales_agent = :sales_agent "
+                "AND customer = :customer "
             )
+            params2 = {
+                "agent_id": agent_id,
+                "sales_agent": sales_agent,
+                "customer": customer,
+            }
             if filter_by_call_id:
-                stmt2 = stmt2.where(AR.call_id == call_id)
-            stmt2 = stmt2.order_by(AR.created_at.desc())
-            cached = db.exec(stmt2).first()
+                sql2 += "AND call_id = :call_id "
+                params2["call_id"] = call_id or ""
+            sql2 += "ORDER BY created_at DESC LIMIT 1"
+            try:
+                cached_row = db.exec(_sql_text(sql2), params2).first()
+            except Exception:
+                cached_row = None
+
+        cached = _row_to_result(cached_row)
         out.append({
             "agent_id": agent_id,
-            "result": {
-                "id": cached.id,
-                "content": cached.content,
-                "agent_name": cached.agent_name,
-                "created_at": cached.created_at.isoformat() if cached.created_at else None,
-            } if cached else None,
+            "result": cached,
         })
     return out
 
