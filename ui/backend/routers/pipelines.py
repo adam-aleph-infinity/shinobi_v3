@@ -186,6 +186,19 @@ def _find_file(pipeline_id: str) -> tuple[Any, dict]:
     raise HTTPException(404, f"Pipeline '{pipeline_id}' not found")
 
 
+def _get_table_columns(db_or_bind: Any, table_name: str) -> set[str]:
+    try:
+        bind = db_or_bind.get_bind() if hasattr(db_or_bind, "get_bind") else db_or_bind
+        return {c["name"] for c in _sa_inspect(bind).get_columns(table_name)}
+    except Exception:
+        return set()
+
+
+def _agent_result_supports_pipeline_cache(db_or_bind: Any) -> bool:
+    cols = _get_table_columns(db_or_bind, "agent_result")
+    return {"pipeline_id", "pipeline_step_index", "input_fingerprint"}.issubset(cols)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
@@ -255,12 +268,7 @@ def get_pipeline_results(
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
     filter_by_call_id = call_id is not None and call_id != ""
-    try:
-        bind = db.get_bind()
-        cols = {c["name"] for c in _sa_inspect(bind).get_columns("agent_result")}
-    except Exception:
-        cols = set()
-    has_pipeline_cols = {"pipeline_id", "pipeline_step_index"}.issubset(cols)
+    has_pipeline_cols = _agent_result_supports_pipeline_cache(db)
 
     def _to_iso(v: Any) -> Optional[str]:
         if v is None:
@@ -564,6 +572,13 @@ async def run_pipeline(
         with Session(_db_engine) as _s:
             _s.add(run_record)
             _s.commit()
+
+        _agent_result_has_pipeline_cache = _agent_result_supports_pipeline_cache(_db_engine)
+        if not _agent_result_has_pipeline_cache:
+            log_buffer.emit(
+                "[PIPELINE] ⚠ agent_result schema is legacy (missing pipeline cache columns); "
+                "using legacy cache mode"
+            )
         # Write initial state file (all steps waiting) so frontend can find it immediately.
         # force=True so a new run always claims the file even if an old run still owns it.
         _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
@@ -687,32 +702,26 @@ async def run_pipeline(
             _pipeline_step_index: int,
             _input_fingerprint: str,
         ) -> str:
-            """Persist an agent result, with fallback for legacy DB schemas."""
+            """Persist an agent result in pipeline-aware or legacy schema mode."""
             _rid = str(uuid.uuid4())
             _created_at = datetime.utcnow()
             try:
                 with Session(_db_engine) as _s:
-                    _s.add(AR(
-                        id=_rid,
-                        agent_id=_agent_id,
-                        agent_name=_agent_name,
-                        sales_agent=req.sales_agent,
-                        customer=req.customer,
-                        call_id=req.call_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_step_index=_pipeline_step_index,
-                        input_fingerprint=_input_fingerprint,
-                        content=_content,
-                        model=_model,
-                    ))
-                    _s.commit()
-                return _rid
-            except Exception as exc_full:
-                log_buffer.emit(
-                    f"[PIPELINE] ⚠ AgentResult full insert failed, trying legacy schema fallback: {exc_full}"
-                )
-                try:
-                    with Session(_db_engine) as _s:
+                    if _agent_result_has_pipeline_cache:
+                        _s.add(AR(
+                            id=_rid,
+                            agent_id=_agent_id,
+                            agent_name=_agent_name,
+                            sales_agent=req.sales_agent,
+                            customer=req.customer,
+                            call_id=req.call_id,
+                            pipeline_id=pipeline_id,
+                            pipeline_step_index=_pipeline_step_index,
+                            input_fingerprint=_input_fingerprint,
+                            content=_content,
+                            model=_model,
+                        ))
+                    else:
                         _s.execute(
                             _sql_text(
                                 "INSERT INTO agent_result ("
@@ -733,12 +742,13 @@ async def run_pipeline(
                                 "created_at": _created_at,
                             },
                         )
-                        _s.commit()
-                    return _rid
-                except Exception as exc_legacy:
-                    raise RuntimeError(
-                        f"Failed to persist AgentResult (full={exc_full}; legacy={exc_legacy})"
-                    ) from exc_legacy
+                    _s.commit()
+                return _rid
+            except Exception as exc:
+                mode = "pipeline" if _agent_result_has_pipeline_cache else "legacy"
+                raise RuntimeError(
+                    f"Failed to persist AgentResult in {mode} schema mode: {exc}"
+                ) from exc
 
         # ── Build stage groups from canvas ───────────────────────────────────
         # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
@@ -914,10 +924,13 @@ async def run_pipeline(
                                 AR.agent_id == agent_id,
                                 AR.sales_agent == req.sales_agent,
                                 AR.customer == req.customer,
-                                AR.pipeline_id == pipeline_id,
-                                AR.pipeline_step_index == step_idx,
-                                AR.input_fingerprint == input_fingerprint,
                             )
+                            if _agent_result_has_pipeline_cache:
+                                stmt = stmt.where(
+                                    AR.pipeline_id == pipeline_id,
+                                    AR.pipeline_step_index == step_idx,
+                                    AR.input_fingerprint == input_fingerprint,
+                                )
                             if req.call_id:
                                 stmt = stmt.where(AR.call_id == req.call_id)
                             else:
@@ -927,7 +940,7 @@ async def run_pipeline(
                                 cached = _s.exec(stmt).first()
                         except Exception as _cache_exc:
                             log_buffer.emit(
-                                f"[PIPELINE] ⚠ Cache lookup (pipeline columns) failed for step {step_idx + 1}: {_cache_exc}"
+                                f"[PIPELINE] ⚠ Cache lookup failed for step {step_idx + 1}: {_cache_exc}"
                             )
                             cached = None
 
@@ -1221,10 +1234,13 @@ async def run_pipeline(
                                             AR.agent_id == _par_aid,
                                             AR.sales_agent == req.sales_agent,
                                             AR.customer == req.customer,
-                                            AR.pipeline_id == pipeline_id,
-                                            AR.pipeline_step_index == par_idx,
-                                            AR.input_fingerprint == _par_fp,
                                         )
+                                        if _agent_result_has_pipeline_cache:
+                                            _cs = _cs.where(
+                                                AR.pipeline_id == pipeline_id,
+                                                AR.pipeline_step_index == par_idx,
+                                                AR.input_fingerprint == _par_fp,
+                                            )
                                         if req.call_id:
                                             _cs = _cs.where(AR.call_id == req.call_id)
                                         else:
@@ -1477,28 +1493,29 @@ async def run_pipeline(
             # a page refresh won't show old successful data instead of the error state.
             if req.force:
                 try:
-                    for idx, s in enumerate(run_steps):
-                        if s.get("state") == "failed" and s.get("agent_id"):
-                            aid = s["agent_id"]
-                            stale_stmt = select(AR).where(
-                                AR.agent_id == aid,
-                                AR.sales_agent == req.sales_agent,
-                                AR.customer == req.customer,
-                                AR.pipeline_id == pipeline_id,
-                                AR.pipeline_step_index == idx,
-                            )
-                            if req.call_id:
-                                stale_stmt = stale_stmt.where(AR.call_id == req.call_id)
-                            else:
-                                stale_stmt = stale_stmt.where(AR.call_id == "")
-                            fp = s.get("input_fingerprint", "")
-                            if fp:
-                                stale_stmt = stale_stmt.where(AR.input_fingerprint == fp)
-                            with Session(_db_engine) as _s:
-                                stale_rows = _s.exec(stale_stmt).all()
-                                for stale in stale_rows:
-                                    _s.delete(stale)
-                                _s.commit()
+                    if _agent_result_has_pipeline_cache:
+                        for idx, s in enumerate(run_steps):
+                            if s.get("state") == "failed" and s.get("agent_id"):
+                                aid = s["agent_id"]
+                                stale_stmt = select(AR).where(
+                                    AR.agent_id == aid,
+                                    AR.sales_agent == req.sales_agent,
+                                    AR.customer == req.customer,
+                                    AR.pipeline_id == pipeline_id,
+                                    AR.pipeline_step_index == idx,
+                                )
+                                if req.call_id:
+                                    stale_stmt = stale_stmt.where(AR.call_id == req.call_id)
+                                else:
+                                    stale_stmt = stale_stmt.where(AR.call_id == "")
+                                fp = s.get("input_fingerprint", "")
+                                if fp:
+                                    stale_stmt = stale_stmt.where(AR.input_fingerprint == fp)
+                                with Session(_db_engine) as _s:
+                                    stale_rows = _s.exec(stale_stmt).all()
+                                    for stale in stale_rows:
+                                        _s.delete(stale)
+                                    _s.commit()
                 except Exception:
                     pass
             try:

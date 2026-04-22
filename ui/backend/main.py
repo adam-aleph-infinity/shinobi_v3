@@ -71,7 +71,7 @@ async def on_startup():
     import asyncio
     import shutil
     from datetime import datetime
-    from sqlalchemy import text
+    from sqlalchemy import text, inspect as _sa_inspect
     from sqlmodel import Session, select
     from ui.backend.database import engine, _DATABASE_URL
     from ui.backend.models.job import Job, JobStatus
@@ -108,6 +108,19 @@ async def on_startup():
                 conn.commit()
             except Exception:
                 pass  # column already exists
+        try:
+            cols = {c["name"] for c in _sa_inspect(conn).get_columns("agent_result")}
+            missing = [
+                c for c in ("pipeline_id", "pipeline_step_index", "input_fingerprint")
+                if c not in cols
+            ]
+            if missing:
+                print(
+                    "[startup] WARNING: agent_result missing columns "
+                    f"{', '.join(missing)} — running in legacy cache compatibility mode"
+                )
+        except Exception:
+            pass
 
     # Backfill persona_agent_id for existing personas that don't have it yet
     async def _backfill_persona_agent_id():
