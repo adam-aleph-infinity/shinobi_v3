@@ -814,7 +814,7 @@ def _llm_call_openai_responses_files(
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=180.0)  # 3-min hard timeout — prevents hung threads
     ctx = getattr(db, "_agent_run_ctx", {})
 
     # Upload (or reuse cached) each file input — returns (file_id, _) tuple
