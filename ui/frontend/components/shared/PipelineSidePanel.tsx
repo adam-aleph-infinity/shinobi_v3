@@ -1448,7 +1448,7 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
       >
         {st.status === "loading" && !st.stream && <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />}
         {st.status === "loading" && st.stream  && <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse shrink-0" />}
-        {st.status === "cached"  && <SkipForward className="w-3 h-3 text-amber-400 shrink-0" />}
+        {st.status === "cached"  && <Zap className="w-3 h-3 text-amber-400 shrink-0" />}
         {st.status === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
         {st.status === "error"   && <AlertCircle  className="w-3 h-3 text-red-400 shrink-0" />}
         {st.status === "pending" && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
