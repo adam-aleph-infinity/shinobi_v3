@@ -1127,6 +1127,30 @@ export function PipelineSidePanel({
                 />
               </div>
 
+              {/* ── State debug panel ── */}
+              <div className="shrink-0 border-t border-gray-800 bg-black/80 max-h-48 overflow-y-auto">
+                <div className="px-2 py-1 font-mono text-[9px] text-gray-600 border-b border-gray-800/60 flex gap-4">
+                  <span>run_id: <span className="text-gray-400">{pipelineState?.run_id ?? "—"}</span></span>
+                  <span>updated: <span className="text-gray-400">{pipelineState?.updated_at ? new Date(pipelineState.updated_at).toISOString().replace("T"," ").slice(0,19) : "—"}</span></span>
+                  <span>status: <span className={pipelineState?.status === "running" ? "text-orange-400" : pipelineState?.status === "done" ? "text-green-400" : "text-gray-400"}>{pipelineState?.status ?? "—"}</span></span>
+                </div>
+                {(pipelineState?.steps ?? []).map((s: any, i: number) => {
+                  const live = steps[i];
+                  const st = live?.status ?? s.status ?? "pending";
+                  const color = st === "done" ? "text-green-400" : st === "cached" ? "text-amber-400" : st === "loading" ? "text-orange-400" : st === "error" ? "text-red-400" : "text-gray-500";
+                  return (
+                    <div key={i} className="px-2 py-0.5 font-mono text-[9px] border-b border-gray-800/40 flex gap-3 flex-wrap">
+                      <span className="text-gray-600 w-4 shrink-0">{i}</span>
+                      <span className="text-gray-300 truncate max-w-[120px]">{s.agent_name || live?.agentName || "—"}</span>
+                      <span className={color}>{st}</span>
+                      {s.execution_time_s != null && <span className="text-gray-600">{s.execution_time_s.toFixed(1)}s</span>}
+                      {live?.execTimeS != null && live.execTimeS !== s.execution_time_s && <span className="text-gray-500">live:{live.execTimeS.toFixed(1)}s</span>}
+                    </div>
+                  );
+                })}
+                {!pipelineState && <div className="px-2 py-1 font-mono text-[9px] text-gray-700">no state file</div>}
+              </div>
+
               {/* ── Live log tail ── */}
               {logLines.length > 0 && (
                 <div className="shrink-0 border-t border-gray-800 bg-black/60 max-h-28 overflow-y-auto">
