@@ -1424,7 +1424,8 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
   pendingLabel?: string;  // "waiting" | "not run" — label for pending steps
   prevContent?: string;   // cached result snapshot taken before this run started
 }) {
-  const isOpen = st.status === "done" || st.status === "cached" || st.status === "error";
+  const isOpen = st.status === "done" || st.status === "cached" || st.status === "error" ||
+    (st.status === "loading" && !!prevContent);
   return (
     <div className={cn("border rounded-xl overflow-hidden", isOpen ? "border-gray-700/60" : "border-gray-800")}>
       <div
@@ -1459,6 +1460,12 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
           <pre className="text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
             {st.stream}<div ref={streamEndRef} />
           </pre>
+        </div>
+      )}
+      {st.expanded && st.status === "loading" && prevContent && (
+        <div className="px-3 pb-3 bg-gray-950">
+          <div className="text-[9px] text-amber-400/70 font-semibold mb-1.5 uppercase tracking-wide">Previous cached result</div>
+          <SectionContent content={prevContent} />
         </div>
       )}
       {st.expanded && st.status === "error" && (
