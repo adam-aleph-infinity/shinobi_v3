@@ -236,17 +236,22 @@ def get_pipeline_results(
     out = []
     for idx, step in enumerate(steps):
         agent_id = step.get("agent_id", "")
-        stmt = select(AR).where(
-            AR.agent_id == agent_id,
-            AR.sales_agent == sales_agent,
-            AR.customer == customer,
-            AR.pipeline_id == pipeline_id,
-            AR.pipeline_step_index == idx,
-        )
-        if filter_by_call_id:
-            stmt = stmt.where(AR.call_id == call_id)
-        stmt = stmt.order_by(AR.created_at.desc())
-        cached = db.exec(stmt).first()
+        cached = None
+        try:
+            stmt = select(AR).where(
+                AR.agent_id == agent_id,
+                AR.sales_agent == sales_agent,
+                AR.customer == customer,
+                AR.pipeline_id == pipeline_id,
+                AR.pipeline_step_index == idx,
+            )
+            if filter_by_call_id:
+                stmt = stmt.where(AR.call_id == call_id)
+            stmt = stmt.order_by(AR.created_at.desc())
+            cached = db.exec(stmt).first()
+        except Exception:
+            # Legacy schema fallback (older DB without pipeline columns)
+            cached = None
         if not cached:
             # Legacy fallback for pre-v4 records without pipeline dimensions
             stmt2 = select(AR).where(
@@ -392,7 +397,7 @@ async def run_pipeline(
         run_final_status = "error"
         loop = asyncio.get_event_loop()
         prev_content = ""
-        LLM_TIMEOUT_S = 180.0
+        LLM_TIMEOUT_S = 600.0
 
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
@@ -407,9 +412,70 @@ async def run_pipeline(
                     )
                     _s.commit()
             except Exception:
-                pass
+                    pass
             _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
                         start_datetime=run_start_dt)
+
+        def _persist_agent_result(
+            _agent_id: str,
+            _agent_name: str,
+            _content: str,
+            _model: str,
+            _pipeline_step_index: int,
+            _input_fingerprint: str,
+        ) -> str:
+            """Persist an agent result, with fallback for legacy DB schemas."""
+            _rid = str(uuid.uuid4())
+            _created_at = datetime.utcnow()
+            try:
+                with Session(_db_engine) as _s:
+                    _s.add(AR(
+                        id=_rid,
+                        agent_id=_agent_id,
+                        agent_name=_agent_name,
+                        sales_agent=req.sales_agent,
+                        customer=req.customer,
+                        call_id=req.call_id,
+                        pipeline_id=pipeline_id,
+                        pipeline_step_index=_pipeline_step_index,
+                        input_fingerprint=_input_fingerprint,
+                        content=_content,
+                        model=_model,
+                    ))
+                    _s.commit()
+                return _rid
+            except Exception as exc_full:
+                log_buffer.emit(
+                    f"[PIPELINE] ⚠ AgentResult full insert failed, trying legacy schema fallback: {exc_full}"
+                )
+                try:
+                    with Session(_db_engine) as _s:
+                        _s.execute(
+                            _sql_text(
+                                "INSERT INTO agent_result ("
+                                "id, agent_id, agent_name, sales_agent, customer, call_id, content, model, created_at"
+                                ") VALUES ("
+                                ":id, :agent_id, :agent_name, :sales_agent, :customer, :call_id, :content, :model, :created_at"
+                                ")"
+                            ),
+                            {
+                                "id": _rid,
+                                "agent_id": _agent_id,
+                                "agent_name": _agent_name,
+                                "sales_agent": req.sales_agent,
+                                "customer": req.customer,
+                                "call_id": req.call_id,
+                                "content": _content,
+                                "model": _model,
+                                "created_at": _created_at,
+                            },
+                        )
+                        _s.commit()
+                    return _rid
+                except Exception as exc_legacy:
+                    raise RuntimeError(
+                        f"Failed to persist AgentResult (full={exc_full}; legacy={exc_legacy})"
+                    ) from exc_legacy
 
         # ── Build stage groups from canvas ───────────────────────────────────
         # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
@@ -549,20 +615,27 @@ async def run_pipeline(
 
                     # ── Check cache (pipeline+step+input fingerprint) ────────
                     if not req.force and step_idx not in req.force_step_indices:
-                        stmt = select(AR).where(
-                            AR.agent_id == agent_id,
-                            AR.sales_agent == req.sales_agent,
-                            AR.customer == req.customer,
-                            AR.pipeline_id == pipeline_id,
-                            AR.pipeline_step_index == step_idx,
-                            AR.input_fingerprint == input_fingerprint,
-                        )
-                        if req.call_id:
-                            stmt = stmt.where(AR.call_id == req.call_id)
-                        else:
-                            stmt = stmt.where(AR.call_id == "")
-                        stmt = stmt.order_by(AR.created_at.desc())
-                        cached = db.exec(stmt).first()
+                        cached = None
+                        try:
+                            stmt = select(AR).where(
+                                AR.agent_id == agent_id,
+                                AR.sales_agent == req.sales_agent,
+                                AR.customer == req.customer,
+                                AR.pipeline_id == pipeline_id,
+                                AR.pipeline_step_index == step_idx,
+                                AR.input_fingerprint == input_fingerprint,
+                            )
+                            if req.call_id:
+                                stmt = stmt.where(AR.call_id == req.call_id)
+                            else:
+                                stmt = stmt.where(AR.call_id == "")
+                            stmt = stmt.order_by(AR.created_at.desc())
+                            cached = db.exec(stmt).first()
+                        except Exception as _cache_exc:
+                            log_buffer.emit(
+                                f"[PIPELINE] ⚠ Cache lookup (pipeline columns) failed for step {step_idx + 1}: {_cache_exc}"
+                            )
+                            cached = None
 
                         if cached:
                             prev_content = cached.content
@@ -705,21 +778,14 @@ async def run_pipeline(
                     output_tok_est = len(content) // 4
 
                     # ── Persist AgentResult ───────────────────────────────────
-                    result_id = str(uuid.uuid4())
-                    db.add(AR(
-                        id=result_id,
-                        agent_id=agent_id,
-                        agent_name=agent_name,
-                        sales_agent=req.sales_agent,
-                        customer=req.customer,
-                        call_id=req.call_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_step_index=step_idx,
-                        input_fingerprint=input_fingerprint,
-                        content=content,
-                        model=model,
-                    ))
-                    db.commit()
+                    result_id = _persist_agent_result(
+                        _agent_id=agent_id,
+                        _agent_name=agent_name,
+                        _content=content,
+                        _model=model,
+                        _pipeline_step_index=step_idx,
+                        _input_fingerprint=input_fingerprint,
+                    )
 
                     prev_content = content
                     run_steps[step_idx].update({
@@ -848,20 +914,27 @@ async def run_pipeline(
                                 )
 
                                 if not req.force and par_idx not in req.force_step_indices:
-                                    _cs = select(AR).where(
-                                        AR.agent_id == _par_aid,
-                                        AR.sales_agent == req.sales_agent,
-                                        AR.customer == req.customer,
-                                        AR.pipeline_id == pipeline_id,
-                                        AR.pipeline_step_index == par_idx,
-                                        AR.input_fingerprint == _par_fp,
-                                    )
-                                    if req.call_id:
-                                        _cs = _cs.where(AR.call_id == req.call_id)
-                                    else:
-                                        _cs = _cs.where(AR.call_id == "")
-                                    _cs = _cs.order_by(AR.created_at.desc())
-                                    _cached = _par_db.exec(_cs).first()
+                                    _cached = None
+                                    try:
+                                        _cs = select(AR).where(
+                                            AR.agent_id == _par_aid,
+                                            AR.sales_agent == req.sales_agent,
+                                            AR.customer == req.customer,
+                                            AR.pipeline_id == pipeline_id,
+                                            AR.pipeline_step_index == par_idx,
+                                            AR.input_fingerprint == _par_fp,
+                                        )
+                                        if req.call_id:
+                                            _cs = _cs.where(AR.call_id == req.call_id)
+                                        else:
+                                            _cs = _cs.where(AR.call_id == "")
+                                        _cs = _cs.order_by(AR.created_at.desc())
+                                        _cached = _par_db.exec(_cs).first()
+                                    except Exception as _cache_exc:
+                                        log_buffer.emit(
+                                            f"[PIPELINE] ⚠ Parallel cache lookup failed for step {par_idx + 1}: {_cache_exc}"
+                                        )
+                                        _cached = None
                                     if _cached:
                                         return {
                                             "step_idx": par_idx,
@@ -892,21 +965,14 @@ async def run_pipeline(
                                 )
                                 _par_exec = round(time.time() - _par_t0, 1)
 
-                                _par_rid = str(uuid.uuid4())
-                                _par_db.add(AR(
-                                    id=_par_rid,
-                                    agent_id=_par_aid,
-                                    agent_name=_par_aname,
-                                    sales_agent=req.sales_agent,
-                                    customer=req.customer,
-                                    call_id=req.call_id,
-                                    pipeline_id=pipeline_id,
-                                    pipeline_step_index=par_idx,
-                                    input_fingerprint=_par_fp,
-                                    content=_par_content,
-                                    model=_par_model,
-                                ))
-                                _par_db.commit()
+                                _par_rid = _persist_agent_result(
+                                    _agent_id=_par_aid,
+                                    _agent_name=_par_aname,
+                                    _content=_par_content,
+                                    _model=_par_model,
+                                    _pipeline_step_index=par_idx,
+                                    _input_fingerprint=_par_fp,
+                                )
 
                                 return {
                                     "step_idx": par_idx,
@@ -1066,6 +1132,24 @@ async def run_pipeline(
             )
             log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
             raise
+        except Exception as exc:
+            err_msg = f"Pipeline execution failed: {exc}"
+            now_iso = datetime.utcnow().isoformat()
+            for s in run_steps:
+                if s.get("state") == "running":
+                    s["state"] = "failed"
+                    s["end_time"] = now_iso
+                    s["error_msg"] = err_msg
+            run_final_status = "error"
+            _save_state(
+                pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                start_datetime=run_start_dt,
+            )
+            log_buffer.emit(f"[PIPELINE] ✗ Fatal: {pipeline_name} · {cid_short} · {exc}")
+            try:
+                yield _sse("error", {"msg": err_msg})
+            except Exception:
+                pass
 
         finally:
             # On force rerun: delete stale cached results for errored steps so that

@@ -817,7 +817,7 @@ def _llm_call_openai_responses_files(
         raise RuntimeError("OPENAI_API_KEY not set")
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     connect_timeout_s = float(os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "20"))
-    read_timeout_s = float(os.environ.get("OPENAI_RESPONSES_TIMEOUT_S", "180"))
+    read_timeout_s = float(os.environ.get("OPENAI_RESPONSES_TIMEOUT_S", "600"))
     ctx = getattr(db, "_agent_run_ctx", {})
 
     # Upload (or reuse cached) each file input — returns (file_id, _) tuple
