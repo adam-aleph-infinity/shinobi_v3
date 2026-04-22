@@ -23,6 +23,9 @@ router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
 _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
+_ACTIVE_RUN_LOCK = threading.Lock()
+_ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
+_STOP_REQUESTED: dict[str, threading.Event] = {}
 
 
 def _pair_key(pipeline_id: str, sales_agent: str, customer: str) -> str:
@@ -31,6 +34,10 @@ def _pair_key(pipeline_id: str, sales_agent: str, customer: str) -> str:
     never affected by URL-encoding, case, or whitespace differences."""
     pair_hash = hashlib.md5(f"{sales_agent}::{customer}".encode("utf-8")).hexdigest()[:10]
     return f"{pipeline_id}_{pair_hash}"
+
+
+def _run_slot_key(pipeline_id: str, sales_agent: str, customer: str, call_id: str) -> str:
+    return f"{pipeline_id}::{sales_agent}::{customer}::{call_id or ''}"
 
 
 def _save_state(pipeline_id: str, run_id: str, sales_agent: str, customer: str,
@@ -218,6 +225,12 @@ class PipelineRunRequest(BaseModel):
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
 
 
+class PipelineStopRequest(BaseModel):
+    sales_agent: str = ""
+    customer: str = ""
+    call_id: str = ""
+
+
 @router.get("/{pipeline_id}/results")
 def get_pipeline_results(
     pipeline_id: str,
@@ -273,6 +286,45 @@ def get_pipeline_results(
             } if cached else None,
         })
     return out
+
+
+@router.post("/{pipeline_id}/stop")
+async def stop_pipeline(pipeline_id: str, req: PipelineStopRequest):
+    """Request cancellation of an active pipeline run for this context."""
+    slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
+    task: Optional[asyncio.Task] = None
+    with _ACTIVE_RUN_LOCK:
+        ev = _STOP_REQUESTED.get(slot)
+        if ev:
+            ev.set()
+        task = _ACTIVE_RUN_TASKS.get(slot)
+
+    cancelled = False
+    if task and not task.done():
+        task.cancel()
+        cancelled = True
+
+    # Proactively mark state file as failed for per-pair UI so canvas unblocks quickly.
+    # If the run coroutine is still alive, it will keep the same run_id and reconcile.
+    try:
+        path = _STATE_DIR / f"{_pair_key(pipeline_id, req.sales_agent, req.customer)}.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("status") == "running":
+                now_iso = datetime.utcnow().isoformat()
+                for s in data.get("steps", []):
+                    if s.get("state") == "running" or s.get("status") == "loading":
+                        s["state"] = "failed"
+                        s["status"] = "error"  # legacy compatibility
+                        s["end_time"] = now_iso
+                        s["error_msg"] = "stopped by user"
+                data["status"] = "failed"
+                data["updated_at"] = now_iso
+                path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    return {"ok": True, "cancelled": cancelled, "slot": slot}
 
 
 @router.get("/{pipeline_id}/runs")
@@ -398,6 +450,22 @@ async def run_pipeline(
         loop = asyncio.get_event_loop()
         prev_content = ""
         LLM_TIMEOUT_S = 600.0
+        run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
+        cancel_state = {"reason": "run cancelled (client disconnected or server interrupted)"}
+
+        with _ACTIVE_RUN_LOCK:
+            _STOP_REQUESTED[run_slot] = threading.Event()
+            _ACTIVE_RUN_TASKS[run_slot] = asyncio.current_task()
+
+        def _is_stop_requested() -> bool:
+            with _ACTIVE_RUN_LOCK:
+                ev = _STOP_REQUESTED.get(run_slot)
+            return bool(ev and ev.is_set())
+
+        def _raise_if_stop_requested() -> None:
+            if _is_stop_requested():
+                cancel_state["reason"] = "run stopped by user"
+                raise asyncio.CancelledError()
 
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
@@ -512,6 +580,7 @@ async def run_pipeline(
             fatal_error = False
 
             for _canvas_stage, step_indices in _ordered_stages:
+                _raise_if_stop_requested()
                 if fatal_error:
                     break
 
@@ -738,6 +807,7 @@ async def run_pipeline(
                             _deadline = time.monotonic() + LLM_TIMEOUT_S
                             _next_heartbeat = time.monotonic() + 10.0
                             while True:
+                                _raise_if_stop_requested()
                                 _remaining = _deadline - time.monotonic()
                                 if _remaining <= 0:
                                     raise asyncio.TimeoutError
@@ -1007,6 +1077,7 @@ async def run_pipeline(
                         _deadline = time.monotonic() + LLM_TIMEOUT_S
                         _next_heartbeat = time.monotonic() + 10.0
                         while True:
+                            _raise_if_stop_requested()
                             _remaining = _deadline - time.monotonic()
                             if _remaining <= 0:
                                 return {
@@ -1118,7 +1189,7 @@ async def run_pipeline(
                             start_datetime=run_start_dt)
 
         except asyncio.CancelledError:
-            cancel_msg = "run cancelled (client disconnected or server interrupted)"
+            cancel_msg = cancel_state["reason"]
             now_iso = datetime.utcnow().isoformat()
             for s in run_steps:
                 if s.get("state") == "running":
@@ -1152,6 +1223,12 @@ async def run_pipeline(
                 pass
 
         finally:
+            with _ACTIVE_RUN_LOCK:
+                _STOP_REQUESTED.pop(run_slot, None)
+                cur = _ACTIVE_RUN_TASKS.get(run_slot)
+                if cur is asyncio.current_task():
+                    _ACTIVE_RUN_TASKS.pop(run_slot, None)
+
             # On force rerun: delete stale cached results for errored steps so that
             # a page refresh won't show old successful data instead of the error state.
             if req.force:

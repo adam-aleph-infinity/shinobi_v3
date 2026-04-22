@@ -6,7 +6,7 @@ import {
   ChevronDown, ChevronUp, CheckCircle2,
   Download, Eye, EyeOff, ChevronLeft, ChevronRight, X,
   Mic2, FileText, Bot, StickyNote, Layers, BookOpen,
-  GitBranch, PenLine, Clock, Zap, Cpu,
+  GitBranch, PenLine, Clock, Zap, Cpu, Square,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -347,6 +347,7 @@ export function PipelineSidePanel({
   // ── view state ───────────────────────────────────────────────────────────────
   const [panelView, setPanelView] = useState<"flow" | "steps">("flow");
   const [cachedView, setCachedView] = useState(false); // toggle: cached results vs current run
+  const [cachedExpanded, setCachedExpanded] = useState<boolean[]>([]);
   const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
   const [inputPreview, setInputPreview] = useState<{ loading: boolean; content: string; error: string }>(
     { loading: false, content: "", error: "" }
@@ -616,12 +617,20 @@ export function PipelineSidePanel({
         agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
         status:    (cr?.result ? "done" : "pending") as StepStatus,
         content:   cr?.result?.content ?? "",
-        stream: "", expanded: false,
+        stream: "",
+        expanded: cachedExpanded[i] ?? false,
       };
     });
-  }, [pipeline, agents, cachedResults]);
+  }, [pipeline, agents, cachedResults, cachedExpanded]);
+
+  useEffect(() => {
+    const nextLen = pipeline?.steps?.length ?? 0;
+    setCachedExpanded(prev => Array.from({ length: nextLen }, (_, i) => prev[i] ?? false));
+  }, [pipeline?.id, pipeline?.steps?.length, cachedResults]);
 
   const flowSteps = flowCall ? flowCall.steps : (cachedView ? cachedDisplaySteps : steps);
+  const perPairSteps = cachedView ? cachedDisplaySteps : steps;
+  const hasCachedResults = !!cachedResults?.some(cr => !!cr.result?.content);
   const cachedInputStatus: StepStatus[] = cachedDisplaySteps.map(s =>
     (s.status === "done" ? "done" : "pending") as StepStatus
   );
@@ -754,7 +763,7 @@ export function PipelineSidePanel({
     );
   }
 
-  const hasResults     = steps.length > 0 && steps.some(s => s.content);
+  const hasResults     = (steps.length > 0 && steps.some(s => s.content)) || hasCachedResults;
   const hasCallResults = callResults.some(cr => cr.done);
 
   // ── download ──────────────────────────────────────────────────────────────────
@@ -770,13 +779,60 @@ export function PipelineSidePanel({
       const a = document.createElement("a"); a.href = url; a.download = `${slug}.md`; a.click();
       URL.revokeObjectURL(url);
     } else {
-      const text = steps.filter(s => s.content).map((s, i) => `# Step ${i + 1}: ${s.agentName}\n\n${s.content}`).join("\n\n---\n\n");
+      const exportSteps = cachedView ? cachedDisplaySteps : steps;
+      const text = exportSteps.filter(s => s.content).map((s, i) => `# Step ${i + 1}: ${s.agentName}\n\n${s.content}`).join("\n\n---\n\n");
       const slug = [activePipelineName, salesAgent, customer, callId].filter(Boolean).join("_").replace(/[^a-z0-9_\-]/gi, "_");
       const blob = new Blob([text], { type: "text/markdown" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = `${slug}.md`; a.click();
       URL.revokeObjectURL(url);
     }
+  }
+
+  async function stopExecution() {
+    if (!activePipelineId || !contextOk) return;
+
+    const stopMsg = "Execution stopped by user.";
+    abortCtrlRef.current?.abort();
+    callsAbortRef.current?.abort();
+
+    const runningCallId = callResults.find(cr => cr.runStatus === "running")?.callId ?? "";
+    try {
+      await fetch(`/api/pipelines/${activePipelineId}/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sales_agent: salesAgent,
+          customer,
+          call_id: isPerCall ? runningCallId : "",
+        }),
+      });
+    } catch {
+      // ignore network failure; local abort state still unblocks UI
+    }
+
+    if (isPerCall) {
+      setCallsRunning(false);
+      setCallsRunError(stopMsg);
+      setCallResults(prev => prev.map(cr => {
+        if (cr.runStatus !== "running" && cr.runStatus !== "queued") return cr;
+        return {
+          ...cr,
+          runStatus: "error" as CallRunStatus,
+          done: true,
+          error: cr.error || stopMsg,
+          steps: cr.steps.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: stopMsg } : st),
+        };
+      }));
+      return;
+    }
+
+    setRunning(false);
+    setRunError(stopMsg);
+    setDone(false);
+    setSteps(prev => prev.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: stopMsg } : st));
+    setStepInputStatus(prev => prev.map(st => st === "loading" ? "error" : st));
+    mutatePipelineState();
   }
 
   // ── per_pair run ──────────────────────────────────────────────────────────────
@@ -1099,7 +1155,7 @@ export function PipelineSidePanel({
           {/* Cached/Run toggle (per_pair only) */}
           {!isPerCall && (
             <button
-              onClick={() => { setCachedView(v => !v); setPanelView("flow"); }}
+              onClick={() => setCachedView(v => !v)}
               disabled={!cachedResults?.some(cr => cr.result)}
               title={
                 !cachedResults?.some(cr => cr.result)
@@ -1116,6 +1172,15 @@ export function PipelineSidePanel({
               {cachedView ? "Run" : "Cached"}
             </button>
           )}
+          <button
+            onClick={stopExecution}
+            disabled={!anyBusy}
+            title="Stop current execution"
+            className="flex items-center gap-1.5 px-2.5 py-2 border disabled:opacity-50 text-[11px] font-medium rounded-lg transition-colors shrink-0 bg-red-950/40 hover:bg-red-950/60 border-red-700/60 text-red-300"
+          >
+            <Square className="w-3 h-3" />
+            Stop
+          </button>
         </div>
         {!running && !callsRunning && pipelineState?.status === "running" && (
           <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-400 bg-amber-950/20 border border-amber-800/30 rounded-lg">
@@ -1473,18 +1538,28 @@ export function PipelineSidePanel({
       {/* Steps (per_pair) */}
       {panelView === "steps" && !isPerCall && (
         <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-          {steps.length === 0 && (
+          {perPairSteps.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
               <Workflow className="w-8 h-8 opacity-20" />
               <p className="text-xs text-center">{contextOk ? "Hit Run to execute the pipeline" : "Select context to load results"}</p>
             </div>
           )}
-          {steps.map((st, i) => (
-            <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
-              hasCached={!!cachedResults?.[i]?.result}
-              prevContent={prevCachedRef.current?.[i]?.result?.content}
+          {perPairSteps.map((st, i) => (
+            <StepRow key={`${cachedView ? "cached" : "run"}-${i}`} st={st} index={i} streamEndRef={streamEndRef}
+              hasCached={!cachedView && !!cachedResults?.[i]?.result}
+              prevContent={!cachedView ? prevCachedRef.current?.[i]?.result?.content : undefined}
               pendingLabel={!running && pipelineState?.status === "running" ? "waiting" : "not run"}
-              onToggle={() => setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s))} />
+              onToggle={() => {
+                if (cachedView) {
+                  setCachedExpanded(prev => {
+                    const next = [...prev];
+                    next[i] = !next[i];
+                    return next;
+                  });
+                } else {
+                  setSteps(p => p.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s));
+                }
+              }} />
           ))}
         </div>
       )}
