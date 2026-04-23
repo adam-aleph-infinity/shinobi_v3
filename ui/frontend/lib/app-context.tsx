@@ -42,9 +42,9 @@ const AppCtx = createContext<AppCtxType>({
   setActivePipeline: () => {}, clearAll: () => {},
 });
 
-function ss(k: string) { try { return sessionStorage.getItem(k) ?? ""; } catch { return ""; } }
+function ss(k: string) { try { return localStorage.getItem(k) ?? ""; } catch { return ""; } }
 function ssSet(k: string, v: string) {
-  try { if (v) sessionStorage.setItem(k, v); else sessionStorage.removeItem(k); } catch {}
+  try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch {}
 }
 
 export function AppContextProvider({ children }: { children: React.ReactNode }) {
