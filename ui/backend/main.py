@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 # Ensure shinobi_v3 root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -335,3 +336,14 @@ async def on_startup():
 @app.get("/health")
 def health():
     return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/time")
+def server_time():
+    now_utc = datetime.now(timezone.utc)
+    now_vm = datetime.now().astimezone()
+    return {
+        "now_utc": now_utc.isoformat(timespec="seconds"),
+        "now_vm": now_vm.isoformat(timespec="seconds"),
+        "tz": str(now_vm.tzinfo) if now_vm.tzinfo else "unknown",
+    }

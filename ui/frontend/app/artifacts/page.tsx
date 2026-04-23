@@ -148,6 +148,18 @@ function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function formatVmDateTime(value: string): string {
+  if (!value) return "—";
+  const s = String(value).trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  if (m) return `${m[1]} ${m[2]}`;
+  try {
+    return new Date(s).toISOString().slice(0, 19).replace("T", " ");
+  } catch {
+    return s;
+  }
+}
+
 function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -257,7 +269,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
-            <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
+            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
@@ -277,7 +289,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
-            <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
+            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={rawText} />
@@ -356,7 +368,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">Call Note · {item.data.call_id.slice(-12)}</p>
-            <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
+            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
@@ -379,7 +391,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">Compliance Note · {item.data.call_id.slice(-12)}</p>
-            <p className="text-[10px] text-gray-500">{item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars</p>
+            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md + (rawText ? "\n\n" + rawText : "")} />
@@ -436,7 +448,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className={cn("text-xs font-semibold uppercase tracking-wide", m.text)}>{m.label}</p>
             <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
             <p className="text-[10px] text-gray-500">
-              {item.date.slice(0, 10)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
+              {formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
               {item.data.model ? ` · ${item.data.model}` : ""}
             </p>
           </div>
@@ -486,7 +498,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className={cn("text-xs font-bold uppercase tracking-wider", pColor)}>{f.provider}</p>
             <p className="text-sm font-semibold text-white truncate">{f.source.replace(/_/g, " ")}</p>
             <p className="text-[10px] text-gray-500">
-              {f.created_at.slice(0, 10)} · {f.chars.toLocaleString()} chars
+              {formatVmDateTime(f.created_at)} · {f.chars.toLocaleString()} chars
               {f.input_key ? ` · key: ${f.input_key}` : ""}
             </p>
           </div>
@@ -584,7 +596,7 @@ function ItemRow({ item, selected, onClick }: { item: ArtifactItem; selected: bo
       <div className="flex-1 min-w-0">
         <p className={cn("text-[11px] font-medium truncate", selected ? "text-white" : "text-gray-300")}>{item.label}</p>
         <p className="text-[9px] text-gray-600 flex items-center gap-1.5">
-          <CalendarDays className="w-2.5 h-2.5" />{item.date.slice(0, 10)}
+          <CalendarDays className="w-2.5 h-2.5" />{formatVmDateTime(item.date)}
           <span className="text-gray-700">{item.chars.toLocaleString()} chars</span>
         </p>
       </div>
