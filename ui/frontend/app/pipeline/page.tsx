@@ -248,6 +248,20 @@ const MAX_PER_LANE   = 4;     // maximum nodes per lane (4 X slots)
 // 4 fixed X slots within every lane
 const X_SLOTS = [0, 1, 2, 3].map(i => 20 + i * (NODE_W + X_GAP)); // [20, 260, 500, 740]
 
+// Center of the 4-slot group: (leftmost_slot + rightmost_slot + NODE_W) / 2
+const LANE_CENTER_X = (X_SLOTS[0] + X_SLOTS[MAX_PER_LANE - 1] + NODE_W) / 2; // 480
+
+// Centered X positions for 1–4 nodes in a lane (symmetric around LANE_CENTER_X)
+const CENTERED_X: readonly (readonly number[])[] = [
+  [380],                // 1 node  — center at 480
+  [260, 500],           // 2 nodes — symmetric around 480
+  [140, 380, 620],      // 3 nodes — evenly spaced around 480
+  [20, 260, 500, 740],  // 4 nodes — full X_SLOTS
+];
+
+// Maximum total stages: input + 3 × (processing + output)
+const MAX_TOTAL_STAGES = 7;
+
 function snapXToSlot(x: number): number {
   return X_SLOTS.reduce((best, s) => Math.abs(s - x) < Math.abs(best - x) ? s : best, X_SLOTS[0]);
 }
@@ -680,7 +694,7 @@ function PipelineCanvas() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const INIT_STAGES: NodeKind[] = ["input", "processing", "output", "processing", "output"];
+  const INIT_STAGES: NodeKind[] = ["input", "processing", "output"];
   const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -708,11 +722,11 @@ function PipelineCanvas() {
     const el = canvasContainerRef.current;
     if (!el) return;
     const update = () => {
-      const { height } = el.getBoundingClientRect();
-      if (!height) return;
+      const { height, width } = el.getBoundingClientRect();
+      if (!height || !width) return;
       const totalH = Y_INIT + stagesRef.current.length * SLEEVE_H + 20;
       const zoom   = height / totalH;
-      const x      = (-SLEEVE_START_X) * zoom + 8;
+      const x      = width / 2 - LANE_CENTER_X * zoom;
       const y      = 8 - Y_INIT * zoom;
       setViewport({ x, y, zoom }, { duration: 200 });
     };
@@ -880,14 +894,27 @@ function PipelineCanvas() {
       }
     }
 
-    // ── Position: snap X to first free slot, Y locked to lane ───────────────
+    // ── Position: centered within lane, or snapped to nearest slot on drop ──
     const nodesInStage = currentNodes.filter(n => (n.data as PipelineNodeData).stageIndex === stageIndex);
-    const usedX        = new Set(nodesInStage.map(n => snapXToSlot(n.position.x)));
-    const freeSlot     = X_SLOTS.findIndex(x => !usedX.has(x));
-    const slotX        = freeSlot >= 0 ? X_SLOTS[freeSlot] : X_SLOTS[Math.min(nodesInStage.length, MAX_PER_LANE - 1)];
-    const position = dropPos
-      ? { x: snapXToSlot(dropPos.x), y: laneY(stageIndex) + SLEEVE_INNER }
-      : { x: slotX, y: laneY(stageIndex) + SLEEVE_INNER };
+    let position: { x: number; y: number };
+    let repositionFn: ((ns: Node[]) => Node[]) | null = null;
+
+    if (dropPos) {
+      position = { x: snapXToSlot(dropPos.x), y: laneY(stageIndex) + SLEEVE_INNER };
+    } else {
+      const newCount   = Math.min(nodesInStage.length + 1, MAX_PER_LANE);
+      const newXArr    = CENTERED_X[newCount - 1];
+      // Reposition existing nodes sorted left-to-right into the new centered layout
+      if (nodesInStage.length > 0 && nodesInStage.length < MAX_PER_LANE) {
+        const sorted = [...nodesInStage].sort((a, b) => a.position.x - b.position.x);
+        const idMap: Record<string, number> = {};
+        sorted.forEach((n, i) => { idMap[n.id] = newXArr[i]; });
+        repositionFn = (ns: Node[]) => ns.map(n =>
+          idMap[n.id] !== undefined ? { ...n, position: { x: idMap[n.id], y: n.position.y } } : n
+        );
+      }
+      position = { x: newXArr[Math.min(nodesInStage.length, MAX_PER_LANE - 1)], y: laneY(stageIndex) + SLEEVE_INNER };
+    }
 
     const newNode: Node = {
       id,
@@ -916,7 +943,7 @@ function PipelineCanvas() {
       stagesRef.current = newStages;
     }
 
-    setNodes(ns => [...ns, newNode]);
+    setNodes(ns => [...(repositionFn ? repositionFn(ns) : ns), newNode]);
     if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
     setSelectedNodeId(id);
   }, [setNodes, setEdges, setStages]);
@@ -932,7 +959,7 @@ function PipelineCanvas() {
     e.preventDefault();
     const kind    = e.dataTransfer.getData("application/nodeKind")    as NodeKind | "";
     const subType = e.dataTransfer.getData("application/nodeSubType") as string   | "";
-    if (!kind || !subType) return;
+    if (!kind) return;
     const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     addNodeToCanvas(kind, subType, pos);
   }, [screenToFlowPosition, addNodeToCanvas]);
@@ -958,6 +985,7 @@ function PipelineCanvas() {
   }
 
   function handleAddStage() {
+    if (stagesRef.current.length >= MAX_TOTAL_STAGES) return;
     const next: NodeKind[] = [...stagesRef.current, "processing", "output"];
     setStages(next);
     stagesRef.current = next;
@@ -1882,10 +1910,12 @@ function PipelineCanvas() {
           <div className="p-2.5 border-t border-gray-800 shrink-0">
             <div className="flex items-center justify-between mb-1.5">
               <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">Flow rules</p>
-              <button onClick={handleAddStage}
-                className="text-[10px] text-indigo-500 hover:text-indigo-400 font-semibold transition-colors">
-                + Stage
-              </button>
+              {stages.length < MAX_TOTAL_STAGES && (
+                <button onClick={handleAddStage}
+                  className="text-[10px] text-indigo-500 hover:text-indigo-400 font-semibold transition-colors">
+                  + Layer
+                </button>
+              )}
             </div>
             <div className="space-y-0.5 text-[10px]">
               <p className="text-gray-500"><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span> ✓</p>
