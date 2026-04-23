@@ -12,6 +12,7 @@ import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import text as _sql_text
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -1000,7 +1001,6 @@ def _resolve_input(source: str, agent_id: Optional[str],
                    manual_inputs: dict, db: Session) -> str:
     """Resolve one declared input to its text content."""
     from ui.backend.models.note import Note
-    from ui.backend.models.agent_result import AgentResult as AR
 
     ui_data = settings.ui_data_dir
 
@@ -1058,18 +1058,29 @@ def _resolve_input(source: str, agent_id: Optional[str],
     if source == "agent_output":
         if not agent_id:
             raise RuntimeError("agent_output input missing agent_id")
-        stmt = select(AR).where(
-            AR.agent_id == agent_id,
-            AR.sales_agent == sales_agent,
-            AR.customer == customer,
+        sql = (
+            "SELECT content "
+            "FROM agent_result "
+            "WHERE agent_id = :agent_id "
+            "AND sales_agent = :sales_agent "
+            "AND customer = :customer "
         )
+        params = {
+            "agent_id": agent_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+        }
         if call_id:
-            stmt = stmt.where(AR.call_id == call_id)
-        stmt = stmt.order_by(AR.created_at.desc())
-        result = db.exec(stmt).first()
-        if not result:
+            sql += "AND call_id = :call_id "
+            params["call_id"] = call_id
+        sql += "ORDER BY created_at DESC LIMIT 1"
+        row = db.exec(_sql_text(sql), params).first()
+        if not row:
             raise RuntimeError(f"No stored result for agent {agent_id} in this context")
-        return result.content
+        m = getattr(row, "_mapping", row)
+        if hasattr(m, "get"):
+            return str(m.get("content", "") or "")
+        return str(row[0] if isinstance(row, tuple) and row else "")
 
     if source == "chain_previous" or source.startswith("artifact_"):
         # artifact_persona / artifact_persona_score / artifact_notes / etc.
@@ -1093,8 +1104,6 @@ class RunRequest(BaseModel):
 @router.post("/{agent_id}/run")
 async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_session)):
     """Execute a universal agent against a given context and stream results via SSE."""
-    from ui.backend.models.agent_result import AgentResult as AR
-
     _, agent_def = _find_file(agent_id)
 
     async def stream():
@@ -1212,17 +1221,26 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
 
             # Save result (thinking not persisted — it's ephemeral reasoning)
             result_id = str(uuid.uuid4())
-            record = AR(
-                id=result_id,
-                agent_id=agent_id,
-                agent_name=agent_def.get("name", ""),
-                sales_agent=req.sales_agent,
-                customer=req.customer,
-                call_id=req.call_id,
-                content=content,
-                model=model,
+            db.execute(
+                _sql_text(
+                    "INSERT INTO agent_result ("
+                    "id, agent_id, agent_name, sales_agent, customer, call_id, content, model, created_at"
+                    ") VALUES ("
+                    ":id, :agent_id, :agent_name, :sales_agent, :customer, :call_id, :content, :model, :created_at"
+                    ")"
+                ),
+                {
+                    "id": result_id,
+                    "agent_id": agent_id,
+                    "agent_name": agent_def.get("name", ""),
+                    "sales_agent": req.sales_agent,
+                    "customer": req.customer,
+                    "call_id": req.call_id,
+                    "content": content,
+                    "model": model,
+                    "created_at": datetime.utcnow(),
+                },
             )
-            db.add(record)
             db.commit()
 
             log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars)")
@@ -1247,15 +1265,56 @@ def get_results(
     db: Session = Depends(get_session),
 ):
     """Fetch stored results for a given agent + context."""
-    from ui.backend.models.agent_result import AgentResult as AR
-
-    stmt = select(AR).where(AR.agent_id == agent_id)
+    sql = (
+        "SELECT id, agent_id, agent_name, sales_agent, customer, call_id, content, model, created_at "
+        "FROM agent_result "
+        "WHERE agent_id = :agent_id "
+    )
+    params: dict[str, Any] = {"agent_id": agent_id}
     if sales_agent:
-        stmt = stmt.where(AR.sales_agent == sales_agent)
+        sql += "AND sales_agent = :sales_agent "
+        params["sales_agent"] = sales_agent
     if customer:
-        stmt = stmt.where(AR.customer == customer)
+        sql += "AND customer = :customer "
+        params["customer"] = customer
     if call_id:
-        stmt = stmt.where(AR.call_id == call_id)
-    stmt = stmt.order_by(AR.created_at.desc())
-    results = db.exec(stmt).all()
-    return results
+        sql += "AND call_id = :call_id "
+        params["call_id"] = call_id
+    sql += "ORDER BY created_at DESC"
+    rows = db.exec(_sql_text(sql), params).all()
+
+    out = []
+    for row in rows:
+        m = getattr(row, "_mapping", row)
+        if hasattr(m, "get"):
+            created_at = m.get("created_at")
+            out.append({
+                "id": m.get("id", ""),
+                "agent_id": m.get("agent_id", ""),
+                "agent_name": m.get("agent_name", ""),
+                "sales_agent": m.get("sales_agent", ""),
+                "customer": m.get("customer", ""),
+                "call_id": m.get("call_id", ""),
+                "content": m.get("content", ""),
+                "model": m.get("model", ""),
+                "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+                "pipeline_id": "",
+                "pipeline_step_index": -1,
+                "input_fingerprint": "",
+            })
+        else:
+            out.append({
+                "id": row[0] if len(row) > 0 else "",
+                "agent_id": row[1] if len(row) > 1 else "",
+                "agent_name": row[2] if len(row) > 2 else "",
+                "sales_agent": row[3] if len(row) > 3 else "",
+                "customer": row[4] if len(row) > 4 else "",
+                "call_id": row[5] if len(row) > 5 else "",
+                "content": row[6] if len(row) > 6 else "",
+                "model": row[7] if len(row) > 7 else "",
+                "created_at": row[8].isoformat() if len(row) > 8 and hasattr(row[8], "isoformat") else (row[8] if len(row) > 8 else None),
+                "pipeline_id": "",
+                "pipeline_step_index": -1,
+                "input_fingerprint": "",
+            })
+    return out
