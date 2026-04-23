@@ -1317,30 +1317,39 @@ function PipelineCanvas() {
             : null;
           const defaultSourceSet = new Set(agent.inputs.map(inp => inp.source));
           const nonDefaultConnected = connectedInputSources.filter(src => !defaultSourceSet.has(src));
-          const hasInputConnections = connectedInputSources.length > 0;
           const canUsePositionalMap = connectedInputSources.length === agent.inputs.length && connectedInputSources.length > 1;
+          const isArtifactLike = (src: string) =>
+            src === "chain_previous" || src.startsWith("artifact_");
 
           // Prefer deterministic matching by source value. Use positional mapping only when
           // cardinality is equal (avoids edge-order-induced override corruption).
           agent.inputs.forEach((inp, idx) => {
-            if (connectedInputSources.includes(inp.source)) return;
+            const defaultSrc = inp.source;
+
+            // Artifact-like inputs should follow the upstream output artifact edge, not
+            // be remapped to a top-level input source when both are connected.
+            if (isArtifactLike(defaultSrc)) {
+              if (artifactSrc && defaultSrc !== artifactSrc) input_overrides[inp.key] = artifactSrc;
+              return;
+            }
+
+            if (connectedInputSources.includes(defaultSrc)) return;
             if (connectedInputSources.length === 1) {
               const onlySrc = connectedInputSources[0];
-              if (onlySrc && onlySrc !== inp.source) input_overrides[inp.key] = onlySrc;
+              if (onlySrc && onlySrc !== defaultSrc) input_overrides[inp.key] = onlySrc;
               return;
             }
             if (canUsePositionalMap) {
               const canvasSrc = connectedInputSources[idx];
-              if (canvasSrc && canvasSrc !== inp.source) input_overrides[inp.key] = canvasSrc;
+              if (canvasSrc && canvasSrc !== defaultSrc) input_overrides[inp.key] = canvasSrc;
               return;
             }
             if (nonDefaultConnected.length === 1) {
               const onlyNonDefault = nonDefaultConnected[0];
-              if (onlyNonDefault && onlyNonDefault !== inp.source) input_overrides[inp.key] = onlyNonDefault;
+              if (onlyNonDefault && !isArtifactLike(onlyNonDefault) && onlyNonDefault !== defaultSrc) {
+                input_overrides[inp.key] = onlyNonDefault;
+              }
               return;
-            }
-            if (!hasInputConnections && artifactSrc && inp.source !== artifactSrc) {
-              input_overrides[inp.key] = artifactSrc;
             }
           });
         }

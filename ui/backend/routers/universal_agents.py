@@ -550,9 +550,7 @@ def _get_or_upload_openai(
     db: Session,
 ) -> tuple[str, str]:
     """Upload to OpenAI/Grok Files API, track in DB, return (file_id, content_with_header).
-    Note: OpenAI/Grok Chat Completions don't support inline file references, so the returned
-    content_with_header is still included as text in the message, but the file_id is logged
-    and persisted for reference."""
+    `content_with_header` is used by Grok's inline fallback path; OpenAI Responses uses file_id."""
     from openai import OpenAI
     from ui.backend.models.uploaded_file import UploadedFile as UF
 
@@ -840,9 +838,26 @@ def _llm_call_openai_responses_files(
         user_text = user_text.replace(f"{{{k}}}", v)
     user_text = user_text.strip()
 
-    # Build Responses API input: file blocks + text wrapped in a user message
-    content: list = []
+    # Build Responses API input: file blocks + text wrapped in a user message.
+    # Important: dedupe repeated file_ids. A pipeline step may map multiple keys
+    # to the same source/content hash, and repeating identical file refs can
+    # unnecessarily inflate context usage.
+    unique_file_ids: list[str] = []
+    seen_file_ids: set[str] = set()
+    duplicate_count = 0
     for fid in file_ids.values():
+        if fid in seen_file_ids:
+            duplicate_count += 1
+            continue
+        seen_file_ids.add(fid)
+        unique_file_ids.append(fid)
+    if duplicate_count:
+        log_buffer.emit(
+            f"[LLM] {model} — deduped {duplicate_count} duplicate file reference(s)"
+        )
+
+    content: list = []
+    for fid in unique_file_ids:
         content.append({"type": "input_file", "file_id": fid})
     if user_text:
         content.append({"type": "input_text", "text": user_text})
@@ -913,6 +928,15 @@ def _llm_call_openai_responses_files(
         body = (resp.text or "").strip()
         if len(body) > 800:
             body = body[:800] + "…"
+        if resp.status_code == 400 and "context_length_exceeded" in body:
+            inline_chars = sum(len(v or "") for v in inline_inputs.values())
+            file_chars = sum(len(v or "") for v in file_inputs.values())
+            raise RuntimeError(
+                "OpenAI context_length_exceeded "
+                f"(model={model}, inline_chars≈{inline_chars:,}, "
+                f"file_inputs={len(file_inputs)}, unique_files={len(unique_file_ids)}, "
+                f"file_chars≈{file_chars:,}). {body or 'empty response'}"
+            )
         raise RuntimeError(f"OpenAI Responses API HTTP {resp.status_code}: {body or 'empty response'}")
 
     try:

@@ -699,6 +699,21 @@ async def run_pipeline(
                 start_datetime=run_start_dt, node_states=_build_node_states(),
             )
 
+        def _normalize_overrides_for_step(
+            _step_idx: int, _agent_def: dict, _overrides: dict
+        ) -> dict:
+            """Normalize overrides for artifact-like inputs based on canvas output wiring."""
+            _norm = dict(_overrides or {})
+            _artifact_src = _incoming_output_src_by_step_idx.get(_step_idx)
+            if not _artifact_src:
+                return _norm
+            for _inp in (_agent_def.get("inputs", []) or []):
+                _k = _inp.get("key", "")
+                _default_src = str(_inp.get("source", ""))
+                if _default_src == "chain_previous" or _default_src.startswith("artifact_"):
+                    _norm[_k] = _artifact_src
+            return _norm
+
         def _persist_agent_result(
             _agent_id: str,
             _agent_name: str,
@@ -781,6 +796,7 @@ async def run_pipeline(
         }
         _output_node_to_step_idx = {}
         _input_node_to_step_idxs = {}
+        _incoming_output_src_by_step_idx: dict[int, str] = {}
         for _e in (pipeline_def.get("canvas", {}) or {}).get("edges", []):
             _src = _e.get("source")
             _tgt = _e.get("target")
@@ -793,6 +809,13 @@ async def run_pipeline(
                         "sub_type": str(_od.get("subType") or "").strip(),
                         "label": str(_od.get("label") or "").strip(),
                     }
+            # Output -> processing edges carry semantic artifact source for downstream inputs.
+            if _src in _output_node_ids and _tgt in _proc_node_to_step_idx:
+                _si = _proc_node_to_step_idx[_tgt]
+                _od = _output_node_data_by_id.get(_src, {})
+                _sub = str(_od.get("subType") or "").strip()
+                if _sub and _si not in _incoming_output_src_by_step_idx:
+                    _incoming_output_src_by_step_idx[_si] = f"artifact_{_sub}"
             if _src in _input_node_ids and _tgt in _proc_node_to_step_idx:
                 _arr = _input_node_to_step_idxs.get(_src, [])
                 _arr.append(_proc_node_to_step_idx[_tgt])
@@ -1041,7 +1064,6 @@ async def run_pipeline(
                     step_idx  = step_indices[0]
                     step      = steps[step_idx]
                     agent_id  = step.get("agent_id", "")
-                    overrides = step.get("input_overrides", {})
                     agent_def = agent_map.get(agent_id)
 
                     if not agent_def:
@@ -1052,6 +1074,10 @@ async def run_pipeline(
                         save_steps()
                         fatal_error = True
                         break
+
+                    overrides = _normalize_overrides_for_step(
+                        step_idx, agent_def, step.get("input_overrides", {})
+                    )
 
                     agent_name = agent_def.get("name", agent_id)
                     model      = agent_def.get("model", "gpt-5.4")
@@ -1384,8 +1410,10 @@ async def run_pipeline(
                     for _sidx in step_indices:
                         _s = steps[_sidx]
                         _aid = _s.get("agent_id", "")
-                        _ov = _s.get("input_overrides", {})
                         _adef = agent_map[_aid]
+                        _ov = _normalize_overrides_for_step(
+                            _sidx, _adef, _s.get("input_overrides", {})
+                        )
                         _aname = _adef.get("name", _aid)
                         _model = _adef.get("model", "gpt-5.4")
                         run_steps[_sidx]["agent_name"] = _aname
