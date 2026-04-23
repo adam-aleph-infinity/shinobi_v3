@@ -550,7 +550,7 @@ async def run_pipeline(
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.persona import Persona
     from ui.backend.routers.universal_agents import (
-        _sse, _FILE_SOURCES, _resolve_input,
+        _sse, _is_file_source, _resolve_input,
         _llm_call_with_files, _llm_call_anthropic_files_streaming,
         _load_all as _load_agents,
     )
@@ -1154,11 +1154,16 @@ async def run_pipeline(
 
                     resolved: dict[str, str] = {}
                     resolve_err = False
-                    def _resolve_input_worker(_source: str, _ref_id: Optional[str], _manual_inputs: dict[str, str]) -> str:
+                    def _resolve_input_worker(
+                        _source: str,
+                        _ref_id: Optional[str],
+                        _manual_inputs: dict[str, str],
+                        _input_key: str,
+                    ) -> str:
                         with Session(_db_engine) as _ldb:
                             return _resolve_input(
                                 _source, _ref_id, req.sales_agent, req.customer, req.call_id,
-                                _manual_inputs, _ldb,
+                                _manual_inputs, _ldb, input_key=_input_key,
                             )
                     for inp in agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
@@ -1169,7 +1174,7 @@ async def run_pipeline(
                         try:
                             text = await loop.run_in_executor(
                                 None,
-                                lambda s=source, a=ref_id, m=manual_inputs: _resolve_input_worker(s, a, m),
+                                lambda s=source, a=ref_id, m=manual_inputs, k=key: _resolve_input_worker(s, a, m, k),
                             )
                             resolved[key] = text
                         except Exception as exc:
@@ -1188,7 +1193,11 @@ async def run_pipeline(
                     file_keys = {
                         inp.get("key", "")
                         for inp in agent_def.get("inputs", [])
-                        if overrides.get(inp.get("key", ""), inp.get("source", "manual")) in _FILE_SOURCES
+                        if _is_file_source(
+                            _public_input_source(
+                                overrides.get(inp.get("key", ""), inp.get("source", "manual"))
+                            )
+                        )
                     }
                     file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
                     inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
@@ -1520,13 +1529,18 @@ async def run_pipeline(
                                     _rid = _inp.get("agent_id")
                                     _par_resolved[_k] = _resolve_input(
                                         _src, _rid, req.sales_agent, req.customer, req.call_id, _par_mi, _par_db,
+                                        input_key=_k,
                                     )
                                 _par_input_ready = True
 
                                 _par_fkeys = {
                                     _inp.get("key", "")
                                     for _inp in _par_adef.get("inputs", [])
-                                    if _par_ov.get(_inp.get("key", ""), _inp.get("source", "manual")) in _FILE_SOURCES
+                                    if _is_file_source(
+                                        _public_input_source(
+                                            _par_ov.get(_inp.get("key", ""), _inp.get("source", "manual"))
+                                        )
+                                    )
                                 }
                                 _par_fi = {k: v for k, v in _par_resolved.items() if k in _par_fkeys}
                                 _par_ii = {k: v for k, v in _par_resolved.items() if k not in _par_fkeys}

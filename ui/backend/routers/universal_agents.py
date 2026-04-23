@@ -32,6 +32,10 @@ INPUT_SOURCES = [
     "merged_transcript",  # all transcripts for the pair merged
     "notes",              # notes for a specific call
     "merged_notes",       # all notes aggregated for the pair
+    "artifact_persona",   # latest persona artifact for context
+    "artifact_persona_score",      # latest persona score artifact for context
+    "artifact_notes",              # latest notes artifact for context
+    "artifact_notes_compliance",   # latest notes compliance artifact for context
     "agent_output",       # output of another specific agent
     "artifact_output",    # output of previous pipeline stage (generic artifact alias)
     "chain_previous",     # legacy alias for artifact_output
@@ -387,7 +391,17 @@ def import_presets():
 
 # Input sources that represent large text files — never pasted inline into the prompt.
 # These are uploaded as native file objects to the LLM provider.
-_FILE_SOURCES = {"transcript", "merged_transcript", "notes", "merged_notes"}
+_FILE_SOURCES = {"transcript", "merged_transcript", "notes", "merged_notes", "artifact_output"}
+
+
+def _normalize_input_source(source: str) -> str:
+    src = str(source or "").strip()
+    return "artifact_output" if src == "chain_previous" else src
+
+
+def _is_file_source(source: str) -> bool:
+    src = _normalize_input_source(source)
+    return src in _FILE_SOURCES or src.startswith("artifact_")
 
 def _sse(event: str, data: dict) -> str:
     return f"data: {json.dumps({'type': event, 'data': data})}\n\n"
@@ -1023,11 +1037,14 @@ def _llm_call_with_files(
 
 def _resolve_input(source: str, agent_id: Optional[str],
                    sales_agent: str, customer: str, call_id: str,
-                   manual_inputs: dict, db: Session) -> str:
+                   manual_inputs: dict, db: Session,
+                   input_key: str = "") -> str:
     """Resolve one declared input to its text content."""
     from ui.backend.models.note import Note
+    from ui.backend.models.persona import Persona
 
     ui_data = settings.ui_data_dir
+    source = _normalize_input_source(source)
 
     if source == "transcript":
         if not call_id:
@@ -1107,15 +1124,68 @@ def _resolve_input(source: str, agent_id: Optional[str],
             return str(m.get("content", "") or "")
         return str(row[0] if isinstance(row, tuple) and row else "")
 
-    if source == "chain_previous":
-        source = "artifact_output"  # legacy alias
-
     if source == "artifact_output" or source.startswith("artifact_"):
-        # artifact_persona / artifact_persona_score / artifact_notes / etc.
-        # all resolve to the previous stage's output.
-        return manual_inputs.get("_chain_previous", "")
+        # Pipeline stage chaining source.
+        chained = manual_inputs.get("_chain_previous", "")
+        if chained:
+            return chained
+
+        # Standalone agent-run fallback for persisted artifacts.
+        if source == "artifact_persona":
+            q = select(Persona).where(
+                Persona.agent == sales_agent,
+                Persona.type.in_(["pair", "agent_overall"]),
+            )
+            if customer:
+                q = q.where(Persona.customer == customer)
+            else:
+                q = q.where(Persona.customer == None)  # noqa: E711
+            q = q.order_by(Persona.created_at.desc())
+            p = db.exec(q).first()
+            if not p:
+                raise RuntimeError("No persona cached for this context")
+            return p.content_md or ""
+
+        if source == "artifact_persona_score":
+            q = select(Persona).where(
+                Persona.agent == sales_agent,
+                Persona.type.in_(["pair", "agent_overall"]),
+                Persona.score_json != None,  # noqa: E711
+            )
+            if customer:
+                q = q.where(Persona.customer == customer)
+            else:
+                q = q.where(Persona.customer == None)  # noqa: E711
+            q = q.order_by(Persona.created_at.desc())
+            p = db.exec(q).first()
+            if not p:
+                raise RuntimeError("No scored persona cached for this context")
+            return p.score_json or ""
+
+        if source == "artifact_notes":
+            rollup = ui_data / "_note_rollups" / sales_agent / f"{customer}__all.json"
+            legacy_rollup = ui_data / "_note_rollups" / sales_agent / f"{customer}.json"
+            path = rollup if rollup.exists() else legacy_rollup
+            if not path.exists():
+                raise RuntimeError("No notes artifact cached for this context")
+            return path.read_text(encoding="utf-8").strip()
+
+        if source == "artifact_notes_compliance":
+            q = select(Note).where(
+                Note.agent == sales_agent,
+                Note.customer == customer,
+                Note.score_json != None,  # noqa: E711
+            ).order_by(Note.created_at.desc())
+            n = db.exec(q).first()
+            if not n:
+                raise RuntimeError("No compliance-scored notes cached for this context")
+            return n.score_json or ""
+
+        return ""
 
     if source == "manual":
+        if input_key and input_key in manual_inputs:
+            return manual_inputs.get(input_key, "") or ""
         return manual_inputs.get("manual", "")
 
     raise RuntimeError(f"Unknown input source '{source}'")
@@ -1141,21 +1211,41 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
             # Resolve all inputs
             resolved: dict[str, str] = {}
             loop = asyncio.get_event_loop()
+            requested_source_for_key: dict[str, str] = {}
+            effective_source_for_key: dict[str, str] = {}
+
+            for inp in agent_def.get("inputs", []):
+                key = inp.get("key", "input")
+                declared_src = _normalize_input_source(inp.get("source", "manual"))
+                requested_src = _normalize_input_source(
+                    req.source_overrides.get(key, declared_src)
+                )
+                effective_src = requested_src
+                # Quick-test mode can inject artifact/file-like content via manual text.
+                # Keep those on the file-upload path for provider file IDs and context safety.
+                if (
+                    requested_src == "manual"
+                    and key in req.manual_inputs
+                    and _is_file_source(declared_src)
+                ):
+                    effective_src = declared_src
+                requested_source_for_key[key] = requested_src
+                effective_source_for_key[key] = effective_src
 
             for inp in agent_def.get("inputs", []):
                 key     = inp.get("key", "input")
-                # Allow caller to override the source for this input key
-                source  = req.source_overrides.get(key, inp.get("source", "manual"))
+                source  = requested_source_for_key.get(key, "manual")
+                display_source = effective_source_for_key.get(key, source)
                 ref_id  = inp.get("agent_id")
 
-                yield _sse("progress", {"msg": f"Loading {key} ({source})…"})
+                yield _sse("progress", {"msg": f"Loading {key} ({display_source})…"})
 
                 try:
                     text = await loop.run_in_executor(
                         None,
-                        lambda s=source, a=ref_id: _resolve_input(
+                        lambda s=source, a=ref_id, k=key: _resolve_input(
                             s, a, req.sales_agent, req.customer, req.call_id,
-                            req.manual_inputs, db
+                            req.manual_inputs, db, input_key=k
                         ),
                     )
                     resolved[key] = text
@@ -1172,8 +1262,10 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
             file_keys: set[str] = set()
             for inp in agent_def.get("inputs", []):
                 k = inp.get("key", "")
-                effective_src = req.source_overrides.get(k, inp.get("source", "manual"))
-                if effective_src in _FILE_SOURCES:
+                effective_src = effective_source_for_key.get(
+                    k, _normalize_input_source(inp.get("source", "manual"))
+                )
+                if _is_file_source(effective_src):
                     file_keys.add(k)
 
             file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
@@ -1185,8 +1277,9 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 "customer":    req.customer,
                 "call_id":     req.call_id,
                 "source_for_key": {
-                    inp.get("key", ""): req.source_overrides.get(
-                        inp.get("key", ""), inp.get("source", "")
+                    inp.get("key", ""): effective_source_for_key.get(
+                        inp.get("key", ""),
+                        _normalize_input_source(inp.get("source", "")),
                     )
                     for inp in agent_def.get("inputs", [])
                 },
