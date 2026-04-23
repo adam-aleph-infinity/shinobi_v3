@@ -1074,7 +1074,7 @@ def _resolve_input(source: str, agent_id: Optional[str],
             sql += "AND call_id = :call_id "
             params["call_id"] = call_id
         sql += "ORDER BY created_at DESC LIMIT 1"
-        row = db.exec(_sql_text(sql), params).first()
+        row = db.execute(_sql_text(sql), params).first()
         if not row:
             raise RuntimeError(f"No stored result for agent {agent_id} in this context")
         m = getattr(row, "_mapping", row)
@@ -1281,7 +1281,7 @@ def get_results(
         sql += "AND call_id = :call_id "
         params["call_id"] = call_id
     sql += "ORDER BY created_at DESC"
-    rows = db.exec(_sql_text(sql), params).all()
+    rows = db.execute(_sql_text(sql), params).all()
 
     out = []
     for row in rows:
