@@ -383,10 +383,14 @@ export default function CRMPage() {
                   return (
                     <tr
                       key={pair.id}
+                      onClick={() => ctx.setCustomer(pair.customer, pair.agent)}
                       className={`border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors ${isSelected ? "bg-indigo-900/10" : ""}`}
                     >
                       <td className="px-3 py-3 w-8">
-                        <button onClick={() => toggleRow(pair.id)} className="text-gray-500 hover:text-white transition-colors">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleRow(pair.id); }}
+                          className="text-gray-500 hover:text-white transition-colors"
+                        >
                           {isSelected
                             ? <CheckSquare className="w-4 h-4 text-indigo-400" />
                             : <Square className="w-4 h-4" />}
@@ -420,7 +424,7 @@ export default function CRMPage() {
                       <td className="px-3 py-3 text-right text-gray-300 text-xs">{fmtDate(pair.ftd_at)}</td>
                       <td className="px-2 py-3 text-center">
                         <button
-                          onClick={() => ctx.setCustomer(pair.customer, pair.agent)}
+                          onClick={(e) => { e.stopPropagation(); ctx.setCustomer(pair.customer, pair.agent); }}
                           title={`Set context: ${pair.agent} / ${pair.customer}`}
                           className={`p-1 rounded transition-colors ${
                             ctx.salesAgent === pair.agent && ctx.customer === pair.customer

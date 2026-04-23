@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import useSWR from "swr";
 import {
   User, BadgeCheck, StickyNote, ShieldCheck, Layers, FileText, GitBranch,
-  Loader2, Copy, Archive, Search, CalendarDays, ChevronRight, Trash2,
+  Loader2, Copy, Archive, CalendarDays, ChevronRight, Trash2,
   CloudUpload, AlertTriangle, Clock, Code2, Eye,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -71,6 +71,13 @@ type ArtifactKind =
   | "pipeline_output"
   | "provider_file";
 
+interface PipelineBucket {
+  id: string;
+  label: string;
+  items: ArtifactItem[];
+  latestTs: number;
+}
+
 type ArtifactItem =
   | { kind: "merged_transcript"; id: "merged_transcript"; date: string; chars: number; label: string; data: { content: string } }
   | { kind: "persona";           id: string; date: string; chars: number; label: string; data: Persona }
@@ -135,6 +142,18 @@ function subTypeToKind(subType: string): ArtifactKind {
   if (subType === "notes")            return "pipeline_notes";
   if (subType === "notes_compliance") return "pipeline_compliance";
   return "pipeline_output";
+}
+
+function isPipelineKind(
+  kind: ArtifactKind,
+): kind is "pipeline_persona" | "pipeline_score" | "pipeline_notes" | "pipeline_compliance" | "pipeline_output" {
+  return (
+    kind === "pipeline_persona" ||
+    kind === "pipeline_score" ||
+    kind === "pipeline_notes" ||
+    kind === "pipeline_compliance" ||
+    kind === "pipeline_output"
+  );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -605,66 +624,18 @@ function ItemRow({ item, selected, onClick }: { item: ArtifactItem; selected: bo
   );
 }
 
-// ── Status dots ───────────────────────────────────────────────────────────────
-
-function StatusDots({ salesAgent, customer }: { salesAgent: string; customer: string }) {
-  const qs = new URLSearchParams({ agent: salesAgent, customer });
-  const { data: personas } = useSWR<Persona[]>(`/api/personas?${qs}`, fetcher);
-  const { data: notes }    = useSWR<Note[]>(`/api/notes?${qs}`, fetcher);
-  const { data: rollup, error: rollupErr } = useSWR<Record<string, unknown> | null>(`/api/notes/rollup?${qs}`, fetcherOptional);
-  const mtUrl = `/api/universal-agents/raw-input?source=merged_transcript&sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`;
-  const { data: mt } = useSWR<{ content: string; chars: number } | null>(mtUrl, fetcherOptional);
-  const has = {
-    mt:         mt != null,
-    persona:    (personas ?? []).length > 0,
-    score:      (personas ?? []).some(p => p.score_json != null),
-    rollup:     !!rollup && !rollupErr,
-    notes:      (notes ?? []).some(n => n.score_json == null),
-    compliance: (notes ?? []).some(n => n.score_json != null),
-  };
-  if (!has.mt && !has.persona && !has.rollup && !has.notes && !has.compliance) return null;
-  return (
-    <div className="flex items-center gap-0.5 shrink-0 ml-1">
-      {has.mt         && <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"    title="Merged Transcript" />}
-      {has.persona    && <span className="w-1.5 h-1.5 rounded-full bg-violet-500"  title="Persona" />}
-      {has.score      && <span className="w-1.5 h-1.5 rounded-full bg-violet-400"  title="Score" />}
-      {has.rollup     && <span className="w-1.5 h-1.5 rounded-full bg-amber-500"   title="Merged Notes" />}
-      {has.notes      && <span className="w-1.5 h-1.5 rounded-full bg-teal-500"    title="Call Notes" />}
-      {has.compliance && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title="Compliance Notes" />}
-    </div>
-  );
-}
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ArtifactsPage() {
-  const [agentW,    agentDrag]    = useResize(160, 120, 280);
-  const [customerW, customerDrag] = useResize(160, 120, 280);
+  const [pipelineW, pipelineDrag] = useResize(210, 150, 360);
   const [typesW,    typesDrag]    = useResize(150, 120, 240);
   const [itemsW,    itemsDrag]    = useResize(220, 160, 360);
 
-  const [selectedAgent,    setSelectedAgent]    = useState("");
-  const [selectedCustomer, setSelectedCustomer] = useState("");
+  const { salesAgent: selectedAgent, customer: selectedCustomer } = useAppCtx();
+  const hasPair = !!(selectedAgent && selectedCustomer);
+  const [selectedBucketId, setSelectedBucketId] = useState<string | null>(null);
   const [selectedKind,     setSelectedKind]     = useState<ArtifactKind | null>(null);
   const [selectedItem,     setSelectedItem]     = useState<ArtifactItem | null>(null);
-  const [agentSearch,      setAgentSearch]      = useState("");
-  const [customerSearch,   setCustomerSearch]   = useState("");
-
-  // Pre-populate from global context (ContextBar breadcrumb)
-  const { salesAgent: ctxAgent, customer: ctxCustomer } = useAppCtx();
-  const [ctxApplied, setCtxApplied] = useState(false);
-  useEffect(() => {
-    if (!ctxApplied && ctxAgent) {
-      setSelectedAgent(ctxAgent);
-      if (ctxCustomer) setSelectedCustomer(ctxCustomer);
-      setCtxApplied(true);
-    }
-  }, [ctxAgent, ctxCustomer, ctxApplied]);
-
-  const { data: navAgents }    = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
-  const { data: navCustomers } = useSWR<{ customer: string; call_count: number }[]>(
-    selectedAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(selectedAgent)}` : null, fetcher,
-  );
 
   const pairQs = selectedAgent && selectedCustomer
     ? new URLSearchParams({ agent: selectedAgent, customer: selectedCustomer })
@@ -848,106 +819,164 @@ export default function ArtifactsPage() {
     setSelectedItem(null);
   }
 
-  const typeGroups = (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
-    .filter(k => itemsByKind[k].length > 0);
+  const allItems = useMemo(
+    () => (Object.keys(itemsByKind) as ArtifactKind[]).flatMap(k => itemsByKind[k]),
+    [itemsByKind],
+  );
 
-  const visibleItems = selectedKind ? itemsByKind[selectedKind] : [];
+  const pipelineBuckets = useMemo<PipelineBucket[]>(() => {
+    const map = new Map<string, PipelineBucket>();
+    for (const item of allItems) {
+      let id = "context";
+      let label = "Direct Artifacts";
+      if (isPipelineKind(item.kind)) {
+        const day = formatVmDateTime(item.date).slice(0, 10);
+        const pipelineData = item.data as { pipeline_name?: string };
+        const pipelineName = pipelineData.pipeline_name || "Pipeline";
+        id = `pipeline:${pipelineName}:${day}`;
+        label = `${pipelineName} · ${day}`;
+      }
+      const ts = Number.isFinite(Date.parse(item.date)) ? Date.parse(item.date) : 0;
+      const existing = map.get(id);
+      if (!existing) {
+        map.set(id, { id, label, items: [item], latestTs: ts });
+      } else {
+        existing.items.push(item);
+        existing.latestTs = Math.max(existing.latestTs, ts);
+      }
+    }
+    return [...map.values()].sort((a, b) => {
+      if (a.id === "context" && b.id !== "context") return 1;
+      if (a.id !== "context" && b.id === "context") return -1;
+      return b.latestTs - a.latestTs || a.label.localeCompare(b.label);
+    });
+  }, [allItems]);
 
-  const filteredAgents    = (navAgents ?? []).filter(a => a.agent.toLowerCase().includes(agentSearch.toLowerCase()));
-  const filteredCustomers = (navCustomers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
+  useEffect(() => {
+    if (!hasPair) {
+      setSelectedBucketId(null);
+      setSelectedKind(null);
+      setSelectedItem(null);
+      return;
+    }
+    if (pipelineBuckets.length === 0) {
+      setSelectedBucketId(null);
+      setSelectedKind(null);
+      setSelectedItem(null);
+      return;
+    }
+    if (!selectedBucketId || !pipelineBuckets.some(b => b.id === selectedBucketId)) {
+      setSelectedBucketId(pipelineBuckets[0].id);
+      setSelectedKind(null);
+      setSelectedItem(null);
+    }
+  }, [hasPair, pipelineBuckets, selectedBucketId]);
 
-  function selectAgent(a: string) {
-    setSelectedAgent(a); setSelectedCustomer(""); setSelectedKind(null); setSelectedItem(null);
+  const selectedBucket = selectedBucketId
+    ? pipelineBuckets.find(b => b.id === selectedBucketId) ?? null
+    : null;
+
+  const typeGroups = useMemo(
+    () => (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
+      .filter(k => (selectedBucket?.items ?? []).some(i => i.kind === k)),
+    [selectedBucket],
+  );
+
+  const visibleItems = useMemo(
+    () => selectedKind ? (selectedBucket?.items ?? []).filter(i => i.kind === selectedKind) : [],
+    [selectedKind, selectedBucket],
+  );
+
+  function selectBucket(id: string) {
+    setSelectedBucketId(id);
+    setSelectedKind(null);
+    setSelectedItem(null);
   }
-  function selectCustomer(c: string) {
-    setSelectedCustomer(c); setSelectedKind(null); setSelectedItem(null);
-  }
+
   function selectKind(k: ArtifactKind) {
-    setSelectedKind(k); setSelectedItem(null);
+    setSelectedKind(k);
+    setSelectedItem(null);
   }
 
   return (
     <div className="h-[calc(100vh-5.25rem)] flex overflow-hidden">
 
-      {/* ── Panel 1: Agents ─────────────────────────────────────── */}
-      <div className="flex shrink-0 overflow-hidden" style={{ width: agentW }}>
+      {/* ── Panel 1: Pipelines (grouped by name + date) ───────────────────── */}
+      <div className="flex shrink-0 overflow-hidden" style={{ width: pipelineW }}>
         <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
           <div className="px-3 py-2 border-b border-gray-800 shrink-0">
-            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Sales Agents</p>
-            <div className="relative">
-              <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-600" />
-              <input value={agentSearch} onChange={e => setAgentSearch(e.target.value)} placeholder="Search…"
-                className="w-full bg-gray-800 border border-gray-700 rounded-md pl-6 pr-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500 placeholder-gray-600" />
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto py-1">
-            {filteredAgents.map(a => (
-              <button key={a.agent} onClick={() => selectAgent(a.agent)}
-                className={cn(
-                  "w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] transition-colors border-l-2",
-                  selectedAgent === a.agent
-                    ? "bg-indigo-900/30 border-indigo-500 text-white"
-                    : "border-transparent text-gray-400 hover:text-white hover:bg-gray-800/40",
-                )}>
-                <span className="flex-1 truncate">{a.agent}</span>
-                <span className="text-[9px] text-gray-700 shrink-0">{a.count}</span>
-              </button>
-            ))}
-            {filteredAgents.length === 0 && <p className="text-[10px] text-gray-700 italic px-3 py-4">No agents</p>}
-          </div>
-        </div>
-        <DragHandle onMouseDown={agentDrag} />
-      </div>
-
-      {/* ── Panel 2: Customers ──────────────────────────────────── */}
-      <div className="flex shrink-0 overflow-hidden" style={{ width: customerW }}>
-        <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
-          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
-            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Customers</p>
-            <div className="relative">
-              <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-600" />
-              <input value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} placeholder="Search…"
-                disabled={!selectedAgent}
-                className="w-full bg-gray-800 border border-gray-700 rounded-md pl-6 pr-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500 placeholder-gray-600 disabled:opacity-40" />
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto py-1">
-            {!selectedAgent
-              ? <p className="text-[10px] text-gray-700 italic px-3 py-4">Select an agent</p>
-              : filteredCustomers.map(c => (
-                <button key={c.customer} onClick={() => selectCustomer(c.customer)}
-                  className={cn(
-                    "w-full flex items-center gap-1 px-3 py-2 text-left text-[11px] transition-colors border-l-2",
-                    selectedCustomer === c.customer
-                      ? "bg-indigo-900/30 border-indigo-500 text-white"
-                      : "border-transparent text-gray-400 hover:text-white hover:bg-gray-800/40",
-                  )}>
-                  <span className="flex-1 truncate">{c.customer}</span>
-                  <StatusDots salesAgent={selectedAgent} customer={c.customer} />
-                </button>
-              ))}
-            {selectedAgent && filteredCustomers.length === 0 && <p className="text-[10px] text-gray-700 italic px-3 py-4">No customers</p>}
-          </div>
-        </div>
-        <DragHandle onMouseDown={customerDrag} />
-      </div>
-
-      {/* ── Panel 3: Artifact types ──────────────────────────────── */}
-      <div className="flex shrink-0 overflow-hidden" style={{ width: typesW }}>
-        <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
-          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
-            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Artifact Types</p>
-            {selectedCustomer && !isLoadingPair && (
-              <p className="text-[9px] text-gray-700 mt-0.5">{typeGroups.length} type{typeGroups.length !== 1 ? "s" : ""}</p>
+            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
+            {hasPair && (
+              <p className="text-[9px] text-gray-700 mt-0.5 truncate">
+                {selectedAgent} · {selectedCustomer}
+              </p>
             )}
           </div>
           <div className="flex-1 overflow-y-auto py-1">
-            {!selectedCustomer ? (
-              <p className="text-[10px] text-gray-700 italic px-3 py-4">Select a customer</p>
+            {!hasPair ? (
+              <p className="text-[10px] text-gray-700 italic px-3 py-4">Select agent + customer in the top bar</p>
             ) : isLoadingPair ? (
               <div className="flex items-center gap-1.5 px-3 py-4 text-[10px] text-gray-600">
                 <Loader2 className="w-3 h-3 animate-spin" /> Loading…
               </div>
+            ) : pipelineBuckets.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-6 gap-1.5 text-gray-700">
+                <Archive className="w-5 h-5 opacity-20" />
+                <p className="text-[10px]">No artifacts</p>
+              </div>
+            ) : pipelineBuckets.map(bucket => {
+              const isSel = selectedBucketId === bucket.id;
+              const isDirect = bucket.id === "context";
+              return (
+                <button
+                  key={bucket.id}
+                  onClick={() => selectBucket(bucket.id)}
+                  className={cn(
+                    "w-full flex items-center gap-2 px-3 py-2.5 text-left transition-colors border-l-2",
+                    isSel ? "bg-indigo-900/30 border-indigo-500" : "border-transparent hover:bg-gray-800/40",
+                  )}
+                >
+                  <span className={cn(
+                    "p-0.5 rounded border shrink-0",
+                    isDirect
+                      ? "bg-gray-800/70 text-gray-300 border-gray-700/60"
+                      : "bg-teal-900/50 text-teal-300 border-teal-700/40",
+                  )}>
+                    {isDirect ? <Archive className="w-3 h-3" /> : <GitBranch className="w-3 h-3" />}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className={cn("text-[11px] font-medium truncate", isSel ? "text-white" : (isDirect ? "text-gray-300" : "text-teal-300"))}>
+                      {bucket.label}
+                    </p>
+                    <p className="text-[9px] text-gray-600">{bucket.items.length} item{bucket.items.length !== 1 ? "s" : ""}</p>
+                  </div>
+                  <ChevronRight className={cn("w-3 h-3 shrink-0 transition-colors", isSel ? "text-indigo-400" : "text-gray-700")} />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <DragHandle onMouseDown={pipelineDrag} />
+      </div>
+
+      {/* ── Panel 2: Artifact types within selected pipeline ───────────────── */}
+      <div className="flex shrink-0 overflow-hidden" style={{ width: typesW }}>
+        <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
+          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
+            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Artifact Types</p>
+            {selectedBucket && !isLoadingPair && (
+              <p className="text-[9px] text-gray-700 mt-0.5">{typeGroups.length} type{typeGroups.length !== 1 ? "s" : ""}</p>
+            )}
+          </div>
+          <div className="flex-1 overflow-y-auto py-1">
+            {!hasPair ? (
+              <p className="text-[10px] text-gray-700 italic px-3 py-4">Select agent + customer in the top bar</p>
+            ) : isLoadingPair ? (
+              <div className="flex items-center gap-1.5 px-3 py-4 text-[10px] text-gray-600">
+                <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+              </div>
+            ) : !selectedBucket ? (
+              <p className="text-[10px] text-gray-700 italic px-3 py-4">Select a pipeline group</p>
             ) : typeGroups.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-6 gap-1.5 text-gray-700">
                 <Archive className="w-5 h-5 opacity-20" />
@@ -956,7 +985,7 @@ export default function ArtifactsPage() {
             ) : typeGroups.map(k => {
               const m = ARTIFACT_TYPE_META[k];
               const Icon = m.icon;
-              const count = itemsByKind[k].length;
+              const count = (selectedBucket?.items ?? []).filter(i => i.kind === k).length;
               const isSel = selectedKind === k;
               return (
                 <button key={k} onClick={() => selectKind(k)}
@@ -1014,9 +1043,9 @@ export default function ArtifactsPage() {
           <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
             <Archive className="w-10 h-10 opacity-10" />
             <p className="text-sm">
-              {!selectedAgent    ? "Select a sales agent"
-               : !selectedCustomer ? "Select a customer"
-               : !selectedKind     ? "Select an artifact type"
+              {!hasPair          ? "Select agent + customer in the top context bar"
+               : !selectedBucket ? "Select a pipeline group"
+               : !selectedKind   ? "Select an artifact type"
                : "Select an item to view it"}
             </p>
           </div>

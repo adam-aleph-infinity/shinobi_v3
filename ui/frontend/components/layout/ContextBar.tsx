@@ -21,6 +21,16 @@ interface Pipeline {
   steps: { agent_id: string }[];
 }
 
+interface NavAgentOption {
+  agent: string;
+  count: number;
+}
+
+interface NavCustomerOption {
+  customer: string;
+  call_count: number;
+}
+
 // ── Universal Agent Picker ─────────────────────────────────────────────────────
 function AgentPicker({
   activeId,
@@ -242,6 +252,11 @@ export function ContextBar() {
 
   const { data: agents }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelines } = useSWR<Pipeline[]>("/api/pipelines", fetcher);
+  const { data: navAgents } = useSWR<NavAgentOption[]>("/api/crm/nav/agents", fetcher);
+  const { data: navCustomers } = useSWR<NavCustomerOption[]>(
+    salesAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(salesAgent)}` : null,
+    fetcher,
+  );
 
   // Auto-clear stale IDs once lists have loaded and the stored ID is missing
   useEffect(() => {
@@ -256,28 +271,80 @@ export function ContextBar() {
     }
   }, [pipelines, activePipelineId, setActivePipeline]);
 
+  useEffect(() => {
+    if (!salesAgent || !customer || !navCustomers) return;
+    if (!navCustomers.some(c => c.customer === customer)) setCustomer("");
+  }, [salesAgent, customer, navCustomers, setCustomer]);
+
+  const selectedAgentKnown = !salesAgent || !!(navAgents ?? []).find(a => a.agent === salesAgent);
+  const selectedCustomerKnown = !customer || !!(navCustomers ?? []).find(c => c.customer === customer);
+
   return (
     <div className="border-b border-gray-800 bg-gray-900/90 px-4 flex items-center gap-2 text-xs shrink-0 h-9">
 
-      {/* ── Breadcrumb: sales agent → customer → call ── */}
-      {salesAgent && (
-        <span className="flex items-center gap-1.5 text-gray-300 min-w-0">
-          <User className="w-3 h-3 text-indigo-400 shrink-0" />
-          <span className="font-medium truncate max-w-[140px]">{salesAgent}</span>
+      {/* ── Context selectors: sales agent → customer → call ── */}
+      <span className="flex items-center gap-1.5 min-w-0">
+        <User className="w-3 h-3 text-indigo-400 shrink-0" />
+        <select
+          value={salesAgent}
+          onChange={e => setSalesAgent(e.target.value)}
+          className={cn(
+            "h-6 rounded border px-2 text-[11px] outline-none bg-gray-800/70 min-w-[160px] max-w-[220px] truncate",
+            selectedAgentKnown
+              ? "text-gray-200 border-gray-700/70 focus:border-indigo-500"
+              : "text-red-300 border-red-800/70 focus:border-red-500",
+          )}
+        >
+          <option value="">{navAgents === undefined ? "Sales agent (loading…)" : "Sales agent…"}</option>
+          {!selectedAgentKnown && salesAgent && (
+            <option value={salesAgent}>{salesAgent} (not found)</option>
+          )}
+          {(navAgents ?? []).map(a => (
+            <option key={a.agent} value={a.agent}>
+              {a.agent} ({a.count})
+            </option>
+          ))}
+        </select>
+        {salesAgent && (
           <button onClick={() => setSalesAgent("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
             <X className="w-3 h-3" />
           </button>
-        </span>
-      )}
-      {salesAgent && customer && <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />}
-      {customer && (
-        <span className="flex items-center gap-1.5 text-gray-400 min-w-0">
-          <span className="truncate max-w-[140px]">{customer}</span>
+        )}
+      </span>
+
+      <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
+
+      <span className="flex items-center gap-1.5 min-w-0">
+        <select
+          value={customer}
+          onChange={e => setCustomer(e.target.value)}
+          disabled={!salesAgent}
+          className={cn(
+            "h-6 rounded border px-2 text-[11px] outline-none bg-gray-800/70 min-w-[160px] max-w-[220px] truncate disabled:opacity-50 disabled:cursor-not-allowed",
+            selectedCustomerKnown
+              ? "text-gray-300 border-gray-700/70 focus:border-indigo-500"
+              : "text-red-300 border-red-800/70 focus:border-red-500",
+          )}
+        >
+          <option value="">
+            {!salesAgent ? "Customer…" : navCustomers === undefined ? "Customer (loading…)" : "Customer…"}
+          </option>
+          {!selectedCustomerKnown && customer && (
+            <option value={customer}>{customer} (not found)</option>
+          )}
+          {(navCustomers ?? []).map(c => (
+            <option key={c.customer} value={c.customer}>
+              {c.customer}
+            </option>
+          ))}
+        </select>
+        {customer && (
           <button onClick={() => setCustomer("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
             <X className="w-3 h-3" />
           </button>
-        </span>
-      )}
+        )}
+      </span>
+
       {customer && callId && <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />}
       {callId && (
         <span className="flex items-center gap-1.5 text-gray-500 min-w-0">

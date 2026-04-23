@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import useSWR from "swr";
 import {
-  Users, Search, Loader2, FileText, CheckCircle2,
+  Loader2, FileText, CheckCircle2,
   Circle, ChevronRight, Mic2, StickyNote, Trash2, Play,
   EyeOff, Eye, X,
 } from "lucide-react";
@@ -203,7 +203,6 @@ function NotesPanel({
   );
 }
 
-interface Agent    { agent: string; count: number; }
 interface Customer { customer: string; account_id: string; crm_url: string; call_count: number; }
 interface CRMCall  { call_id: string; date: string; duration: number; record_path: string; }
 interface TxCall   {
@@ -212,9 +211,6 @@ interface TxCall   {
   smoothed_path: string | null; voted_path: string | null;
   duration_s: number | null; started_at: string | null;
 }
-
-function _css(k: string) { try { return sessionStorage.getItem(`calls_${k}`) ?? ""; } catch { return ""; } }
-function _cssSet(k: string, v: string) { try { sessionStorage.setItem(`calls_${k}`, v); } catch {} }
 
 export default function CallsPage() {
   const ctx = useAppCtx();
@@ -235,20 +231,12 @@ export default function CallsPage() {
     prevPipelineId.current = ctx.activePipelineId;
   }, [ctx.activePipelineId]);
 
-  const [agentW, agentDrag]       = useResize(180, 120, 360);
-  const [customerW, customerDrag] = useResize(180, 120, 360);
   const [callsW, callsDrag]       = useResize(280, 180, 440);
-
-  const [agentsCollapsed, setAgentsCollapsed]     = useState(false);
-  const [customersCollapsed, setCustomersCollapsed] = useState(false);
   const [callsCollapsed, setCallsCollapsed]       = useState(false);
 
-  // Start from safe defaults to match SSR; restored from sessionStorage post-mount
-  const [selectedAgent, _setSelectedAgent]       = useState("");
-  const [selectedCustomer, _setSelectedCustomer] = useState<Customer | null>(null);
-  const [selectedCallId, _setSelectedCallId]     = useState("");
-  const [agentSearch, _setAgentSearch]           = useState("");
-  const [customerSearch, _setCustomerSearch]     = useState("");
+  const selectedAgent = ctx.salesAgent;
+  const selectedCustomerName = ctx.customer;
+  const selectedCallId = ctx.callId;
   const [checkedCallIds, setCheckedCallIds]       = useState<Set<string>>(new Set());
 
   // Auto-switch to pipeline tab when calls are first checked (if pipeline active)
@@ -262,22 +250,7 @@ export default function CallsPage() {
 
   const [batchTranscribing, setBatchTranscribing] = useState(false);
   const [batchError, setBatchError]               = useState("");
-
-  const setSelectedAgent = (v: string) => {
-    _setSelectedAgent(v); _cssSet("selectedAgent", v);
-    ctx.setSalesAgent(v);
-  };
-  const setSelectedCustomer = (v: Customer | null) => {
-    _setSelectedCustomer(v); _cssSet("selectedCustomer", v ? JSON.stringify(v) : "");
-    if (v) ctx.setCustomer(v.customer);
-    setCheckedCallIds(new Set());
-  };
-  const setSelectedCallId = (v: string) => {
-    _setSelectedCallId(v); _cssSet("selectedCallId", v);
-    ctx.setCallId(v);
-  };
-  const setAgentSearch     = (v: string) => { _setAgentSearch(v);     _cssSet("agentSearch",     v); };
-  const setCustomerSearch  = (v: string) => { _setCustomerSearch(v);  _cssSet("customerSearch",  v); };
+  const setSelectedCallId = (v: string) => ctx.setCallId(v);
 
   const [transcript, setTranscript]             = useState("");
   const [transcriptLoading, setTranscriptLoading] = useState(false);
@@ -291,41 +264,12 @@ export default function CallsPage() {
   const [citationTranscript, setCitationTranscript] = useState("");
   const [citationLoading, setCitationLoading]     = useState(false);
 
-  // Restore persisted state after mount — prefer context values if local storage is empty
-  useEffect(() => {
-    const localAgent = _css("selectedAgent") || ctx.salesAgent;
-    const localCustomerRaw = _css("selectedCustomer");
-    const localCall = _css("selectedCallId") || ctx.callId;
-
-    _setSelectedAgent(localAgent);
-    let restoredCustomer = "";
-    try {
-      const v = localCustomerRaw;
-      if (v) {
-        const parsed = JSON.parse(v);
-        _setSelectedCustomer(parsed);
-        restoredCustomer = parsed.customer ?? "";
-      }
-    } catch {}
-    _setSelectedCallId(localCall);
-    _setAgentSearch(_css("agentSearch"));
-    _setCustomerSearch(_css("customerSearch"));
-
-    // Sync restored selections into the shared context so AgentSidePanel sees them.
-    // Order matters: setSalesAgent clears customer/call, so set agent first.
-    if (localAgent) ctx.setSalesAgent(localAgent);
-    if (restoredCustomer) ctx.setCustomer(restoredCustomer);
-    if (localCall) ctx.setCallId(localCall);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // ── Data fetching ─────────────────────────────────────────────────────────
-  const { data: agents } = useSWR<Agent[]>("/api/crm/nav/agents", fetcher);
-
   const { data: customers } = useSWR<Customer[]>(
     selectedAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(selectedAgent)}` : null,
     fetcher
   );
+  const selectedCustomer = (customers ?? []).find(c => c.customer === selectedCustomerName) ?? null;
 
   const { data: crmCalls } = useSWR<CRMCall[]>(
     selectedCustomer
@@ -335,16 +279,16 @@ export default function CallsPage() {
   );
 
   const { data: txCalls, mutate: mutateTx } = useSWR<TxCall[]>(
-    selectedAgent && selectedCustomer
-      ? `/api/final-transcript/calls?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer.customer)}`
+    selectedAgent && selectedCustomerName
+      ? `/api/final-transcript/calls?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
       : null,
     fetcher
   );
 
   // Fetch all notes for this agent/customer pair to know which calls have notes
   const { data: pairNotes } = useSWR<{ call_id: string }[]>(
-    selectedAgent && selectedCustomer
-      ? `/api/notes?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer.customer)}`
+    selectedAgent && selectedCustomerName
+      ? `/api/notes?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
       : null,
     fetcher,
     { refreshInterval: 15000 }
@@ -488,115 +432,23 @@ export default function CallsPage() {
     }
   }
 
-  // ── Filtered lists ────────────────────────────────────────────────────────
-  const filteredAgents    = (agents ?? []).filter(a => a.agent.toLowerCase().includes(agentSearch.toLowerCase()));
-  const filteredCustomers = (customers ?? []).filter(c => c.customer.toLowerCase().includes(customerSearch.toLowerCase()));
+  const hasPairContext = !!(selectedAgent && selectedCustomerName);
+  useEffect(() => {
+    setCheckedCallIds(new Set());
+    setBatchError("");
+  }, [selectedAgent, selectedCustomerName]);
 
   return (
     <div className="h-[calc(100vh-5.25rem)] flex">
 
-      {/* Panel 1 — Agents */}
-      <CollapsiblePanel title="Agents" width={agentW} collapsed={agentsCollapsed} onToggle={() => setAgentsCollapsed(c => !c)}>
-        <div className="px-2 py-1.5 border-b border-gray-800/60 shrink-0">
-          <div className="flex items-center gap-1.5 bg-gray-800 rounded-md px-2 py-1">
-            <Search className="w-3 h-3 text-gray-600 shrink-0" />
-            <input value={agentSearch} onChange={e => setAgentSearch(e.target.value)}
-              placeholder="Search…"
-              className="flex-1 bg-transparent text-[11px] text-gray-300 placeholder-gray-600 outline-none min-w-0" />
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-          {!agents && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-          {filteredAgents.map(a => {
-            const isSelected = selectedAgent === a.agent;
-            return (
-              <div
-                key={a.agent}
-                onClick={() => {
-                  if (isSelected) { setSelectedAgent(""); setSelectedCustomer(null); }
-                  else { setSelectedAgent(a.agent); setSelectedCustomer(null); setSelectedCallId(""); }
-                }}
-                className={cn(
-                  "rounded-lg border p-2.5 cursor-pointer transition-colors",
-                  isSelected
-                    ? "border-teal-500/60 bg-teal-900/20"
-                    : "border-gray-700 bg-gray-800/30 hover:border-gray-600"
-                )}
-              >
-                <div className="flex items-start gap-2">
-                  <div className={cn(
-                    "mt-0.5 w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center",
-                    isSelected ? "border-teal-500 bg-teal-600" : "border-gray-600"
-                  )}>
-                    {isSelected && (
-                      <svg className="w-2 h-2 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className={cn("text-xs font-medium truncate leading-tight", isSelected ? "text-white" : "text-gray-300")}>
-                      {a.agent}
-                    </p>
-                    <p className="text-[10px] text-gray-600 mt-0.5">
-                      {a.count} customer{a.count !== 1 ? "s" : ""}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </CollapsiblePanel>
-
-      <DragHandle onMouseDown={agentDrag} />
-
-      {/* Panel 2 — Customers */}
-      <CollapsiblePanel title="Customers" width={customerW} collapsed={customersCollapsed} onToggle={() => setCustomersCollapsed(c => !c)}>
-        {!selectedAgent ? (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-xs text-gray-600">Select an agent</p>
-          </div>
-        ) : (
-          <>
-            <div className="px-3 py-2 border-b border-gray-800">
-              <p className="text-xs font-semibold text-white truncate">{selectedAgent}</p>
-              <p className="text-[10px] text-gray-600 mt-0.5">{customers?.length ?? "…"} customers</p>
-            </div>
-            <div className="px-2 py-1.5 border-b border-gray-800/60">
-              <div className="flex items-center gap-1.5 bg-gray-800 rounded-md px-2 py-1">
-                <Search className="w-3 h-3 text-gray-600 shrink-0" />
-                <input value={customerSearch} onChange={e => setCustomerSearch(e.target.value)}
-                  placeholder="Search…"
-                  className="flex-1 bg-transparent text-[11px] text-gray-300 placeholder-gray-600 outline-none min-w-0" />
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
-              {!customers && <div className="flex justify-center p-4"><Loader2 className="w-4 h-4 animate-spin text-gray-600" /></div>}
-              {filteredCustomers.map(c => (
-                <button key={c.customer} onClick={() => {
-                  if (selectedCustomer?.customer === c.customer) { setSelectedCustomer(null); setSelectedCallId(""); }
-                  else { setSelectedCustomer(c); setSelectedCallId(""); }
-                }}
-                  className={cn("w-full text-left px-2 py-2 rounded-lg text-xs transition-colors",
-                    selectedCustomer?.customer === c.customer
-                      ? "bg-teal-500/10 border border-teal-500/20 text-white"
-                      : "text-gray-400 hover:bg-gray-800 hover:text-white"
-                  )}>
-                  <span className="font-medium truncate block">{c.customer}</span>
-                  {c.call_count > 0 && <p className="text-[10px] text-gray-600 mt-0.5">{c.call_count} calls</p>}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-      </CollapsiblePanel>
-
-      <DragHandle onMouseDown={customerDrag} />
-
-      {/* Panel 3 — Calls */}
+      {/* Panel 1 — Calls */}
       <CollapsiblePanel title="Calls" width={callsW} collapsed={callsCollapsed} onToggle={() => setCallsCollapsed(c => !c)}>
         <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
+          {hasPairContext ? (
+            <p className="text-[10px] text-gray-600 truncate">{selectedAgent} · {selectedCustomerName}</p>
+          ) : (
+            <p className="text-[10px] text-gray-600">Select agent + customer in the top context bar</p>
+          )}
           {calls.length > 0 && (
             <p className="text-[10px] text-gray-500">
               {calls.length} calls · {calls.filter(c => c.tx?.has_llm_smoothed || c.tx?.has_llm_voted).length} transcribed
@@ -643,19 +495,24 @@ export default function CallsPage() {
           {batchError && <p className="text-[10px] text-red-400">{batchError}</p>}
         </div>
         <div className="flex-1 overflow-y-auto">
-          {!selectedCustomer && (
+          {!hasPairContext && (
             <div className="flex items-center justify-center h-full">
-              <p className="text-xs text-gray-600">Select a customer</p>
+              <p className="text-xs text-gray-600">Select agent + customer in the top context bar</p>
             </div>
           )}
-          {selectedCustomer && !crmCalls && (
+          {hasPairContext && !selectedCustomer && (
+            <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
+              <span>Customer not found for selected agent.</span>
+            </div>
+          )}
+          {hasPairContext && selectedCustomer && !crmCalls && (
             <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
               <Loader2 className="w-4 h-4 animate-spin" />
               <span>Loading calls…</span>
               <span className="text-gray-700 text-[10px]">First load fetches from CRM</span>
             </div>
           )}
-          {calls.map(call => {
+          {hasPairContext && calls.map(call => {
             const hasTranscript = call.tx?.has_llm_smoothed || call.tx?.has_llm_voted || call.tx?.has_pipeline_final;
             const hasNotes = notesCallIds.has(call.call_id);
             const isSelected = selectedCallId === call.call_id;
@@ -704,7 +561,7 @@ export default function CallsPage() {
               </div>
             );
           })}
-          {selectedCustomer && crmCalls?.length === 0 && (
+          {hasPairContext && selectedCustomer && crmCalls?.length === 0 && (
             <p className="text-xs text-gray-600 p-4 text-center">No calls found</p>
           )}
         </div>

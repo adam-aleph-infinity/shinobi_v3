@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive, Clock3,
+  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -85,58 +85,21 @@ function BackendStatus() {
 
 function SidebarClock() {
   const [localNow, setLocalNow] = useState<Date>(new Date());
-  const [vmNow, setVmNow] = useState<string>("");
-  const [vmTz, setVmTz] = useState<string>("UTC");
 
   useEffect(() => {
     const id = setInterval(() => setLocalNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const syncVmTime = () => {
-      fetch("/api/time", { signal: AbortSignal.timeout(8000) })
-        .then(async (r) => {
-          if (!r.ok || cancelled) return;
-          const data = await r.json() as { now_vm?: string; tz?: string };
-          if (cancelled) return;
-          setVmNow(data.now_vm ?? "");
-          setVmTz(data.tz ?? "UTC");
-        })
-        .catch(() => { /* keep last known value */ });
-    };
-    syncVmTime();
-    const id = setInterval(syncVmTime, 30000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  const localStamp = localNow.toLocaleString(undefined, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
+  const localTime = localNow.toLocaleTimeString(undefined, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
   });
 
-  const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
-  const vmStamp = vmNow
-    ? vmNow.replace("T", " ").replace(/\.\d+/, "")
-    : "syncing…";
-
   return (
-    <div className="rounded-md border border-gray-800 bg-gray-950/70 px-2.5 py-2 space-y-1">
-      <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wide">
-        <Clock3 className="w-3 h-3" />
-        Time
-      </div>
-      <div className="space-y-0.5 text-[10px] font-mono">
-        <p className="text-gray-400">Local ({localTz}): {localStamp}</p>
-        <p className="text-gray-500">VM ({vmTz}): {vmStamp}</p>
-      </div>
-    </div>
+    <div className="text-[10px] font-mono text-gray-500 text-right leading-none">{localTime}</div>
   );
 }
 
