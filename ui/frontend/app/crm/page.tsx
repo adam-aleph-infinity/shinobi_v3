@@ -282,6 +282,15 @@ export default function CRMPage() {
   const hasFilter = !!(agentFilter || customerFilter || accountIdFilter || crmFilter || minCalls || minDuration || minTx ||
     minDeposits || maxDeposits || minAgentDep || maxAgentDep || ftdAfter || ftdBefore || hasArtifactFilter);
 
+  const showArtifactColumns = hasArtifactFilter;
+  const showArtifactScoreSectionColumn = showArtifactColumns && artifactScoreSection !== "all";
+  const showArtifactViolationTypeColumn = showArtifactColumns && artifactViolationType !== "all";
+  const artifactColumnCount =
+    (showArtifactColumns ? 4 : 0)
+    + (showArtifactScoreSectionColumn ? 1 : 0)
+    + (showArtifactViolationTypeColumn ? 1 : 0);
+  const tableColSpan = 11 + artifactColumnCount;
+
   function clearFilters() {
     setAgentFilter(""); setCustomerFilter(""); setAccountIdFilter(""); setCrmFilter("");
     setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
@@ -712,22 +721,42 @@ export default function CRMPage() {
                   <ThBtn col="duration" label="Duration" align="right" />
                   <ThBtn col="deposits" label="Net Dep."  align="right" />
                   <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">FTD</th>
+                  {showArtifactColumns && (
+                    <>
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Art Avg Score</th>
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Art Violations</th>
+                      {showArtifactScoreSectionColumn && (
+                        <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
+                          {artifactScoreSection}
+                        </th>
+                      )}
+                      {showArtifactViolationTypeColumn && (
+                        <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
+                          {artifactViolationType}
+                        </th>
+                      )}
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Agent Avg Score</th>
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Agent Violations</th>
+                    </>
+                  )}
                   <th className="w-8 px-2 py-3" />
                 </tr>
               </thead>
               <tbody>
                 {isLoading && (
-                  <tr><td colSpan={11} className="text-center py-12 text-gray-500">
+                  <tr><td colSpan={tableColSpan} className="text-center py-12 text-gray-500">
                     <Loader2 className="w-4 h-4 animate-spin inline mr-2" />Loading…
                   </td></tr>
                 )}
                 {error && (
-                  <tr><td colSpan={11} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
+                  <tr><td colSpan={tableColSpan} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
                 )}
                 {!isLoading && displayPairs.map((pair) => {
                   const isSelected = selectedIds.has(pair.id);
                   const slug = `${pair.agent}/${pair.customer}`;
                   const tx = txStats?.[slug];
+                  const artifactPair = artifactPairMap.get(`${pair.agent}::${pair.customer}`);
+                  const artifactAgent = artifactAgentMap.get(pair.agent);
                   return (
                     <tr
                       key={pair.id}
@@ -770,6 +799,36 @@ export default function CRMPage() {
                         ) : <span className="text-gray-600">—</span>}
                       </td>
                       <td className="px-3 py-3 text-right text-gray-300 text-xs">{fmtDate(pair.ftd_at)}</td>
+                      {showArtifactColumns && (
+                        <>
+                          <td className="px-3 py-3 text-right text-indigo-300 font-mono text-xs">
+                            {artifactPair?.avg_score_all_sections != null ? artifactPair.avg_score_all_sections.toFixed(1) : "—"}
+                          </td>
+                          <td className="px-3 py-3 text-right text-red-300 font-mono text-xs">
+                            {artifactPair ? Math.round(artifactPair.total_violations || 0) : "—"}
+                          </td>
+                          {showArtifactScoreSectionColumn && (
+                            <td className="px-3 py-3 text-right text-emerald-300 font-mono text-xs">
+                              {artifactPair?.score_by_section?.[artifactScoreSection] != null
+                                ? Number(artifactPair.score_by_section[artifactScoreSection]).toFixed(1)
+                                : "—"}
+                            </td>
+                          )}
+                          {showArtifactViolationTypeColumn && (
+                            <td className="px-3 py-3 text-right text-amber-300 font-mono text-xs">
+                              {artifactPair?.violations_by_type?.[artifactViolationType] != null
+                                ? Math.round(Number(artifactPair.violations_by_type[artifactViolationType] || 0))
+                                : "—"}
+                            </td>
+                          )}
+                          <td className="px-3 py-3 text-right text-indigo-300 font-mono text-xs">
+                            {artifactAgent?.avg_score_all_sections != null ? artifactAgent.avg_score_all_sections.toFixed(1) : "—"}
+                          </td>
+                          <td className="px-3 py-3 text-right text-red-300 font-mono text-xs">
+                            {artifactAgent ? Math.round(artifactAgent.total_violations || 0) : "—"}
+                          </td>
+                        </>
+                      )}
                       <td className="px-2 py-3 text-center">
                         <button
                           onClick={(e) => { e.stopPropagation(); ctx.setCustomer(pair.customer, pair.agent); }}
@@ -787,7 +846,7 @@ export default function CRMPage() {
                   );
                 })}
                 {!isLoading && displayPairs.length === 0 && (
-                  <tr><td colSpan={11} className="text-center py-12 text-gray-500">No pairs found</td></tr>
+                  <tr><td colSpan={tableColSpan} className="text-center py-12 text-gray-500">No pairs found</td></tr>
                 )}
               </tbody>
             </table>

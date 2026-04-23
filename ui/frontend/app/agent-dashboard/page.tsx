@@ -22,6 +22,7 @@ const fetcher = async (url: string) => {
 type PipelineRunMeta = {
   id: string;
   pipeline_name: string;
+  customer?: string;
   started_at: string | null;
   finished_at: string | null;
   status: string;
@@ -106,6 +107,16 @@ type PairStats = {
   not_found?: boolean;
 };
 
+type AgentStats = {
+  agent: string;
+  total_calls: number;
+  unique_customers: number;
+  net_deposits: number;
+  total_deposits: number;
+  total_withdrawals: number;
+  not_found?: boolean;
+};
+
 function fmtCurrency(n?: number | null) {
   if (n == null) return "—";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
@@ -136,18 +147,41 @@ export default function AgentDashboardPage() {
     activePipelineName,
   } = useAppCtx();
 
-  const hasContext = !!(salesAgent && customer && activePipelineId);
+  const hasContext = !!(salesAgent && activePipelineId);
+  const [customerScope, setCustomerScope] = useState<"selected" | "all">(
+    customer ? "selected" : "all",
+  );
+
+  useEffect(() => {
+    if (!customer) setCustomerScope("all");
+  }, [customer]);
+
+  const scopeCustomer = customerScope === "selected" ? customer : "";
+  const selectedCustomerScopeActive = customerScope === "selected" && !!scopeCustomer;
 
   const { data: pairStats } = useSWR<PairStats>(
-    hasContext
+    hasContext && selectedCustomerScopeActive
       ? `/api/agent-stats/pair?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
       : null,
     fetcher,
   );
 
-  const analyticsUrl = hasContext
-    ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/analytics?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&limit=120`
-    : null;
+  const { data: agentStats } = useSWR<AgentStats>(
+    hasContext
+      ? `/api/agent-stats/${encodeURIComponent(salesAgent)}`
+      : null,
+    fetcher,
+  );
+
+  const analyticsUrl = useMemo(() => {
+    if (!hasContext) return null;
+    const qp = new URLSearchParams();
+    qp.set("sales_agent", salesAgent);
+    if (scopeCustomer) qp.set("customer", scopeCustomer);
+    qp.set("limit", "120");
+    return `/api/pipelines/${encodeURIComponent(activePipelineId)}/analytics?${qp.toString()}`;
+  }, [hasContext, salesAgent, scopeCustomer, activePipelineId]);
+
   const { data: analytics, isLoading, error, mutate } = useSWR<PipelineAnalytics>(
     analyticsUrl,
     fetcher,
@@ -335,7 +369,7 @@ export default function AgentDashboardPage() {
       {!hasContext && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-gray-500">
           <BarChart3 className="w-6 h-6 mx-auto mb-2 text-gray-700" />
-          Select `Sales Agent` + `Customer` + `Pipeline` in the top context bar.
+          Select `Sales Agent` + `Pipeline` in the top context bar.
         </div>
       )}
 
@@ -343,20 +377,31 @@ export default function AgentDashboardPage() {
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
             <StatCard label="Agent" value={salesAgent} />
-            <StatCard label="Customer" value={customer} />
+            <StatCard label="Customer Scope" value={scopeCustomer || "All Customers"} />
             <StatCard label="Pipeline" value={activePipelineName || "Selected"} />
             <StatCard
-              label="Net Deposits (Pair)"
-              value={pairStats?.not_found ? "—" : fmtCurrency(pairStats?.net_deposits)}
+              label={selectedCustomerScopeActive ? "Net Deposits (Pair)" : "Net Deposits (Agent)"}
+              value={
+                selectedCustomerScopeActive
+                  ? (pairStats?.not_found ? "—" : fmtCurrency(pairStats?.net_deposits))
+                  : fmtCurrency(agentStats?.net_deposits)
+              }
               tone={
-                pairStats?.not_found
-                  ? "text-gray-400"
-                  : (pairStats?.net_deposits || 0) >= 0
+                selectedCustomerScopeActive
+                  ? pairStats?.not_found
+                    ? "text-gray-400"
+                    : (pairStats?.net_deposits || 0) >= 0
+                      ? "text-emerald-400"
+                      : "text-red-400"
+                  : (agentStats?.net_deposits || 0) >= 0
                     ? "text-emerald-400"
                     : "text-red-400"
               }
             />
-            <StatCard label="Pair Calls" value={String(pairStats?.call_count ?? "—")} />
+            <StatCard
+              label={selectedCustomerScopeActive ? "Pair Calls" : "Agent Calls"}
+              value={String(selectedCustomerScopeActive ? (pairStats?.call_count ?? "—") : (agentStats?.total_calls ?? "—"))}
+            />
           </div>
 
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 space-y-3">
@@ -373,7 +418,21 @@ export default function AgentDashboardPage() {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2">
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Customer Scope</span>
+                <select
+                  value={customerScope}
+                  onChange={e => setCustomerScope(e.target.value as "selected" | "all")}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                >
+                  <option value="all">All Customers</option>
+                  <option value="selected" disabled={!customer}>
+                    {customer ? `Selected: ${customer}` : "Selected Customer (not set)"}
+                  </option>
+                </select>
+              </label>
+
               <label className="text-[10px] text-gray-500 space-y-1">
                 <span className="block uppercase tracking-wide">Run</span>
                 <select
@@ -384,7 +443,9 @@ export default function AgentDashboardPage() {
                   <option value="all">All Runs</option>
                   {(analytics?.runs ?? []).map(r => (
                     <option key={r.id} value={r.id}>
-                      {formatLocalDateTime(r.started_at)} · {r.id.slice(0, 8)} · {r.status}
+                      {formatLocalDateTime(r.started_at)} · {r.id.slice(0, 8)}
+                      {customerScope === "all" && r.customer ? ` · ${r.customer}` : ""}
+                      {` · ${r.status}`}
                     </option>
                   ))}
                 </select>
@@ -461,12 +522,12 @@ export default function AgentDashboardPage() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <StatCard
-              label="Pair Avg Score"
+              label={selectedCustomerScopeActive ? "Pair Avg Score" : "Scope Avg Score"}
               value={pairSummary?.avg_score_all_sections != null ? `${pairSummary.avg_score_all_sections.toFixed(1)}` : "—"}
               tone="text-emerald-300"
             />
             <StatCard
-              label="Pair Avg Violations/Run"
+              label={selectedCustomerScopeActive ? "Pair Avg Violations/Run" : "Scope Avg Violations/Run"}
               value={pairSummary?.avg_violations_per_run != null ? `${pairSummary.avg_violations_per_run.toFixed(1)}` : "—"}
               tone="text-amber-300"
             />

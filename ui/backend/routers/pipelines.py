@@ -245,6 +245,58 @@ def _normalise_metric_name(name: str) -> str:
     return " ".join(str(name or "").strip().split())
 
 
+def _canonical_score_taxonomy_label(name: str) -> str:
+    n = _normalise_metric_name(name)
+    if not n:
+        return n
+    n = _re.sub(r"^\d+\s*[\).\:-]\s*", "", n).strip()
+    n = _re.sub(r"\s*[\-–:]?\s*score\s*$", "", n, flags=_re.IGNORECASE).strip()
+    n = _re.sub(r"\s*/\s*100\s*$", "", n).strip()
+    return _normalise_metric_name(n)
+
+
+def _canonical_violation_taxonomy_label(name: str) -> str:
+    n = _normalise_metric_name(name)
+    if not n:
+        return n
+    slug = _slug_metric_name(n)
+    if not slug:
+        return n
+
+    if "secret" in slug and "code" in slug:
+        return "Secret Code Violations"
+    if (
+        "simpletruthaboutyourmoney" in slug
+        or ("requiredemail" in slug and "money" in slug)
+        or ("emailviolations" in slug and "simpletruth" in slug)
+    ):
+        return "Simple Truth About Your Money Email Violations"
+    if "emailverification" in slug and (
+        "missing" in slug or "receipt" in slug or "view" in slug or "read" in slug
+    ):
+        return "Email Verification Missing"
+    if ("multiplatform" in slug or "successfee" in slug) and (
+        "followup" in slug or "followupverification" in slug or "verification" in slug
+    ):
+        return "Multi-Platform Follow-Up Missing"
+    if ("multiplatform" in slug or "successfee" in slug) and (
+        "offer" in slug or "introduction" in slug or "introduced" in slug
+    ):
+        return "Multi-Platform Offer Missing"
+    if "totalviolationsallprocedures" in slug:
+        return "Total Violations (All Procedures)"
+    return n
+
+
+def _canonical_taxonomy_label(kind: str, name: str) -> str:
+    k = str(kind or "").strip().lower()
+    if k == "score":
+        return _canonical_score_taxonomy_label(name)
+    if k == "violation":
+        return _canonical_violation_taxonomy_label(name)
+    return _normalise_metric_name(name)
+
+
 def _parse_scores_from_text(content: str) -> dict[str, float]:
     """Extract section scores from JSON or markdown/text score blocks."""
     txt = (content or "").strip()
@@ -371,11 +423,11 @@ def _parse_violations_from_text(content: str) -> dict[str, int]:
     return line_counts
 
 
-def _unique_metric_list(items: list[str]) -> list[str]:
+def _unique_metric_list(items: list[str], kind: str = "") -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in items:
-        key = _normalise_metric_name(raw)
+        key = _canonical_taxonomy_label(kind, raw)
         if not key:
             continue
         low = key.lower()
@@ -390,17 +442,18 @@ def _slug_metric_name(name: str) -> str:
     return _re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
 
 
-def _build_catalog_lookup(items: list[str]) -> dict[str, str]:
+def _build_catalog_lookup(items: list[str], kind: str = "") -> dict[str, str]:
     out: dict[str, str] = {}
     for item in items:
-        slug = _slug_metric_name(item)
+        canonical = _canonical_taxonomy_label(kind, item)
+        slug = _slug_metric_name(canonical)
         if slug and slug not in out:
-            out[slug] = item
+            out[slug] = canonical
     return out
 
 
-def _canonical_metric_name(name: str, lookup: dict[str, str]) -> str:
-    normalized = _normalise_metric_name(name)
+def _canonical_metric_name(name: str, lookup: dict[str, str], kind: str = "") -> str:
+    normalized = _canonical_taxonomy_label(kind, name)
     if not lookup:
         return normalized
     slug = _slug_metric_name(normalized)
@@ -457,7 +510,7 @@ def _heuristic_extract_score_sections_from_prompt(system_prompt: str, user_promp
         if k:
             found.append(k)
 
-    return _unique_metric_list(found)
+    return _unique_metric_list(found, kind="score")
 
 
 def _heuristic_extract_violation_types_from_prompt(system_prompt: str, user_prompt: str) -> list[str]:
@@ -478,7 +531,7 @@ def _heuristic_extract_violation_types_from_prompt(system_prompt: str, user_prom
             if k:
                 found.append(k)
 
-    return _unique_metric_list(found)
+    return _unique_metric_list(found, kind="violation")
 
 
 def _infer_prompt_rubric_with_llm(
@@ -515,15 +568,26 @@ def _infer_prompt_rubric_with_llm(
         f'Return exactly: {{"{key}": ["label 1", "label 2"]}}\n'
         "Rules:\n"
         "- Keep labels short, canonical, and human-readable.\n"
+        "- Normalize equivalent labels into a consistent taxonomy across agents.\n"
         "- Remove duplicates.\n"
         "- Exclude helper/meta keys (for example keys that start with _).\n"
+        + (
+            "- For violation taxonomy, prefer these canonical labels when equivalent:\n"
+            "  Secret Code Violations\n"
+            "  Simple Truth About Your Money Email Violations\n"
+            "  Email Verification Missing\n"
+            "  Multi-Platform Offer Missing\n"
+            "  Multi-Platform Follow-Up Missing\n"
+            if kind == "violation"
+            else ""
+        )
     )
     raw, _ = _llm_call_with_files(sys, user, {}, {}, model, 0.0, db)
     parsed = _extract_json_obj_from_text(raw)
     vals = parsed.get(key, [])
     if not isinstance(vals, list):
         raise RuntimeError(f"invalid rubric payload key '{key}'")
-    labels = _unique_metric_list([str(v or "") for v in vals])
+    labels = _unique_metric_list([str(v or "") for v in vals], kind=kind)
     return labels, model
 
 
@@ -536,7 +600,7 @@ def _load_cached_prompt_rubric(agent_id: str, kind: str, prompt_hash: str) -> Op
         labels = data.get("labels")
         if not isinstance(labels, list):
             return None
-        return _unique_metric_list([str(x or "") for x in labels]), str(data.get("model") or "")
+        return _unique_metric_list([str(x or "") for x in labels], kind=kind), str(data.get("model") or "")
     except Exception:
         return None
 
@@ -556,7 +620,7 @@ def _save_cached_prompt_rubric(
             "agent_id": agent_id,
             "kind": kind,
             "prompt_hash": prompt_hash,
-            "labels": _unique_metric_list(labels),
+            "labels": _unique_metric_list(labels, kind=kind),
             "method": method,
             "model": model,
             "updated_at": datetime.utcnow().isoformat(),
@@ -622,6 +686,8 @@ def _derive_agent_prompt_rubric(
             model = llm_model
     except Exception:
         pass
+
+    labels = _unique_metric_list(labels, kind=kind)
 
     _save_cached_prompt_rubric(
         agent_id=agent_id,
@@ -712,8 +778,8 @@ def _collect_pipeline_rubric_catalog(
             })
 
     return {
-        "score_sections": _unique_metric_list(score_sections),
-        "violation_types": _unique_metric_list(violation_types),
+        "score_sections": _unique_metric_list(score_sections, kind="score"),
+        "violation_types": _unique_metric_list(violation_types, kind="violation"),
         "score_sources": score_sources,
         "violation_sources": violation_sources,
     }
@@ -750,8 +816,8 @@ def _collect_metrics_for_runs(
     violation_totals: dict[str, int] = {}
     run_summaries: list[dict] = []
 
-    score_lookup = _build_catalog_lookup(score_catalog)
-    violation_lookup = _build_catalog_lookup(violation_catalog)
+    score_lookup = _build_catalog_lookup(score_catalog, kind="score")
+    violation_lookup = _build_catalog_lookup(violation_catalog, kind="violation")
 
     for run in runs:
         try:
@@ -797,7 +863,7 @@ def _collect_metrics_for_runs(
                     scores = _parse_scores_from_text(content)
 
             for sec, val in scores.items():
-                canonical_sec = _canonical_metric_name(sec, score_lookup)
+                canonical_sec = _canonical_metric_name(sec, score_lookup, kind="score")
                 score_values.setdefault(canonical_sec, []).append(float(val))
                 per_run_scores.setdefault(canonical_sec, []).append(float(val))
                 parsed_rows.append({
@@ -828,7 +894,7 @@ def _collect_metrics_for_runs(
 
             for proc, cnt in violations.items():
                 n = int(cnt or 0)
-                canonical_proc = _canonical_metric_name(proc, violation_lookup)
+                canonical_proc = _canonical_metric_name(proc, violation_lookup, kind="violation")
                 violation_totals[canonical_proc] = violation_totals.get(canonical_proc, 0) + n
                 per_run_violations[canonical_proc] = per_run_violations.get(canonical_proc, 0) + n
                 parsed_rows.append({
@@ -1562,12 +1628,20 @@ def get_pipeline_metrics_index(
 
         score_map = rs.get("score_by_section") if isinstance(rs.get("score_by_section"), dict) else {}
         for sec, val in score_map.items():
-            sec_key = _canonical_metric_name(str(sec), _build_catalog_lookup(score_catalog))
+            sec_key = _canonical_metric_name(
+                str(sec),
+                _build_catalog_lookup(score_catalog, kind="score"),
+                kind="score",
+            )
             bucket["score_by_section_values"].setdefault(sec_key, []).append(float(val))
 
         viol_map = rs.get("violations_by_type") if isinstance(rs.get("violations_by_type"), dict) else {}
         for vtype, cnt in viol_map.items():
-            v_key = _canonical_metric_name(str(vtype), _build_catalog_lookup(violation_catalog))
+            v_key = _canonical_metric_name(
+                str(vtype),
+                _build_catalog_lookup(violation_catalog, kind="violation"),
+                kind="violation",
+            )
             bucket["violation_by_type"][v_key] = bucket["violation_by_type"].get(v_key, 0) + int(cnt or 0)
 
     pairs_out: list[dict] = []
