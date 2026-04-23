@@ -312,6 +312,116 @@ async def on_startup():
 
     asyncio.create_task(_seed_crm_bg())
 
+    # Reconcile CRM financial fields from index.json into active DB (SQLite/Postgres).
+    # This prevents stale DB deposits when index has newer values.
+    async def _reconcile_crm_financials_bg():
+        from ui.backend.models.crm import CRMPair
+
+        if not settings.index_file.exists():
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def _to_float(v):
+            try:
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    return float(v)
+                s = str(v).strip().replace(",", "")
+                return float(s) if s else None
+            except Exception:
+                return None
+
+        def _do():
+            try:
+                import json as _json
+                rows = _json.loads(settings.index_file.read_text(encoding="utf-8"))
+            except Exception:
+                return 0, 0, 0
+
+            if not isinstance(rows, list) or not rows:
+                return 0, 0, 0
+
+            updated = created = seen = 0
+            now = datetime.now(timezone.utc)
+
+            with Session(engine) as db:
+                for p in rows:
+                    if not isinstance(p, dict):
+                        continue
+                    crm_url = str(p.get("crm") or p.get("crm_url") or "").strip()
+                    account_id = str(p.get("account_id") or "").strip()
+                    agent = str(p.get("agent") or "").strip()
+                    customer = str(p.get("customer") or "").strip()
+                    if not crm_url or not account_id or not agent:
+                        continue
+
+                    nd = _to_float(p.get("net_deposits"))
+                    td = _to_float(p.get("total_deposits"))
+                    tw = _to_float(p.get("total_withdrawals"))
+                    ftd_at = p.get("ftd_at")
+                    if nd is None and td is None and tw is None and ftd_at is None:
+                        continue
+
+                    seen += 1
+                    row_id = f"{crm_url}::{account_id}::{agent}"
+                    pair = db.get(CRMPair, row_id)
+                    if pair is None:
+                        pair = CRMPair(
+                            id=row_id,
+                            crm_url=crm_url,
+                            account_id=account_id,
+                            agent=agent,
+                            customer=customer,
+                            call_count=int(p.get("total_calls") or p.get("recorded_calls") or 0),
+                            total_duration_s=int(p.get("total_duration_s") or 0),
+                            net_deposits=nd if nd is not None else 0.0,
+                            total_deposits=td if td is not None else 0.0,
+                            total_withdrawals=tw if tw is not None else 0.0,
+                            ftd_at=ftd_at if ftd_at is not None else None,
+                            last_synced_at=now,
+                        )
+                        db.add(pair)
+                        created += 1
+                        continue
+
+                    changed = False
+                    if nd is not None and float(pair.net_deposits or 0) != nd:
+                        pair.net_deposits = nd
+                        changed = True
+                    if td is not None and float(pair.total_deposits or 0) != td:
+                        pair.total_deposits = td
+                        changed = True
+                    if tw is not None and float(pair.total_withdrawals or 0) != tw:
+                        pair.total_withdrawals = tw
+                        changed = True
+                    if ftd_at is not None and pair.ftd_at != ftd_at:
+                        pair.ftd_at = ftd_at
+                        changed = True
+
+                    if changed:
+                        pair.last_synced_at = now
+                        db.add(pair)
+                        updated += 1
+
+                if updated or created:
+                    db.commit()
+
+            return updated, created, seen
+
+        try:
+            updated, created, seen = await loop.run_in_executor(None, _do)
+            if updated or created:
+                print(
+                    f"[startup] Reconciled CRM financials from index — "
+                    f"{updated} updated, {created} created (checked {seen} rows)"
+                )
+        except Exception as e:
+            print(f"[startup] CRM financial reconcile failed: {e}")
+
+    asyncio.create_task(_reconcile_crm_financials_bg())
+
     # Re-queue orphaned jobs from previous server runs
     loop = asyncio.get_running_loop()
     with Session(engine) as db:
