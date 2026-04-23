@@ -205,6 +205,8 @@ export default function CRMPage() {
   const [refreshing, setRefreshing]           = useState(false);
   const [transcribing, setTranscribing]       = useState(false);
   const [transcribeResult, setTranscribeResult] = useState<{ submitted: number; skipped: number } | null>(null);
+  const [txingPairId, setTxingPairId]         = useState<string | null>(null);
+  const [txPairResult, setTxPairResult]       = useState<Record<string, { submitted: number; skipped: number }>>({});
 
   // ── Data ───────────────────────────────────────────────────────────────────
   const { data: allPairs } = useSWR<AgentCustomerPair[]>(`/crm/pairs?sort=agent&dir=asc`, fetcher);
@@ -474,6 +476,28 @@ export default function CRMPage() {
       setTranscribeResult({ submitted: 0, skipped: -1 });
     } finally {
       setTranscribing(false);
+    }
+  }
+
+  // ── Single-pair transcription (from Tx cell click) ────────────────────────
+  async function handleTranscribePair(pair: AgentCustomerPair) {
+    if (txingPairId) return; // one at a time
+    setTxingPairId(pair.id);
+    setTxPairResult(prev => { const n = { ...prev }; delete n[pair.id]; return n; });
+    try {
+      const res = await fetch(`${API}/transcription/batch-for-pairs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pairs: [{ crm_url: pair.crm_url, account_id: pair.account_id, agent: pair.agent, customer: pair.customer }],
+        }),
+      });
+      const data = await res.json();
+      setTxPairResult(prev => ({ ...prev, [pair.id]: { submitted: data.submitted ?? 0, skipped: data.skipped ?? 0 } }));
+    } catch {
+      setTxPairResult(prev => ({ ...prev, [pair.id]: { submitted: -1, skipped: 0 } }));
+    } finally {
+      setTxingPairId(null);
     }
   }
 
@@ -784,10 +808,26 @@ export default function CRMPage() {
                       <td className="px-3 py-3 text-right text-gray-300">{pair.call_count || "—"}</td>
                       <td className="px-3 py-3 text-right">
                         {tx ? (
-                          <span className={`text-xs flex items-center justify-end gap-1 ${tx.transcribed > 0 ? "text-teal-400" : "text-gray-600"}`}>
-                            {tx.transcribed > 0 && <CheckCircle2 className="w-3 h-3" />}
-                            {tx.transcribed}/{tx.total}
-                          </span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleTranscribePair(pair); }}
+                            disabled={txingPairId === pair.id}
+                            title="Click to transcribe untranscribed calls for this pair"
+                            className={`text-xs flex items-center justify-end gap-1 transition-colors rounded px-1 -mx-1
+                              ${txingPairId === pair.id ? "opacity-50 cursor-wait" :
+                                tx.transcribed > 0 ? "text-teal-400 hover:text-teal-300 hover:bg-teal-900/30 cursor-pointer" :
+                                "text-gray-500 hover:text-teal-400 hover:bg-teal-900/20 cursor-pointer"}`}
+                          >
+                            {txingPairId === pair.id
+                              ? <Loader2 className="w-3 h-3 animate-spin" />
+                              : tx.transcribed > 0
+                                ? <CheckCircle2 className="w-3 h-3" />
+                                : <Mic2 className="w-3 h-3 opacity-40" />}
+                            {txPairResult[pair.id]
+                              ? txPairResult[pair.id].submitted >= 0
+                                ? <span className="text-indigo-400">{txPairResult[pair.id].submitted}↑</span>
+                                : <span className="text-red-400">err</span>
+                              : `${tx.transcribed}/${tx.total}`}
+                          </button>
                         ) : <span className="text-gray-700 text-xs">—</span>}
                       </td>
                       <td className="px-3 py-3 text-right text-gray-400">{formatDuration(pair.total_duration)}</td>

@@ -299,11 +299,20 @@ export default function CallsPage() {
   const txMap = new Map<string, TxCall>();
   txCalls?.forEach(t => txMap.set(t.call_id, t));
 
-  // Merge CRM calls with transcription status
-  const calls = crmCalls?.map(c => ({
-    ...c,
-    tx: txMap.get(c.call_id) ?? null,
-  })) ?? [];
+  // Merge CRM calls + any tx-only calls (transcribed locally but CRM unavailable)
+  const crmCallSet = new Set((crmCalls ?? []).map(c => c.call_id));
+  const txOnlyCalls = (txCalls ?? []).filter(tx => !crmCallSet.has(tx.call_id));
+
+  const calls = [
+    ...(crmCalls?.map(c => ({ ...c, tx: txMap.get(c.call_id) ?? null })) ?? []),
+    ...txOnlyCalls.map(tx => ({
+      call_id:     tx.call_id,
+      date:        tx.started_at ?? "",
+      duration:    tx.duration_s ?? 0,
+      record_path: "",
+      tx,
+    })),
+  ];
 
   const selectedCallData = calls.find(c => c.call_id === selectedCallId) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
@@ -500,12 +509,18 @@ export default function CallsPage() {
               <p className="text-xs text-gray-600">Select agent + customer in the top context bar</p>
             </div>
           )}
-          {hasPairContext && !selectedCustomer && (
+          {hasPairContext && !selectedCustomer && !txCalls && (
+            <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Loading…</span>
+            </div>
+          )}
+          {hasPairContext && !selectedCustomer && txCalls && txOnlyCalls.length === 0 && (
             <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
               <span>Customer not found for selected agent.</span>
             </div>
           )}
-          {hasPairContext && selectedCustomer && !crmCalls && (
+          {hasPairContext && selectedCustomer && !crmCalls && txOnlyCalls.length === 0 && (
             <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
               <Loader2 className="w-4 h-4 animate-spin" />
               <span>Loading calls…</span>
@@ -561,7 +576,7 @@ export default function CallsPage() {
               </div>
             );
           })}
-          {hasPairContext && selectedCustomer && crmCalls?.length === 0 && (
+          {hasPairContext && calls.length === 0 && (crmCalls !== undefined || txCalls !== undefined) && (
             <p className="text-xs text-gray-600 p-4 text-center">No calls found</p>
           )}
         </div>
