@@ -8,7 +8,6 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
-  CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppCtx } from "@/lib/app-context";
@@ -26,6 +25,40 @@ type PipelineRunMeta = {
   started_at: string | null;
   finished_at: string | null;
   status: string;
+};
+
+type RubricSource = {
+  agent_id: string;
+  agent_name: string;
+  method: string;
+  model: string;
+};
+
+type RubricInfo = {
+  score_sections: string[];
+  violation_types: string[];
+  score_sources: RubricSource[];
+  violation_sources: RubricSource[];
+};
+
+type PairSummary = {
+  run_count: number;
+  avg_score_all_sections: number | null;
+  total_violations: number;
+  avg_violations_per_run: number | null;
+};
+
+type AgentAggregate = {
+  sales_agent: string;
+  run_count: number;
+  customer_count: number;
+  customers: string[];
+  avg_score_all_sections: number | null;
+  total_violations: number;
+  avg_violations_per_run: number | null;
+  avg_violations_per_customer: number | null;
+  score_by_section: Array<{ section: string; average: number; count: number }>;
+  violation_by_type: Array<{ type: string; total: number }>;
 };
 
 type AnalyticsRow = {
@@ -55,6 +88,10 @@ type PipelineAnalytics = {
   rows: AnalyticsRow[];
   score_by_section: Array<{ section: string; average: number; count: number }>;
   violation_by_type: Array<{ type: string; total: number }>;
+  rubric?: RubricInfo;
+  pair_summary?: PairSummary;
+  run_summaries?: Array<Record<string, unknown>>;
+  agent_aggregate?: AgentAggregate;
 };
 
 type PairStats = {
@@ -68,14 +105,6 @@ type PairStats = {
   duplicate_rows_merged?: number;
   not_found?: boolean;
 };
-
-const DEFAULT_VIOLATION_TYPES = [
-  "Secret Code Violations",
-  "\"Simple Truth About Your Money\" Email Violations",
-  "Email Verification Missing",
-  "Multi-Platform Offer Missing",
-  "Multi-Platform Follow-Up Missing",
-];
 
 function fmtCurrency(n?: number | null) {
   if (n == null) return "—";
@@ -158,18 +187,23 @@ export default function AgentDashboardPage() {
   }, [rows, selectedRunId, dateFrom, dateTo]);
 
   const scoreSections = useMemo(
-    () => [...new Set(rows.filter(r => r.metric_type === "score").map(r => r.metric_key))].sort((a, b) => a.localeCompare(b)),
-    [rows],
+    () => {
+      const fromRows = rows.filter(r => r.metric_type === "score").map(r => r.metric_key);
+      const fromRubric = analytics?.rubric?.score_sections ?? [];
+      return [...new Set([...fromRubric, ...fromRows])].sort((a, b) => a.localeCompare(b));
+    },
+    [rows, analytics?.rubric?.score_sections],
   );
   const violationTypes = useMemo(
     () => {
       const dynamic = rows
         .filter(r => r.metric_type === "violation")
         .map(r => r.metric_key);
-      const all = [...new Set([...DEFAULT_VIOLATION_TYPES, ...dynamic])];
+      const fromRubric = analytics?.rubric?.violation_types ?? [];
+      const all = [...new Set([...fromRubric, ...dynamic])];
       return all.sort((a, b) => a.localeCompare(b));
     },
-    [rows],
+    [rows, analytics?.rubric?.violation_types],
   );
 
   const filteredRows = useMemo(() => {
@@ -221,6 +255,23 @@ export default function AgentDashboardPage() {
     });
 
     if ((analytics?.runs?.length ?? 0) > 0) {
+      const requiredScoreRows = scoreSection === "all"
+        ? scoreSections
+        : (scoreSection ? [scoreSection] : []);
+      for (const key of requiredScoreRows) {
+        const exists = out.some(r => r.metric_type === "score" && r.metric_key === key);
+        if (!exists) {
+          out.push({
+            metric_type: "score",
+            metric_key: key,
+            value: 0,
+            samples: 0,
+            runs: 0,
+            latestAt: "",
+          });
+        }
+      }
+
       const requiredViolationRows = violationType === "all"
         ? violationTypes
         : (violationType ? [violationType] : []);
@@ -248,7 +299,7 @@ export default function AgentDashboardPage() {
       return b.latestAt.localeCompare(a.latestAt);
     });
     return out;
-  }, [filteredRows, sortBy, violationType, violationTypes, analytics?.runs]);
+  }, [filteredRows, sortBy, scoreSection, scoreSections, violationType, violationTypes, analytics?.runs]);
 
   const scoreRows = tableRows.filter(r => r.metric_type === "score");
   const violationRows = tableRows.filter(r => r.metric_type === "violation");
@@ -271,6 +322,8 @@ export default function AgentDashboardPage() {
     ? scoreAveragesAllSections.reduce((s, r) => s + r.avg, 0) / scoreAveragesAllSections.length
     : 0;
   const totalViolations = violationRows.reduce((s, r) => s + r.value, 0);
+  const pairSummary = analytics?.pair_summary;
+  const agentAggregate = analytics?.agent_aggregate;
 
   return (
     <div className="space-y-4">
@@ -393,80 +446,148 @@ export default function AgentDashboardPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <StatCard label="Score Sections" value={String(scoreAveragesAllSections.length)} tone="text-indigo-300" />
-            <StatCard label="Avg Score (all sections)" value={scoreAveragesAllSections.length ? `${overallAvgScoreAllSections.toFixed(1)}` : "—"} tone="text-emerald-300" />
-            <StatCard label="Violation Types" value={String(violationRows.length)} tone="text-amber-300" />
-            <StatCard label="Total Violations" value={String(totalViolations)} tone="text-red-300" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <StatCard label="Score Sections (View)" value={String(scoreAveragesAllSections.length)} tone="text-indigo-300" />
+            <StatCard label="Avg Score (View)" value={scoreAveragesAllSections.length ? `${overallAvgScoreAllSections.toFixed(1)}` : "—"} tone="text-emerald-300" />
+            <StatCard label="Violation Types (View)" value={String(violationRows.length)} tone="text-amber-300" />
+            <StatCard label="Total Violations (View)" value={String(totalViolations)} tone="text-red-300" />
           </div>
 
-          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-            <div className="px-3 py-2 border-b border-gray-800">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Scores & Violations Table</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <StatCard
+              label="Pair Avg Score"
+              value={pairSummary?.avg_score_all_sections != null ? `${pairSummary.avg_score_all_sections.toFixed(1)}` : "—"}
+              tone="text-emerald-300"
+            />
+            <StatCard
+              label="Pair Avg Violations/Run"
+              value={pairSummary?.avg_violations_per_run != null ? `${pairSummary.avg_violations_per_run.toFixed(1)}` : "—"}
+              tone="text-amber-300"
+            />
+            <StatCard
+              label="Agent Avg Score (All Customers)"
+              value={agentAggregate?.avg_score_all_sections != null ? `${agentAggregate.avg_score_all_sections.toFixed(1)}` : "—"}
+              tone="text-indigo-300"
+            />
+            <StatCard
+              label="Agent Total Violations"
+              value={agentAggregate?.total_violations != null ? String(agentAggregate.total_violations) : "—"}
+              tone="text-red-300"
+            />
+          </div>
+
+          {analytics?.rubric && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">
+                Prompt-Derived Rubric Sources
+              </p>
+              <p className="text-[11px] text-gray-400 mt-1">
+                Score sources: {(analytics.rubric.score_sources ?? []).map(s => `${s.agent_name} (${s.method})`).join(", ") || "—"}
+              </p>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Violation sources: {(analytics.rubric.violation_sources ?? []).map(s => `${s.agent_name} (${s.method})`).join(", ") || "—"}
+              </p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+              <div className="px-3 py-2 border-b border-gray-800">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Score Panel</p>
+              </div>
+
+              {isLoading && (
+                <div className="py-8 flex items-center justify-center text-gray-500 text-sm">
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading score metrics…
+                </div>
+              )}
+              {error && !isLoading && (
+                <div className="py-8 px-4 text-sm text-red-400 flex items-center justify-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  Failed to load score metrics.
+                </div>
+              )}
+              {!isLoading && !error && scoreRows.length === 0 && (
+                <div className="py-8 px-4 text-sm text-gray-500 text-center">
+                  No score metrics found for this filter selection.
+                </div>
+              )}
+              {!isLoading && !error && scoreRows.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-gray-950/70 border-b border-gray-800 text-gray-500">
+                        <th className="px-3 py-2 text-left font-medium">Section</th>
+                        <th className="px-3 py-2 text-right font-medium">Avg</th>
+                        <th className="px-3 py-2 text-right font-medium">Samples</th>
+                        <th className="px-3 py-2 text-right font-medium">Runs</th>
+                        <th className="px-3 py-2 text-left font-medium">Latest Run</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scoreRows.map((r) => (
+                        <tr key={`score:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                          <td className="px-3 py-2 text-gray-200">{r.metric_key}</td>
+                          <td className="px-3 py-2 text-right font-mono text-emerald-400">{r.value.toFixed(1)}</td>
+                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
+                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
+                          <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
-            {isLoading && (
-              <div className="py-8 flex items-center justify-center text-gray-500 text-sm">
-                <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading metrics…
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+              <div className="px-3 py-2 border-b border-gray-800">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Violation Panel</p>
               </div>
-            )}
 
-            {error && !isLoading && (
-              <div className="py-8 px-4 text-sm text-red-400 flex items-center justify-center gap-2">
-                <AlertTriangle className="w-4 h-4" />
-                Failed to load pipeline analytics.
-              </div>
-            )}
-
-            {!isLoading && !error && tableRows.length === 0 && (
-              <div className="py-8 px-4 text-sm text-gray-500 text-center">
-                No score/violation metrics found for this filter selection.
-              </div>
-            )}
-
-            {!isLoading && !error && tableRows.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="bg-gray-950/70 border-b border-gray-800 text-gray-500">
-                      <th className="px-3 py-2 text-left font-medium">Type</th>
-                      <th className="px-3 py-2 text-left font-medium">Metric</th>
-                      <th className="px-3 py-2 text-right font-medium">Value</th>
-                      <th className="px-3 py-2 text-right font-medium">Samples</th>
-                      <th className="px-3 py-2 text-right font-medium">Runs</th>
-                      <th className="px-3 py-2 text-left font-medium">Latest Run</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tableRows.map((r) => (
-                      <tr key={`${r.metric_type}:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                        <td className="px-3 py-2">
-                          <span className={cn(
-                            "inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px]",
-                            r.metric_type === "score"
-                              ? "bg-indigo-900/30 border-indigo-700/50 text-indigo-300"
-                              : "bg-red-900/20 border-red-700/50 text-red-300",
-                          )}>
-                            {r.metric_type === "score" ? <CheckCircle2 className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
-                            {r.metric_type}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-gray-200">{r.metric_key}</td>
-                        <td className={cn(
-                          "px-3 py-2 text-right font-mono",
-                          r.metric_type === "score" ? "text-emerald-400" : "text-red-400",
-                        )}>
-                          {r.metric_type === "score" ? r.value.toFixed(1) : Math.round(r.value)}
-                        </td>
-                        <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
-                        <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
-                        <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
+              {isLoading && (
+                <div className="py-8 flex items-center justify-center text-gray-500 text-sm">
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading violation metrics…
+                </div>
+              )}
+              {error && !isLoading && (
+                <div className="py-8 px-4 text-sm text-red-400 flex items-center justify-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  Failed to load violation metrics.
+                </div>
+              )}
+              {!isLoading && !error && violationRows.length === 0 && (
+                <div className="py-8 px-4 text-sm text-gray-500 text-center">
+                  No violation metrics found for this filter selection.
+                </div>
+              )}
+              {!isLoading && !error && violationRows.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-gray-950/70 border-b border-gray-800 text-gray-500">
+                        <th className="px-3 py-2 text-left font-medium">Procedure</th>
+                        <th className="px-3 py-2 text-right font-medium">Total</th>
+                        <th className="px-3 py-2 text-right font-medium">Samples</th>
+                        <th className="px-3 py-2 text-right font-medium">Runs</th>
+                        <th className="px-3 py-2 text-left font-medium">Latest Run</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    </thead>
+                    <tbody>
+                      {violationRows.map((r) => (
+                        <tr key={`violation:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                          <td className="px-3 py-2 text-gray-200">{r.metric_key}</td>
+                          <td className="px-3 py-2 text-right font-mono text-red-400">{Math.round(r.value)}</td>
+                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
+                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
+                          <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}

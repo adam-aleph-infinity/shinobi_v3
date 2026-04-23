@@ -26,8 +26,54 @@ function ssSave(updates: Record<string, string>) {
   } catch { /* SSR/private */ }
 }
 
-type SortKey = "agent" | "customer" | "account_id" | "crm" | "calls" | "duration" | "deposits" | "tx";
+type SortKey =
+  | "agent"
+  | "customer"
+  | "account_id"
+  | "crm"
+  | "calls"
+  | "duration"
+  | "deposits"
+  | "tx"
+  | "artifact_pair_avg_score"
+  | "artifact_pair_total_violations"
+  | "artifact_agent_avg_score"
+  | "artifact_agent_total_violations";
 type SortDir = "asc" | "desc";
+
+type ArtifactPairMetric = {
+  sales_agent: string;
+  customer: string;
+  run_count: number;
+  avg_score_all_sections: number | null;
+  total_violations: number;
+  avg_violations_per_run: number | null;
+  score_by_section: Record<string, number>;
+  violations_by_type: Record<string, number>;
+  latest_run_at?: string | null;
+};
+
+type ArtifactAgentMetric = {
+  sales_agent: string;
+  customer_count: number;
+  run_count: number;
+  avg_score_all_sections: number | null;
+  total_violations: number;
+  avg_violations_per_run: number | null;
+  avg_violations_per_customer: number | null;
+  score_by_section: Record<string, number>;
+  violations_by_type: Record<string, number>;
+};
+
+type ArtifactMetricsIndex = {
+  pipeline_id: string;
+  pipeline_name: string;
+  run_count: number;
+  score_sections: string[];
+  violation_types: string[];
+  pairs: ArtifactPairMetric[];
+  agents: ArtifactAgentMetric[];
+};
 
 function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
   if (!active) return <ChevronsUpDown className="w-3.5 h-3.5 text-gray-600" />;
@@ -71,6 +117,19 @@ export default function CRMPage() {
   const [maxAgentDep, _setMaxAgentDep]       = useState("");
   const [ftdAfter, _setFtdAfter]             = useState("");
   const [ftdBefore, _setFtdBefore]           = useState("");
+  const [showArtifactOptions, _setShowArtifactOptions] = useState(false);
+  const [minArtifactAvgScore, _setMinArtifactAvgScore] = useState("");
+  const [maxArtifactAvgScore, _setMaxArtifactAvgScore] = useState("");
+  const [minArtifactTotalViolations, _setMinArtifactTotalViolations] = useState("");
+  const [maxArtifactTotalViolations, _setMaxArtifactTotalViolations] = useState("");
+  const [artifactScoreSection, _setArtifactScoreSection] = useState("all");
+  const [minArtifactScoreSectionValue, _setMinArtifactScoreSectionValue] = useState("");
+  const [artifactViolationType, _setArtifactViolationType] = useState("all");
+  const [minArtifactViolationTypeValue, _setMinArtifactViolationTypeValue] = useState("");
+  const [minArtifactAgentAvgScore, _setMinArtifactAgentAvgScore] = useState("");
+  const [maxArtifactAgentAvgScore, _setMaxArtifactAgentAvgScore] = useState("");
+  const [minArtifactAgentTotalViolations, _setMinArtifactAgentTotalViolations] = useState("");
+  const [maxArtifactAgentTotalViolations, _setMaxArtifactAgentTotalViolations] = useState("");
   const ftdAfterRef  = useRef<HTMLInputElement>(null);
   const ftdBeforeRef = useRef<HTMLInputElement>(null);
 
@@ -87,6 +146,19 @@ export default function CRMPage() {
   function setMaxAgentDep(v: string)    { _setMaxAgentDep(v);    ssSave({ maxAgentDep: v }); }
   function setFtdAfter(v: string)       { _setFtdAfter(v);       ssSave({ ftdAfter: v }); }
   function setFtdBefore(v: string)      { _setFtdBefore(v);      ssSave({ ftdBefore: v }); }
+  function setShowArtifactOptions(v: boolean) { _setShowArtifactOptions(v); ssSave({ showArtifactOptions: v ? "1" : "0" }); }
+  function setMinArtifactAvgScore(v: string) { _setMinArtifactAvgScore(v); ssSave({ minArtifactAvgScore: v }); }
+  function setMaxArtifactAvgScore(v: string) { _setMaxArtifactAvgScore(v); ssSave({ maxArtifactAvgScore: v }); }
+  function setMinArtifactTotalViolations(v: string) { _setMinArtifactTotalViolations(v); ssSave({ minArtifactTotalViolations: v }); }
+  function setMaxArtifactTotalViolations(v: string) { _setMaxArtifactTotalViolations(v); ssSave({ maxArtifactTotalViolations: v }); }
+  function setArtifactScoreSection(v: string) { _setArtifactScoreSection(v); ssSave({ artifactScoreSection: v }); }
+  function setMinArtifactScoreSectionValue(v: string) { _setMinArtifactScoreSectionValue(v); ssSave({ minArtifactScoreSectionValue: v }); }
+  function setArtifactViolationType(v: string) { _setArtifactViolationType(v); ssSave({ artifactViolationType: v }); }
+  function setMinArtifactViolationTypeValue(v: string) { _setMinArtifactViolationTypeValue(v); ssSave({ minArtifactViolationTypeValue: v }); }
+  function setMinArtifactAgentAvgScore(v: string) { _setMinArtifactAgentAvgScore(v); ssSave({ minArtifactAgentAvgScore: v }); }
+  function setMaxArtifactAgentAvgScore(v: string) { _setMaxArtifactAgentAvgScore(v); ssSave({ maxArtifactAgentAvgScore: v }); }
+  function setMinArtifactAgentTotalViolations(v: string) { _setMinArtifactAgentTotalViolations(v); ssSave({ minArtifactAgentTotalViolations: v }); }
+  function setMaxArtifactAgentTotalViolations(v: string) { _setMaxArtifactAgentTotalViolations(v); ssSave({ maxArtifactAgentTotalViolations: v }); }
 
   // ── Sort / selection (persisted) — start from safe defaults; restored post-mount
   const [sortKey, _setSortKey] = useState<SortKey>("agent");
@@ -108,6 +180,19 @@ export default function CRMPage() {
     if (s.maxAgentDep)    _setMaxAgentDep(s.maxAgentDep);
     if (s.ftdAfter)       _setFtdAfter(s.ftdAfter);
     if (s.ftdBefore)      _setFtdBefore(s.ftdBefore);
+    if (s.showArtifactOptions) _setShowArtifactOptions(s.showArtifactOptions === "1");
+    if (s.minArtifactAvgScore) _setMinArtifactAvgScore(s.minArtifactAvgScore);
+    if (s.maxArtifactAvgScore) _setMaxArtifactAvgScore(s.maxArtifactAvgScore);
+    if (s.minArtifactTotalViolations) _setMinArtifactTotalViolations(s.minArtifactTotalViolations);
+    if (s.maxArtifactTotalViolations) _setMaxArtifactTotalViolations(s.maxArtifactTotalViolations);
+    if (s.artifactScoreSection) _setArtifactScoreSection(s.artifactScoreSection);
+    if (s.minArtifactScoreSectionValue) _setMinArtifactScoreSectionValue(s.minArtifactScoreSectionValue);
+    if (s.artifactViolationType) _setArtifactViolationType(s.artifactViolationType);
+    if (s.minArtifactViolationTypeValue) _setMinArtifactViolationTypeValue(s.minArtifactViolationTypeValue);
+    if (s.minArtifactAgentAvgScore) _setMinArtifactAgentAvgScore(s.minArtifactAgentAvgScore);
+    if (s.maxArtifactAgentAvgScore) _setMaxArtifactAgentAvgScore(s.maxArtifactAgentAvgScore);
+    if (s.minArtifactAgentTotalViolations) _setMinArtifactAgentTotalViolations(s.minArtifactAgentTotalViolations);
+    if (s.maxArtifactAgentTotalViolations) _setMaxArtifactAgentTotalViolations(s.maxArtifactAgentTotalViolations);
     if (s.sortKey)        _setSortKey(s.sortKey as SortKey);
     if (s.sortDir)        _setSortDir(s.sortDir as SortDir);
   }, []);
@@ -125,9 +210,17 @@ export default function CRMPage() {
   const { data: allPairs } = useSWR<AgentCustomerPair[]>(`/crm/pairs?sort=agent&dir=asc`, fetcher);
   const crms = allPairs ? Array.from(new Set(allPairs.map(p => p.crm_url))).sort() : [];
 
-  // "tx" is sorted client-side from txStats; use a stable server sort as base
-  const serverSortKey = sortKey === "tx" ? "agent" : sortKey;
-  const serverSortDir = sortKey === "tx" ? "asc"   : sortDir;
+  // Client-side-only sort modes use a stable server base sort.
+  const clientOnlySort = new Set<SortKey>([
+    "tx",
+    "account_id",
+    "artifact_pair_avg_score",
+    "artifact_pair_total_violations",
+    "artifact_agent_avg_score",
+    "artifact_agent_total_violations",
+  ]);
+  const serverSortKey = clientOnlySort.has(sortKey) ? "agent" : sortKey;
+  const serverSortDir = clientOnlySort.has(sortKey) ? "asc" : sortDir;
   const params = new URLSearchParams({ sort: serverSortKey, dir: serverSortDir });
   if (agentFilter)    params.set("agent",               agentFilter);
   if (customerFilter) params.set("customer",            customerFilter);
@@ -147,13 +240,58 @@ export default function CRMPage() {
 
   const { data: txStats } = useSWR<TxStats>(`/final-transcript/tx-stats`, fetcher, { refreshInterval: 30000 });
 
+  const { data: artifactIndex } = useSWR<ArtifactMetricsIndex>(
+    ctx.activePipelineId
+      ? `/pipelines/${encodeURIComponent(ctx.activePipelineId)}/metrics-index?limit=2000`
+      : null,
+    fetcher,
+    { revalidateOnFocus: false },
+  );
+
+  const artifactPairMap = useMemo(() => {
+    const m = new Map<string, ArtifactPairMetric>();
+    for (const p of artifactIndex?.pairs ?? []) {
+      m.set(`${p.sales_agent}::${p.customer}`, p);
+    }
+    return m;
+  }, [artifactIndex?.pairs]);
+
+  const artifactAgentMap = useMemo(() => {
+    const m = new Map<string, ArtifactAgentMetric>();
+    for (const a of artifactIndex?.agents ?? []) {
+      m.set(a.sales_agent, a);
+    }
+    return m;
+  }, [artifactIndex?.agents]);
+
+  const hasArtifactFilter = !!(
+    minArtifactAvgScore ||
+    maxArtifactAvgScore ||
+    minArtifactTotalViolations ||
+    maxArtifactTotalViolations ||
+    (artifactScoreSection && artifactScoreSection !== "all") ||
+    minArtifactScoreSectionValue ||
+    (artifactViolationType && artifactViolationType !== "all") ||
+    minArtifactViolationTypeValue ||
+    minArtifactAgentAvgScore ||
+    maxArtifactAgentAvgScore ||
+    minArtifactAgentTotalViolations ||
+    maxArtifactAgentTotalViolations
+  );
+
   const hasFilter = !!(agentFilter || customerFilter || accountIdFilter || crmFilter || minCalls || minDuration || minTx ||
-    minDeposits || maxDeposits || minAgentDep || maxAgentDep || ftdAfter || ftdBefore);
+    minDeposits || maxDeposits || minAgentDep || maxAgentDep || ftdAfter || ftdBefore || hasArtifactFilter);
 
   function clearFilters() {
     setAgentFilter(""); setCustomerFilter(""); setAccountIdFilter(""); setCrmFilter("");
     setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
     setMinAgentDep(""); setMaxAgentDep(""); setFtdAfter(""); setFtdBefore("");
+    setMinArtifactAvgScore(""); setMaxArtifactAvgScore("");
+    setMinArtifactTotalViolations(""); setMaxArtifactTotalViolations("");
+    setArtifactScoreSection("all"); setMinArtifactScoreSectionValue("");
+    setArtifactViolationType("all"); setMinArtifactViolationTypeValue("");
+    setMinArtifactAgentAvgScore(""); setMaxArtifactAgentAvgScore("");
+    setMinArtifactAgentTotalViolations(""); setMaxArtifactAgentTotalViolations("");
   }
 
   function toggleSort(col: SortKey) {
@@ -176,6 +314,66 @@ export default function CRMPage() {
         return tx ? tx.transcribed >= threshold : false;
       });
     }
+
+    if (hasArtifactFilter) {
+      result = result.filter((p) => {
+        const pairMetric = artifactPairMap.get(`${p.agent}::${p.customer}`);
+        const agentMetric = artifactAgentMap.get(p.agent);
+
+        if (minArtifactAvgScore) {
+          const min = Number(minArtifactAvgScore) || 0;
+          if (pairMetric?.avg_score_all_sections == null || pairMetric.avg_score_all_sections < min) return false;
+        }
+        if (maxArtifactAvgScore) {
+          const max = Number(maxArtifactAvgScore) || 0;
+          if (pairMetric?.avg_score_all_sections == null || pairMetric.avg_score_all_sections > max) return false;
+        }
+        if (minArtifactTotalViolations) {
+          const min = Number(minArtifactTotalViolations) || 0;
+          if ((pairMetric?.total_violations ?? -1) < min) return false;
+        }
+        if (maxArtifactTotalViolations) {
+          const max = Number(maxArtifactTotalViolations) || 0;
+          if ((pairMetric?.total_violations ?? 0) > max) return false;
+        }
+
+        if (artifactScoreSection !== "all") {
+          const secValue = pairMetric?.score_by_section?.[artifactScoreSection];
+          if (secValue == null) return false;
+          if (minArtifactScoreSectionValue) {
+            const min = Number(minArtifactScoreSectionValue) || 0;
+            if (secValue < min) return false;
+          }
+        }
+
+        if (artifactViolationType !== "all") {
+          const violValue = pairMetric?.violations_by_type?.[artifactViolationType] ?? 0;
+          if (minArtifactViolationTypeValue) {
+            const min = Number(minArtifactViolationTypeValue) || 0;
+            if (violValue < min) return false;
+          }
+        }
+
+        if (minArtifactAgentAvgScore) {
+          const min = Number(minArtifactAgentAvgScore) || 0;
+          if (agentMetric?.avg_score_all_sections == null || agentMetric.avg_score_all_sections < min) return false;
+        }
+        if (maxArtifactAgentAvgScore) {
+          const max = Number(maxArtifactAgentAvgScore) || 0;
+          if (agentMetric?.avg_score_all_sections == null || agentMetric.avg_score_all_sections > max) return false;
+        }
+        if (minArtifactAgentTotalViolations) {
+          const min = Number(minArtifactAgentTotalViolations) || 0;
+          if ((agentMetric?.total_violations ?? -1) < min) return false;
+        }
+        if (maxArtifactAgentTotalViolations) {
+          const max = Number(maxArtifactAgentTotalViolations) || 0;
+          if ((agentMetric?.total_violations ?? 0) > max) return false;
+        }
+        return true;
+      });
+    }
+
     if (sortKey === "account_id") {
       result = [...result].sort((a, b) =>
         sortDir === "asc"
@@ -188,9 +386,42 @@ export default function CRMPage() {
         const bTx = txStats[`${b.agent}/${b.customer}`]?.transcribed ?? 0;
         return sortDir === "asc" ? aTx - bTx : bTx - aTx;
       });
+    } else if (sortKey === "artifact_pair_avg_score") {
+      result = [...result].sort((a, b) => {
+        const av = artifactPairMap.get(`${a.agent}::${a.customer}`)?.avg_score_all_sections ?? -1;
+        const bv = artifactPairMap.get(`${b.agent}::${b.customer}`)?.avg_score_all_sections ?? -1;
+        return sortDir === "asc" ? av - bv : bv - av;
+      });
+    } else if (sortKey === "artifact_pair_total_violations") {
+      result = [...result].sort((a, b) => {
+        const av = artifactPairMap.get(`${a.agent}::${a.customer}`)?.total_violations ?? -1;
+        const bv = artifactPairMap.get(`${b.agent}::${b.customer}`)?.total_violations ?? -1;
+        return sortDir === "asc" ? av - bv : bv - av;
+      });
+    } else if (sortKey === "artifact_agent_avg_score") {
+      result = [...result].sort((a, b) => {
+        const av = artifactAgentMap.get(a.agent)?.avg_score_all_sections ?? -1;
+        const bv = artifactAgentMap.get(b.agent)?.avg_score_all_sections ?? -1;
+        return sortDir === "asc" ? av - bv : bv - av;
+      });
+    } else if (sortKey === "artifact_agent_total_violations") {
+      result = [...result].sort((a, b) => {
+        const av = artifactAgentMap.get(a.agent)?.total_violations ?? -1;
+        const bv = artifactAgentMap.get(b.agent)?.total_violations ?? -1;
+        return sortDir === "asc" ? av - bv : bv - av;
+      });
     }
     return result;
-  }, [pairs, txStats, sortKey, sortDir, minTx, accountIdFilter]); // eslint-disable-line
+  }, [
+    pairs, txStats, sortKey, sortDir, minTx, accountIdFilter,
+    hasArtifactFilter, artifactPairMap, artifactAgentMap,
+    minArtifactAvgScore, maxArtifactAvgScore,
+    minArtifactTotalViolations, maxArtifactTotalViolations,
+    artifactScoreSection, minArtifactScoreSectionValue,
+    artifactViolationType, minArtifactViolationTypeValue,
+    minArtifactAgentAvgScore, maxArtifactAgentAvgScore,
+    minArtifactAgentTotalViolations, maxArtifactAgentTotalViolations,
+  ]); // eslint-disable-line
 
   // ── Selection helpers ──────────────────────────────────────────────────────
   const visibleIds  = displayPairs.map(p => p.id);
@@ -338,6 +569,123 @@ export default function CRMPage() {
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Extra artifact filters/sorts */}
+      <div className="mb-3 shrink-0">
+        <button
+          onClick={() => setShowArtifactOptions(!showArtifactOptions)}
+          className="px-3 py-1.5 text-xs rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+        >
+          Extra Artifact Options {showArtifactOptions ? "▾" : "▸"}
+        </button>
+
+        {showArtifactOptions && (
+          <div className="mt-2 p-3 bg-gray-900 border border-gray-800 rounded-xl space-y-3">
+            {!ctx.activePipelineId && (
+              <p className="text-xs text-amber-400">
+                Select a pipeline in the top context bar to enable artifact metrics.
+              </p>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair avg score:</span>
+                <FilterInput label="Min…" value={minArtifactAvgScore} onChange={setMinArtifactAvgScore} type="number" step="1" />
+                <span className="text-[10px] text-gray-700">–</span>
+                <FilterInput label="Max…" value={maxArtifactAvgScore} onChange={setMaxArtifactAvgScore} type="number" step="1" />
+              </div>
+
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair violations:</span>
+                <FilterInput label="Min…" value={minArtifactTotalViolations} onChange={setMinArtifactTotalViolations} type="number" step="1" />
+                <span className="text-[10px] text-gray-700">–</span>
+                <FilterInput label="Max…" value={maxArtifactTotalViolations} onChange={setMaxArtifactTotalViolations} type="number" step="1" />
+              </div>
+
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent avg score:</span>
+                <FilterInput label="Min…" value={minArtifactAgentAvgScore} onChange={setMinArtifactAgentAvgScore} type="number" step="1" />
+                <span className="text-[10px] text-gray-700">–</span>
+                <FilterInput label="Max…" value={maxArtifactAgentAvgScore} onChange={setMaxArtifactAgentAvgScore} type="number" step="1" />
+              </div>
+
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent violations:</span>
+                <FilterInput label="Min…" value={minArtifactAgentTotalViolations} onChange={setMinArtifactAgentTotalViolations} type="number" step="1" />
+                <span className="text-[10px] text-gray-700">–</span>
+                <FilterInput label="Max…" value={maxArtifactAgentTotalViolations} onChange={setMaxArtifactAgentTotalViolations} type="number" step="1" />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Score section:</span>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={artifactScoreSection}
+                  onChange={e => setArtifactScoreSection(e.target.value)}
+                >
+                  <option value="all">All</option>
+                  {(artifactIndex?.score_sections ?? []).map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                <FilterInput
+                  label="Min score…"
+                  value={minArtifactScoreSectionValue}
+                  onChange={setMinArtifactScoreSectionValue}
+                  type="number"
+                  step="1"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Violation type:</span>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={artifactViolationType}
+                  onChange={e => setArtifactViolationType(e.target.value)}
+                >
+                  <option value="all">All</option>
+                  {(artifactIndex?.violation_types ?? []).map(v => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+                <FilterInput
+                  label="Min count…"
+                  value={minArtifactViolationTypeValue}
+                  onChange={setMinArtifactViolationTypeValue}
+                  type="number"
+                  step="1"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Artifact sort:</span>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={`${sortKey}:${sortDir}`}
+                  onChange={(e) => {
+                    const [k, d] = e.target.value.split(":");
+                    setSortKey(k as SortKey);
+                    setSortDir(d as SortDir);
+                  }}
+                >
+                  <option value={`${sortKey}:${sortDir}`}>Keep current</option>
+                  <option value="artifact_pair_avg_score:desc">Pair avg score (high → low)</option>
+                  <option value="artifact_pair_avg_score:asc">Pair avg score (low → high)</option>
+                  <option value="artifact_pair_total_violations:desc">Pair violations (high → low)</option>
+                  <option value="artifact_pair_total_violations:asc">Pair violations (low → high)</option>
+                  <option value="artifact_agent_avg_score:desc">Agent avg score (high → low)</option>
+                  <option value="artifact_agent_avg_score:asc">Agent avg score (low → high)</option>
+                  <option value="artifact_agent_total_violations:desc">Agent violations (high → low)</option>
+                  <option value="artifact_agent_total_violations:asc">Agent violations (low → high)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Table */}

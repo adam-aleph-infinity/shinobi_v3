@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import queue as _queue
 import re as _re
 import threading
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
 _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
+_RUBRIC_DIR = settings.ui_data_dir / "_analytics_rubrics"
 _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
@@ -367,6 +369,509 @@ def _parse_violations_from_text(content: str) -> dict[str, int]:
         return summary_counts
 
     return line_counts
+
+
+def _unique_metric_list(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in items:
+        key = _normalise_metric_name(raw)
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(key)
+    return out
+
+
+def _slug_metric_name(name: str) -> str:
+    return _re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+
+
+def _build_catalog_lookup(items: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in items:
+        slug = _slug_metric_name(item)
+        if slug and slug not in out:
+            out[slug] = item
+    return out
+
+
+def _canonical_metric_name(name: str, lookup: dict[str, str]) -> str:
+    normalized = _normalise_metric_name(name)
+    if not lookup:
+        return normalized
+    slug = _slug_metric_name(normalized)
+    if slug in lookup:
+        return lookup[slug]
+    if slug:
+        for k, v in lookup.items():
+            if slug in k or k in slug:
+                return v
+    return normalized
+
+
+def _extract_json_obj_from_text(content: str) -> dict[str, Any]:
+    txt = str(content or "").strip()
+    if not txt:
+        return {}
+    for candidate in (
+        txt,
+        *_re.findall(r"```(?:json)?\s*([\s\S]*?)```", txt, flags=_re.IGNORECASE),
+        *_re.findall(r"(\{[\s\S]*\})", txt),
+    ):
+        s = str(candidate or "").strip()
+        if not s:
+            continue
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+    return {}
+
+
+def _heuristic_extract_score_sections_from_prompt(system_prompt: str, user_prompt: str) -> list[str]:
+    txt = f"{system_prompt or ''}\n\n{user_prompt or ''}"
+    found: list[str] = []
+
+    # JSON-style schemas: "Section Name": {"score": ...}
+    for sec in _re.findall(
+        r'["“]([^"\n]{2,120})["”]\s*:\s*\{[^{}]{0,200}["“]score["”]',
+        txt,
+        flags=_re.IGNORECASE,
+    ):
+        k = _normalise_metric_name(sec)
+        if k and not k.startswith("_"):
+            found.append(k)
+
+    # Section heading followed by Score line.
+    for sec in _re.findall(
+        r"(?im)^\s*([A-Za-z][^\n:]{2,120})\s*\n\s*Score\s*[:\-]",
+        txt,
+    ):
+        k = _normalise_metric_name(sec)
+        if k:
+            found.append(k)
+
+    return _unique_metric_list(found)
+
+
+def _heuristic_extract_violation_types_from_prompt(system_prompt: str, user_prompt: str) -> list[str]:
+    txt = f"{system_prompt or ''}\n\n{user_prompt or ''}"
+    found: list[str] = []
+
+    # Preferred: explicit "Total Violations by Procedure" bullet list.
+    if "total violations by procedure" in txt.lower():
+        for name in _re.findall(r"(?im)^[•\-\*]\s*(.+?)\s*:\s*[x0-9]+\s*$", txt):
+            k = _normalise_metric_name(name)
+            if k and "total violations" not in k.lower():
+                found.append(k)
+
+    # Fallback: explicit violation labels.
+    if not found:
+        for name in _re.findall(r"(?im)^[•\-\*]\s*(.+?violations?)\s*$", txt):
+            k = _normalise_metric_name(name)
+            if k:
+                found.append(k)
+
+    return _unique_metric_list(found)
+
+
+def _infer_prompt_rubric_with_llm(
+    kind: str,
+    agent_name: str,
+    agent_class: str,
+    system_prompt: str,
+    user_prompt: str,
+    db: Session,
+) -> tuple[list[str], str]:
+    """Use an LLM once to extract stable metric labels from an agent prompt pair."""
+    from ui.backend.routers.universal_agents import _llm_call_with_files
+
+    model = os.environ.get("ANALYTICS_RUBRIC_MODEL", "gpt-5.4")
+    key = "score_sections" if kind == "score" else "violation_types"
+    task = (
+        "Extract ONLY the canonical score section names that are intended to be scored."
+        if kind == "score"
+        else "Extract ONLY the canonical company procedure / violation type labels used for compliance totals."
+    )
+
+    sys = (
+        "You extract metric label rubrics from prompt templates.\n"
+        "Return STRICT JSON only, no markdown, no commentary."
+    )
+    user = (
+        f"Agent name: {agent_name}\n"
+        f"Agent class: {agent_class}\n\n"
+        "SYSTEM PROMPT:\n"
+        f"{system_prompt}\n\n"
+        "USER PROMPT:\n"
+        f"{user_prompt}\n\n"
+        f"TASK: {task}\n\n"
+        f'Return exactly: {{"{key}": ["label 1", "label 2"]}}\n'
+        "Rules:\n"
+        "- Keep labels short, canonical, and human-readable.\n"
+        "- Remove duplicates.\n"
+        "- Exclude helper/meta keys (for example keys that start with _).\n"
+    )
+    raw, _ = _llm_call_with_files(sys, user, {}, {}, model, 0.0, db)
+    parsed = _extract_json_obj_from_text(raw)
+    vals = parsed.get(key, [])
+    if not isinstance(vals, list):
+        raise RuntimeError(f"invalid rubric payload key '{key}'")
+    labels = _unique_metric_list([str(v or "") for v in vals])
+    return labels, model
+
+
+def _load_cached_prompt_rubric(agent_id: str, kind: str, prompt_hash: str) -> Optional[tuple[list[str], str]]:
+    try:
+        path = _RUBRIC_DIR / f"{kind}_{agent_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("prompt_hash") != prompt_hash:
+            return None
+        labels = data.get("labels")
+        if not isinstance(labels, list):
+            return None
+        return _unique_metric_list([str(x or "") for x in labels]), str(data.get("model") or "")
+    except Exception:
+        return None
+
+
+def _save_cached_prompt_rubric(
+    agent_id: str,
+    kind: str,
+    prompt_hash: str,
+    labels: list[str],
+    method: str,
+    model: str,
+) -> None:
+    try:
+        _RUBRIC_DIR.mkdir(parents=True, exist_ok=True)
+        path = _RUBRIC_DIR / f"{kind}_{agent_id}.json"
+        payload = {
+            "agent_id": agent_id,
+            "kind": kind,
+            "prompt_hash": prompt_hash,
+            "labels": _unique_metric_list(labels),
+            "method": method,
+            "model": model,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _derive_agent_prompt_rubric(
+    agent_def: dict,
+    kind: str,
+    db: Session,
+) -> tuple[list[str], str, str]:
+    """Return (labels, method, model). method: cache|llm|heuristic|none"""
+    agent_id = str(agent_def.get("id") or "")
+    agent_name = str(agent_def.get("name") or "")
+    agent_class = str(agent_def.get("agent_class") or "")
+    system_prompt = str(agent_def.get("system_prompt") or "")
+    user_prompt = str(agent_def.get("user_prompt") or "")
+
+    if not (system_prompt or user_prompt):
+        return [], "none", ""
+
+    prompt_hash = _hash_text(
+        json.dumps(
+            {
+                "name": agent_name,
+                "class": agent_class,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
+
+    cached = _load_cached_prompt_rubric(agent_id, kind, prompt_hash)
+    if cached is not None:
+        return cached[0], "cache", cached[1]
+
+    heuristic = (
+        _heuristic_extract_score_sections_from_prompt(system_prompt, user_prompt)
+        if kind == "score"
+        else _heuristic_extract_violation_types_from_prompt(system_prompt, user_prompt)
+    )
+    labels = heuristic
+    method = "heuristic" if heuristic else "none"
+    model = ""
+
+    try:
+        llm_labels, llm_model = _infer_prompt_rubric_with_llm(
+            kind=kind,
+            agent_name=agent_name,
+            agent_class=agent_class,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            db=db,
+        )
+        if llm_labels:
+            labels = llm_labels
+            method = "llm"
+            model = llm_model
+    except Exception:
+        pass
+
+    _save_cached_prompt_rubric(
+        agent_id=agent_id,
+        kind=kind,
+        prompt_hash=prompt_hash,
+        labels=labels,
+        method=method,
+        model=model,
+    )
+    return labels, method, model
+
+
+def _is_score_agent_def(agent_def: dict, sub_type: str) -> bool:
+    st = str(sub_type or "").strip().lower()
+    if st == "persona_score":
+        return True
+    cls = str(agent_def.get("agent_class") or "").lower()
+    name = str(agent_def.get("name") or "").lower()
+    tags = [str(t or "").lower() for t in (agent_def.get("tags") or [])]
+    return (
+        "scorer" in cls
+        or "score" in cls
+        or "scorer" in name
+        or any(("scorer" in t or "score" in t) for t in tags)
+    )
+
+
+def _is_violation_agent_def(agent_def: dict, sub_type: str) -> bool:
+    st = str(sub_type or "").strip().lower()
+    if st == "notes_compliance":
+        return True
+    cls = str(agent_def.get("agent_class") or "").lower()
+    name = str(agent_def.get("name") or "").lower()
+    tags = [str(t or "").lower() for t in (agent_def.get("tags") or [])]
+    return (
+        "compliance" in cls
+        or "notes" in cls
+        or "compliance" in name
+        or "notes" in name
+        or any(("compliance" in t or "notes" in t or "violation" in t) for t in tags)
+    )
+
+
+def _collect_pipeline_rubric_catalog(
+    pipeline_def: dict,
+    agent_map: dict[str, dict],
+    db: Session,
+) -> dict[str, Any]:
+    canvas_json = json.dumps(pipeline_def.get("canvas", {}), ensure_ascii=False)
+    subtype_by_agent = _extract_agent_output_subtypes(canvas_json)
+
+    score_sections: list[str] = []
+    violation_types: list[str] = []
+    score_sources: list[dict] = []
+    violation_sources: list[dict] = []
+    seen_score_agent: set[str] = set()
+    seen_violation_agent: set[str] = set()
+
+    for step in (pipeline_def.get("steps") or []):
+        if not isinstance(step, dict):
+            continue
+        aid = str(step.get("agent_id") or "")
+        if not aid:
+            continue
+        agent_def = agent_map.get(aid, {})
+        sub_type = subtype_by_agent.get(aid, "")
+
+        if _is_score_agent_def(agent_def, sub_type) and aid not in seen_score_agent:
+            seen_score_agent.add(aid)
+            labels, method, model = _derive_agent_prompt_rubric(agent_def, "score", db)
+            score_sections.extend(labels)
+            score_sources.append({
+                "agent_id": aid,
+                "agent_name": str(agent_def.get("name") or aid),
+                "method": method,
+                "model": model,
+            })
+
+        if _is_violation_agent_def(agent_def, sub_type) and aid not in seen_violation_agent:
+            seen_violation_agent.add(aid)
+            labels, method, model = _derive_agent_prompt_rubric(agent_def, "violation", db)
+            violation_types.extend(labels)
+            violation_sources.append({
+                "agent_id": aid,
+                "agent_name": str(agent_def.get("name") or aid),
+                "method": method,
+                "model": model,
+            })
+
+    return {
+        "score_sections": _unique_metric_list(score_sections),
+        "violation_types": _unique_metric_list(violation_types),
+        "score_sources": score_sources,
+        "violation_sources": violation_sources,
+    }
+
+
+def _score_averages_from_values(score_values: dict[str, list[float]]) -> list[dict]:
+    out = [
+        {
+            "section": section,
+            "average": round(sum(vals) / len(vals), 2),
+            "count": len(vals),
+        }
+        for section, vals in score_values.items()
+        if vals
+    ]
+    out.sort(key=lambda x: str(x["section"]).lower())
+    return out
+
+
+def _violation_totals_to_rows(violation_totals: dict[str, int]) -> list[dict]:
+    out = [{"type": k, "total": int(v or 0)} for k, v in violation_totals.items()]
+    out.sort(key=lambda x: (-x["total"], str(x["type"]).lower()))
+    return out
+
+
+def _collect_metrics_for_runs(
+    runs: list[Any],
+    agent_map: dict[str, dict],
+    score_catalog: list[str],
+    violation_catalog: list[str],
+) -> tuple[list[dict], dict[str, list[float]], dict[str, int], list[dict]]:
+    parsed_rows: list[dict] = []
+    score_values: dict[str, list[float]] = {}
+    violation_totals: dict[str, int] = {}
+    run_summaries: list[dict] = []
+
+    score_lookup = _build_catalog_lookup(score_catalog)
+    violation_lookup = _build_catalog_lookup(violation_catalog)
+
+    for run in runs:
+        try:
+            steps = json.loads(getattr(run, "steps_json", "") or "[]")
+            if not isinstance(steps, list):
+                steps = []
+        except Exception:
+            steps = []
+
+        subtype_by_agent = _extract_agent_output_subtypes(getattr(run, "canvas_json", "") or "")
+        run_started_at = run.started_at.isoformat() if getattr(run, "started_at", None) else ""
+        run_finished_at = run.finished_at.isoformat() if getattr(run, "finished_at", None) else None
+
+        per_run_scores: dict[str, list[float]] = {}
+        per_run_violations: dict[str, int] = {}
+
+        for idx, raw_step in enumerate(steps):
+            step = raw_step if isinstance(raw_step, dict) else {}
+            content = str(step.get("content") or "")
+            if not content:
+                continue
+
+            agent_id = str(step.get("agent_id") or "")
+            agent_def = agent_map.get(agent_id, {})
+            agent_name = str(step.get("agent_name") or "") or str(agent_def.get("name") or "") or agent_id or f"Step {idx + 1}"
+            model = str(step.get("model") or "")
+            sub_type = str(subtype_by_agent.get(agent_id, "") or "").strip().lower()
+            unknown_type = sub_type in {"", "unknown"}
+
+            step_state = str(step.get("state") or step.get("status") or "").strip().lower()
+            step_done = step_state in {"done", "completed", "pass", "success", "ok"}
+
+            score_like = _is_score_agent_def(agent_def, sub_type)
+            violation_like = _is_violation_agent_def(agent_def, sub_type)
+
+            parse_scores = score_like or (unknown_type and not violation_like)
+            parse_violations = violation_like or (unknown_type and not score_like)
+
+            scores: dict[str, float] = {}
+            if parse_scores:
+                scores = _parse_scores_from_text(content)
+                if not scores and unknown_type and "score" in content.lower() and "/100" in content:
+                    scores = _parse_scores_from_text(content)
+
+            for sec, val in scores.items():
+                canonical_sec = _canonical_metric_name(sec, score_lookup)
+                score_values.setdefault(canonical_sec, []).append(float(val))
+                per_run_scores.setdefault(canonical_sec, []).append(float(val))
+                parsed_rows.append({
+                    "metric_type": "score",
+                    "metric_key": canonical_sec,
+                    "metric_value": float(val),
+                    "run_id": run.id,
+                    "run_started_at": run_started_at,
+                    "run_finished_at": run_finished_at,
+                    "run_status": run.status,
+                    "step_index": idx,
+                    "step_done": step_done,
+                    "step_state": step_state,
+                    "step_agent_id": agent_id,
+                    "step_agent_name": agent_name,
+                    "step_model": model,
+                    "step_sub_type": sub_type or "unknown",
+                })
+
+            violations: dict[str, int] = {}
+            if parse_violations:
+                violations = _parse_violations_from_text(content)
+                if not violations and (
+                    "[violation]" in content.lower()
+                    or "total violations by procedure" in content.lower()
+                ):
+                    violations = _parse_violations_from_text(content)
+
+            for proc, cnt in violations.items():
+                n = int(cnt or 0)
+                canonical_proc = _canonical_metric_name(proc, violation_lookup)
+                violation_totals[canonical_proc] = violation_totals.get(canonical_proc, 0) + n
+                per_run_violations[canonical_proc] = per_run_violations.get(canonical_proc, 0) + n
+                parsed_rows.append({
+                    "metric_type": "violation",
+                    "metric_key": canonical_proc,
+                    "metric_value": n,
+                    "run_id": run.id,
+                    "run_started_at": run_started_at,
+                    "run_finished_at": run_finished_at,
+                    "run_status": run.status,
+                    "step_index": idx,
+                    "step_done": step_done,
+                    "step_state": step_state,
+                    "step_agent_id": agent_id,
+                    "step_agent_name": agent_name,
+                    "step_model": model,
+                    "step_sub_type": sub_type or "unknown",
+                })
+
+        run_flat_scores = [v for vals in per_run_scores.values() for v in vals]
+        run_summaries.append({
+            "run_id": str(run.id or ""),
+            "pipeline_id": str(getattr(run, "pipeline_id", "") or ""),
+            "pipeline_name": str(getattr(run, "pipeline_name", "") or ""),
+            "sales_agent": str(getattr(run, "sales_agent", "") or ""),
+            "customer": str(getattr(run, "customer", "") or ""),
+            "started_at": run_started_at,
+            "finished_at": run_finished_at,
+            "status": str(getattr(run, "status", "") or ""),
+            "run_avg_score": (
+                round(sum(run_flat_scores) / len(run_flat_scores), 2)
+                if run_flat_scores else None
+            ),
+            "run_total_violations": int(sum(per_run_violations.values())),
+            "score_by_section": {
+                k: round(sum(vs) / len(vs), 2)
+                for k, vs in per_run_scores.items()
+                if vs
+            },
+            "violations_by_type": per_run_violations,
+        })
+
+    return parsed_rows, score_values, violation_totals, run_summaries
 
 def _load_all() -> list[dict]:
     _DIR.mkdir(parents=True, exist_ok=True)
@@ -803,6 +1308,20 @@ def get_pipeline_analytics(
 ):
     """Return parsed score + violation metrics from pipeline run outputs."""
     from ui.backend.models.pipeline_run import PipelineRun as PR
+    try:
+        from ui.backend.routers.universal_agents import _load_all as _load_agents
+        agent_map = {str(a.get("id") or ""): a for a in _load_agents()}
+    except Exception:
+        agent_map = {}
+
+    try:
+        _, pipeline_def = _find_file(pipeline_id)
+    except Exception:
+        pipeline_def = {"id": pipeline_id, "steps": [], "canvas": {}}
+
+    rubric = _collect_pipeline_rubric_catalog(pipeline_def, agent_map, db)
+    score_catalog = rubric.get("score_sections") or []
+    violation_catalog = rubric.get("violation_types") or []
 
     safe_limit = max(1, min(limit, 300))
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
@@ -850,104 +1369,108 @@ def get_pipeline_analytics(
                             "status": single.status,
                         }]
 
-    parsed_rows: list[dict] = []
-    score_values: dict[str, list[float]] = {}
-    violation_totals: dict[str, int] = {}
+    parsed_rows, score_values, violation_totals, selected_run_summaries = _collect_metrics_for_runs(
+        runs=selected_runs,
+        agent_map=agent_map,
+        score_catalog=score_catalog,
+        violation_catalog=violation_catalog,
+    )
+    score_by_section = _score_averages_from_values(score_values)
+    violation_by_type = _violation_totals_to_rows(violation_totals)
 
-    for run in selected_runs:
-        try:
-            steps = json.loads(run.steps_json or "[]")
-            if not isinstance(steps, list):
-                steps = []
-        except Exception:
-            steps = []
-        subtype_by_agent = _extract_agent_output_subtypes(run.canvas_json or "")
-        run_started_at = run.started_at.isoformat() if run.started_at else ""
-        run_finished_at = run.finished_at.isoformat() if run.finished_at else None
+    # Ensure rubric-defined labels appear even when current rows are empty.
+    existing_scores = {str(r["section"]).lower() for r in score_by_section}
+    for sec in score_catalog:
+        if str(sec).lower() in existing_scores:
+            continue
+        score_by_section.append({"section": sec, "average": 0.0, "count": 0})
+    score_by_section.sort(key=lambda x: str(x["section"]).lower())
 
-        for idx, raw_step in enumerate(steps):
-            step = raw_step if isinstance(raw_step, dict) else {}
-            content = str(step.get("content") or "")
-            if not content:
-                continue
+    existing_violations = {str(r["type"]).lower() for r in violation_by_type}
+    for vtype in violation_catalog:
+        if str(vtype).lower() in existing_violations:
+            continue
+        violation_by_type.append({"type": vtype, "total": 0})
+    violation_by_type.sort(key=lambda x: (-int(x["total"]), str(x["type"]).lower()))
 
-            agent_id = str(step.get("agent_id") or "")
-            agent_name = str(step.get("agent_name") or "") or agent_id or f"Step {idx + 1}"
-            model = str(step.get("model") or "")
-            sub_type = str(subtype_by_agent.get(agent_id, "") or "").strip().lower()
+    pair_flat_scores = [v for vals in score_values.values() for v in vals]
+    pair_total_violations = int(sum(violation_totals.values()))
+    pair_run_count = len(selected_runs)
+    pair_summary = {
+        "run_count": pair_run_count,
+        "avg_score_all_sections": (
+            round(sum(pair_flat_scores) / len(pair_flat_scores), 2)
+            if pair_flat_scores else None
+        ),
+        "total_violations": pair_total_violations,
+        "avg_violations_per_run": (
+            round(pair_total_violations / pair_run_count, 2)
+            if pair_run_count else None
+        ),
+    }
 
-            step_state = str(step.get("state") or step.get("status") or "").strip().lower()
-            step_done = step_state in {"done", "completed", "pass", "success", "ok"}
+    agent_aggregate: dict[str, Any] = {}
+    if sales_agent:
+        agent_limit = max(500, safe_limit * 8)
+        stmt_agent = select(PR).where(PR.pipeline_id == pipeline_id, PR.sales_agent == sales_agent)
+        if call_id is not None:
+            stmt_agent = stmt_agent.where(PR.call_id == call_id)
+        stmt_agent = stmt_agent.order_by(PR.started_at.desc()).limit(agent_limit)
+        agent_runs = db.exec(stmt_agent).all()
 
-            # Score rows
-            scores = _parse_scores_from_text(content) if sub_type in {"persona_score", ""} else {}
-            if not scores and sub_type == "":
-                # Fallback on unknown subtype only if strongly score-shaped.
-                if "score" in content.lower() and "/100" in content:
-                    scores = _parse_scores_from_text(content)
+        (
+            _agent_rows_unused,
+            agent_score_values,
+            agent_violation_totals,
+            agent_run_summaries,
+        ) = _collect_metrics_for_runs(
+            runs=agent_runs,
+            agent_map=agent_map,
+            score_catalog=score_catalog,
+            violation_catalog=violation_catalog,
+        )
+        agent_score_by_section = _score_averages_from_values(agent_score_values)
+        agent_violation_by_type = _violation_totals_to_rows(agent_violation_totals)
 
-            for sec, val in scores.items():
-                score_values.setdefault(sec, []).append(float(val))
-                parsed_rows.append({
-                    "metric_type": "score",
-                    "metric_key": sec,
-                    "metric_value": float(val),
-                    "run_id": run.id,
-                    "run_started_at": run_started_at,
-                    "run_finished_at": run_finished_at,
-                    "run_status": run.status,
-                    "step_index": idx,
-                    "step_done": step_done,
-                    "step_state": step_state,
-                    "step_agent_id": agent_id,
-                    "step_agent_name": agent_name,
-                    "step_model": model,
-                    "step_sub_type": sub_type or "unknown",
-                })
+        existing_agent_scores = {str(r["section"]).lower() for r in agent_score_by_section}
+        for sec in score_catalog:
+            if str(sec).lower() not in existing_agent_scores:
+                agent_score_by_section.append({"section": sec, "average": 0.0, "count": 0})
+        agent_score_by_section.sort(key=lambda x: str(x["section"]).lower())
 
-            # Violation rows
-            violations = _parse_violations_from_text(content) if sub_type in {"notes_compliance", ""} else {}
-            if not violations and sub_type == "":
-                # Fallback on unknown subtype only if clearly compliance-shaped.
-                if "[violation]" in content.lower() or "total violations by procedure" in content.lower():
-                    violations = _parse_violations_from_text(content)
+        existing_agent_viol = {str(r["type"]).lower() for r in agent_violation_by_type}
+        for vtype in violation_catalog:
+            if str(vtype).lower() not in existing_agent_viol:
+                agent_violation_by_type.append({"type": vtype, "total": 0})
+        agent_violation_by_type.sort(key=lambda x: (-int(x["total"]), str(x["type"]).lower()))
 
-            for proc, cnt in violations.items():
-                n = int(cnt or 0)
-                violation_totals[proc] = violation_totals.get(proc, 0) + n
-                parsed_rows.append({
-                    "metric_type": "violation",
-                    "metric_key": proc,
-                    "metric_value": n,
-                    "run_id": run.id,
-                    "run_started_at": run_started_at,
-                    "run_finished_at": run_finished_at,
-                    "run_status": run.status,
-                    "step_index": idx,
-                    "step_done": step_done,
-                    "step_state": step_state,
-                    "step_agent_id": agent_id,
-                    "step_agent_name": agent_name,
-                    "step_model": model,
-                    "step_sub_type": sub_type or "unknown",
-                })
+        agent_flat_scores = [v for vals in agent_score_values.values() for v in vals]
+        agent_total_violations = int(sum(agent_violation_totals.values()))
+        agent_run_count = len(agent_runs)
+        agent_customers = sorted({str(r.customer or "") for r in agent_runs if str(r.customer or "").strip()})
 
-    score_by_section = [
-        {
-            "section": section,
-            "average": round(sum(vals) / len(vals), 2),
-            "count": len(vals),
+        agent_aggregate = {
+            "sales_agent": sales_agent,
+            "run_count": agent_run_count,
+            "customer_count": len(agent_customers),
+            "customers": agent_customers,
+            "avg_score_all_sections": (
+                round(sum(agent_flat_scores) / len(agent_flat_scores), 2)
+                if agent_flat_scores else None
+            ),
+            "total_violations": agent_total_violations,
+            "avg_violations_per_run": (
+                round(agent_total_violations / agent_run_count, 2)
+                if agent_run_count else None
+            ),
+            "avg_violations_per_customer": (
+                round(agent_total_violations / len(agent_customers), 2)
+                if agent_customers else None
+            ),
+            "score_by_section": agent_score_by_section,
+            "violation_by_type": agent_violation_by_type,
+            "run_summaries": agent_run_summaries,
         }
-        for section, vals in score_values.items()
-        if vals
-    ]
-    score_by_section.sort(key=lambda x: x["section"].lower())
-
-    violation_by_type = [
-        {"type": proc, "total": total}
-        for proc, total in violation_totals.items()
-    ]
-    violation_by_type.sort(key=lambda x: (-x["total"], x["type"].lower()))
 
     return {
         "pipeline_id": pipeline_id,
@@ -960,6 +1483,205 @@ def get_pipeline_analytics(
         "rows": parsed_rows,
         "score_by_section": score_by_section,
         "violation_by_type": violation_by_type,
+        "rubric": rubric,
+        "pair_summary": pair_summary,
+        "run_summaries": selected_run_summaries,
+        "agent_aggregate": agent_aggregate,
+    }
+
+
+@router.get("/{pipeline_id}/metrics-index")
+def get_pipeline_metrics_index(
+    pipeline_id: str,
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: Optional[str] = Query(None),
+    limit: int = Query(1200),
+    db: Session = Depends(get_session),
+):
+    """Compact pair/agent artifact metrics for CRM filtering/sorting."""
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+
+    try:
+        from ui.backend.routers.universal_agents import _load_all as _load_agents
+        agent_map = {str(a.get("id") or ""): a for a in _load_agents()}
+    except Exception:
+        agent_map = {}
+
+    try:
+        _, pipeline_def = _find_file(pipeline_id)
+    except Exception:
+        pipeline_def = {"id": pipeline_id, "steps": [], "canvas": {}}
+
+    rubric = _collect_pipeline_rubric_catalog(pipeline_def, agent_map, db)
+    score_catalog = rubric.get("score_sections") or []
+    violation_catalog = rubric.get("violation_types") or []
+
+    safe_limit = max(100, min(limit, 3000))
+    stmt = select(PR).where(PR.pipeline_id == pipeline_id)
+    if sales_agent:
+        stmt = stmt.where(PR.sales_agent == sales_agent)
+    if customer:
+        stmt = stmt.where(PR.customer == customer)
+    if call_id is not None:
+        stmt = stmt.where(PR.call_id == call_id)
+    stmt = stmt.order_by(PR.started_at.desc()).limit(safe_limit)
+    runs = db.exec(stmt).all()
+
+    _rows_unused, _score_unused, _viol_unused, run_summaries = _collect_metrics_for_runs(
+        runs=runs,
+        agent_map=agent_map,
+        score_catalog=score_catalog,
+        violation_catalog=violation_catalog,
+    )
+
+    pair_buckets: dict[str, dict[str, Any]] = {}
+    for rs in run_summaries:
+        sa = str(rs.get("sales_agent") or "")
+        cu = str(rs.get("customer") or "")
+        if not (sa and cu):
+            continue
+        key = f"{sa}::{cu}"
+        bucket = pair_buckets.setdefault(key, {
+            "sales_agent": sa,
+            "customer": cu,
+            "run_count": 0,
+            "run_avg_scores": [],
+            "total_violations": 0,
+            "score_by_section_values": {},
+            "violation_by_type": {},
+            "latest_run_at": "",
+        })
+        bucket["run_count"] += 1
+        if isinstance(rs.get("run_avg_score"), (int, float)):
+            bucket["run_avg_scores"].append(float(rs["run_avg_score"]))
+        bucket["total_violations"] += int(rs.get("run_total_violations") or 0)
+        started_at = str(rs.get("started_at") or "")
+        if started_at > bucket["latest_run_at"]:
+            bucket["latest_run_at"] = started_at
+
+        score_map = rs.get("score_by_section") if isinstance(rs.get("score_by_section"), dict) else {}
+        for sec, val in score_map.items():
+            sec_key = _canonical_metric_name(str(sec), _build_catalog_lookup(score_catalog))
+            bucket["score_by_section_values"].setdefault(sec_key, []).append(float(val))
+
+        viol_map = rs.get("violations_by_type") if isinstance(rs.get("violations_by_type"), dict) else {}
+        for vtype, cnt in viol_map.items():
+            v_key = _canonical_metric_name(str(vtype), _build_catalog_lookup(violation_catalog))
+            bucket["violation_by_type"][v_key] = bucket["violation_by_type"].get(v_key, 0) + int(cnt or 0)
+
+    pairs_out: list[dict] = []
+    for pb in pair_buckets.values():
+        score_by_section = {
+            sec: (round(sum(vals) / len(vals), 2) if vals else 0.0)
+            for sec, vals in pb["score_by_section_values"].items()
+        }
+        for sec in score_catalog:
+            score_by_section.setdefault(sec, 0.0)
+
+        violations_by_type = {str(k): int(v or 0) for k, v in pb["violation_by_type"].items()}
+        for vtype in violation_catalog:
+            violations_by_type.setdefault(vtype, 0)
+
+        run_count = int(pb["run_count"] or 0)
+        total_violations = int(pb["total_violations"] or 0)
+        avg_score_all_sections = (
+            round(sum(pb["run_avg_scores"]) / len(pb["run_avg_scores"]), 2)
+            if pb["run_avg_scores"] else None
+        )
+        pairs_out.append({
+            "sales_agent": pb["sales_agent"],
+            "customer": pb["customer"],
+            "run_count": run_count,
+            "avg_score_all_sections": avg_score_all_sections,
+            "total_violations": total_violations,
+            "avg_violations_per_run": (
+                round(total_violations / run_count, 2)
+                if run_count else None
+            ),
+            "score_by_section": score_by_section,
+            "violations_by_type": violations_by_type,
+            "latest_run_at": pb["latest_run_at"] or None,
+        })
+    pairs_out.sort(key=lambda x: (str(x["sales_agent"]).lower(), str(x["customer"]).lower()))
+
+    agent_buckets: dict[str, dict[str, Any]] = {}
+    for pair in pairs_out:
+        sa = str(pair.get("sales_agent") or "")
+        if not sa:
+            continue
+        ab = agent_buckets.setdefault(sa, {
+            "sales_agent": sa,
+            "customer_set": set(),
+            "run_count": 0,
+            "run_avg_scores": [],
+            "total_violations": 0,
+            "score_by_section_values": {},
+            "violation_by_type": {},
+        })
+        ab["customer_set"].add(str(pair.get("customer") or ""))
+        ab["run_count"] += int(pair.get("run_count") or 0)
+        if isinstance(pair.get("avg_score_all_sections"), (int, float)):
+            for _ in range(int(pair.get("run_count") or 0)):
+                ab["run_avg_scores"].append(float(pair["avg_score_all_sections"]))
+        ab["total_violations"] += int(pair.get("total_violations") or 0)
+
+        score_map = pair.get("score_by_section") if isinstance(pair.get("score_by_section"), dict) else {}
+        for sec, val in score_map.items():
+            ab["score_by_section_values"].setdefault(str(sec), []).append(float(val))
+
+        viol_map = pair.get("violations_by_type") if isinstance(pair.get("violations_by_type"), dict) else {}
+        for vtype, cnt in viol_map.items():
+            ab["violation_by_type"][str(vtype)] = ab["violation_by_type"].get(str(vtype), 0) + int(cnt or 0)
+
+    agents_out: list[dict] = []
+    for ab in agent_buckets.values():
+        customers = sorted([c for c in ab["customer_set"] if c])
+        score_by_section = {
+            sec: (round(sum(vals) / len(vals), 2) if vals else 0.0)
+            for sec, vals in ab["score_by_section_values"].items()
+        }
+        for sec in score_catalog:
+            score_by_section.setdefault(sec, 0.0)
+
+        violations_by_type = {str(k): int(v or 0) for k, v in ab["violation_by_type"].items()}
+        for vtype in violation_catalog:
+            violations_by_type.setdefault(vtype, 0)
+
+        run_count = int(ab["run_count"] or 0)
+        total_violations = int(ab["total_violations"] or 0)
+        agents_out.append({
+            "sales_agent": ab["sales_agent"],
+            "customer_count": len(customers),
+            "customers": customers,
+            "run_count": run_count,
+            "avg_score_all_sections": (
+                round(sum(ab["run_avg_scores"]) / len(ab["run_avg_scores"]), 2)
+                if ab["run_avg_scores"] else None
+            ),
+            "total_violations": total_violations,
+            "avg_violations_per_run": (
+                round(total_violations / run_count, 2)
+                if run_count else None
+            ),
+            "avg_violations_per_customer": (
+                round(total_violations / len(customers), 2)
+                if customers else None
+            ),
+            "score_by_section": score_by_section,
+            "violations_by_type": violations_by_type,
+        })
+    agents_out.sort(key=lambda x: str(x["sales_agent"]).lower())
+
+    return {
+        "pipeline_id": pipeline_id,
+        "pipeline_name": runs[0].pipeline_name if runs else "",
+        "run_count": len(runs),
+        "score_sections": score_catalog,
+        "violation_types": violation_catalog,
+        "pairs": pairs_out,
+        "agents": agents_out,
+        "rubric": rubric,
     }
 
 
