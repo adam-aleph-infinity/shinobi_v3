@@ -262,8 +262,11 @@ const CENTERED_X: readonly (readonly number[])[] = [
 // Maximum total stages: input + 3 × (processing + output)
 const MAX_TOTAL_STAGES = 7;
 
+// All valid X snap targets: union of every position used in CENTERED_X
+const ALL_SNAP_X = [...new Set(CENTERED_X.flat())].sort((a, b) => a - b); // [20,140,260,380,500,620,740]
+
 function snapXToSlot(x: number): number {
-  return X_SLOTS.reduce((best, s) => Math.abs(s - x) < Math.abs(best - x) ? s : best, X_SLOTS[0]);
+  return ALL_SNAP_X.reduce((best, s) => Math.abs(s - x) < Math.abs(best - x) ? s : best, ALL_SNAP_X[0]);
 }
 
 function laneY(si: number): number {
