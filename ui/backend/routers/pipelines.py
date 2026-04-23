@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import queue as _queue
+import re as _re
 import threading
 import time
 import uuid
@@ -515,7 +516,9 @@ async def run_pipeline(
 ):
     """Execute a pipeline step-by-step, streaming SSE events."""
     from ui.backend.models.agent_result import AgentResult as AR
+    from ui.backend.models.note import Note
     from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.models.persona import Persona
     from ui.backend.routers.universal_agents import (
         _sse, _FILE_SOURCES, _resolve_input,
         _llm_call_with_files, _llm_call_anthropic_files_streaming,
@@ -609,6 +612,8 @@ async def run_pipeline(
         _input_node_to_step_idxs: dict[str, list[int]] = {}
         _input_node_ids: list[str] = []
         _output_node_ids: list[str] = []
+        _step_output_meta: dict[int, dict[str, str]] = {}
+        _artifact_ctx: dict[str, Optional[str]] = {"latest_persona_id": None}
 
         def _step_status_to_ui(_s: dict) -> str:
             raw = (_s.get("state") or _s.get("status") or "waiting")
@@ -769,13 +774,25 @@ async def run_pipeline(
         _proc_node_to_step_idx = {v: k for k, v in _proc_node_id_by_step_idx.items()}
         _input_node_ids = [n.get("id") for n in _canvas_nodes if n.get("type") == "input" and (n.get("id") or "")]
         _output_node_ids = [n.get("id") for n in _canvas_nodes if n.get("type") == "output" and (n.get("id") or "")]
+        _output_node_data_by_id = {
+            (n.get("id") or ""): (n.get("data", {}) or {})
+            for n in _canvas_nodes
+            if n.get("type") == "output" and (n.get("id") or "")
+        }
         _output_node_to_step_idx = {}
         _input_node_to_step_idxs = {}
         for _e in (pipeline_def.get("canvas", {}) or {}).get("edges", []):
             _src = _e.get("source")
             _tgt = _e.get("target")
             if _src in _proc_node_to_step_idx and _tgt in _output_node_ids:
-                _output_node_to_step_idx[_tgt] = _proc_node_to_step_idx[_src]
+                _si = _proc_node_to_step_idx[_src]
+                _output_node_to_step_idx[_tgt] = _si
+                if _si not in _step_output_meta:
+                    _od = _output_node_data_by_id.get(_tgt, {})
+                    _step_output_meta[_si] = {
+                        "sub_type": str(_od.get("subType") or "").strip(),
+                        "label": str(_od.get("label") or "").strip(),
+                    }
             if _src in _input_node_ids and _tgt in _proc_node_to_step_idx:
                 _arr = _input_node_to_step_idxs.get(_src, [])
                 _arr.append(_proc_node_to_step_idx[_tgt])
@@ -803,6 +820,210 @@ async def run_pipeline(
         _ordered_stages = [(_cs, _grp[_cs]) for _cs in _seen_stages]
         # Rewrite once after canvas maps are available so JSON includes node_states.
         save_steps()
+
+        def _jsonish_to_str(_raw: str) -> str:
+            _text = (_raw or "").strip()
+            if not _text:
+                return "{}"
+            # Strip optional fenced code blocks before JSON parsing.
+            if _text.startswith("```"):
+                _text = _re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", _text)
+                _text = _re.sub(r"\s*```$", "", _text).strip()
+            try:
+                return json.dumps(json.loads(_text), ensure_ascii=False)
+            except Exception:
+                pass
+            _m = _re.search(r"\{[\s\S]+\}", _text)
+            if _m:
+                try:
+                    return json.dumps(json.loads(_m.group(0)), ensure_ascii=False)
+                except Exception:
+                    pass
+            return json.dumps({"_raw_text": _raw}, ensure_ascii=False)
+
+        def _save_notes_rollup_from_pipeline(_step_idx: int, _sub_type: str, _content: str, _model: str) -> None:
+            if not (req.sales_agent and req.customer):
+                return
+            try:
+                _parsed = json.loads(_jsonish_to_str(_content))
+                if not isinstance(_parsed, dict):
+                    _parsed = {"_raw_text": _content}
+            except Exception:
+                _parsed = {"_raw_text": _content}
+            _parsed["_saved_at"] = datetime.utcnow().isoformat()
+            _parsed["_note_count"] = 1
+            _parsed["_preset"] = "(all)"
+            _parsed["_source"] = "pipeline"
+            _parsed["_pipeline_id"] = pipeline_id
+            _parsed["_run_id"] = run_id
+            _parsed["_step_idx"] = _step_idx
+            _parsed["_artifact_sub_type"] = _sub_type
+            _parsed["_model"] = _model
+            _save_dir = settings.ui_data_dir / "_note_rollups" / req.sales_agent
+            _save_dir.mkdir(parents=True, exist_ok=True)
+            (_save_dir / f"{req.customer}__all.json").write_text(
+                json.dumps(_parsed, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            # Keep legacy filename path for compatibility.
+            (_save_dir / f"{req.customer}.json").write_text(
+                json.dumps(_parsed, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+        def _persist_structured_artifact(
+            _step_idx: int,
+            _content: str,
+            _model: str,
+            _agent_name: str,
+            _input_fingerprint: str,
+        ) -> None:
+            _meta = _step_output_meta.get(_step_idx, {})
+            _sub_type = str(_meta.get("sub_type") or "").strip().lower()
+            if _sub_type not in {"persona", "persona_score", "notes", "notes_compliance"}:
+                return
+
+            _fp = _input_fingerprint or _hash_text(_content)[:24]
+            _marker = f"pipeline:{pipeline_id}:{_step_idx}:{_fp}"
+            _label = (_meta.get("label") or "").strip() or f"{pipeline_name} · {_agent_name}"
+            _call_id = req.call_id or f"pipeline:{run_id}:{_step_idx}"
+
+            try:
+                if _sub_type == "persona":
+                    with Session(_db_engine) as _s:
+                        _existing = _s.exec(
+                            select(Persona).where(Persona.persona_agent_id == _marker)
+                        ).first()
+                        if _existing:
+                            if (_existing.content_md or "") != (_content or ""):
+                                _existing.content_md = _content
+                                _existing.model = _model
+                                _s.add(_existing)
+                                _s.commit()
+                            _artifact_ctx["latest_persona_id"] = _existing.id
+                            return
+                        _ptype = "pair" if req.customer else "agent_overall"
+                        _p = Persona(
+                            id=str(uuid.uuid4()),
+                            type=_ptype,
+                            agent=req.sales_agent,
+                            customer=req.customer or None,
+                            label=_label,
+                            content_md=_content,
+                            prompt_used="",
+                            model=_model,
+                            temperature=0.0,
+                            transcript_paths="",
+                            script_path=None,
+                            version=1,
+                            parent_id=None,
+                            persona_agent_id=_marker,
+                            sections_json=None,
+                            score_json=None,
+                        )
+                        _s.add(_p)
+                        _s.commit()
+                        _artifact_ctx["latest_persona_id"] = _p.id
+                    return
+
+                if _sub_type == "persona_score":
+                    _score_json = _jsonish_to_str(_content)
+                    with Session(_db_engine) as _s:
+                        _target = None
+                        _latest_id = _artifact_ctx.get("latest_persona_id")
+                        if _latest_id:
+                            _target = _s.get(Persona, _latest_id)
+                        if not _target:
+                            _q = select(Persona).where(
+                                Persona.agent == req.sales_agent,
+                                Persona.type.in_(["pair", "agent_overall"]),
+                                Persona.persona_agent_id.contains(f"pipeline:{pipeline_id}:"),
+                            )
+                            if req.customer:
+                                _q = _q.where(Persona.customer == req.customer)
+                            else:
+                                _q = _q.where(Persona.customer == None)  # noqa: E711
+                            _q = _q.order_by(Persona.created_at.desc())
+                            _target = _s.exec(_q).first()
+                        if not _target:
+                            log_buffer.emit(
+                                f"[PIPELINE] ⚠ No matching persona row to attach persona_score for step {_step_idx + 1} · {cid_short}"
+                            )
+                            return
+                        _target.score_json = _score_json
+                        _target.model = _target.model or _model
+                        _s.add(_target)
+                        _s.commit()
+                        _artifact_ctx["latest_persona_id"] = _target.id
+                    return
+
+                if _sub_type == "notes":
+                    with Session(_db_engine) as _s:
+                        _existing = _s.exec(
+                            select(Note).where(
+                                Note.agent == req.sales_agent,
+                                Note.customer == req.customer,
+                                Note.call_id == _call_id,
+                                Note.persona_agent_id == _marker,
+                            )
+                        ).first()
+                        if _existing:
+                            if (_existing.content_md or "") != (_content or ""):
+                                _existing.content_md = _content
+                                _existing.model = _model
+                                _s.add(_existing)
+                                _s.commit()
+                        else:
+                            _n = Note(
+                                id=str(uuid.uuid4()),
+                                agent=req.sales_agent,
+                                customer=req.customer,
+                                call_id=_call_id,
+                                persona_agent_id=_marker,
+                                content_md=_content,
+                                score_json=None,
+                                model=_model,
+                                temperature=0.0,
+                            )
+                            _s.add(_n)
+                            _s.commit()
+                    _save_notes_rollup_from_pipeline(_step_idx, _sub_type, _content, _model)
+                    return
+
+                if _sub_type == "notes_compliance":
+                    _score_json = _jsonish_to_str(_content)
+                    with Session(_db_engine) as _s:
+                        _existing = _s.exec(
+                            select(Note).where(
+                                Note.agent == req.sales_agent,
+                                Note.customer == req.customer,
+                                Note.call_id == _call_id,
+                                Note.persona_agent_id == _marker,
+                            )
+                        ).first()
+                        if _existing:
+                            _existing.content_md = _content
+                            _existing.score_json = _score_json
+                            _existing.model = _model
+                            _s.add(_existing)
+                            _s.commit()
+                        else:
+                            _n = Note(
+                                id=str(uuid.uuid4()),
+                                agent=req.sales_agent,
+                                customer=req.customer,
+                                call_id=_call_id,
+                                persona_agent_id=_marker,
+                                content_md=_content,
+                                score_json=_score_json,
+                                model=_model,
+                                temperature=0.0,
+                            )
+                            _s.add(_n)
+                            _s.commit()
+                    return
+            except Exception as _artifact_exc:
+                log_buffer.emit(
+                    f"[PIPELINE] ⚠ Artifact persist failed for step {_step_idx + 1} ({_sub_type}): {_artifact_exc}"
+                )
 
         try:
             log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
@@ -946,6 +1167,13 @@ async def run_pipeline(
 
                         if cached:
                             prev_content = cached.content
+                            _persist_structured_artifact(
+                                _step_idx=step_idx,
+                                _content=cached.content,
+                                _model=model,
+                                _agent_name=agent_name,
+                                _input_fingerprint=input_fingerprint,
+                            )
                             run_steps[step_idx].update({
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
@@ -1094,6 +1322,13 @@ async def run_pipeline(
                         _content=content,
                         _model=model,
                         _pipeline_step_index=step_idx,
+                        _input_fingerprint=input_fingerprint,
+                    )
+                    _persist_structured_artifact(
+                        _step_idx=step_idx,
+                        _content=content,
+                        _model=model,
+                        _agent_name=agent_name,
                         _input_fingerprint=input_fingerprint,
                     )
 
@@ -1357,6 +1592,13 @@ async def run_pipeline(
                         _rn   = _res.get("agent_name", "")
                         _rm   = _res.get("model", "")
                         if _rst == "cached":
+                            _persist_structured_artifact(
+                                _step_idx=_ri,
+                                _content=_res["content"],
+                                _model=_rm,
+                                _agent_name=_rn,
+                                _input_fingerprint=_res.get("input_fingerprint", ""),
+                            )
                             run_steps[_ri].update({
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
@@ -1376,6 +1618,13 @@ async def run_pipeline(
                         elif _rst == "done":
                             _rc  = _res["content"]
                             _ret = _res["exec_time_s"]
+                            _persist_structured_artifact(
+                                _step_idx=_ri,
+                                _content=_rc,
+                                _model=_rm,
+                                _agent_name=_rn,
+                                _input_fingerprint=_res.get("input_fingerprint", ""),
+                            )
                             run_steps[_ri].update({
                                 "state":            "completed",
                                 "end_time":         datetime.utcnow().isoformat(),
