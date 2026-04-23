@@ -347,8 +347,14 @@ export default function AgentDashboardPage() {
             <StatCard label="Pipeline" value={activePipelineName || "Selected"} />
             <StatCard
               label="Net Deposits (Pair)"
-              value={fmtCurrency(pairStats?.net_deposits)}
-              tone={(pairStats?.net_deposits || 0) >= 0 ? "text-emerald-400" : "text-red-400"}
+              value={pairStats?.not_found ? "—" : fmtCurrency(pairStats?.net_deposits)}
+              tone={
+                pairStats?.not_found
+                  ? "text-gray-400"
+                  : (pairStats?.net_deposits || 0) >= 0
+                    ? "text-emerald-400"
+                    : "text-red-400"
+              }
             />
             <StatCard label="Pair Calls" value={String(pairStats?.call_count ?? "—")} />
           </div>

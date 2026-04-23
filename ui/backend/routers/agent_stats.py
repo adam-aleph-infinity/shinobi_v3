@@ -1,12 +1,28 @@
 """Agent summary statistics — total calls, customers, deposits, session analysis insights."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from ui.backend.database import get_session
 from ui.backend.models.crm import CRMPair, CRMCall
 
 router = APIRouter(prefix="/agent-stats", tags=["agent-stats"])
+
+
+def _norm_name(v: str) -> str:
+    return " ".join((v or "").split()).strip().casefold()
+
+
+def _to_float(v) -> float:
+    try:
+        if v is None:
+            return 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip().replace(",", "")
+        return float(s) if s else 0.0
+    except Exception:
+        return 0.0
 
 
 def _dedupe_pairs_with_deposits(
@@ -28,9 +44,9 @@ def _dedupe_pairs_with_deposits(
     out: list[dict] = []
     for rows in grouped.values():
         activity = max(rows, key=lambda r: (r.call_count or 0, r.total_duration_s or 0))
-        net_dep = max((float(r.net_deposits or 0) for r in rows), key=abs, default=0.0)
-        total_dep = max((float(r.total_deposits or 0) for r in rows), default=0.0)
-        total_with = max((float(r.total_withdrawals or 0) for r in rows), default=0.0)
+        net_dep = max((_to_float(r.net_deposits) for r in rows), key=abs, default=0.0)
+        total_dep = max((_to_float(r.total_deposits) for r in rows), default=0.0)
+        total_with = max((_to_float(r.total_withdrawals) for r in rows), default=0.0)
         out.append({
             "agent": activity.agent,
             "customer": activity.customer,
@@ -112,12 +128,44 @@ def get_pair_stats(
     if not agent or not customer:
         raise HTTPException(400, "agent and customer are required")
 
+    # Resolve alias family for robust matching (canonical + known aliases).
+    from ui.backend.services.crm_service import _load_aliases, _auto_detect_re_aliases
+
+    all_agents = [r[0] for r in db.exec(select(CRMPair.agent).distinct()).all() if r and r[0]]
+    aliases = {**_auto_detect_re_aliases(all_agents), **_load_aliases()}
+    canonical_agent = aliases.get(agent, agent)
+    alias_names = [a for a, p in aliases.items() if p == canonical_agent]
+    candidate_agents = sorted(set([agent, canonical_agent, *alias_names]))
+    candidate_agent_norms = sorted({_norm_name(a) for a in candidate_agents if _norm_name(a)})
+    customer_norm = _norm_name(customer)
+
+    # Prefer strict equality first.
     rows = db.exec(
-        select(CRMPair).where(CRMPair.agent == agent, CRMPair.customer == customer)
+        select(CRMPair).where(
+            or_(*[CRMPair.agent == a for a in candidate_agents]),
+            CRMPair.customer == customer,
+        )
     ).all()
+    # Fallback: normalized whitespace/case match.
+    if not rows:
+        rows = db.exec(
+            select(CRMPair).where(
+                or_(*[(func.lower(func.trim(CRMPair.agent)) == a_norm) for a_norm in candidate_agent_norms]),
+                func.lower(func.trim(CRMPair.customer)) == customer_norm,
+            )
+        ).all()
+    # Last fallback: in-memory normalization (handles internal multi-space variants).
+    if not rows:
+        broad_rows = db.exec(
+            select(CRMPair).where(
+                or_(*[(func.lower(func.trim(CRMPair.agent)) == a_norm) for a_norm in candidate_agent_norms]),
+            )
+        ).all()
+        rows = [r for r in broad_rows if _norm_name(r.customer) == customer_norm]
+
     if not rows:
         return {
-            "agent": agent,
+            "agent": canonical_agent,
             "customer": customer,
             "not_found": True,
             "call_count": 0,
@@ -127,7 +175,7 @@ def get_pair_stats(
             "total_withdrawals": 0.0,
         }
 
-    merged = _dedupe_pairs_with_deposits(rows, key_fn=lambda p: (p.agent, p.customer))[0]
+    merged = _dedupe_pairs_with_deposits(rows, key_fn=lambda p: (_norm_name(p.agent), _norm_name(p.customer)))[0]
     return {
         "agent": merged["agent"],
         "customer": merged["customer"],
