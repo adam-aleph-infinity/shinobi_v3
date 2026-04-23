@@ -9,7 +9,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from shared.crm_client import load_credentials, list_agent_customer_pairs, get_calls_for_pair
+from shared.crm_client import (
+    fetch_accounts,
+    get_calls_for_pair,
+    list_agent_customer_pairs,
+    load_credentials,
+)
 from ui.backend.config import settings
 
 _LOCAL_CACHE = settings.ui_data_dir / "all_crm_agents_customers.json"

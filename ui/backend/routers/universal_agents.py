@@ -1193,7 +1193,12 @@ def _resolve_input(source: str, agent_id: Optional[str],
             # Per-pair context: fall back to merged transcript
             source = "merged_transcript"
         else:
-            path = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final" / "smoothed.txt"
+            llm_dir = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final"
+            path = llm_dir / "smoothed.txt"
+            if not path.exists():
+                voted = llm_dir / "voted.txt"
+                if voted.exists():
+                    path = voted
             if not path.exists():
                 raise RuntimeError(f"Transcript not found for call {call_id}")
             return path.read_text(encoding="utf-8").strip()

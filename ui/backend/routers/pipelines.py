@@ -2004,6 +2004,187 @@ async def run_pipeline(
             # Keep legacy compatibility internally but avoid surfacing chain_previous.
             return "artifact_output" if _source == "chain_previous" else _source
 
+        def _has_call_transcript(_call_id: str) -> bool:
+            if not _call_id:
+                return False
+            _llm = settings.agents_dir / req.sales_agent / req.customer / _call_id / "transcribed" / "llm_final"
+            return (_llm / "smoothed.txt").exists() or (_llm / "voted.txt").exists()
+
+        def _pair_has_any_transcript() -> bool:
+            _pair_dir = settings.agents_dir / req.sales_agent / req.customer
+            if not _pair_dir.exists():
+                return False
+            for _call_dir in _pair_dir.iterdir():
+                if not _call_dir.is_dir() or _call_dir.name.startswith("."):
+                    continue
+                _llm = _call_dir / "transcribed" / "llm_final"
+                if (_llm / "smoothed.txt").exists() or (_llm / "voted.txt").exists():
+                    return True
+                _final = _call_dir / "transcribed" / "final"
+                if _final.exists() and any(_final.iterdir()):
+                    return True
+            return False
+
+        def _collect_missing_transcript_requirements() -> tuple[bool, set[str]]:
+            _needs_merged = False
+            _missing_call_ids: set[str] = set()
+            for _step_idx, _step in enumerate(steps):
+                _aid = _step.get("agent_id", "")
+                _adef = agent_map.get(_aid)
+                if not _adef:
+                    continue
+                _ov = _normalize_overrides_for_step(
+                    _step_idx, _adef, _step.get("input_overrides", {})
+                )
+                for _inp in (_adef.get("inputs", []) or []):
+                    _k = _inp.get("key", "")
+                    _src = _public_input_source(
+                        _ov.get(_k, _inp.get("source", "manual"))
+                    )
+                    if _src == "transcript":
+                        if req.call_id:
+                            if not _has_call_transcript(req.call_id):
+                                _missing_call_ids.add(req.call_id)
+                        elif not _pair_has_any_transcript():
+                            _needs_merged = True
+                    elif _src == "merged_transcript":
+                        if not _pair_has_any_transcript():
+                            _needs_merged = True
+            return _needs_merged, _missing_call_ids
+
+        async def _wait_for_jobs(
+            _job_ids: list[str],
+            _timeout_s: int = 5400,
+        ) -> tuple[bool, int]:
+            from ui.backend.models.job import Job, JobStatus
+
+            _ids = list(dict.fromkeys([str(_j) for _j in _job_ids if str(_j)]))
+            if not _ids:
+                return True, 0
+
+            _deadline = time.monotonic() + max(30, int(_timeout_s))
+            _last_log = 0.0
+            while True:
+                _raise_if_stop_requested()
+                with Session(_db_engine) as _s:
+                    _rows = _s.exec(
+                        select(Job).where(Job.id.in_(_ids))
+                    ).all()
+                _status_by_id = {str(_r.id): str(_r.status) for _r in _rows}
+                _done = sum(
+                    1 for _i in _ids
+                    if _status_by_id.get(_i) in ("complete", "failed")
+                )
+                _failed = sum(
+                    1 for _i in _ids
+                    if _status_by_id.get(_i) == "failed"
+                )
+                if _done >= len(_ids):
+                    return _failed == 0, _failed
+                if time.monotonic() - _last_log >= 5.0:
+                    _last_log = time.monotonic()
+                    log_buffer.emit(
+                        f"[PIPELINE] … auto-transcription running ({_done}/{len(_ids)} complete) · {cid_short}"
+                    )
+                if time.monotonic() >= _deadline:
+                    return False, _failed
+                await asyncio.sleep(2.0)
+
+        async def _ensure_transcripts_ready_for_run() -> None:
+            from ui.backend.models.crm import CRMPair
+            from ui.backend.models.job import Job, JobStatus
+            from ui.backend.routers.transcription_process import (
+                BatchPairsRequest, PairSpec, batch_transcribe_pairs,
+            )
+            from ui.backend.services.crm_service import (
+                _auto_detect_re_aliases as _crm_auto_detect_re_aliases,
+                _load_aliases as _crm_load_aliases,
+            )
+
+            _needs_merged, _missing_call_ids = _collect_missing_transcript_requirements()
+            if not _needs_merged and not _missing_call_ids:
+                return
+
+            if not req.sales_agent or not req.customer:
+                raise RuntimeError(
+                    "Pipeline requires transcript inputs but sales_agent/customer context is missing."
+                )
+
+            yield_msg = (
+                f"Missing transcript inputs detected "
+                f"({'call' if _missing_call_ids else 'merged'}). Starting auto-transcription…"
+            )
+            log_buffer.emit(f"[PIPELINE] ⏳ {yield_msg} · {cid_short}")
+            yield _sse("progress", {"msg": yield_msg})
+
+            _file_aliases = _crm_load_aliases()
+            _auto_aliases = _crm_auto_detect_re_aliases([req.sales_agent])
+            _all_aliases = {**_auto_aliases, **_file_aliases}
+            _alias_names = [a for a, p in _all_aliases.items() if p == req.sales_agent]
+            _agent_names = list(dict.fromkeys([req.sales_agent] + _alias_names))
+
+            with Session(_db_engine) as _s:
+                _stmt = select(CRMPair).where(CRMPair.customer == req.customer)
+                if len(_agent_names) == 1:
+                    _stmt = _stmt.where(CRMPair.agent == _agent_names[0])
+                else:
+                    _stmt = _stmt.where(CRMPair.agent.in_(_agent_names))
+                _stmt = _stmt.order_by(CRMPair.call_count.desc())
+                _pair_row = _s.exec(_stmt).first()
+
+            if not _pair_row:
+                raise RuntimeError(
+                    f"Auto-transcription failed: CRM pair not found for {req.sales_agent} / {req.customer}"
+                )
+
+            _call_ids = sorted(_missing_call_ids) if _missing_call_ids else []
+            _batch_req = BatchPairsRequest(
+                pairs=[PairSpec(
+                    crm_url=str(_pair_row.crm_url or ""),
+                    account_id=str(_pair_row.account_id or ""),
+                    agent=req.sales_agent,
+                    customer=req.customer,
+                    call_ids=_call_ids,
+                )]
+            )
+            _batch_res = await batch_transcribe_pairs(_batch_req)
+            _submitted = int(_batch_res.get("submitted") or 0)
+            _skipped = int(_batch_res.get("skipped") or 0)
+            _job_ids = [str(_j) for _j in (_batch_res.get("job_ids") or []) if str(_j)]
+
+            if _submitted == 0 and not _job_ids:
+                # Jobs may already be running from another trigger; wait on inflight.
+                with Session(_db_engine) as _s:
+                    _j_stmt = select(Job).where(
+                        Job.pair_slug == f"{req.sales_agent}/{req.customer}",
+                        Job.status.in_([JobStatus.pending, JobStatus.running]),
+                    )
+                    if _call_ids:
+                        _j_stmt = _j_stmt.where(Job.call_id.in_(_call_ids))
+                    _inflight = _s.exec(_j_stmt).all()
+                _job_ids = [str(_j.id) for _j in _inflight if _j.id]
+
+            if _job_ids:
+                _ok, _failed = await _wait_for_jobs(_job_ids)
+                if not _ok:
+                    raise RuntimeError(
+                        f"Auto-transcription timed out/failed for {_failed} call(s)."
+                    )
+
+            # Re-check required inputs after auto-transcription finished.
+            _needs_merged_after, _missing_call_ids_after = _collect_missing_transcript_requirements()
+            if _needs_merged_after or _missing_call_ids_after:
+                raise RuntimeError(
+                    "Auto-transcription completed but required transcript inputs are still missing."
+                )
+
+            log_buffer.emit(
+                f"[PIPELINE] ✓ Auto-transcription ready (submitted {_submitted}, skipped {_skipped}) · {cid_short}"
+            )
+            yield _sse("progress", {
+                "msg": f"Auto-transcription ready (submitted {_submitted}, skipped {_skipped})",
+            })
+
         def _persist_agent_result(
             _agent_id: str,
             _agent_name: str,
@@ -2339,6 +2520,8 @@ async def run_pipeline(
                 )
 
         try:
+            async for _evt in _ensure_transcripts_ready_for_run():
+                yield _evt
             log_buffer.emit(f"[PIPELINE] ▶ {pipeline_name} ({len(steps)} steps) · {cid_short}")
             yield _sse("pipeline_start", {"total": len(steps), "name": pipeline_name, "run_id": run_id})
 

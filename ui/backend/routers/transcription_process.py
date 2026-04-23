@@ -52,6 +52,7 @@ class PairSpec(BaseModel):
     account_id: str
     agent: str
     customer: str
+    call_ids: List[str] = []
 
 
 class BatchPairsRequest(BaseModel):
@@ -131,6 +132,7 @@ async def batch_transcribe_pairs(req: BatchPairsRequest):
         nonlocal submitted, skipped
         async with sem:
             try:
+                selected_call_ids = {str(cid) for cid in (spec.call_ids or []) if str(cid)}
                 calls = await loop.run_in_executor(
                     None,
                     lambda: _get_calls(
@@ -146,6 +148,8 @@ async def batch_transcribe_pairs(req: BatchPairsRequest):
                     for c in calls:
                         record_path = c.get("record_path", "")
                         call_id = str(c.get("call_id", ""))
+                        if selected_call_ids and call_id not in selected_call_ids:
+                            continue
                         if not record_path or not call_id:
                             skipped += 1
                             continue

@@ -269,7 +269,36 @@ export default function CallsPage() {
     selectedAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(selectedAgent)}` : null,
     fetcher
   );
-  const selectedCustomer = (customers ?? []).find(c => c.customer === selectedCustomerName) ?? null;
+  const norm = (v?: string | null) => String(v || "").trim().toLowerCase();
+  const selectedCustomer = (customers ?? []).find(c => norm(c.customer) === norm(selectedCustomerName)) ?? null;
+
+  // Fallback lookup from pair list when nav/customers doesn't include the active customer yet.
+  const { data: selectedPairRows } = useSWR<any[]>(
+    selectedAgent && selectedCustomerName && !selectedCustomer
+      ? `/api/crm/pairs?agent=${encodeURIComponent(selectedAgent)}&agent_exact=true&customer=${encodeURIComponent(selectedCustomerName)}&sort=calls&dir=desc`
+      : null,
+    fetcher,
+  );
+  const selectedPairFallback = (() => {
+    const rows = (selectedPairRows ?? []) as any[];
+    if (!rows.length) return null;
+    const exact = rows.filter(r => norm(r?.customer) === norm(selectedCustomerName));
+    const pool = exact.length ? exact : rows;
+    return [...pool].sort((a, b) => Number(b?.call_count || 0) - Number(a?.call_count || 0))[0] ?? null;
+  })();
+  const selectedPairMeta = selectedCustomer
+    ? {
+        crm_url: selectedCustomer.crm_url,
+        account_id: selectedCustomer.account_id,
+        customer: selectedCustomer.customer,
+      }
+    : selectedPairFallback
+      ? {
+          crm_url: selectedPairFallback.crm_url,
+          account_id: selectedPairFallback.account_id,
+          customer: selectedPairFallback.customer,
+        }
+      : null;
 
   // Fast path: local DB — instant, no live CRM needed
   const { data: dbCalls } = useSWR<CRMCall[]>(
@@ -280,10 +309,10 @@ export default function CallsPage() {
   );
 
   // Slow path: live CRM / calls.json — only triggered when DB returns empty
-  const needsCrmFetch = dbCalls !== undefined && dbCalls.length === 0 && !!selectedCustomer;
+  const needsCrmFetch = dbCalls !== undefined && dbCalls.length === 0 && !!selectedPairMeta;
   const { data: crmCalls } = useSWR<CRMCall[]>(
     needsCrmFetch
-      ? `/api/crm/calls/${selectedCustomer!.account_id}?crm_url=${encodeURIComponent(selectedCustomer!.crm_url)}&agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
+      ? `/api/crm/calls/${selectedPairMeta!.account_id}?crm_url=${encodeURIComponent(selectedPairMeta!.crm_url)}&agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
       : null,
     (url: string) => fetch(url, { signal: AbortSignal.timeout(60000) }).then(r => r.json()),
   );
@@ -382,7 +411,7 @@ export default function CallsPage() {
 
   // ── Transcribe action ─────────────────────────────────────────────────────
   async function handleTranscribe() {
-    if (!selectedCallData || !selectedCustomer) return;
+    if (!selectedCallData || !selectedPairMeta) return;
     setTranscribing(true);
     setTranscribeError("");
     try {
@@ -390,10 +419,10 @@ export default function CallsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          crm_url:     selectedCustomer.crm_url,
-          account_id:  selectedCustomer.account_id,
+          crm_url:     selectedPairMeta.crm_url,
+          account_id:  selectedPairMeta.account_id,
           agent:       selectedAgent,
-          customer:    selectedCustomer.customer,
+          customer:    selectedPairMeta.customer,
           call_id:     selectedCallData.call_id,
           record_path: selectedCallData.record_path,
         }),
@@ -430,9 +459,9 @@ export default function CallsPage() {
 
   async function handleBatchTranscribe() {
     if (checkedCallIds.size === 0) return;
-    // Prefer selectedCustomer; fall back to DB call metadata
-    const crmUrl    = selectedCustomer?.crm_url    ?? dbCalls?.[0]?.crm_url    ?? "";
-    const accountId = selectedCustomer?.account_id ?? dbCalls?.[0]?.account_id ?? "";
+    // Prefer selected pair metadata; fall back to DB call metadata
+    const crmUrl    = selectedPairMeta?.crm_url    ?? dbCalls?.[0]?.crm_url    ?? "";
+    const accountId = selectedPairMeta?.account_id ?? dbCalls?.[0]?.account_id ?? "";
     if (!crmUrl || !accountId || !selectedAgent || !selectedCustomerName) {
       setBatchError("Missing CRM info — sync this pair from the CRM browser first");
       return;
@@ -444,7 +473,13 @@ export default function CallsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          pairs: [{ crm_url: crmUrl, account_id: accountId, agent: selectedAgent, customer: selectedCustomerName }],
+          pairs: [{
+            crm_url: crmUrl,
+            account_id: accountId,
+            agent: selectedAgent,
+            customer: selectedCustomerName,
+            call_ids: [...checkedCallIds],
+          }],
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -525,13 +560,13 @@ export default function CallsPage() {
               <p className="text-xs text-gray-600">Select agent + customer in the top context bar</p>
             </div>
           )}
-          {hasPairContext && !selectedCustomer && !txCalls && (
+          {hasPairContext && !selectedPairMeta && !txCalls && (
             <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
               <Loader2 className="w-4 h-4 animate-spin" />
               <span>Loading…</span>
             </div>
           )}
-          {hasPairContext && !selectedCustomer && txCalls && txOnlyCalls.length === 0 && (
+          {hasPairContext && !selectedPairMeta && txCalls && txOnlyCalls.length === 0 && (
             <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
               <span>Customer not found for selected agent.</span>
             </div>
