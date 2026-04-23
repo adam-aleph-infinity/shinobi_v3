@@ -57,15 +57,25 @@ type PipelineAnalytics = {
   violation_by_type: Array<{ type: string; total: number }>;
 };
 
-type AgentStats = {
+type PairStats = {
   agent: string;
-  total_calls: number;
-  unique_customers: number;
+  customer: string;
+  call_count: number;
+  total_duration_s: number;
   net_deposits: number;
   total_deposits: number;
   total_withdrawals: number;
-  avg_call_duration_s: number;
+  duplicate_rows_merged?: number;
+  not_found?: boolean;
 };
+
+const DEFAULT_VIOLATION_TYPES = [
+  "Secret Code Violations",
+  "\"Simple Truth About Your Money\" Email Violations",
+  "Email Verification Missing",
+  "Multi-Platform Offer Missing",
+  "Multi-Platform Follow-Up Missing",
+];
 
 function fmtCurrency(n?: number | null) {
   if (n == null) return "—";
@@ -99,8 +109,10 @@ export default function AgentDashboardPage() {
 
   const hasContext = !!(salesAgent && customer && activePipelineId);
 
-  const { data: stats } = useSWR<AgentStats>(
-    salesAgent ? `/api/agent-stats/${encodeURIComponent(salesAgent)}` : null,
+  const { data: pairStats } = useSWR<PairStats>(
+    hasContext
+      ? `/api/agent-stats/pair?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
     fetcher,
   );
 
@@ -135,26 +147,38 @@ export default function AgentDashboardPage() {
   }, [analytics?.runs, selectedRunId]);
 
   const rows = analytics?.rows ?? [];
-  const scoreSections = useMemo(
-    () => [...new Set(rows.filter(r => r.metric_type === "score").map(r => r.metric_key))].sort((a, b) => a.localeCompare(b)),
-    [rows],
-  );
-  const violationTypes = useMemo(
-    () => [...new Set(rows.filter(r => r.metric_type === "violation").map(r => r.metric_key))].sort((a, b) => a.localeCompare(b)),
-    [rows],
-  );
-
-  const filteredRows = useMemo(() => {
+  const baseFilteredRows = useMemo(() => {
     return rows.filter(r => {
       if (selectedRunId !== "all" && r.run_id !== selectedRunId) return false;
       const d = formatLocalDate(r.run_started_at || "");
       if (dateFrom && d < dateFrom) return false;
       if (dateTo && d > dateTo) return false;
+      return true;
+    });
+  }, [rows, selectedRunId, dateFrom, dateTo]);
+
+  const scoreSections = useMemo(
+    () => [...new Set(rows.filter(r => r.metric_type === "score").map(r => r.metric_key))].sort((a, b) => a.localeCompare(b)),
+    [rows],
+  );
+  const violationTypes = useMemo(
+    () => {
+      const dynamic = rows
+        .filter(r => r.metric_type === "violation")
+        .map(r => r.metric_key);
+      const all = [...new Set([...DEFAULT_VIOLATION_TYPES, ...dynamic])];
+      return all.sort((a, b) => a.localeCompare(b));
+    },
+    [rows],
+  );
+
+  const filteredRows = useMemo(() => {
+    return baseFilteredRows.filter(r => {
       if (scoreSection !== "all" && r.metric_type === "score" && r.metric_key !== scoreSection) return false;
       if (violationType !== "all" && r.metric_type === "violation" && r.metric_key !== violationType) return false;
       return true;
     });
-  }, [rows, selectedRunId, dateFrom, dateTo, scoreSection, violationType]);
+  }, [baseFilteredRows, scoreSection, violationType]);
 
   const tableRows = useMemo(() => {
     const map = new Map<string, {
@@ -196,6 +220,25 @@ export default function AgentDashboardPage() {
       };
     });
 
+    if ((analytics?.runs?.length ?? 0) > 0) {
+      const requiredViolationRows = violationType === "all"
+        ? violationTypes
+        : (violationType ? [violationType] : []);
+      for (const key of requiredViolationRows) {
+        const exists = out.some(r => r.metric_type === "violation" && r.metric_key === key);
+        if (!exists) {
+          out.push({
+            metric_type: "violation",
+            metric_key: key,
+            value: 0,
+            samples: 0,
+            runs: 0,
+            latestAt: "",
+          });
+        }
+      }
+    }
+
     out.sort((a, b) => {
       if (sortBy === "metric_asc") return a.metric_key.localeCompare(b.metric_key);
       if (sortBy === "metric_desc") return b.metric_key.localeCompare(a.metric_key);
@@ -205,12 +248,27 @@ export default function AgentDashboardPage() {
       return b.latestAt.localeCompare(a.latestAt);
     });
     return out;
-  }, [filteredRows, sortBy]);
+  }, [filteredRows, sortBy, violationType, violationTypes, analytics?.runs]);
 
   const scoreRows = tableRows.filter(r => r.metric_type === "score");
   const violationRows = tableRows.filter(r => r.metric_type === "violation");
-  const overallAvgScore = scoreRows.length
-    ? scoreRows.reduce((s, r) => s + r.value, 0) / scoreRows.length
+
+  const scoreAveragesAllSections = useMemo(() => {
+    const sectionMap = new Map<string, number[]>();
+    for (const row of baseFilteredRows) {
+      if (row.metric_type !== "score") continue;
+      const arr = sectionMap.get(row.metric_key) ?? [];
+      arr.push(Number(row.metric_value || 0));
+      sectionMap.set(row.metric_key, arr);
+    }
+    return [...sectionMap.entries()].map(([section, values]) => ({
+      section,
+      avg: values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0,
+    }));
+  }, [baseFilteredRows]);
+
+  const overallAvgScoreAllSections = scoreAveragesAllSections.length
+    ? scoreAveragesAllSections.reduce((s, r) => s + r.avg, 0) / scoreAveragesAllSections.length
     : 0;
   const totalViolations = violationRows.reduce((s, r) => s + r.value, 0);
 
@@ -235,11 +293,11 @@ export default function AgentDashboardPage() {
             <StatCard label="Customer" value={customer} />
             <StatCard label="Pipeline" value={activePipelineName || "Selected"} />
             <StatCard
-              label="Net Deposits"
-              value={fmtCurrency(stats?.net_deposits)}
-              tone={(stats?.net_deposits || 0) >= 0 ? "text-emerald-400" : "text-red-400"}
+              label="Net Deposits (Pair)"
+              value={fmtCurrency(pairStats?.net_deposits)}
+              tone={(pairStats?.net_deposits || 0) >= 0 ? "text-emerald-400" : "text-red-400"}
             />
-            <StatCard label="Total Calls" value={String(stats?.total_calls ?? "—")} />
+            <StatCard label="Pair Calls" value={String(pairStats?.call_count ?? "—")} />
           </div>
 
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 space-y-3">
@@ -336,8 +394,8 @@ export default function AgentDashboardPage() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <StatCard label="Score Sections" value={String(scoreRows.length)} tone="text-indigo-300" />
-            <StatCard label="Avg Score (sections)" value={scoreRows.length ? `${overallAvgScore.toFixed(1)}` : "—"} tone="text-emerald-300" />
+            <StatCard label="Score Sections" value={String(scoreAveragesAllSections.length)} tone="text-indigo-300" />
+            <StatCard label="Avg Score (all sections)" value={scoreAveragesAllSections.length ? `${overallAvgScoreAllSections.toFixed(1)}` : "—"} tone="text-emerald-300" />
             <StatCard label="Violation Types" value={String(violationRows.length)} tone="text-amber-300" />
             <StatCard label="Total Violations" value={String(totalViolations)} tone="text-red-300" />
           </div>
@@ -402,7 +460,7 @@ export default function AgentDashboardPage() {
                         </td>
                         <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
                         <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
-                        <td className="px-3 py-2 text-gray-500">{formatLocalDateTime(r.latestAt)}</td>
+                        <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
                       </tr>
                     ))}
                   </tbody>

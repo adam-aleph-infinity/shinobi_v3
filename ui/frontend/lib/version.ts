@@ -7,4 +7,4 @@
  *    MINOR – new feature or significant improvement
  *    PATCH – bug fix or small tweak
  */
-export const VERSION = "5.0.5";
+export const VERSION = "5.1.0";

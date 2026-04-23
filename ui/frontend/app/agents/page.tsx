@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -147,6 +147,8 @@ interface UniversalAgent {
   model: string; temperature: number; system_prompt: string; user_prompt: string;
   inputs: AgentInput[]; output_format: string; tags: string[];
   is_default: boolean; created_at: string;
+  updated_at?: string;
+  folder?: string;
 }
 
 const BLANK_AGENT = {
@@ -154,17 +156,18 @@ const BLANK_AGENT = {
   model: "gpt-5.4", temperature: 0,
   system_prompt: "", user_prompt: "",
   inputs: [{ key: "transcript", source: "transcript" as SourceValue }],
-  output_format: "markdown", tags: [], is_default: false,
+  output_format: "markdown", tags: [], is_default: false, folder: "",
 };
 
 // ── AgentEditor ───────────────────────────────────────────────────────────────
 
 function AgentEditor({
-  agent, allAgents, onSave, onDelete,
+  agent, allAgents, onSave, onDelete, onCopy,
 }: {
   agent: UniversalAgent; allAgents: UniversalAgent[];
   onSave: (draft: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
   onDelete: () => void;
+  onCopy: () => void;
 }) {
   const [draft, setDraft] = useState<Omit<UniversalAgent, "id" | "created_at">>({
     name: agent.name, description: agent.description ?? "",
@@ -173,6 +176,7 @@ function AgentEditor({
     user_prompt: agent.user_prompt, inputs: agent.inputs ?? [],
     output_format: agent.output_format ?? "markdown",
     tags: agent.tags ?? [], is_default: agent.is_default ?? false,
+    folder: agent.folder ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [saved,  setSaved]  = useState(false);
@@ -186,10 +190,11 @@ function AgentEditor({
       user_prompt: agent.user_prompt, inputs: agent.inputs ?? [],
       output_format: agent.output_format ?? "markdown",
       tags: agent.tags ?? [], is_default: agent.is_default ?? false,
+      folder: agent.folder ?? "",
     });
     setSaved(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent.id]);
+  }, [agent.id, agent.folder]);
 
   async function save() {
     setSaving(true);
@@ -236,6 +241,12 @@ function AgentEditor({
           />
           <p className={cn("text-[10px] mt-0.5", cm.textColor)}>{cm.label || "—"}</p>
         </div>
+        <button
+          onClick={onCopy}
+          className="p-1.5 text-gray-500 hover:text-indigo-300 transition-colors shrink-0"
+          title="Copy agent">
+          <Copy className="w-4 h-4" />
+        </button>
         <button
           onClick={() => { if (confirm(`Delete "${agent.name}"? This cannot be undone.`)) onDelete(); }}
           className="p-1.5 text-red-500/50 hover:text-red-400 transition-colors shrink-0"
@@ -983,11 +994,13 @@ export default function AgentsPage() {
   const { mutate } = useSWRConfig();
   const { activeAgentId, setActiveAgent } = useAppCtx();
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
+  const { data: foldersData } = useSWR<string[]>("/api/universal-agents/folders", fetcher);
   const allAgents = agents ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(() => activeAgentId || null);
   const [importing, setImporting]   = useState(false);
   const [importMsg, setImportMsg]   = useState("");
+  const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeAgentId) return;
@@ -995,18 +1008,30 @@ export default function AgentsPage() {
   }, [activeAgentId]);
 
   const selected = allAgents.find(a => a.id === selectedId) ?? null;
+  const normalizedFolder = (name?: string | null) => (name ?? "").trim();
 
-  // Group by class
-  const grouped: Record<string, UniversalAgent[]> = {};
-  for (const a of allAgents) {
-    const cls = (a.agent_class || "general").toLowerCase();
-    (grouped[cls] ??= []).push(a);
-  }
-  const knownOrder = ["persona", "scorer", "notes", "compliance", "general"];
-  const orderedGroups = [
-    ...knownOrder.filter(c => grouped[c]?.length),
-    ...Object.keys(grouped).filter(c => !knownOrder.includes(c) && grouped[c]?.length),
-  ];
+  const folderNames = useMemo(() => {
+    const fromAgents = allAgents
+      .map(a => normalizedFolder(a.folder))
+      .filter(Boolean);
+    const fromFolders = (foldersData ?? [])
+      .map(f => normalizedFolder(f))
+      .filter(Boolean);
+    return [...new Set([...fromFolders, ...fromAgents])]
+      .sort((a, b) => a.localeCompare(b));
+  }, [allAgents, foldersData]);
+
+  const agentsByFolder = useMemo(() => {
+    const grouped: Record<string, UniversalAgent[]> = {};
+    for (const a of allAgents) {
+      const folder = normalizedFolder(a.folder);
+      (grouped[folder] ??= []).push(a);
+    }
+    for (const k of Object.keys(grouped)) {
+      grouped[k].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    }
+    return grouped;
+  }, [allAgents]);
 
   async function createAgent() {
     const res = await fetch("/api/universal-agents", {
@@ -1015,6 +1040,16 @@ export default function AgentsPage() {
     });
     const created: UniversalAgent = await res.json();
     mutate("/api/universal-agents");
+    setSelectedId(created.id);
+    setActiveAgent(created.id, created.name, created.agent_class || "general");
+  }
+
+  async function copyAgent(agentId: string) {
+    const res = await fetch(`/api/universal-agents/${agentId}/copy`, { method: "POST" });
+    if (!res.ok) return;
+    const created: UniversalAgent = await res.json();
+    mutate("/api/universal-agents");
+    mutate("/api/universal-agents/folders");
     setSelectedId(created.id);
     setActiveAgent(created.id, created.name, created.agent_class || "general");
   }
@@ -1042,9 +1077,66 @@ export default function AgentsPage() {
       const res  = await fetch("/api/universal-agents/import-presets", { method: "POST" });
       const data = await res.json();
       mutate("/api/universal-agents");
+      mutate("/api/universal-agents/folders");
       setImportMsg(`+${data.created_agents?.length ?? 0} agents`);
       setTimeout(() => setImportMsg(""), 4000);
     } finally { setImporting(false); }
+  }
+
+  async function createFolder() {
+    const raw = window.prompt("Folder name");
+    const name = (raw ?? "").trim();
+    if (!name) return;
+    const res = await fetch("/api/universal-agents/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) return;
+    mutate("/api/universal-agents/folders");
+  }
+
+  async function moveAgentToFolder(agentId: string, folder: string) {
+    await fetch(`/api/universal-agents/${agentId}/folder`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder }),
+    });
+    mutate("/api/universal-agents");
+    mutate("/api/universal-agents/folders");
+  }
+
+  function renderAgentRow(a: UniversalAgent) {
+    const clsMeta = classMeta((a.agent_class || "general").toLowerCase());
+    return (
+      <div key={a.id} className="flex items-center group">
+        <button
+          draggable
+          onDragStart={e => {
+            e.dataTransfer.setData("application/x-agent-id", a.id);
+            e.dataTransfer.effectAllowed = "move";
+          }}
+          onClick={() => {
+            setSelectedId(a.id);
+            setActiveAgent(a.id, a.name, a.agent_class || "general");
+          }}
+          className={cn(
+            "flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] transition-colors",
+            selectedId === a.id
+              ? "bg-indigo-900/40 text-white border border-indigo-700/40"
+              : "text-gray-400 hover:text-white hover:bg-gray-800/60",
+          )}>
+          <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", clsMeta.textColor.replace("text-", "bg-"))} />
+          <span className="truncate flex-1">{a.name}</span>
+        </button>
+        <button
+          onClick={() => copyAgent(a.id)}
+          title="Copy agent"
+          className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all">
+          <Copy className="w-3 h-3" />
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -1061,6 +1153,10 @@ export default function AgentsPage() {
                 ? <Loader2 className="w-3 h-3 animate-spin" />
                 : <Download className="w-3 h-3" />}
             </button>
+            <button onClick={createFolder} title="New folder"
+              className="p-1 text-gray-600 hover:text-indigo-400 transition-colors">
+              <Layers className="w-3 h-3" />
+            </button>
             <button onClick={createAgent} title="New agent"
               className="p-1 text-gray-600 hover:text-indigo-400 transition-colors">
               <Plus className="w-3 h-3" />
@@ -1072,36 +1168,55 @@ export default function AgentsPage() {
           <p className="text-[9px] text-emerald-400 text-center py-1 border-b border-gray-800">{importMsg}</p>
         )}
 
-        <div className="flex-1 overflow-y-auto p-2 space-y-3">
-          {orderedGroups.map(cls => {
-            const m = classMeta(cls);
-            const Icon = CLASS_ICON[cls] ?? Bot;
-            return (
-              <div key={cls}>
-                <p className={cn("text-[9px] font-bold uppercase tracking-widest px-1.5 mb-0.5 flex items-center gap-1", m.textColor)}>
-                  <Icon className="w-2.5 h-2.5" /> {m.label}
-                </p>
-                {(grouped[cls] ?? []).map(a => (
-                  <button key={a.id} onClick={() => {
-                    setSelectedId(a.id);
-                    setActiveAgent(a.id, a.name, a.agent_class || "general");
-                  }}
-                    className={cn(
-                      "w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] transition-colors",
-                      selectedId === a.id
-                        ? "bg-indigo-900/40 text-white border border-indigo-700/40"
-                        : "text-gray-400 hover:text-white hover:bg-gray-800/60",
-                    )}>
-                    <span className="truncate flex-1">{a.name}</span>
-                  </button>
-                ))}
-              </div>
-            );
-          })}
+        <div className="flex-1 overflow-y-auto p-2 space-y-2">
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOverFolder(""); }}
+            onDragLeave={() => setDragOverFolder(null)}
+            onDrop={async e => {
+              e.preventDefault();
+              const id = e.dataTransfer.getData("application/x-agent-id");
+              setDragOverFolder(null);
+              if (!id) return;
+              await moveAgentToFolder(id, "");
+            }}
+            className={cn(
+              "rounded-lg border p-1.5 transition-colors",
+              dragOverFolder === "" ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
+            )}>
+            <p className="text-[9px] font-bold uppercase tracking-widest px-1.5 mb-1 text-gray-500">Unfiled</p>
+            {(agentsByFolder[""] ?? []).map(a => renderAgentRow(a))}
+            {!(agentsByFolder[""] ?? []).length && (
+              <p className="text-[9px] text-gray-700 italic px-2 py-1">Drop agents here</p>
+            )}
+          </div>
 
-          {allAgents.length === 0 && (
+          {folderNames.map(folder => (
+            <div
+              key={folder}
+              onDragOver={e => { e.preventDefault(); setDragOverFolder(folder); }}
+              onDragLeave={() => setDragOverFolder(null)}
+              onDrop={async e => {
+                e.preventDefault();
+                const id = e.dataTransfer.getData("application/x-agent-id");
+                setDragOverFolder(null);
+                if (!id) return;
+                await moveAgentToFolder(id, folder);
+              }}
+              className={cn(
+                "rounded-lg border p-1.5 transition-colors",
+                dragOverFolder === folder ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
+              )}>
+              <p className="text-[9px] font-bold uppercase tracking-widest px-1.5 mb-1 text-gray-400">{folder}</p>
+              {(agentsByFolder[folder] ?? []).map(a => renderAgentRow(a))}
+              {!(agentsByFolder[folder] ?? []).length && (
+                <p className="text-[9px] text-gray-700 italic px-2 py-1">Empty folder</p>
+              )}
+            </div>
+          ))}
+
+          {allAgents.length === 0 && folderNames.length === 0 && (
             <p className="text-[10px] text-gray-700 italic px-2 py-4 text-center">
-              No agents yet — click + or import presets
+              No agents yet — click +, create a folder, or import presets
             </p>
           )}
         </div>
@@ -1116,6 +1231,7 @@ export default function AgentsPage() {
             allAgents={allAgents}
             onSave={saveAgent}
             onDelete={deleteAgent}
+            onCopy={() => copyAgent(selected.id)}
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-700">

@@ -24,6 +24,7 @@ router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
 _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
+_FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
@@ -116,6 +117,15 @@ class PipelineIn(BaseModel):
     scope: str = "per_pair"
     steps: list[PipelineStep] = []
     canvas: dict = {}
+    folder: str = ""
+
+
+class FolderIn(BaseModel):
+    name: str
+
+
+class FolderMoveIn(BaseModel):
+    folder: str = ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -363,7 +373,9 @@ def _load_all() -> list[dict]:
     out = []
     for f in sorted(_DIR.glob("*.json")):
         try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("id"):
+                out.append(data)
         except Exception:
             pass
     return out
@@ -393,11 +405,87 @@ def _agent_result_supports_pipeline_cache(db_or_bind: Any) -> bool:
     return {"pipeline_id", "pipeline_step_index", "input_fingerprint"}.issubset(cols)
 
 
+def _normalise_folder(name: str) -> str:
+    return " ".join(str(name or "").strip().split())
+
+
+def _load_folders() -> list[str]:
+    try:
+        raw = json.loads(_FOLDERS_FILE.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            out = []
+            for x in raw:
+                n = _normalise_folder(str(x or ""))
+                if n:
+                    out.append(n)
+            return out
+    except Exception:
+        pass
+    return []
+
+
+def _save_folders(folders: list[str]) -> None:
+    cleaned = []
+    seen = set()
+    for f in folders:
+        n = _normalise_folder(f)
+        if not n:
+            continue
+        k = n.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        cleaned.append(n)
+    cleaned.sort(key=lambda x: x.lower())
+    _FOLDERS_FILE.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ensure_folder_exists(folder: str) -> None:
+    n = _normalise_folder(folder)
+    if not n:
+        return
+    folders = _load_folders()
+    if n.lower() in {f.lower() for f in folders}:
+        return
+    folders.append(n)
+    _save_folders(folders)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
 def list_pipelines():
     return _load_all()
+
+
+@router.get("/folders")
+def list_pipeline_folders():
+    from_pipelines = [
+        _normalise_folder(str(p.get("folder", "") or ""))
+        for p in _load_all()
+    ]
+    merged = [*from_pipelines, *_load_folders()]
+    deduped = []
+    seen = set()
+    for folder in merged:
+        if not folder:
+            continue
+        key = folder.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(folder)
+    deduped.sort(key=lambda x: x.lower())
+    return deduped
+
+
+@router.post("/folders")
+def create_pipeline_folder(req: FolderIn):
+    name = _normalise_folder(req.name)
+    if not name:
+        raise HTTPException(400, "Folder name is required")
+    _ensure_folder_exists(name)
+    return {"ok": True, "folder": name}
 
 
 @router.post("")
@@ -406,6 +494,9 @@ def create_pipeline(req: PipelineIn):
     _DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.utcnow().isoformat()
     record = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()}
+    record["folder"] = _normalise_folder(record.get("folder", ""))
+    if record["folder"]:
+        _ensure_folder_exists(record["folder"])
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -423,7 +514,22 @@ def update_pipeline(pipeline_id: str, req: PipelineIn):
     _validate_pipeline_payload(req)
     f, data = _find_file(pipeline_id)
     data.update({**req.model_dump(), "updated_at": datetime.utcnow().isoformat()})
+    data["folder"] = _normalise_folder(data.get("folder", ""))
+    if data["folder"]:
+        _ensure_folder_exists(data["folder"])
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return data
+
+
+@router.patch("/{pipeline_id}/folder")
+def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
+    f, data = _find_file(pipeline_id)
+    folder = _normalise_folder(req.folder)
+    data["folder"] = folder
+    data["updated_at"] = datetime.utcnow().isoformat()
+    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    if folder:
+        _ensure_folder_exists(folder)
     return data
 
 

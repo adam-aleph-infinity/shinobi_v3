@@ -19,6 +19,7 @@ import {
   Plus, Trash2, ChevronRight, X, Download, Workflow, Copy,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
+import { cn } from "@/lib/utils";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -700,7 +701,8 @@ function PipelineCanvas() {
 
   // Backend data
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
-  const { data: pipelinesData } = useSWR<{ id: string; name: string; description: string; steps: {agent_id: string; input_overrides: Record<string,string>}[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }[]>("/api/pipelines", fetcher);
+  const { data: pipelinesData } = useSWR<{ id: string; name: string; description: string; folder?: string; steps: {agent_id: string; input_overrides: Record<string,string>}[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }[]>("/api/pipelines", fetcher);
+  const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
 
@@ -713,13 +715,39 @@ function PipelineCanvas() {
   // Pipeline save state
   const [pipelineName, setPipelineName]     = useState("");
   const [pipelineId,   setPipelineId]       = useState<string | null>(null);
+  const [pipelineFolder, setPipelineFolder] = useState("");
   const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [dragOverPipelineFolder, setDragOverPipelineFolder] = useState<string | null>(null);
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
   const [agentSaving,   setAgentSaving]   = useState(false);
   const [agentSaved,    setAgentSaved]    = useState(false);
   const [agentDeleting, setAgentDeleting] = useState(false);
   const [showModel,     setShowModel]     = useState(false);
+
+  const normalizeFolder = (name?: string | null) => (name ?? "").trim();
+  const pipelineFolders = useMemo(() => {
+    const fromPipelines = allPipelines
+      .map(p => normalizeFolder(p.folder))
+      .filter(Boolean);
+    const fromFolders = (pipelineFoldersData ?? [])
+      .map(f => normalizeFolder(f))
+      .filter(Boolean);
+    return [...new Set([...fromFolders, ...fromPipelines])]
+      .sort((a, b) => a.localeCompare(b));
+  }, [allPipelines, pipelineFoldersData]);
+
+  const pipelinesByFolder = useMemo(() => {
+    const grouped: Record<string, typeof allPipelines> = {};
+    for (const p of allPipelines) {
+      const folder = normalizeFolder(p.folder);
+      (grouped[folder] ??= []).push(p);
+    }
+    for (const key of Object.keys(grouped)) {
+      grouped[key].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    }
+    return grouped;
+  }, [allPipelines]);
 
   // Refs for fresh state in callbacks (avoid stale closures)
   const nodesRef  = useRef<Node[]>([]);
@@ -1063,6 +1091,7 @@ function PipelineCanvas() {
     setSelectedNodeId(null);
     setPipelineName("");
     setPipelineId(null);
+    setPipelineFolder("");
   }
 
   async function handleDeletePipeline(pid: string) {
@@ -1079,6 +1108,37 @@ function PipelineCanvas() {
     } catch { showToast("Network error — could not delete pipeline", false); }
   }
 
+  async function createPipelineFolder() {
+    const raw = window.prompt("Folder name");
+    const name = (raw ?? "").trim();
+    if (!name) return;
+    const res = await fetch("/api/pipelines/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      showToast("Could not create folder", false);
+      return;
+    }
+    mutate("/api/pipelines/folders");
+  }
+
+  async function movePipelineToFolder(pid: string, folder: string) {
+    const res = await fetch(`/api/pipelines/${pid}/folder`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder }),
+    });
+    if (!res.ok) {
+      showToast("Could not move pipeline", false);
+      return;
+    }
+    if (pipelineId === pid) setPipelineFolder(folder);
+    mutate("/api/pipelines");
+    mutate("/api/pipelines/folders");
+  }
+
   async function handleDuplicatePipeline(pid: string) {
     const pl = allPipelines.find(p => p.id === pid);
     if (!pl) return;
@@ -1088,17 +1148,29 @@ function PipelineCanvas() {
       const res = await fetch("/api/pipelines", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName, steps: fullPl.steps ?? [], scope: fullPl.scope ?? "per_call", canvas: fullPl.canvas ?? {} }),
+        body: JSON.stringify({
+          name: newName,
+          steps: fullPl.steps ?? [],
+          scope: fullPl.scope ?? "per_call",
+          canvas: fullPl.canvas ?? {},
+          folder: fullPl.folder ?? pl.folder ?? "",
+        }),
       });
       if (!res.ok) { showToast(`Duplicate failed (${res.status})`, false); return; }
       const saved = await res.json();
       mutate("/api/pipelines");
       showToast(`Duplicated as "${newName}"`, true);
-      loadPipelineToCanvas(saved.id, { id: saved.id, name: newName, steps: fullPl.steps ?? [], canvas: fullPl.canvas });
+      loadPipelineToCanvas(saved.id, {
+        id: saved.id,
+        name: newName,
+        folder: fullPl.folder ?? pl.folder ?? "",
+        steps: fullPl.steps ?? [],
+        canvas: fullPl.canvas,
+      });
     } catch { showToast("Network error — could not duplicate pipeline", false); }
   }
 
-  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; steps: { agent_id: string; input_overrides: Record<string, string> }[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }) {
+  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; folder?: string; steps: { agent_id: string; input_overrides: Record<string, string> }[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }) {
     const pl = override ?? allPipelines.find(p => p.id === pid);
     if (!pl) return;
 
@@ -1141,6 +1213,7 @@ function PipelineCanvas() {
       setEdges(restoredEdges);
       setPipelineName(pl.name);
       setPipelineId(pl.id);
+      setPipelineFolder((pl.folder ?? "").trim());
       setSelectedNodeId(null);
       return;
     }
@@ -1259,6 +1332,7 @@ function PipelineCanvas() {
     setEdges(newEdges);
     setPipelineName(pl.name);
     setPipelineId(pl.id);
+    setPipelineFolder((pl.folder ?? "").trim());
     setSelectedNodeId(null);
   }
 
@@ -1267,6 +1341,7 @@ function PipelineCanvas() {
       await fetch("/api/universal-agents/import-presets", { method: "POST" });
       mutate("/api/universal-agents");
       mutate("/api/pipelines");
+      mutate("/api/pipelines/folders");
       showToast("Presets imported", true);
     } catch { showToast("Import failed", false); }
   }
@@ -1382,7 +1457,7 @@ function PipelineCanvas() {
       const url    = pipelineId ? `/api/pipelines/${pipelineId}` : `/api/pipelines`;
       const method = pipelineId ? "PUT" : "POST";
       const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: pipelineName, description: "", scope, steps, canvas: canvasData }) });
+        body: JSON.stringify({ name: pipelineName, description: "", scope, steps, canvas: canvasData, folder: pipelineFolder }) });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         showToast(`Save failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
@@ -1895,42 +1970,81 @@ function PipelineCanvas() {
           <div className="border-b border-gray-800 shrink-0">
             <div className="px-3 py-2 flex items-center justify-between">
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
-              <button onClick={handleClear} title="New pipeline"
-                className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
-                <Plus className="w-3 h-3" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button onClick={createPipelineFolder} title="New folder"
+                  className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
+                  <Layers className="w-3 h-3" />
+                </button>
+                <button onClick={handleClear} title="New pipeline"
+                  className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
+                  <Plus className="w-3 h-3" />
+                </button>
+              </div>
             </div>
-            <div className="max-h-36 overflow-y-auto px-2 pb-2 space-y-0.5">
-              {allPipelines.length === 0 ? (
-                <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
-              ) : allPipelines.map(p => (
-                <div key={p.id} className="flex items-center group">
-                  <button
-                    onClick={async () => {
-                      const fullPl = await fetch(`/api/pipelines/${p.id}`).then(r => r.json());
-                      loadPipelineToCanvas(p.id, { id: fullPl.id, name: fullPl.name, steps: fullPl.steps ?? [], canvas: fullPl.canvas });
+            <div className="max-h-40 overflow-y-auto px-2 pb-2 space-y-1.5">
+              {([
+                { key: "", label: "Unfiled" },
+                ...pipelineFolders.map(f => ({ key: f, label: f })),
+              ]).map(section => {
+                const list = pipelinesByFolder[section.key] ?? [];
+                return (
+                  <div
+                    key={section.label}
+                    onDragOver={e => { e.preventDefault(); setDragOverPipelineFolder(section.key); }}
+                    onDragLeave={() => setDragOverPipelineFolder(null)}
+                    onDrop={async e => {
+                      e.preventDefault();
+                      const pid = e.dataTransfer.getData("application/x-pipeline-id");
+                      setDragOverPipelineFolder(null);
+                      if (!pid) return;
+                      await movePipelineToFolder(pid, section.key);
                     }}
-                    className={`flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
-                      ${pipelineId === p.id
-                        ? "bg-indigo-900/40 text-white"
-                        : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
-                    <span className="truncate flex-1">{p.name}</span>
-                  </button>
-                  <button
-                    onClick={() => handleDuplicatePipeline(p.id)}
-                    title="Duplicate pipeline"
-                    className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all">
-                    <Copy className="w-3 h-3" />
-                  </button>
-                  <button
-                    onClick={() => handleDeletePipeline(p.id)}
-                    title="Delete pipeline"
-                    className="shrink-0 p-1 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all">
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
+                    className={cn(
+                      "rounded-lg border p-1 transition-colors",
+                      dragOverPipelineFolder === section.key ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
+                    )}>
+                    <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest px-1.5 mb-0.5">{section.label}</p>
+                    {list.length === 0 ? (
+                      <p className="text-[9px] text-gray-700 italic px-2 py-1">Drop pipelines here</p>
+                    ) : list.map(p => (
+                      <div key={p.id} className="flex items-center group">
+                        <button
+                          draggable
+                          onDragStart={e => {
+                            e.dataTransfer.setData("application/x-pipeline-id", p.id);
+                            e.dataTransfer.effectAllowed = "move";
+                          }}
+                          onClick={async () => {
+                            const fullPl = await fetch(`/api/pipelines/${p.id}`).then(r => r.json());
+                            loadPipelineToCanvas(p.id, { id: fullPl.id, name: fullPl.name, folder: fullPl.folder ?? "", steps: fullPl.steps ?? [], canvas: fullPl.canvas });
+                          }}
+                          className={`flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
+                            ${pipelineId === p.id
+                              ? "bg-indigo-900/40 text-white"
+                              : "text-gray-400 hover:text-white hover:bg-gray-800"}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
+                          <span className="truncate flex-1">{p.name}</span>
+                        </button>
+                        <button
+                          onClick={() => handleDuplicatePipeline(p.id)}
+                          title="Duplicate pipeline"
+                          className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all">
+                          <Copy className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleDeletePipeline(p.id)}
+                          title="Delete pipeline"
+                          className="shrink-0 p-1 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all">
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+              {allPipelines.length === 0 && pipelineFolders.length === 0 && (
+                <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
+              )}
             </div>
           </div>
 

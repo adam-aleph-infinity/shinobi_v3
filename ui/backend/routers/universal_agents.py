@@ -25,6 +25,7 @@ _DIR          = settings.ui_data_dir / "_universal_agents"
 _PIPELINES    = settings.ui_data_dir / "_pipelines"
 _FPA_PRESETS  = settings.ui_data_dir / "_fpa_analyzer_presets"
 _NOTES_AGENTS = settings.ui_data_dir / "_notes_agents"
+_FOLDERS_FILE = settings.ui_data_dir / "_universal_agents_folders.json"
 
 # Valid input source types
 INPUT_SOURCES = [
@@ -62,6 +63,15 @@ class UniversalAgentIn(BaseModel):
     output_format: str = "markdown"  # markdown | json | text
     tags: list[str] = []
     is_default: bool = False
+    folder: str = ""
+
+
+class FolderIn(BaseModel):
+    name: str
+
+
+class FolderMoveIn(BaseModel):
+    folder: str = ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -71,7 +81,9 @@ def _load_all() -> list[dict]:
     out = []
     for f in sorted(_DIR.glob("*.json")):
         try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("id"):
+                out.append(data)
         except Exception:
             pass
     return out
@@ -88,6 +100,66 @@ def _find_file(agent_id: str) -> tuple[Any, dict]:
     raise HTTPException(404, f"Universal agent '{agent_id}' not found")
 
 
+def _normalise_folder(name: str) -> str:
+    return " ".join(str(name or "").strip().split())
+
+
+def _load_folders() -> list[str]:
+    try:
+        raw = json.loads(_FOLDERS_FILE.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            out = []
+            for x in raw:
+                n = _normalise_folder(str(x or ""))
+                if n:
+                    out.append(n)
+            return out
+    except Exception:
+        pass
+    return []
+
+
+def _save_folders(folders: list[str]) -> None:
+    cleaned = []
+    seen = set()
+    for f in folders:
+        n = _normalise_folder(f)
+        if not n:
+            continue
+        k = n.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        cleaned.append(n)
+    cleaned.sort(key=lambda x: x.lower())
+    _FOLDERS_FILE.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ensure_folder_exists(folder: str) -> None:
+    n = _normalise_folder(folder)
+    if not n:
+        return
+    folders = _load_folders()
+    if n.lower() in {f.lower() for f in folders}:
+        return
+    folders.append(n)
+    _save_folders(folders)
+
+
+def _next_copy_name(base_name: str) -> str:
+    base = str(base_name or "Agent").strip() or "Agent"
+    existing = {str(a.get("name", "")).strip().lower() for a in _load_all()}
+    candidate = f"Copy of {base}"
+    if candidate.lower() not in existing:
+        return candidate
+    i = 2
+    while True:
+        candidate = f"Copy of {base} ({i})"
+        if candidate.lower() not in existing:
+            return candidate
+        i += 1
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
@@ -95,11 +167,44 @@ def list_agents():
     return _load_all()
 
 
+@router.get("/folders")
+def list_agent_folders():
+    from_agents = [
+        _normalise_folder(str(a.get("folder", "") or ""))
+        for a in _load_all()
+    ]
+    merged = [*from_agents, *_load_folders()]
+    deduped = []
+    seen = set()
+    for folder in merged:
+        if not folder:
+            continue
+        key = folder.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(folder)
+    deduped.sort(key=lambda x: x.lower())
+    return deduped
+
+
+@router.post("/folders")
+def create_agent_folder(req: FolderIn):
+    name = _normalise_folder(req.name)
+    if not name:
+        raise HTTPException(400, "Folder name is required")
+    _ensure_folder_exists(name)
+    return {"ok": True, "folder": name}
+
+
 @router.post("")
 def create_agent(req: UniversalAgentIn):
     _DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.utcnow().isoformat()
     record = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()}
+    record["folder"] = _normalise_folder(record.get("folder", ""))
+    if record["folder"]:
+        _ensure_folder_exists(record["folder"])
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -185,8 +290,44 @@ def get_agent(agent_id: str):
 def update_agent(agent_id: str, req: UniversalAgentIn):
     f, data = _find_file(agent_id)
     data.update({**req.model_dump(), "updated_at": datetime.utcnow().isoformat()})
+    data["folder"] = _normalise_folder(data.get("folder", ""))
+    if data["folder"]:
+        _ensure_folder_exists(data["folder"])
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return data
+
+
+@router.patch("/{agent_id}/folder")
+def move_agent_to_folder(agent_id: str, req: FolderMoveIn):
+    f, data = _find_file(agent_id)
+    folder = _normalise_folder(req.folder)
+    data["folder"] = folder
+    data["updated_at"] = datetime.utcnow().isoformat()
+    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    if folder:
+        _ensure_folder_exists(folder)
+    return data
+
+
+@router.post("/{agent_id}/copy")
+def copy_agent(agent_id: str):
+    _, data = _find_file(agent_id)
+    now = datetime.utcnow().isoformat()
+    copy_record = {
+        **data,
+        "id": str(uuid.uuid4()),
+        "name": _next_copy_name(str(data.get("name", "Agent"))),
+        "is_default": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    copy_record["folder"] = _normalise_folder(copy_record.get("folder", ""))
+    if copy_record["folder"]:
+        _ensure_folder_exists(copy_record["folder"])
+    (_DIR / f"{copy_record['id']}.json").write_text(
+        json.dumps(copy_record, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return copy_record
 
 
 @router.delete("/{agent_id}")
@@ -248,6 +389,7 @@ def _make_agent(name: str, model: str, temperature: float,
         "system_prompt": system_prompt, "user_prompt": user_prompt,
         "inputs": inputs, "output_format": output_format,
         "tags": tags, "is_default": is_default,
+        "folder": "",
     }
 
 

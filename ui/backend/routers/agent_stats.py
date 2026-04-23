@@ -1,5 +1,5 @@
 """Agent summary statistics — total calls, customers, deposits, session analysis insights."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from sqlalchemy import func
 
@@ -98,6 +98,46 @@ def list_agent_stats(db: Session = Depends(get_session)):
 
     result.sort(key=lambda x: x["net_deposits"] or 0, reverse=True)
     return result
+
+
+@router.get("/pair")
+def get_pair_stats(
+    agent: str,
+    customer: str,
+    db: Session = Depends(get_session),
+):
+    """Stats for one agent/customer pair (deduped, deposit-safe)."""
+    agent = (agent or "").strip()
+    customer = (customer or "").strip()
+    if not agent or not customer:
+        raise HTTPException(400, "agent and customer are required")
+
+    rows = db.exec(
+        select(CRMPair).where(CRMPair.agent == agent, CRMPair.customer == customer)
+    ).all()
+    if not rows:
+        return {
+            "agent": agent,
+            "customer": customer,
+            "not_found": True,
+            "call_count": 0,
+            "total_duration_s": 0,
+            "net_deposits": 0.0,
+            "total_deposits": 0.0,
+            "total_withdrawals": 0.0,
+        }
+
+    merged = _dedupe_pairs_with_deposits(rows, key_fn=lambda p: (p.agent, p.customer))[0]
+    return {
+        "agent": merged["agent"],
+        "customer": merged["customer"],
+        "call_count": merged["call_count"],
+        "total_duration_s": merged["total_duration_s"],
+        "net_deposits": merged["net_deposits"],
+        "total_deposits": merged["total_deposits"],
+        "total_withdrawals": merged["total_withdrawals"],
+        "duplicate_rows_merged": len(rows),
+    }
 
 
 @router.get("/{agent}")
