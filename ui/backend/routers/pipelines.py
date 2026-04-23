@@ -76,6 +76,17 @@ def _save_state(
                     return  # a newer run has claimed this file — don't overwrite
             except Exception:
                 pass
+        sanitized_steps: list = []
+        for step in (steps or []):
+            if isinstance(step, dict):
+                step_copy = dict(step)
+                # State file is for execution status only; keep heavy model output out.
+                step_copy["content"] = ""
+                step_copy["thinking"] = ""
+                sanitized_steps.append(step_copy)
+            else:
+                sanitized_steps.append(step)
+
         path.write_text(
             json.dumps({
                 "pipeline_id":    pipeline_id,
@@ -85,7 +96,7 @@ def _save_state(
                 "status":         status,
                 "start_datetime": start_datetime,
                 "updated_at":     datetime.utcnow().isoformat(),
-                "steps":          steps,
+                "steps":          sanitized_steps,
                 "node_states":    node_states or {"input": {}, "processing": {}, "output": {}},
             }, ensure_ascii=False),
             encoding="utf-8",
@@ -505,7 +516,26 @@ def get_pipeline_state(
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        steps = data.get("steps")
+        if isinstance(steps, list):
+            dirty = False
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                if step.get("content") or step.get("thinking"):
+                    step["content"] = ""
+                    step["thinking"] = ""
+                    dirty = True
+                sources = step.get("input_sources")
+                if isinstance(sources, list):
+                    for src in sources:
+                        if isinstance(src, dict) and src.get("source") == "chain_previous":
+                            src["source"] = "artifact_output"
+                            dirty = True
+            if dirty:
+                path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return data
     except Exception:
         return None
 
@@ -710,9 +740,13 @@ async def run_pipeline(
             for _inp in (_agent_def.get("inputs", []) or []):
                 _k = _inp.get("key", "")
                 _default_src = str(_inp.get("source", ""))
-                if _default_src == "chain_previous" or _default_src.startswith("artifact_"):
+                if _default_src in ("chain_previous", "artifact_output") or _default_src.startswith("artifact_"):
                     _norm[_k] = _artifact_src
             return _norm
+
+        def _public_input_source(_source: str) -> str:
+            # Keep legacy compatibility internally but avoid surfacing chain_previous.
+            return "artifact_output" if _source == "chain_previous" else _source
 
         def _persist_agent_result(
             _agent_id: str,
@@ -1097,7 +1131,12 @@ async def run_pipeline(
 
                     # ── Capture input source declarations ────────────────────
                     run_steps[step_idx]["input_sources"] = [
-                        {"key": inp.get("key", ""), "source": overrides.get(inp.get("key", ""), inp.get("source", "manual"))}
+                        {
+                            "key": inp.get("key", ""),
+                            "source": _public_input_source(
+                                overrides.get(inp.get("key", ""), inp.get("source", "manual"))
+                            ),
+                        }
                         for inp in agent_def.get("inputs", [])
                     ]
 
@@ -1107,7 +1146,9 @@ async def run_pipeline(
                     user_template = agent_def.get("user_prompt", "")
                     manual_inputs = {"_chain_previous": prev_content}
                     source_for_key = {
-                        inp.get("key", ""): overrides.get(inp.get("key", ""), inp.get("source", ""))
+                        inp.get("key", ""): _public_input_source(
+                            overrides.get(inp.get("key", ""), inp.get("source", ""))
+                        )
                         for inp in agent_def.get("inputs", [])
                     }
 
@@ -1121,7 +1162,9 @@ async def run_pipeline(
                             )
                     for inp in agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
-                        source = overrides.get(key, inp.get("source", "manual"))
+                        source = _public_input_source(
+                            overrides.get(key, inp.get("source", "manual"))
+                        )
                         ref_id = inp.get("agent_id")
                         try:
                             text = await loop.run_in_executor(
@@ -1419,7 +1462,12 @@ async def run_pipeline(
                         run_steps[_sidx]["agent_name"] = _aname
                         run_steps[_sidx]["model"]      = _model
                         run_steps[_sidx]["input_sources"] = [
-                            {"key": inp.get("key", ""), "source": _ov.get(inp.get("key", ""), inp.get("source", "manual"))}
+                            {
+                                "key": inp.get("key", ""),
+                                "source": _public_input_source(
+                                    _ov.get(inp.get("key", ""), inp.get("source", "manual"))
+                                ),
+                            }
                             for inp in _adef.get("inputs", [])
                         ]
                         run_steps[_sidx]["state"]      = "running"
@@ -1451,7 +1499,9 @@ async def run_pipeline(
                         try:
                             with Session(_db_engine) as _par_db:
                                 _source_for_key = {
-                                    inp.get("key", ""): _par_ov.get(inp.get("key", ""), inp.get("source", ""))
+                                    inp.get("key", ""): _public_input_source(
+                                        _par_ov.get(inp.get("key", ""), inp.get("source", ""))
+                                    )
                                     for inp in _par_adef.get("inputs", [])
                                 }
                                 _par_db._agent_run_ctx = {
@@ -1464,7 +1514,9 @@ async def run_pipeline(
                                 _par_resolved: dict[str, str] = {}
                                 for _inp in _par_adef.get("inputs", []):
                                     _k   = _inp.get("key", "input")
-                                    _src = _par_ov.get(_k, _inp.get("source", "manual"))
+                                    _src = _public_input_source(
+                                        _par_ov.get(_k, _inp.get("source", "manual"))
+                                    )
                                     _rid = _inp.get("agent_id")
                                     _par_resolved[_k] = _resolve_input(
                                         _src, _rid, req.sales_agent, req.customer, req.call_id, _par_mi, _par_db,

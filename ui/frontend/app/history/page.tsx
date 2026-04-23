@@ -55,7 +55,8 @@ const SOURCE_META: Record<string, { label: string; icon: React.ComponentType<{ c
   notes:             { label: "Notes",             icon: StickyNote, color: "text-green-400" },
   merged_notes:      { label: "Merged Notes",      icon: BookOpen,  color: "text-teal-400" },
   agent_output:      { label: "Agent Output",      icon: Bot,       color: "text-purple-400" },
-  chain_previous:    { label: "Previous Step",     icon: GitBranch, color: "text-amber-400" },
+  artifact_output:   { label: "Artifact Output",   icon: GitBranch, color: "text-amber-400" },
+  chain_previous:    { label: "Artifact Output",   icon: GitBranch, color: "text-amber-400" },
   manual:            { label: "Manual Input",      icon: PenLine,   color: "text-gray-400" },
 };
 
@@ -170,8 +171,13 @@ function MiniCanvas({
       if (statuses.some(s => s === "loading")) return "loading";
       if (statuses.some(s => s === "done" || s === "cached")) {
         const src = cn.data.inputSource ?? "";
-        return !["agent_output", "chain_previous"].includes(src) ? "cached"
-          : statuses.some(s => s === "done") ? "done" : "cached";
+        const isVirtual = (
+          src === "agent_output" ||
+          src === "chain_previous" ||
+          src === "artifact_output" ||
+          src.startsWith("artifact_")
+        );
+        return !isVirtual ? "cached" : (statuses.some(s => s === "done") ? "done" : "cached");
       }
     }
     return "pending";

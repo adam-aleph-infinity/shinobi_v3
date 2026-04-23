@@ -78,9 +78,10 @@ const SOURCE_META: Record<string, {
   notes:             { label: "Notes",             icon: StickyNote, color: "text-green-400", bg: "bg-green-950/30",  border: "border-green-700/50" },
   merged_notes:      { label: "Merged Notes",      icon: BookOpen,  color: "text-teal-400",   bg: "bg-teal-950/30",   border: "border-teal-700/50" },
   agent_output:      { label: "Agent Output",      icon: Bot,       color: "text-purple-400", bg: "bg-purple-950/30", border: "border-purple-700/50" },
-  chain_previous:          { label: "Previous Step",    icon: GitBranch, color: "text-amber-400",  bg: "bg-amber-950/30",  border: "border-amber-700/50" },
+  artifact_output:   { label: "Artifact Output",   icon: GitBranch, color: "text-amber-400",  bg: "bg-amber-950/30",  border: "border-amber-700/50" },
+  chain_previous:    { label: "Artifact Output",   icon: GitBranch, color: "text-amber-400",  bg: "bg-amber-950/30",  border: "border-amber-700/50" },
   manual:                  { label: "Manual Input",     icon: PenLine,   color: "text-gray-400",   bg: "bg-gray-800/40",   border: "border-gray-700/50" },
-  // Artifact sources — emitted by canvas output nodes, resolved as chain_previous at runtime
+  // Artifact sources — emitted by canvas output nodes, resolved from prior output at runtime
   artifact_persona:        { label: "Persona",          icon: Bot,       color: "text-violet-400", bg: "bg-violet-950/20", border: "border-violet-700/40" },
   artifact_persona_score:  { label: "Persona Score",    icon: Bot,       color: "text-violet-300", bg: "bg-violet-950/15", border: "border-violet-800/40" },
   artifact_notes:          { label: "Notes Artifact",   icon: StickyNote,color: "text-amber-400",  bg: "bg-amber-950/20",  border: "border-amber-700/40" },
@@ -508,13 +509,21 @@ export function PipelineSidePanel({
       const isFinished = status !== "running";
       const resolvedStatus: StepStatus =
         (isFinished && rawStatus === "loading") ? "done" : rawStatus;
+      const stateContent = typeof s.content === "string" ? s.content : "";
+      const cachedContent = cachedResults?.[i]?.result?.content ?? "";
+      const resolvedContent =
+        (resolvedStatus === "done" || resolvedStatus === "cached")
+          ? (stateContent || prevStep?.content || cachedContent || "")
+          : "";
+      const stateThinking = typeof s.thinking === "string" ? s.thinking : "";
       return {
         agentName:      s.agent_name || a?.name || "",
         status:         resolvedStatus,
-        content:        s.content || "",
+        content:        resolvedContent,
         stream:         prevStep?.stream || "",
         expanded:       prevStep?.expanded ?? false,
         errorMsg:       s.error_msg || undefined,
+        thinking:       stateThinking || prevStep?.thinking || undefined,
         model:          s.model || undefined,
         execTimeS:      s.execution_time_s ?? undefined,
         inputTokenEst:  s.input_token_est ?? undefined,
@@ -537,7 +546,7 @@ export function PipelineSidePanel({
       const st = toStepStatus(s);
       return status === "running" ? inputStRunning(st) : inputStDone(st);
     }));
-  }, [pipelineState, pipeline, agents, isPerCall]);
+  }, [pipelineState, pipeline, agents, isPerCall, cachedResults]);
 
   // ── per_call: load cached results for each call ──────────────────────────────
   useEffect(() => {
@@ -615,7 +624,15 @@ export function PipelineSidePanel({
       if (agent?.inputs?.length) {
         agent.inputs.forEach(inp => {
           const src = step.input_overrides?.[inp.key] ?? inp.source;
-          if (src && src !== "agent_output" && src !== "chain_previous") sources.add(src);
+          if (
+            src &&
+            src !== "agent_output" &&
+            src !== "chain_previous" &&
+            src !== "artifact_output" &&
+            !src.startsWith("artifact_")
+          ) {
+            sources.add(src);
+          }
         });
       } else {
         sources.add("transcript");
@@ -866,6 +883,8 @@ export function PipelineSidePanel({
     prevCachedRef.current = cachedResults ?? null; // snapshot prev results for comparison
     setCachedView(false);
     setRunning(true); setRunError("");
+    setSteps(initStepsFor(pipeline, agents));
+    setStepInputStatus(new Array(pipeline.steps.length).fill("pending") as StepStatus[]);
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -880,8 +899,74 @@ export function PipelineSidePanel({
       mutatePipelineState();
       const summary = await readPipelineSSE(res,
         (type, evt, _s) => {
+          const stepIdx = typeof evt?.step === "number" ? evt.step : _s;
+          if (type === "step_start" && stepIdx != null) {
+            setSteps(prev => prev.map((st, j) =>
+              j === stepIdx
+                ? {
+                    ...st,
+                    status: "loading",
+                    agentName: evt.agent_name ?? st.agentName,
+                    model: evt.model ?? st.model,
+                    stepStartTs: Date.now(),
+                    errorMsg: undefined,
+                  }
+                : st
+            ));
+            setStepInputStatus(prev => {
+              const next = [...prev];
+              if (stepIdx >= 0 && stepIdx < next.length) next[stepIdx] = "loading";
+              return next;
+            });
+          }
+          if (type === "input_ready" && stepIdx != null) {
+            setStepInputStatus(prev => {
+              const next = [...prev];
+              if (stepIdx >= 0 && stepIdx < next.length) next[stepIdx] = "done";
+              return next;
+            });
+          }
+          if (type === "step_cached" && stepIdx != null) {
+            setSteps(prev => prev.map((st, j) =>
+              j === stepIdx
+                ? {
+                    ...st,
+                    status: "cached",
+                    content: evt.content ?? st.content,
+                    model: evt.model ?? st.model,
+                    stream: "",
+                  }
+                : st
+            ));
+            mutateCache();
+          }
+          if (type === "thinking" && stepIdx != null) {
+            setSteps(prev => prev.map((st, j) =>
+              j === stepIdx ? { ...st, thinking: evt.content ?? st.thinking } : st
+            ));
+          }
+          if (type === "step_done" && stepIdx != null) {
+            setSteps(prev => prev.map((st, j) =>
+              j === stepIdx
+                ? {
+                    ...st,
+                    status: "done",
+                    content: evt.content ?? st.content,
+                    stream: "",
+                    model: evt.model ?? st.model,
+                    execTimeS: evt.execution_time_s ?? st.execTimeS,
+                    inputTokenEst: evt.input_token_est ?? st.inputTokenEst,
+                    outputTokenEst: evt.output_token_est ?? st.outputTokenEst,
+                  }
+                : st
+            ));
+            mutateCache();
+          }
           if (type === "error" && evt.step != null) {
             setRunError(prev => prev || (evt.msg ?? "Pipeline ended with an error."));
+            setSteps(prev => prev.map((st, j) =>
+              j === evt.step ? { ...st, status: "error", errorMsg: evt.msg ?? st.errorMsg } : st
+            ));
           }
           if (type === "pipeline_done") mutateCache();
           if (type === "step_start" || type === "input_ready" || type === "step_cached" || type === "step_done" || type === "error" || type === "pipeline_done") {

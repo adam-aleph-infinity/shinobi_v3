@@ -37,7 +37,8 @@ const SOURCE_META: Record<string, { label: string; badge: string }> = {
   notes:              { label: "Notes",              badge: "bg-green-900/60 text-green-300 border-green-700/50" },
   merged_notes:       { label: "Merged Notes",       badge: "bg-teal-900/60 text-teal-300 border-teal-700/50" },
   agent_output:       { label: "Agent Output",       badge: "bg-purple-900/60 text-purple-300 border-purple-700/50" },
-  chain_previous:     { label: "Prev Step",          badge: "bg-amber-900/60 text-amber-300 border-amber-700/50" },
+  artifact_output:    { label: "Artifact Output",    badge: "bg-amber-900/60 text-amber-300 border-amber-700/50" },
+  chain_previous:     { label: "Artifact Output",    badge: "bg-amber-900/60 text-amber-300 border-amber-700/50" },
   manual:             { label: "Manual",             badge: "bg-gray-700/60 text-gray-300 border-gray-600/50" },
 };
 

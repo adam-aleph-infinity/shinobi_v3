@@ -33,7 +33,8 @@ INPUT_SOURCES = [
     "notes",              # notes for a specific call
     "merged_notes",       # all notes aggregated for the pair
     "agent_output",       # output of another specific agent
-    "chain_previous",     # output of immediately preceding pipeline step
+    "artifact_output",    # output of previous pipeline stage (generic artifact alias)
+    "chain_previous",     # legacy alias for artifact_output
     "manual",             # user provides at run time
 ]
 
@@ -1106,9 +1107,12 @@ def _resolve_input(source: str, agent_id: Optional[str],
             return str(m.get("content", "") or "")
         return str(row[0] if isinstance(row, tuple) and row else "")
 
-    if source == "chain_previous" or source.startswith("artifact_"):
+    if source == "chain_previous":
+        source = "artifact_output"  # legacy alias
+
+    if source == "artifact_output" or source.startswith("artifact_"):
         # artifact_persona / artifact_persona_score / artifact_notes / etc.
-        # all resolve to the previous stage's output (chain_previous).
+        # all resolve to the previous stage's output.
         return manual_inputs.get("_chain_previous", "")
 
     if source == "manual":

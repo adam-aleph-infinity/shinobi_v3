@@ -15,7 +15,7 @@ import "@xyflow/react/dist/style.css";
 import {
   Bot, User, Star, StickyNote, Shield, Zap, BadgeCheck, ShieldCheck,
   Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
-  Mic2, Layers, BookOpen, Link2, PenLine, FileText, Braces, AlignLeft,
+  Mic2, Layers, BookOpen, PenLine, FileText, Braces, AlignLeft,
   Plus, Trash2, ChevronRight, X, Download, Workflow, Copy,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
@@ -103,8 +103,6 @@ const INPUT_SOURCES = [
     badge: "bg-teal-900/50 text-teal-300 border-teal-700/50", desc: "All notes aggregated" },
   { value: "agent_output",      label: "Agent Output", shortLabel: "Agent",      icon: Bot,
     badge: "bg-purple-900/50 text-purple-300 border-purple-700/50", desc: "Output of another agent" },
-  { value: "chain_previous",    label: "Prev Step",    shortLabel: "Prev",       icon: Link2,
-    badge: "bg-amber-900/50 text-amber-300 border-amber-700/50", desc: "Previous pipeline step" },
   { value: "manual",            label: "Manual",       shortLabel: "Manual",     icon: PenLine,
     badge: "bg-gray-700/50 text-gray-300 border-gray-600/50", desc: "Provided at run time" },
 ] as const;
@@ -848,7 +846,7 @@ function PipelineCanvas() {
       const agent = agentId ? allAgents.find(a => a.id === agentId) : null;
       if (agent) {
         const hasMatch = agent.inputs.some(
-          inp => inp.source === artifactSrc || inp.source === "chain_previous"
+          inp => inp.source === artifactSrc || inp.source === "artifact_output" || inp.source === "chain_previous"
         );
         if (!hasMatch) {
           const artifactLabel = subType.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
@@ -1114,15 +1112,19 @@ function PipelineCanvas() {
       }, 0);
       nodeSeq = maxSeq + 1;
 
-      const restoredNodes: Node[] = cv.nodes.map((n: any) => ({
-        id: n.id,
-        type: n.type,
-        position: n.position,
-        sourcePosition: Position.Bottom,
-        targetPosition: Position.Top,
-        style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
-        data: n.data as PipelineNodeData,
-      }));
+      const restoredNodes: Node[] = cv.nodes.map((n: any) => {
+        const nodeData = (n.data as PipelineNodeData) || ({} as PipelineNodeData);
+        const migratedSource = nodeData.inputSource === "chain_previous" ? "artifact_output" : nodeData.inputSource;
+        return {
+          id: n.id,
+          type: n.type,
+          position: n.position,
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
+          data: { ...nodeData, inputSource: migratedSource } as PipelineNodeData,
+        };
+      });
 
       const restoredEdges: Edge[] = cv.edges.map((e: any) => ({
         id: e.id,
@@ -1148,12 +1150,12 @@ function PipelineCanvas() {
     // Only add a source as a top-level input node when:
     //   a) it's always-external (transcript / merged_transcript / manual), OR
     //   b) the user explicitly overrode it to a non-virtual source.
-    // Never add "notes", "merged_notes", "agent_output", or "chain_previous"
+    // Never add "notes", "merged_notes", "agent_output", or artifact-output aliases
     // as top-level nodes when they come from an agent's DEFAULT — those are
     // resolved internally by the executor or chained from a prior step.
     const ALWAYS_TOPLEVEL = new Set(["transcript", "merged_transcript", "manual"]);
-    // artifact_* sources are resolved as chain_previous at runtime — never create a top-level input node for them
-    const VIRTUAL_SOURCES = new Set(["chain_previous", "agent_output", "artifact_persona", "artifact_persona_score", "artifact_notes", "artifact_notes_compliance"]);
+    // artifact_* sources resolve from upstream output at runtime — never top-level input nodes.
+    const VIRTUAL_SOURCES = new Set(["artifact_output", "chain_previous", "agent_output", "artifact_persona", "artifact_persona_score", "artifact_notes", "artifact_notes_compliance"]);
 
     const sourceSet = new Set<string>();
     pl.steps.forEach(step => {
@@ -1170,8 +1172,8 @@ function PipelineCanvas() {
             // User explicitly wired a non-virtual override → show as input node
             sourceSet.add(overrideSrc);
           }
-          // Notes, merged_notes, chain_previous, agent_output as DEFAULTS are
-          // resolved internally — do NOT create a canvas input node for them.
+          // Notes, merged_notes, artifact-output aliases, and agent_output as
+          // defaults are resolved internally — do NOT create canvas input nodes.
         });
       } else {
         sourceSet.add("transcript"); // safe fallback when agent has no inputs
@@ -1307,7 +1309,7 @@ function PipelineCanvas() {
           ));
           // Edges from output nodes (e.g. Persona → pazi notes) carry semantic artifact type.
           // Use artifact_{subType} (e.g. artifact_persona) so the display shows "Persona"
-          // instead of the generic "chain_previous". Both resolve identically at runtime.
+          // instead of the legacy generic previous-output alias.
           const outputPredecessor = edges
             .filter(e => e.target === n.id)
             .map(e => nodes.find(x => x.id === e.source))
@@ -1319,7 +1321,7 @@ function PipelineCanvas() {
           const nonDefaultConnected = connectedInputSources.filter(src => !defaultSourceSet.has(src));
           const canUsePositionalMap = connectedInputSources.length === agent.inputs.length && connectedInputSources.length > 1;
           const isArtifactLike = (src: string) =>
-            src === "chain_previous" || src.startsWith("artifact_");
+            src === "chain_previous" || src === "artifact_output" || src.startsWith("artifact_");
 
           // Prefer deterministic matching by source value. Use positional mapping only when
           // cardinality is equal (avoids edge-order-induced override corruption).
