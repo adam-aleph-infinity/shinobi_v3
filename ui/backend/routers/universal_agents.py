@@ -1209,6 +1209,28 @@ def _resolve_input(source: str, agent_id: Optional[str],
                     return text
             except Exception:
                 pass
+        # Pre-flight: ensure at least one transcript exists before attempting the merge.
+        # Walk the pair directory looking for any smoothed/voted transcript file.
+        pair_dir = ui_data / "agents" / sales_agent / customer
+        _found_transcript = False
+        if pair_dir.exists():
+            for _call_dir in pair_dir.iterdir():
+                if not _call_dir.is_dir() or _call_dir.name.startswith("."):
+                    continue
+                _llm = _call_dir / "transcribed" / "llm_final"
+                if (_llm / "smoothed.txt").exists() or (_llm / "voted.txt").exists():
+                    _found_transcript = True
+                    break
+                _pipeline = _call_dir / "transcribed" / "final"
+                if _pipeline.exists() and any(_pipeline.iterdir()):
+                    _found_transcript = True
+                    break
+        if not _found_transcript:
+            raise RuntimeError(
+                f"No transcripts found for {sales_agent} / {customer}. "
+                f"Please transcribe calls first (CRM browser → click the Tx cell, "
+                f"or Calls page → Select all → Transcribe)."
+            )
         # Build rich version (saves to disk automatically for future cache)
         content = _build_and_save_merged_transcript(sales_agent, customer, force=True)
         if not content:

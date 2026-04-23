@@ -807,28 +807,34 @@ export default function CRMPage() {
                       </td>
                       <td className="px-3 py-3 text-right text-gray-300">{pair.call_count || "—"}</td>
                       <td className="px-3 py-3 text-right">
-                        {tx ? (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleTranscribePair(pair); }}
-                            disabled={txingPairId === pair.id}
-                            title="Click to transcribe untranscribed calls for this pair"
-                            className={`text-xs flex items-center justify-end gap-1 transition-colors rounded px-1 -mx-1
-                              ${txingPairId === pair.id ? "opacity-50 cursor-wait" :
-                                tx.transcribed > 0 ? "text-teal-400 hover:text-teal-300 hover:bg-teal-900/30 cursor-pointer" :
-                                "text-gray-500 hover:text-teal-400 hover:bg-teal-900/20 cursor-pointer"}`}
-                          >
-                            {txingPairId === pair.id
-                              ? <Loader2 className="w-3 h-3 animate-spin" />
-                              : tx.transcribed > 0
-                                ? <CheckCircle2 className="w-3 h-3" />
-                                : <Mic2 className="w-3 h-3 opacity-40" />}
-                            {txPairResult[pair.id]
-                              ? txPairResult[pair.id].submitted >= 0
-                                ? <span className="text-indigo-400">{txPairResult[pair.id].submitted}↑</span>
-                                : <span className="text-red-400">err</span>
-                              : `${tx.transcribed}/${tx.total}`}
-                          </button>
-                        ) : <span className="text-gray-700 text-xs">—</span>}
+                        {(tx || pair.call_count > 0) ? (() => {
+                          const txDone  = tx?.transcribed ?? 0;
+                          const txTotal = tx?.total ?? pair.call_count ?? 0;
+                          const allDone = txDone > 0 && txDone >= txTotal;
+                          return (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleTranscribePair(pair); }}
+                              disabled={txingPairId === pair.id || allDone}
+                              title={allDone ? "All calls transcribed" : "Click to transcribe all calls for this pair"}
+                              className={`text-xs flex items-center justify-end gap-1 transition-colors rounded px-1 -mx-1
+                                ${txingPairId === pair.id ? "opacity-50 cursor-wait" :
+                                  allDone ? "text-teal-400 cursor-default" :
+                                  txDone > 0 ? "text-teal-500 hover:text-teal-300 hover:bg-teal-900/30 cursor-pointer" :
+                                  "text-gray-500 hover:text-teal-400 hover:bg-teal-900/20 cursor-pointer"}`}
+                            >
+                              {txingPairId === pair.id
+                                ? <Loader2 className="w-3 h-3 animate-spin" />
+                                : allDone
+                                  ? <CheckCircle2 className="w-3 h-3" />
+                                  : <Mic2 className={`w-3 h-3 ${txDone > 0 ? "" : "opacity-50"}`} />}
+                              {txPairResult[pair.id]
+                                ? txPairResult[pair.id].submitted >= 0
+                                  ? <span className="text-indigo-400">{txPairResult[pair.id].submitted}↑</span>
+                                  : <span className="text-red-400">err</span>
+                                : `${txDone}/${txTotal}`}
+                            </button>
+                          );
+                        })() : <span className="text-gray-700 text-xs">—</span>}
                       </td>
                       <td className="px-3 py-3 text-right text-gray-400">{formatDuration(pair.total_duration)}</td>
                       <td className="px-3 py-3 text-right">

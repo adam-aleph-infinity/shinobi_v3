@@ -204,7 +204,7 @@ function NotesPanel({
 }
 
 interface Customer { customer: string; account_id: string; crm_url: string; call_count: number; }
-interface CRMCall  { call_id: string; date: string; duration: number; record_path: string; }
+interface CRMCall  { call_id: string; date: string; duration: number; record_path: string; crm_url?: string; account_id?: string; }
 interface TxCall   {
   call_id: string; pair_slug: string;
   has_llm_smoothed: boolean; has_llm_voted: boolean; has_pipeline_final: boolean;
@@ -271,12 +271,29 @@ export default function CallsPage() {
   );
   const selectedCustomer = (customers ?? []).find(c => c.customer === selectedCustomerName) ?? null;
 
+  // Fast path: local DB — instant, no live CRM needed
+  const { data: dbCalls } = useSWR<CRMCall[]>(
+    selectedAgent && selectedCustomerName
+      ? `/api/crm/calls-by-pair?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
+      : null,
+    fetcher,
+  );
+
+  // Slow path: live CRM / calls.json — only triggered when DB returns empty
+  const needsCrmFetch = dbCalls !== undefined && dbCalls.length === 0 && !!selectedCustomer;
   const { data: crmCalls } = useSWR<CRMCall[]>(
-    selectedCustomer
-      ? `/api/crm/calls/${selectedCustomer.account_id}?crm_url=${encodeURIComponent(selectedCustomer.crm_url)}&agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomer.customer)}`
+    needsCrmFetch
+      ? `/api/crm/calls/${selectedCustomer!.account_id}?crm_url=${encodeURIComponent(selectedCustomer!.crm_url)}&agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
       : null,
     (url: string) => fetch(url, { signal: AbortSignal.timeout(60000) }).then(r => r.json()),
   );
+
+  // Merge: DB calls are the primary source; live CRM fills any gaps
+  const rawCrmCalls: CRMCall[] = (() => {
+    if (dbCalls && dbCalls.length > 0) return dbCalls;
+    if (Array.isArray(crmCalls)) return crmCalls;
+    return [];
+  })();
 
   const { data: txCalls, mutate: mutateTx } = useSWR<TxCall[]>(
     selectedAgent && selectedCustomerName
@@ -299,12 +316,12 @@ export default function CallsPage() {
   const txMap = new Map<string, TxCall>();
   txCalls?.forEach(t => txMap.set(t.call_id, t));
 
-  // Merge CRM calls + any tx-only calls (transcribed locally but CRM unavailable)
-  const crmCallSet = new Set((crmCalls ?? []).map(c => c.call_id));
+  // Merge: rawCrmCalls + any tx-only calls not in the CRM list
+  const crmCallSet = new Set(rawCrmCalls.map(c => c.call_id));
   const txOnlyCalls = (txCalls ?? []).filter(tx => !crmCallSet.has(tx.call_id));
 
   const calls = [
-    ...(crmCalls?.map(c => ({ ...c, tx: txMap.get(c.call_id) ?? null })) ?? []),
+    ...rawCrmCalls.map(c => ({ ...c, tx: txMap.get(c.call_id) ?? null })),
     ...txOnlyCalls.map(tx => ({
       call_id:     tx.call_id,
       date:        tx.started_at ?? "",
@@ -406,36 +423,35 @@ export default function CallsPage() {
 
   function selectUntranscribed() {
     const ids = calls
-      .filter(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path)
+      .filter(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final)
       .map(c => c.call_id);
     setCheckedCallIds(new Set(ids));
   }
 
   async function handleBatchTranscribe() {
-    if (!selectedCustomer || checkedCallIds.size === 0) return;
+    if (checkedCallIds.size === 0) return;
+    // Prefer selectedCustomer; fall back to DB call metadata
+    const crmUrl    = selectedCustomer?.crm_url    ?? dbCalls?.[0]?.crm_url    ?? "";
+    const accountId = selectedCustomer?.account_id ?? dbCalls?.[0]?.account_id ?? "";
+    if (!crmUrl || !accountId || !selectedAgent || !selectedCustomerName) {
+      setBatchError("Missing CRM info — sync this pair from the CRM browser first");
+      return;
+    }
     setBatchTranscribing(true);
     setBatchError("");
     try {
-      await Promise.all([...checkedCallIds].map(async (callId) => {
-        const callData = calls.find(c => c.call_id === callId);
-        if (!callData?.record_path) return;
-        await fetch("/api/transcription/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            crm_url:     selectedCustomer.crm_url,
-            account_id:  selectedCustomer.account_id,
-            agent:       selectedAgent,
-            customer:    selectedCustomer.customer,
-            call_id:     callId,
-            record_path: callData.record_path,
-          }),
-        });
-      }));
+      const res = await fetch("/api/transcription/batch-for-pairs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pairs: [{ crm_url: crmUrl, account_id: accountId, agent: selectedAgent, customer: selectedCustomerName }],
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
       setCheckedCallIds(new Set());
       mutateTx();
     } catch (e: any) {
-      setBatchError(e.message ?? "Failed to queue some transcriptions");
+      setBatchError(e.message ?? "Failed to queue transcriptions");
     } finally {
       setBatchTranscribing(false);
     }
@@ -471,7 +487,7 @@ export default function CallsPage() {
               >
                 {checkedCallIds.size === calls.length ? "Deselect all" : "Select all"}
               </button>
-              {calls.some(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final && c.record_path) && (
+              {calls.some(c => !c.tx?.has_llm_smoothed && !c.tx?.has_llm_voted && !c.tx?.has_pipeline_final) && (
                 <button
                   onClick={selectUntranscribed}
                   className="text-[10px] text-gray-500 hover:text-gray-300 underline transition-colors"
@@ -520,11 +536,17 @@ export default function CallsPage() {
               <span>Customer not found for selected agent.</span>
             </div>
           )}
-          {hasPairContext && selectedCustomer && !crmCalls && txOnlyCalls.length === 0 && (
+          {hasPairContext && !dbCalls && txOnlyCalls.length === 0 && (
             <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
               <Loader2 className="w-4 h-4 animate-spin" />
               <span>Loading calls…</span>
-              <span className="text-gray-700 text-[10px]">First load fetches from CRM</span>
+            </div>
+          )}
+          {hasPairContext && needsCrmFetch && !crmCalls && txOnlyCalls.length === 0 && dbCalls?.length === 0 && (
+            <div className="flex flex-col items-center gap-2 p-4 text-xs text-gray-500">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Fetching from CRM…</span>
+              <span className="text-gray-700 text-[10px]">First load may take up to 60s</span>
             </div>
           )}
           {hasPairContext && calls.map(call => {

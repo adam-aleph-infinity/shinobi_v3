@@ -195,6 +195,48 @@ def get_customers(crm: str = Query(""), agent: str = Query("")):
         raise HTTPException(500, str(e))
 
 
+@router.get("/calls-by-pair")
+def calls_by_pair(
+    agent: str = Query(...),
+    customer: str = Query(""),
+    db: Session = Depends(get_session),
+):
+    """Return calls from local DB for an agent/customer pair — no live CRM fetch.
+    Resolves agent aliases so calls stored under any alias name are included.
+    Returns the same shape as /calls/{account_id} for drop-in compatibility."""
+    from sqlalchemy import or_
+    from ui.backend.models.crm import CRMCall
+    from ui.backend.services.crm_service import _load_aliases, _auto_detect_re_aliases
+
+    file_aliases = _load_aliases()
+    auto_aliases = _auto_detect_re_aliases([agent])
+    all_aliases  = {**auto_aliases, **file_aliases}
+    alias_names  = [k for k, v in all_aliases.items() if v == agent]
+    all_names    = [agent] + alias_names
+
+    if len(all_names) == 1:
+        cond = CRMCall.agent == agent
+    else:
+        cond = or_(*[CRMCall.agent == n for n in all_names])
+
+    stmt = select(CRMCall).where(cond)
+    if customer:
+        stmt = stmt.where(CRMCall.customer == customer)
+
+    rows = db.exec(stmt.order_by(CRMCall.started_at)).all()
+    return [
+        {
+            "call_id":      r.call_id,
+            "date":         r.started_at or "",
+            "duration":     int(r.audio_duration_s if r.audio_duration_s is not None else (r.duration_s or 0)),
+            "record_path":  r.record_path or "",
+            "crm_url":      r.crm_url,
+            "account_id":   r.account_id,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/calls/{account_id}")
 def get_calls(
     account_id: str,

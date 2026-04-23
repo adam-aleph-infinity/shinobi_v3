@@ -601,14 +601,22 @@ function RunDetail({ run, onBack }: { run: PipelineRunRecord; onBack: () => void
 // ── Main History Page ─────────────────────────────────────────────────────────
 
 export default function HistoryPage() {
-  const { salesAgent, customer } = useAppCtx();
+  const { salesAgent, customer, activePipelineId, activePipelineName } = useAppCtx();
   const [selectedRun, setSelectedRun] = useState<PipelineRunRecord | null>(null);
   const [filterPipeline, setFilterPipeline] = useState("");
 
-  const hasPair = !!(salesAgent && customer);
-  const runsUrl = hasPair
-    ? `/api/history/runs?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}${filterPipeline ? `&pipeline_id=${filterPipeline}` : ""}`
-    : null;
+  const hasAgent = !!salesAgent;
+  const hasCustomer = !!customer;
+  const effectivePipelineId = activePipelineId || filterPipeline;
+
+  const runsUrl = useMemo(() => {
+    const qp = new URLSearchParams();
+    if (effectivePipelineId) qp.set("pipeline_id", effectivePipelineId);
+    if (hasAgent) qp.set("sales_agent", salesAgent);
+    if (hasCustomer) qp.set("customer", customer);
+    qp.set("limit", "200");
+    return `/api/history/runs?${qp.toString()}`;
+  }, [effectivePipelineId, hasAgent, hasCustomer, salesAgent, customer]);
   const { data: runs, isLoading } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, { refreshInterval: 15000 });
 
   // Unique pipeline names for filter
@@ -618,6 +626,16 @@ export default function HistoryPage() {
     for (const r of runs) { if (!seen.has(r.pipeline_id)) seen.set(r.pipeline_id, r.pipeline_name); }
     return [...seen.entries()].map(([id, name]) => ({ id, name }));
   }, [runs]);
+
+  const scopeLabel = useMemo(() => {
+    const p = activePipelineName || (activePipelineId ? "Selected Pipeline" : "");
+    if (activePipelineId && hasAgent && hasCustomer) return `${p} · ${salesAgent} · ${customer}`;
+    if (activePipelineId && hasAgent) return `${p} · ${salesAgent} · all customers`;
+    if (activePipelineId) return `${p} · all agents/customers`;
+    if (hasAgent && hasCustomer) return `${salesAgent} · ${customer} · all pipelines`;
+    if (hasAgent) return `${salesAgent} · all customers · all pipelines`;
+    return "All runs";
+  }, [activePipelineId, activePipelineName, hasAgent, hasCustomer, salesAgent, customer]);
 
   if (selectedRun) {
     return (
@@ -633,10 +651,8 @@ export default function HistoryPage() {
       <div className="px-6 py-4 border-b border-gray-800 shrink-0 flex items-center gap-3">
         <History className="w-5 h-5 text-teal-400" />
         <h1 className="text-lg font-semibold text-white">Run History</h1>
-        {hasPair && (
-          <span className="text-sm text-gray-500">{salesAgent} · {customer}</span>
-        )}
-        {pipelineOptions.length > 1 && (
+        <span className="text-sm text-gray-500">{scopeLabel}</span>
+        {!activePipelineId && pipelineOptions.length > 1 && (
           <select
             value={filterPipeline}
             onChange={e => setFilterPipeline(e.target.value)}
@@ -650,24 +666,17 @@ export default function HistoryPage() {
 
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {!hasPair && (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-gray-600">
-            <AlertCircle className="w-10 h-10 opacity-20" />
-            <p className="text-sm">Select an agent and customer in the context bar</p>
-          </div>
-        )}
-
-        {hasPair && isLoading && (
+        {isLoading && (
           <div className="flex items-center justify-center h-full gap-2 text-gray-600">
             <Loader2 className="w-5 h-5 animate-spin" />
             <span className="text-sm">Loading history…</span>
           </div>
         )}
 
-        {hasPair && !isLoading && runs?.length === 0 && (
+        {!isLoading && runs?.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-gray-600">
             <History className="w-10 h-10 opacity-20" />
-            <p className="text-sm">No runs yet for this context</p>
+            <p className="text-sm">No runs for this filter scope</p>
           </div>
         )}
 
