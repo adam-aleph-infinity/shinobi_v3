@@ -11,6 +11,7 @@ import {
   BadgeCheck, ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAppCtx } from "@/lib/app-context";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -435,11 +436,20 @@ function AgentEditor({
 type PreviewState = { status: "idle" | "loading" | "ok" | "error"; chars: number; snippet: string; errMsg?: string };
 
 function TestPanel({ agent }: { agent: UniversalAgent }) {
+  const {
+    salesAgent: ctxSalesAgent,
+    customer: ctxCustomer,
+    callId: ctxCallId,
+    setSalesAgent: setCtxSalesAgent,
+    setCustomer: setCtxCustomer,
+    setCallId: setCtxCallId,
+  } = useAppCtx();
+
   // CRM context
   const { data: navAgents } = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
-  const [testAgent, setTestAgent]       = useState("");
-  const [testCustomer, setTestCustomer] = useState("");
-  const [testCallId, setTestCallId]     = useState("");
+  const [testAgent, setTestAgent]       = useState(() => ctxSalesAgent || "");
+  const [testCustomer, setTestCustomer] = useState(() => ctxCustomer || "");
+  const [testCallId, setTestCallId]     = useState(() => ctxCallId || "");
 
   const { data: navCustomers } = useSWR<{ customer: string; call_count: number }[]>(
     testAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(testAgent)}` : null, fetcher,
@@ -475,6 +485,14 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     setStreamText(""); setThinking(""); setResult(null);
     setRunError(""); setStatus("");
   }, [agent.id]);
+
+  // Keep quick-test selectors aligned with the global context bar defaults.
+  useEffect(() => {
+    setTestAgent(ctxSalesAgent || "");
+    setTestCustomer(ctxCustomer || "");
+    setTestCallId(ctxCallId || "");
+    setPreviews({});
+  }, [ctxSalesAgent, ctxCustomer, ctxCallId]);
 
   async function fetchArtifact(inp: AgentInput) {
     if (!testAgent || !testCustomer) return;
@@ -691,20 +709,32 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
         <div className="p-3 border-b border-gray-800 space-y-1.5">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold mb-1.5">Context</p>
           <select value={testAgent}
-            onChange={e => { setTestAgent(e.target.value); setTestCustomer(""); setTestCallId(""); setPreviews({}); }}
+            onChange={e => {
+              const next = e.target.value;
+              setTestAgent(next); setTestCustomer(""); setTestCallId(""); setPreviews({});
+              setCtxSalesAgent(next);
+            }}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500">
             <option value="">— Sales agent —</option>
             {(navAgents ?? []).map(a => <option key={a.agent} value={a.agent}>{a.agent} ({a.count})</option>)}
           </select>
           <select value={testCustomer}
-            onChange={e => { setTestCustomer(e.target.value); setTestCallId(""); setPreviews({}); }}
+            onChange={e => {
+              const next = e.target.value;
+              setTestCustomer(next); setTestCallId(""); setPreviews({});
+              setCtxCustomer(next);
+            }}
             disabled={!testAgent}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500 disabled:opacity-40">
             <option value="">— Customer —</option>
             {(navCustomers ?? []).map(c => <option key={c.customer} value={c.customer}>{c.customer}</option>)}
           </select>
           {needsCallId && (
-            <select value={testCallId} onChange={e => setTestCallId(e.target.value)}
+            <select value={testCallId} onChange={e => {
+              const next = e.target.value;
+              setTestCallId(next);
+              setCtxCallId(next);
+            }}
               disabled={!testCustomer}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500 disabled:opacity-40">
               <option value="">— Call (transcript/notes) —</option>
@@ -976,12 +1006,18 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
 
 export default function AgentsPage() {
   const { mutate } = useSWRConfig();
+  const { activeAgentId, setActiveAgent } = useAppCtx();
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const allAgents = agents ?? [];
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => activeAgentId || null);
   const [importing, setImporting]   = useState(false);
   const [importMsg, setImportMsg]   = useState("");
+
+  useEffect(() => {
+    if (!activeAgentId) return;
+    setSelectedId(activeAgentId);
+  }, [activeAgentId]);
 
   const selected = allAgents.find(a => a.id === selectedId) ?? null;
 
@@ -1005,6 +1041,7 @@ export default function AgentsPage() {
     const created: UniversalAgent = await res.json();
     mutate("/api/universal-agents");
     setSelectedId(created.id);
+    setActiveAgent(created.id, created.name, created.agent_class || "general");
   }
 
   async function saveAgent(draft: Omit<UniversalAgent, "id" | "created_at">) {
@@ -1021,6 +1058,7 @@ export default function AgentsPage() {
     await fetch(`/api/universal-agents/${selectedId}`, { method: "DELETE" });
     mutate("/api/universal-agents");
     setSelectedId(null);
+    if (activeAgentId === selectedId) setActiveAgent("", "", "");
   }
 
   async function importPresets() {
@@ -1069,7 +1107,10 @@ export default function AgentsPage() {
                   <Icon className="w-2.5 h-2.5" /> {m.label}
                 </p>
                 {(grouped[cls] ?? []).map(a => (
-                  <button key={a.id} onClick={() => setSelectedId(a.id)}
+                  <button key={a.id} onClick={() => {
+                    setSelectedId(a.id);
+                    setActiveAgent(a.id, a.name, a.agent_class || "general");
+                  }}
                     className={cn(
                       "w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] transition-colors",
                       selectedId === a.id

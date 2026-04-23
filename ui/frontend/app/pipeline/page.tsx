@@ -282,6 +282,17 @@ function nodeXY(si: number, slotIdx: number): { x: number; y: number } {
 const HANDLE_CSS = `
   /* Sleeve nodes must never intercept pointer events */
   .react-flow__node-sleeve { pointer-events: none !important; }
+  /* Override built-in input/output node sizing (150px) so handles align to our 200px card center */
+  .react-flow__node-input,
+  .react-flow__node-output {
+    width: 200px !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    text-align: left !important;
+  }
   /* Both handles share the same base size (14 px) so they protrude
      symmetrically from the top and bottom edges of every node card.   */
   /* Source handle — center sits ON the bottom edge (protrudes equally below) */
@@ -880,6 +891,27 @@ function PipelineCanvas() {
 
     if (kind === "input") {
       stageIndex = 0; // inputs always in the top lane
+    } else if (dropPos) {
+      // Drag-drop should honor the user's intended lane when possible.
+      const lanesOfKind = newStages
+        .map((k, i) => ({ k, i }))
+        .filter(x => x.k === kind)
+        .map(x => x.i);
+      const freeLanes = lanesOfKind.filter(i =>
+        currentNodes.filter(n => (n.data as PipelineNodeData).stageIndex === i).length < MAX_PER_LANE
+      );
+      const candidateLanes = freeLanes.length > 0 ? freeLanes : lanesOfKind;
+
+      if (candidateLanes.length > 0) {
+        stageIndex = candidateLanes.reduce((best, laneIdx) => {
+          const laneCenterY = laneY(laneIdx) + SLEEVE_INNER;
+          const bestCenterY = laneY(best) + SLEEVE_INNER;
+          return Math.abs(dropPos.y - laneCenterY) < Math.abs(dropPos.y - bestCenterY) ? laneIdx : best;
+        }, candidateLanes[0]);
+      } else {
+        newStages.push(kind);
+        stageIndex = newStages.length - 1;
+      }
     } else {
       // Walk forward: first lane of this kind that still has free slots
       let firstIdx = -1;
@@ -990,6 +1022,37 @@ function PipelineCanvas() {
   function handleAddStage() {
     if (stagesRef.current.length >= MAX_TOTAL_STAGES) return;
     const next: NodeKind[] = [...stagesRef.current, "processing", "output"];
+    setStages(next);
+    stagesRef.current = next;
+  }
+
+  function handleRemoveStage() {
+    const currentStages = stagesRef.current;
+    if (currentStages.length <= INIT_STAGES.length) return;
+
+    const procIdx = currentStages.length - 2;
+    const outIdx = currentStages.length - 1;
+    if (currentStages[procIdx] !== "processing" || currentStages[outIdx] !== "output") return;
+
+    const removeStageIdx = new Set([procIdx, outIdx]);
+    const nodesToRemove = nodesRef.current.filter(n =>
+      removeStageIdx.has((n.data as PipelineNodeData).stageIndex)
+    );
+
+    if (nodesToRemove.length > 0) {
+      const ok = window.confirm(
+        `Remove last layer and delete ${nodesToRemove.length} node(s) in it?`,
+      );
+      if (!ok) return;
+    }
+
+    const removeIds = new Set(nodesToRemove.map(n => n.id));
+    setNodes(ns => ns.filter(n => !removeIds.has(n.id)));
+    setEdges(es => es.filter(e => !removeIds.has(e.source) && !removeIds.has(e.target)));
+
+    if (selectedNodeId && removeIds.has(selectedNodeId)) setSelectedNodeId(null);
+
+    const next = currentStages.slice(0, -2);
     setStages(next);
     stagesRef.current = next;
   }
@@ -1913,12 +1976,20 @@ function PipelineCanvas() {
           <div className="p-2.5 border-t border-gray-800 shrink-0">
             <div className="flex items-center justify-between mb-1.5">
               <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">Flow rules</p>
-              {stages.length < MAX_TOTAL_STAGES && (
-                <button onClick={handleAddStage}
-                  className="text-[10px] text-indigo-500 hover:text-indigo-400 font-semibold transition-colors">
-                  + Layer
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {stages.length > INIT_STAGES.length && (
+                  <button onClick={handleRemoveStage}
+                    className="text-[10px] text-red-500 hover:text-red-400 font-semibold transition-colors">
+                    - Layer
+                  </button>
+                )}
+                {stages.length < MAX_TOTAL_STAGES && (
+                  <button onClick={handleAddStage}
+                    className="text-[10px] text-indigo-500 hover:text-indigo-400 font-semibold transition-colors">
+                    + Layer
+                  </button>
+                )}
+              </div>
             </div>
             <div className="space-y-0.5 text-[10px]">
               <p className="text-gray-500"><span className="text-blue-400">Input</span> → <span className="text-indigo-400">Processing</span> ✓</p>
