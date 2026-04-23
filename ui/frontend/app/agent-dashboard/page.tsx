@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppCtx } from "@/lib/app-context";
+import { formatLocalDate, formatLocalDateTime } from "@/lib/time";
 
 const fetcher = async (url: string) => {
   const r = await fetch(url);
@@ -65,18 +66,6 @@ type AgentStats = {
   total_withdrawals: number;
   avg_call_duration_s: number;
 };
-
-function fmtVmDateTime(value?: string | null) {
-  if (!value) return "—";
-  const s = String(value).trim();
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
-  if (m) return `${m[1]} ${m[2]}`;
-  try {
-    return new Date(s).toISOString().slice(0, 19).replace("T", " ");
-  } catch {
-    return s;
-  }
-}
 
 function fmtCurrency(n?: number | null) {
   if (n == null) return "—";
@@ -158,7 +147,7 @@ export default function AgentDashboardPage() {
   const filteredRows = useMemo(() => {
     return rows.filter(r => {
       if (selectedRunId !== "all" && r.run_id !== selectedRunId) return false;
-      const d = (r.run_started_at || "").slice(0, 10);
+      const d = formatLocalDate(r.run_started_at || "");
       if (dateFrom && d < dateFrom) return false;
       if (dateTo && d > dateTo) return false;
       if (scoreSection !== "all" && r.metric_type === "score" && r.metric_key !== scoreSection) return false;
@@ -278,7 +267,7 @@ export default function AgentDashboardPage() {
                   <option value="all">All Runs</option>
                   {(analytics?.runs ?? []).map(r => (
                     <option key={r.id} value={r.id}>
-                      {fmtVmDateTime(r.started_at)} · {r.id.slice(0, 8)} · {r.status}
+                      {formatLocalDateTime(r.started_at)} · {r.id.slice(0, 8)} · {r.status}
                     </option>
                   ))}
                 </select>
@@ -413,7 +402,7 @@ export default function AgentDashboardPage() {
                         </td>
                         <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
                         <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
-                        <td className="px-3 py-2 text-gray-500">{fmtVmDateTime(r.latestAt)}</td>
+                        <td className="px-3 py-2 text-gray-500">{formatLocalDateTime(r.latestAt)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -426,4 +415,3 @@ export default function AgentDashboardPage() {
     </div>
   );
 }
-

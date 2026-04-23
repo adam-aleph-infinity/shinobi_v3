@@ -3,6 +3,7 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import useSWR from "swr";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
+import { parseServerDate, utcHmsToLocal } from "@/lib/time";
 import { SectionContent } from "@/components/shared/SectionCards";
 import {
   History, CheckCircle2, AlertCircle, Loader2, ChevronDown, ChevronUp,
@@ -71,7 +72,9 @@ const DEFAULT_ARTIFACT = { color: "text-gray-400", bg: "bg-gray-800/40", border:
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
 function relativeTime(isoStr: string): string {
-  const d = Math.floor((Date.now() - new Date(isoStr + "Z").getTime()) / 1000);
+  const dt = parseServerDate(isoStr);
+  if (!dt) return "—";
+  const d = Math.floor((Date.now() - dt.getTime()) / 1000);
   if (d < 60) return `${d}s ago`;
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
@@ -80,16 +83,12 @@ function relativeTime(isoStr: string): string {
 
 function durationStr(s: string, e: string | null): string {
   if (!e) return "…";
-  const ms = new Date(e + "Z").getTime() - new Date(s + "Z").getTime();
+  const start = parseServerDate(s);
+  const end = parseServerDate(e);
+  if (!start || !end) return "—";
+  const ms = end.getTime() - start.getTime();
   const sec = Math.floor(ms / 1000);
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
-}
-
-function utcHmsToIsrael(hms: string): string {
-  const [h, m, s] = hms.split(":").map(Number);
-  const now = new Date();
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m, s ?? 0));
-  return d.toLocaleTimeString("en-GB", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function buildCanvasMaps(canvas: { nodes: CanvasNode[]; edges: { id: string; source: string; target: string }[] }) {
@@ -565,7 +564,7 @@ function RunDetail({ run, onBack }: { run: PipelineRunRecord; onBack: () => void
                     <div key={i} className={cn("px-3 py-px font-mono text-[9px] leading-relaxed whitespace-pre-wrap break-all",
                       l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-400" :
                       l.level === "stage" ? "text-teal-400" : l.level === "llm" ? "text-indigo-300" : "text-gray-600")}>
-                      <span className="text-gray-700 mr-1">{utcHmsToIsrael(l.ts)}</span>{l.text}
+                      <span className="text-gray-700 mr-1">{utcHmsToLocal(l.ts)}</span>{l.text}
                     </div>
                   ))}
                 </div>

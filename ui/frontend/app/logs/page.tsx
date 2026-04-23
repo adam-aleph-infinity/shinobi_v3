@@ -9,6 +9,7 @@ import {
   Trash2, XCircle,
 } from "lucide-react";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
+import { formatLocalTime, utcHmsToLocal } from "@/lib/time";
 
 // Use backend URL directly for EventSource — Next.js dev-server proxy buffers
 // SSE streams and events never arrive. Regular SWR fetches go through /api rewrite.
@@ -401,7 +402,7 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
         if (focusJob) {
           const text = (data.message as string || "").trim();
           if (!text) return;
-          line = { ts: new Date().toISOString().slice(11, 19), text, level: classifyLine(text) };
+          line = { ts: formatLocalTime(new Date(), true), text, level: classifyLine(text) };
           batch.push(line);
           if (!timer) timer = setTimeout(flush, 80);
           // Close once the job signals done — prevents EventSource auto-reconnect loop
@@ -410,7 +411,12 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
             es.close();
           }
         } else {
-          line = { ts: data.ts || "", text: data.text || "", level: data.level || "info", job_id: data.job_id };
+          line = {
+            ts: utcHmsToLocal(data.ts || ""),
+            text: data.text || "",
+            level: data.level || "info",
+            job_id: data.job_id,
+          };
           batch.push(line);
           if (!timer) timer = setTimeout(flush, 80);
         }

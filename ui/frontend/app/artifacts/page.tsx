@@ -12,6 +12,7 @@ import { useResize } from "@/lib/useResize";
 import { DragHandle } from "@/components/shared/DragHandle";
 import { useAppCtx } from "@/lib/app-context";
 import { SectionContent } from "@/components/shared/SectionCards";
+import { formatLocalDateTime, parseServerDate } from "@/lib/time";
 
 const fetcher = (url: string) =>
   fetch(url).then(r => {
@@ -76,6 +77,10 @@ interface PipelineBucket {
   label: string;
   items: ArtifactItem[];
   latestTs: number;
+  runId?: string;
+  runStartedAt?: string;
+  pipelineName?: string;
+  isDirect: boolean;
 }
 
 type ArtifactItem =
@@ -85,11 +90,11 @@ type ArtifactItem =
   | { kind: "notes_rollup";      id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
   | { kind: "note";              id: string; date: string; chars: number; label: string; data: Note }
   | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note }
-  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
-  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
-  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
-  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
-  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string } }
+  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
+  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
+  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
+  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
+  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
   | { kind: "provider_file";       id: string; date: string; chars: number; label: string; data: UploadedFile };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
@@ -156,6 +161,12 @@ function isPipelineKind(
   );
 }
 
+function isPipelineItem(
+  item: ArtifactItem,
+): item is Extract<ArtifactItem, { kind: "pipeline_persona" | "pipeline_score" | "pipeline_notes" | "pipeline_compliance" | "pipeline_output" }> {
+  return isPipelineKind(item.kind);
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function prettyJson(value: unknown): string {
@@ -165,18 +176,6 @@ function prettyJson(value: unknown): string {
     catch { return value; }
   }
   return JSON.stringify(value, null, 2);
-}
-
-function formatVmDateTime(value: string): string {
-  if (!value) return "—";
-  const s = String(value).trim();
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
-  if (m) return `${m[1]} ${m[2]}`;
-  try {
-    return new Date(s).toISOString().slice(0, 19).replace("T", " ");
-  } catch {
-    return s;
-  }
 }
 
 function CopyBtn({ text }: { text: string }) {
@@ -288,7 +287,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
-            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
+            <p className="text-[10px] text-gray-500">{formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars · type: {item.data.type}</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
@@ -308,7 +307,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">{item.label}</p>
-            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
+            <p className="text-[10px] text-gray-500">{formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={rawText} />
@@ -387,7 +386,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">Call Note · {item.data.call_id.slice(-12)}</p>
-            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
+            <p className="text-[10px] text-gray-500">{formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
@@ -410,7 +409,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
         <div className="px-5 py-3 border-b border-gray-800 shrink-0 flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-white truncate">Compliance Note · {item.data.call_id.slice(-12)}</p>
-            <p className="text-[10px] text-gray-500">{formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
+            <p className="text-[10px] text-gray-500">{formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md + (rawText ? "\n\n" + rawText : "")} />
@@ -467,7 +466,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className={cn("text-xs font-semibold uppercase tracking-wide", m.text)}>{m.label}</p>
             <p className="text-sm font-semibold text-white truncate">{item.data.agent_name}</p>
             <p className="text-[10px] text-gray-500">
-              {formatVmDateTime(item.date)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
+              {formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars · {item.data.pipeline_name}
               {item.data.model ? ` · ${item.data.model}` : ""}
             </p>
           </div>
@@ -517,7 +516,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className={cn("text-xs font-bold uppercase tracking-wider", pColor)}>{f.provider}</p>
             <p className="text-sm font-semibold text-white truncate">{f.source.replace(/_/g, " ")}</p>
             <p className="text-[10px] text-gray-500">
-              {formatVmDateTime(f.created_at)} · {f.chars.toLocaleString()} chars
+              {formatLocalDateTime(f.created_at)} · {f.chars.toLocaleString()} chars
               {f.input_key ? ` · key: ${f.input_key}` : ""}
             </p>
           </div>
@@ -560,7 +559,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
               { label: "Size",        value: `${f.chars.toLocaleString()} chars` },
               { label: "Call ID",     value: f.call_id ? f.call_id.slice(-16) : "—" },
               { label: "Content Hash",value: f.content_hash },
-              { label: "Uploaded",    value: f.created_at.slice(0, 19).replace("T", " ") },
+              { label: "Uploaded",    value: formatLocalDateTime(f.created_at) },
             ].map(({ label, value }) => (
               <div key={label} className="border border-gray-800/60 rounded-lg px-3 py-2">
                 <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mb-0.5">{label}</p>
@@ -579,7 +578,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
                     ? <Clock className="w-3 h-3 text-amber-400 shrink-0" />
                     : null}
                   <p className={cn("text-xs font-mono", isExpired ? "text-red-400" : expiringSoon ? "text-amber-400" : "text-gray-300")}>
-                    {f.expires_at.slice(0, 19).replace("T", " ")}
+                    {formatLocalDateTime(f.expires_at)}
                     {isExpired ? " (expired)" : expiringSoon ? " (soon)" : ""}
                   </p>
                 </div>
@@ -615,7 +614,7 @@ function ItemRow({ item, selected, onClick }: { item: ArtifactItem; selected: bo
       <div className="flex-1 min-w-0">
         <p className={cn("text-[11px] font-medium truncate", selected ? "text-white" : "text-gray-300")}>{item.label}</p>
         <p className="text-[9px] text-gray-600 flex items-center gap-1.5">
-          <CalendarDays className="w-2.5 h-2.5" />{formatVmDateTime(item.date)}
+          <CalendarDays className="w-2.5 h-2.5" />{formatLocalDateTime(item.date)}
           <span className="text-gray-700">{item.chars.toLocaleString()} chars</span>
         </p>
       </div>
@@ -642,6 +641,7 @@ export default function ArtifactsPage() {
     agent: string;
     customer: string;
   } | null>(null);
+  const [confirmDeleteRunId, setConfirmDeleteRunId] = useState<string | null>(null);
 
   const pairQs = selectedAgent && selectedCustomer
     ? new URLSearchParams({ agent: selectedAgent, customer: selectedCustomer })
@@ -778,6 +778,7 @@ export default function ArtifactsPage() {
             pipeline_name: run.pipeline_name,
             model: step.model ?? "",
             run_id: run.id,
+            run_started_at: run.started_at,
           },
         } as ArtifactItem);
       });
@@ -825,6 +826,23 @@ export default function ArtifactsPage() {
     setSelectedItem(null);
   }
 
+  async function handleDeleteRun(runId: string) {
+    if (!runId) return;
+    await fetch(`/api/history/runs/${runId}`, { method: "DELETE" });
+    await mutateRuns();
+    setConfirmDeleteRunId(null);
+    setSelectedItem((prev) => {
+      if (!prev) return null;
+      if (!isPipelineItem(prev)) return prev;
+      return prev.data.run_id === runId ? null : prev;
+    });
+    setFrozenItem((prev) => {
+      if (!prev) return null;
+      if (!isPipelineItem(prev.item)) return prev;
+      return prev.item.data.run_id === runId ? null : prev;
+    });
+  }
+
   const allItems = useMemo(
     () => (Object.keys(itemsByKind) as ArtifactKind[]).flatMap(k => itemsByKind[k]),
     [itemsByKind],
@@ -835,25 +853,32 @@ export default function ArtifactsPage() {
     for (const item of allItems) {
       let id = "context";
       let label = "Direct Artifacts";
+      let runId: string | undefined;
+      let runStartedAt: string | undefined;
+      let pipelineName: string | undefined;
+      let isDirect = true;
       if (isPipelineKind(item.kind)) {
-        const day = formatVmDateTime(item.date).slice(0, 10);
-        const pipelineData = item.data as { pipeline_name?: string };
-        const pipelineName = pipelineData.pipeline_name || "Pipeline";
-        id = `pipeline:${pipelineName}:${day}`;
-        label = `${pipelineName} · ${day}`;
+        const pipelineData = item.data as { pipeline_name?: string; run_id?: string; run_started_at?: string };
+        pipelineName = pipelineData.pipeline_name || "Pipeline";
+        runId = pipelineData.run_id || "";
+        runStartedAt = pipelineData.run_started_at || item.date;
+        id = runId ? `run:${runId}` : `run:unknown:${pipelineName}:${item.id}`;
+        label = runId ? `run ${runId}` : "run unknown";
+        isDirect = false;
       }
-      const ts = Number.isFinite(Date.parse(item.date)) ? Date.parse(item.date) : 0;
+      const ts = parseServerDate(item.date)?.getTime() ?? 0;
       const existing = map.get(id);
       if (!existing) {
-        map.set(id, { id, label, items: [item], latestTs: ts });
+        map.set(id, { id, label, items: [item], latestTs: ts, runId, runStartedAt, pipelineName, isDirect });
       } else {
         existing.items.push(item);
         existing.latestTs = Math.max(existing.latestTs, ts);
+        if (!existing.runStartedAt && runStartedAt) existing.runStartedAt = runStartedAt;
       }
     }
     return [...map.values()].sort((a, b) => {
-      if (a.id === "context" && b.id !== "context") return 1;
-      if (a.id !== "context" && b.id === "context") return -1;
+      if (a.isDirect && !b.isDirect) return 1;
+      if (!a.isDirect && b.isDirect) return -1;
       return b.latestTs - a.latestTs || a.label.localeCompare(b.label);
     });
   }, [allItems]);
@@ -881,6 +906,16 @@ export default function ArtifactsPage() {
   const selectedBucket = selectedBucketId
     ? pipelineBuckets.find(b => b.id === selectedBucketId) ?? null
     : null;
+
+  useEffect(() => {
+    if (!selectedBucket?.runId) {
+      setConfirmDeleteRunId(null);
+      return;
+    }
+    if (confirmDeleteRunId && confirmDeleteRunId !== selectedBucket.runId) {
+      setConfirmDeleteRunId(null);
+    }
+  }, [selectedBucket?.runId, confirmDeleteRunId]);
 
   const typeGroups = useMemo(
     () => (Object.keys(ARTIFACT_TYPE_META) as ArtifactKind[])
@@ -918,11 +953,38 @@ export default function ArtifactsPage() {
   return (
     <div className="h-[calc(100vh-5.25rem)] flex overflow-hidden">
 
-      {/* ── Panel 1: Pipelines (grouped by name + date) ───────────────────── */}
+      {/* ── Panel 1: Pipelines (grouped by run_id) ─────────────────────────── */}
       <div className="flex shrink-0 overflow-hidden" style={{ width: pipelineW }}>
         <div className="flex-1 flex flex-col border-r border-gray-800 bg-gray-950 overflow-hidden">
-          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
-            <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
+          <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Pipeline Runs</p>
+              {selectedBucket?.runId && (
+                confirmDeleteRunId === selectedBucket.runId ? (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => setConfirmDeleteRunId(null)}
+                      className="text-[9px] text-gray-600 hover:text-gray-400 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => handleDeleteRun(selectedBucket.runId!)}
+                      className="text-[9px] text-red-400 hover:text-red-300 font-semibold transition-colors"
+                    >
+                      Confirm Delete
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDeleteRunId(selectedBucket.runId!)}
+                    className="text-[9px] px-1.5 py-0.5 rounded border border-red-800/40 text-red-400 hover:text-red-300 hover:border-red-700/60 transition-colors shrink-0"
+                  >
+                    Delete Run
+                  </button>
+                )
+              )}
+            </div>
             {hasPair && (
               <p className="text-[9px] text-gray-700 mt-0.5 truncate">
                 {selectedAgent} · {selectedCustomer}
@@ -943,7 +1005,7 @@ export default function ArtifactsPage() {
               </div>
             ) : pipelineBuckets.map(bucket => {
               const isSel = selectedBucketId === bucket.id;
-              const isDirect = bucket.id === "context";
+              const isDirect = bucket.isDirect;
               return (
                 <button
                   key={bucket.id}
@@ -963,9 +1025,17 @@ export default function ArtifactsPage() {
                   </span>
                   <div className="flex-1 min-w-0">
                     <p className={cn("text-[11px] font-medium truncate", isSel ? "text-white" : (isDirect ? "text-gray-300" : "text-teal-300"))}>
-                      {bucket.label}
+                      {isDirect ? bucket.label : `${bucket.label}`}
                     </p>
-                    <p className="text-[9px] text-gray-600">{bucket.items.length} item{bucket.items.length !== 1 ? "s" : ""}</p>
+                    {isDirect ? (
+                      <p className="text-[9px] text-gray-600">{bucket.items.length} item{bucket.items.length !== 1 ? "s" : ""}</p>
+                    ) : (
+                      <p className="text-[9px] text-gray-600 truncate">
+                        {bucket.pipelineName || "Pipeline"}
+                        {bucket.runStartedAt ? ` · ${formatLocalDateTime(bucket.runStartedAt)}` : ""}
+                        {` · ${bucket.items.length} item${bucket.items.length !== 1 ? "s" : ""}`}
+                      </p>
+                    )}
                   </div>
                   <ChevronRight className={cn("w-3 h-3 shrink-0 transition-colors", isSel ? "text-indigo-400" : "text-gray-700")} />
                 </button>

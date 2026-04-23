@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
+import { formatLocalDateTime, formatLocalTime, utcHmsToLocal } from "@/lib/time";
 import { SectionContent } from "./SectionCards";
 
 const fetcher = (url: string) => fetch(url).then(r => {
@@ -113,13 +114,6 @@ interface CanvasNode {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function utcHmsToIsrael(hms: string): string {
-  const [h, m, s] = hms.split(":").map(Number);
-  const now = new Date();
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m, s ?? 0));
-  return d.toLocaleTimeString("en-GB", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
 
 // ── Mini pipeline canvas ─────────────────────────────────────────────────────
 
@@ -1351,7 +1345,7 @@ export function PipelineSidePanel({
               <div className="shrink-0 border-t border-gray-800 bg-black/80 max-h-56 overflow-y-auto">
                 <div className="px-2 py-1 font-mono text-[9px] text-gray-600 border-b border-gray-800/60 flex gap-4 flex-wrap">
                   <span>run_id: <span className="text-gray-400">{pipelineState?.run_id ?? "—"}</span></span>
-                  <span>start: <span className="text-gray-400">{pipelineState?.start_datetime ? pipelineState.start_datetime.replace("T"," ").slice(0,19) : "—"}</span></span>
+                  <span>start: <span className="text-gray-400">{pipelineState?.start_datetime ? formatLocalDateTime(pipelineState.start_datetime) : "—"}</span></span>
                   <span>status: <span className={
                     pipelineState?.status === "running" ? "text-orange-400" :
                     pipelineState?.status === "pass"    ? "text-green-400"  :
@@ -1364,7 +1358,7 @@ export function PipelineSidePanel({
                     : st === "failed"  || st === "error"   ? "text-red-400"
                     : st === "running" || st === "loading" ? "text-orange-400"
                     : "text-gray-500";
-                  const fmt = (t: string | null) => t ? t.replace("T"," ").slice(11,19) : "—";
+                  const fmt = (t: string | null) => t ? formatLocalTime(t, true) : "—";
                   const hasCached = s.cached_locations?.length > 0;
                   return (
                     <div key={i} className="px-2 py-0.5 font-mono text-[9px] border-b border-gray-800/40 flex gap-3 flex-wrap">
@@ -1390,7 +1384,7 @@ export function PipelineSidePanel({
                       l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-400" :
                       l.level === "stage" ? "text-teal-400" : l.level === "llm" ? "text-indigo-300" : "text-gray-500"
                     )}>
-                      <span className="text-gray-700 mr-1">{utcHmsToIsrael(l.ts)}</span>{l.text}
+                      <span className="text-gray-700 mr-1">{utcHmsToLocal(l.ts)}</span>{l.text}
                     </div>
                   ))}
                   <div ref={logEndRef} />
