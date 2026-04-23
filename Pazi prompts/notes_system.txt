@@ -1,0 +1,234 @@
+ADDITIONAL OUTPUT – SYSTEM NOTES (CALL-LEVEL TRACKING)
+
+ 
+
+This section must be generated ONLY AFTER all scores, final score, and final output have been fully completed.
+
+It must not replace, interrupt, or interfere with the scoring output in any way.
+
+ 
+
+You must generate System Notes for each call based strictly on:
+
+• The Call-Based Process Flow from Stage 2 (this is the exact factual record of the call)
+
+• The expected workflow defined in Stage 1 (chronological process and stage mapping)
+
+• The relevant company procedures for that specific call
+
+ 
+
+Do NOT infer or add facts that are not clearly reflected in Stage 2.
+
+Stage 1 should be used only to determine required actions for that stage of the process.
+
+ 
+
+ 
+
+FOR EACH CALL:
+
+ 
+
+Generate:
+
+ 
+
+System Note – Call X
+
+ 
+
+Structure:
+
+ 
+
+1. Company Procedures (MANDATORY – FIRST SECTION)
+
+ 
+
+Identify ONLY the company procedures that are relevant to that specific call.
+
+ 
+
+The following procedures define what must be evaluated, but only those relevant to the current call should be included:
+
+• Secret Code verification at the beginning of EVERY call
+
+• Sending and verification of the required email “Simple Truth About Your Money”:
+
+ - Must be sent in Call 1
+
+ - For Australian clients:
+
+   • verify that the client received the email
+
+   • verify that the client viewed the content, including the banking article
+
+ - For UK clients:
+
+   • verify that the client received the email
+
+   • verify that the client read the content
+
+• Multi-platform (success fee) offer introduction (Call 1)
+
+• Follow-up verification of the multi-platform explanation (later call)
+
+• Use of the correct exchange for initial bank deposit:
+
+ - Australia: CoinSpot, Swyftx, Kraken, Bitcoin.com.au
+
+ - UK: Coinbase, Kraken, Crypto.com
+
+• Transfer through a secondary exchange (MEXC or Binance) before reaching the broker
+
+For each relevant procedure:
+
+ 
+
+• If performed →  
+
+[COMPLIANT] – Procedure performed correctly
+
+ 
+
+• If NOT performed →  
+
+[VIOLATION] – Procedure not performed
+
+ 
+
+For every violation:
+
+• Clearly specify the exact procedure that was violated
+
+• Do NOT generalize
+
+• If a procedure is not explicitly confirmed as performed in Stage 2 → treat as NOT performed
+
+ 
+
+ 
+
+2. Call Summary (EXACT – NO REWRITE)
+
+ 
+
+You must copy the Call-Based Process Flow for this call EXACTLY as it appears in Stage 2.
+
+ 
+
+• Do NOT summarize
+
+• Do NOT rephrase
+
+• Do NOT shorten
+
+• Do NOT merge sentences
+
+• Do NOT modify wording in any way
+
+ 
+
+The text must be reproduced word-for-word.
+
+ 
+
+ 
+
+3. Next Call Actions (MANDATORY)
+
+ 
+
+The process follows a chronological workflow as defined in Stage 1.
+
+ 
+
+You must identify the current position in the process based on what was actually completed in this call (Stage 2), and determine the next required actions accordingly.
+
+ 
+
+• Identify any required actions that should have already been completed by the stage the agent has reached, but were not, and list them as actions that must be completed in the next call
+
+ 
+
+• Based on the chronological workflow in Stage 1, determine the next required actions as follows:
+
+ 
+
+ - First, map the agent’s current position against the defined sequence of the first four calls (Call 1–Call 4), based on what was actually completed in this call (Stage 2)
+
+ 
+
+ - If the agent has reached the point where the pitch should be delivered:
+
+   • explicitly instruct the agent to perform the pitch
+
+   • emphasize proper execution of the pitch and driving the client toward initiating the transfer
+
+ 
+
+ - If the client shows willingness to proceed with a deposit:
+
+   • instruct the agent to prepare the client for bank interaction:
+
+     • banks often block or flag crypto-related transfers and warn that it may be a scam
+
+     • the agent must prepare the client in advance for this interaction
+
+     • the agent must guide the client on what to say and what NOT to say
+
+     • the agent must reduce fear, hesitation, and reinforce confidence
+
+     • if the client is Australian, remind the client of the banking article that was sent after the first call (Simple Truth About Your Money email) and ensure they have viewed it
+
+ 
+
+   • instruct the agent to prepare the client for exchange interaction:
+
+     • exchanges may restrict withdrawals if they detect transfers to brokerage-related wallets
+
+     • the agent must guide the client step-by-step through the required technical actions
+
+     • the agent must prepare the client for possible restrictions or questioning
+
+ 
+
+   • this preparation must be performed before every transfer attempt
+
+ 
+
+   • instruct the agent to proceed to execution (completing the transfer process end-to-end)
+
+ 
+
+ - Once the initial deposit is completed:
+
+   • instruct the agent to focus on capital maximization (increasing positions, additional deposits, deeper KYC, strengthening trust)
+
+ 
+
+ - When the client reaches full or near-full liquid capital deployment:
+
+   • identify this as the transition point to the Advanced Stage
+
+   • instruct the agent to introduce pension (superannuation) strategy
+
+ 
+
+• All next actions must reflect the exact point reached in the process:
+
+ • if something was skipped or not completed → it must be completed in the next call
+
+ • if a stage was completed → move forward to the next required action
+
+ 
+
+Do NOT rely on call number to determine next actions.
+
+Do NOT introduce any actions that are not derived from Stage 1.
+
+Be explicit and actionable.
+
+ 
+

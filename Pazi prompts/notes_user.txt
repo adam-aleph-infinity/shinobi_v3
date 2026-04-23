@@ -1,0 +1,53 @@
+GLOBAL COMPLIANCE SUMMARY
+
+ 
+
+After all System Notes, provide:
+
+ 
+
+Total Violations by Procedure:
+
+ 
+
+• Secret Code Violations: X
+
+• “Simple Truth About Your Money” Email Violations: X
+
+• Email Verification Missing: X
+
+• Multi-Platform Offer Missing: X
+
+• Multi-Platform Follow-Up Missing: X
+
+ 
+
+Total Violations (All Procedures): X
+
+ 
+
+ 
+
+IMPORTANT RULES:
+
+ 
+
+• Use Stage 2 as the primary source for all factual information
+
+• Stage 1 defines the process positions
+
+• Use Stage 2 to identify where the agent is within the process defined in Stage 1
+
+• Use Stage 1 only to determine required and missing actions based on that position
+
+• Do NOT assume compliance
+
+• If a procedure is not explicitly confirmed → count as violation
+
+• Do NOT rewrite any call content
+
+• Do NOT infer or create new actions outside Stage 1
+
+• Keep everything structured, direct, and factual
+
+• Do NOT mix scoring explanations into the System Notes
