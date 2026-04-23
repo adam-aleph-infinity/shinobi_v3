@@ -43,8 +43,12 @@ interface PipelineRun {
   steps_json: string; canvas_json: string;
 }
 interface RunStep {
-  agent_id: string; agent_name: string; status: string;
-  content: string; model?: string;
+  agent_id: string;
+  agent_name: string;
+  status?: string;
+  state?: string;
+  content?: string;
+  model?: string;
 }
 interface UploadedFile {
   id: string; provider: string; provider_file_id: string; provider_file_uri?: string;
@@ -761,24 +765,26 @@ export default function ArtifactsPage() {
     }
   });
 
-  // Pipeline step outputs — routed by artifact class from canvas_json
-  (historyRuns ?? [])
-    .filter(r => r.status === "done")
-    .forEach(run => {
+  // Pipeline step outputs — routed by artifact class from canvas_json.
+  // Supports both legacy step.status ("done") and current step.state ("completed").
+  (historyRuns ?? []).forEach(run => {
       let steps: RunStep[] = [];
       try { steps = JSON.parse(run.steps_json); } catch { return; }
       const agentMap = getAgentArtifactMap(run.canvas_json ?? "");
       steps.forEach((step, idx) => {
-        if (step.status !== "done" || !step.content) return;
+        const stepState = String(step.status ?? step.state ?? "").toLowerCase();
+        const isStepDone = stepState === "done" || stepState === "completed";
+        const content = step.content ?? "";
+        if (!isStepDone || !content) return;
         const kind = subTypeToKind(agentMap[step.agent_id] ?? "");
         (itemsByKind[kind] as ArtifactItem[]).push({
           kind,
           id: `${run.id}_${idx}`,
           date: run.finished_at ?? run.started_at,
-          chars: step.content.length,
+          chars: content.length,
           label: `${step.agent_name} · ${run.pipeline_name}`,
           data: {
-            content: step.content,
+            content,
             agent_name: step.agent_name,
             pipeline_name: run.pipeline_name,
             model: step.model ?? "",
