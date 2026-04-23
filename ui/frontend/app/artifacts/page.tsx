@@ -636,6 +636,12 @@ export default function ArtifactsPage() {
   const [selectedBucketId, setSelectedBucketId] = useState<string | null>(null);
   const [selectedKind,     setSelectedKind]     = useState<ArtifactKind | null>(null);
   const [selectedItem,     setSelectedItem]     = useState<ArtifactItem | null>(null);
+  const [compareMode,      setCompareMode]      = useState(false);
+  const [frozenItem,       setFrozenItem]       = useState<{
+    item: ArtifactItem;
+    agent: string;
+    customer: string;
+  } | null>(null);
 
   const pairQs = selectedAgent && selectedCustomer
     ? new URLSearchParams({ agent: selectedAgent, customer: selectedCustomer })
@@ -898,6 +904,17 @@ export default function ArtifactsPage() {
     setSelectedItem(null);
   }
 
+  function freezeCurrentSelection() {
+    if (!selectedItem || !selectedAgent || !selectedCustomer) return;
+    setFrozenItem({ item: selectedItem, agent: selectedAgent, customer: selectedCustomer });
+    setCompareMode(true);
+  }
+
+  function clearFrozenSelection() {
+    setFrozenItem(null);
+    setCompareMode(false);
+  }
+
   return (
     <div className="h-[calc(100vh-5.25rem)] flex overflow-hidden">
 
@@ -1036,20 +1053,87 @@ export default function ArtifactsPage() {
       </div>
 
       {/* ── Panel 5: Content viewer ──────────────────────────────── */}
-      <div className="flex-1 min-w-0 bg-gray-900 overflow-hidden">
-        {selectedItem ? (
-          <ContentViewer item={selectedItem} onDelete={() => handleDelete(selectedItem)} />
-        ) : (
-          <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
-            <Archive className="w-10 h-10 opacity-10" />
-            <p className="text-sm">
-              {!hasPair          ? "Select agent + customer in the top context bar"
-               : !selectedBucket ? "Select a pipeline group"
-               : !selectedKind   ? "Select an artifact type"
-               : "Select an item to view it"}
-            </p>
+      <div className="flex-1 min-w-0 bg-gray-900 overflow-hidden flex flex-col">
+        <div className="px-3 py-2 border-b border-gray-800 shrink-0 flex items-center justify-between gap-2">
+          <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Viewer</p>
+          <div className="flex items-center gap-2 text-[10px]">
+            {!compareMode ? (
+              <button
+                onClick={freezeCurrentSelection}
+                disabled={!selectedItem}
+                className="px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Freeze For Compare
+              </button>
+            ) : (
+              <button
+                onClick={() => setCompareMode(false)}
+                className="px-2 py-1 rounded border border-indigo-700/50 bg-indigo-900/20 text-indigo-300 hover:bg-indigo-900/30 transition-colors"
+              >
+                Exit Compare
+              </button>
+            )}
+            {frozenItem && (
+              <button
+                onClick={clearFrozenSelection}
+                className="px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                Clear Frozen
+              </button>
+            )}
           </div>
-        )}
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {compareMode && frozenItem ? (
+            <div className="h-full grid grid-cols-1 lg:grid-cols-2">
+              <div className="h-full min-h-0 border-b lg:border-b-0 lg:border-r border-gray-800 flex flex-col overflow-hidden">
+                <div className="px-3 py-2 border-b border-gray-800 shrink-0 bg-gray-950/60">
+                  <p className="text-[10px] font-semibold text-indigo-300 uppercase tracking-wide">Frozen</p>
+                  <p className="text-[9px] text-gray-500 truncate">{frozenItem.agent} · {frozenItem.customer}</p>
+                </div>
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  <ContentViewer item={frozenItem.item} onDelete={async () => {
+                    await handleDelete(frozenItem.item);
+                    setFrozenItem(null);
+                    setCompareMode(false);
+                  }} />
+                </div>
+              </div>
+
+              <div className="h-full min-h-0 flex flex-col overflow-hidden">
+                <div className="px-3 py-2 border-b border-gray-800 shrink-0 bg-gray-950/40">
+                  <p className="text-[10px] font-semibold text-teal-300 uppercase tracking-wide">Current Selection</p>
+                  <p className="text-[9px] text-gray-500 truncate">
+                    {selectedAgent && selectedCustomer ? `${selectedAgent} · ${selectedCustomer}` : "No active pair"}
+                  </p>
+                </div>
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  {selectedItem ? (
+                    <ContentViewer item={selectedItem} onDelete={() => handleDelete(selectedItem)} />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
+                      <Archive className="w-10 h-10 opacity-10" />
+                      <p className="text-sm">Select another artifact to compare</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : selectedItem ? (
+            <ContentViewer item={selectedItem} onDelete={() => handleDelete(selectedItem)} />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
+              <Archive className="w-10 h-10 opacity-10" />
+              <p className="text-sm">
+                {!hasPair          ? "Select agent + customer in the top context bar"
+                 : !selectedBucket ? "Select a pipeline group"
+                 : !selectedKind   ? "Select an artifact type"
+                 : "Select an item to view it"}
+              </p>
+            </div>
+          )}
+        </div>
       </div>
 
     </div>

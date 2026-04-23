@@ -440,20 +440,13 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     salesAgent: ctxSalesAgent,
     customer: ctxCustomer,
     callId: ctxCallId,
-    setSalesAgent: setCtxSalesAgent,
-    setCustomer: setCtxCustomer,
     setCallId: setCtxCallId,
   } = useAppCtx();
 
-  // CRM context
-  const { data: navAgents } = useSWR<{ agent: string; count: number }[]>("/api/crm/nav/agents", fetcher);
-  const [testAgent, setTestAgent]       = useState(() => ctxSalesAgent || "");
-  const [testCustomer, setTestCustomer] = useState(() => ctxCustomer || "");
-  const [testCallId, setTestCallId]     = useState(() => ctxCallId || "");
+  const testAgent = ctxSalesAgent || "";
+  const testCustomer = ctxCustomer || "";
+  const testCallId = ctxCallId || "";
 
-  const { data: navCustomers } = useSWR<{ customer: string; call_count: number }[]>(
-    testAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(testAgent)}` : null, fetcher,
-  );
   const { data: callDates } = useSWR<Record<string, { date: string; has_audio: boolean }>>(
     testAgent && testCustomer
       ? `/api/crm/call-dates?agent=${encodeURIComponent(testAgent)}&customer=${encodeURIComponent(testCustomer)}`
@@ -485,14 +478,6 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
     setStreamText(""); setThinking(""); setResult(null);
     setRunError(""); setStatus("");
   }, [agent.id]);
-
-  // Keep quick-test selectors aligned with the global context bar defaults.
-  useEffect(() => {
-    setTestAgent(ctxSalesAgent || "");
-    setTestCustomer(ctxCustomer || "");
-    setTestCallId(ctxCallId || "");
-    setPreviews({});
-  }, [ctxSalesAgent, ctxCustomer, ctxCallId]);
 
   async function fetchArtifact(inp: AgentInput) {
     if (!testAgent || !testCustomer) return;
@@ -708,34 +693,24 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
         {/* ── Context picker ──────────────────────────────────────── */}
         <div className="p-3 border-b border-gray-800 space-y-1.5">
           <p className="text-[9px] text-gray-600 uppercase tracking-wide font-semibold mb-1.5">Context</p>
-          <select value={testAgent}
-            onChange={e => {
-              const next = e.target.value;
-              setTestAgent(next); setTestCustomer(""); setTestCallId(""); setPreviews({});
-              setCtxSalesAgent(next);
-            }}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500">
-            <option value="">— Sales agent —</option>
-            {(navAgents ?? []).map(a => <option key={a.agent} value={a.agent}>{a.agent} ({a.count})</option>)}
-          </select>
-          <select value={testCustomer}
-            onChange={e => {
-              const next = e.target.value;
-              setTestCustomer(next); setTestCallId(""); setPreviews({});
-              setCtxCustomer(next);
-            }}
-            disabled={!testAgent}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500 disabled:opacity-40">
-            <option value="">— Customer —</option>
-            {(navCustomers ?? []).map(c => <option key={c.customer} value={c.customer}>{c.customer}</option>)}
-          </select>
+          <div className="rounded-lg border border-gray-700 bg-gray-800/70 px-2 py-1.5">
+            <p className="text-[9px] text-gray-500 uppercase tracking-wide">Sales Agent</p>
+            <p className={cn("text-[11px] mt-0.5 truncate", testAgent ? "text-white" : "text-gray-600 italic")}>
+              {testAgent || "Select in top context bar"}
+            </p>
+          </div>
+          <div className="rounded-lg border border-gray-700 bg-gray-800/70 px-2 py-1.5">
+            <p className="text-[9px] text-gray-500 uppercase tracking-wide">Customer</p>
+            <p className={cn("text-[11px] mt-0.5 truncate", testCustomer ? "text-white" : "text-gray-600 italic")}>
+              {testCustomer || "Select in top context bar"}
+            </p>
+          </div>
           {needsCallId && (
             <select value={testCallId} onChange={e => {
               const next = e.target.value;
-              setTestCallId(next);
               setCtxCallId(next);
             }}
-              disabled={!testCustomer}
+            disabled={!testCustomer}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500 disabled:opacity-40">
               <option value="">— Call (transcript/notes) —</option>
               {callList.map(([cid, info]) => (

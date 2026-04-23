@@ -1,718 +1,429 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
-import useSWR, { useSWRConfig } from "swr";
-import { BarChart3, ChevronRight, Loader2, Search, BarChart2, Brain, CheckCircle2, AlertTriangle, RefreshCw, Clock, X, VolumeX } from "lucide-react";
+
+import { useEffect, useMemo, useState } from "react";
+import useSWR from "swr";
+import {
+  BarChart3,
+  Filter,
+  Loader2,
+  RefreshCw,
+  AlertTriangle,
+  CheckCircle2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAppCtx } from "@/lib/app-context";
 
-const API = "/api";
-const fetcher = (url: string) => fetch(url).then(r => r.json());
+const fetcher = async (url: string) => {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
+  return r.json();
+};
 
+type PipelineRunMeta = {
+  id: string;
+  pipeline_name: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+};
 
+type AnalyticsRow = {
+  metric_type: "score" | "violation";
+  metric_key: string;
+  metric_value: number;
+  run_id: string;
+  run_started_at: string;
+  run_finished_at: string | null;
+  run_status: string;
+  step_index: number;
+  step_done: boolean;
+  step_state: string;
+  step_agent_id: string;
+  step_agent_name: string;
+  step_model: string;
+  step_sub_type: string;
+};
 
-function fmt(n: number | null, prefix = "") {
-  if (n == null) return "—";
-  return prefix + new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(n);
+type PipelineAnalytics = {
+  pipeline_id: string;
+  pipeline_name: string;
+  sales_agent: string;
+  customer: string;
+  selected_run_id: string;
+  runs: PipelineRunMeta[];
+  rows: AnalyticsRow[];
+  score_by_section: Array<{ section: string; average: number; count: number }>;
+  violation_by_type: Array<{ type: string; total: number }>;
+};
+
+type AgentStats = {
+  agent: string;
+  total_calls: number;
+  unique_customers: number;
+  net_deposits: number;
+  total_deposits: number;
+  total_withdrawals: number;
+  avg_call_duration_s: number;
+};
+
+function fmtVmDateTime(value?: string | null) {
+  if (!value) return "—";
+  const s = String(value).trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  if (m) return `${m[1]} ${m[2]}`;
+  try {
+    return new Date(s).toISOString().slice(0, 19).replace("T", " ");
+  } catch {
+    return s;
+  }
 }
-function fmtMoney(n: number | null) {
+
+function fmtCurrency(n?: number | null) {
   if (n == null) return "—";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
 }
-function fmtDur(s: number) {
-  if (!s) return "—";
-  const m = Math.floor(s / 60);
-  return `${m}m`;
-}
 
-function StatCard({ label, value, sub, color = "text-white" }: { label: string; value: string; sub?: string; color?: string }) {
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-      <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</p>
-      <p className={`text-xl font-bold ${color}`}>{value}</p>
-      {sub && <p className="text-xs text-gray-600 mt-0.5">{sub}</p>}
-    </div>
-  );
-}
-
-function TopicBar({ label, count, max }: { label: string; count: number; max: number }) {
-  const pct = max > 0 ? (count / max) * 100 : 0;
-  return (
-    <div className="flex items-center gap-3 text-xs">
-      <span className="w-44 text-gray-400 truncate shrink-0">{label}</span>
-      <div className="flex-1 h-2.5 bg-gray-800 rounded-sm overflow-hidden">
-        <div className="h-full bg-indigo-600 rounded-sm transition-all" style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-gray-500 w-5 text-right shrink-0">{count}</span>
-    </div>
-  );
-}
-
-// ── Roll-up dashboard components ─────────────────────────────────────────────
-
-function RiskBadge({ risk }: { risk?: string }) {
-  const color =
-    risk === "High"   ? "bg-red-900/60 text-red-300 border-red-700" :
-    risk === "Medium" ? "bg-amber-900/60 text-amber-300 border-amber-700" :
-    risk === "Low"    ? "bg-emerald-900/60 text-emerald-300 border-emerald-700" :
-                        "bg-gray-800 text-gray-400 border-gray-700";
-  return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${color}`}>
-      {risk ?? "—"} Risk
-    </span>
-  );
-}
-
-type CallInfo = { date: string; has_audio: boolean };
-
-function RollupDashboard({ data, agent, customer, persona, onRerun, running, callDates }: {
-  data: any; agent: string; customer: string; persona: string;
-  onRerun: () => void; running: boolean;
-  callDates?: Record<string, CallInfo>;
+function StatCard({
+  label,
+  value,
+  tone = "text-white",
+}: {
+  label: string;
+  value: string;
+  tone?: string;
 }) {
-  const [popup, setPopup] = useState<{ title: string; subtitle?: string; text: string; loading?: boolean } | null>(null);
-
-  async function openTranscript(callId: string) {
-    const date = callDates?.[callId]?.date?.slice(0, 10);
-    setPopup({ title: "Transcript", subtitle: [callId, date].filter(Boolean).join(" · "), text: "", loading: true });
-    try {
-      const r = await fetch(`/api/notes/transcript?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`);
-      const d = await r.json();
-      if (r.ok) setPopup({ title: "Transcript", subtitle: [callId, date].filter(Boolean).join(" · "), text: d.text });
-      else setPopup({ title: "Transcript", subtitle: callId, text: "Transcript not available for this call." });
-    } catch {
-      setPopup({ title: "Transcript", subtitle: callId, text: "Failed to load transcript." });
-    }
-  }
-
-  async function openNotes(context: string) {
-    setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "", loading: true });
-    try {
-      const r = await fetch(`/api/notes?agent=${encodeURIComponent(agent)}&customer=${encodeURIComponent(customer)}`);
-      if (r.ok) {
-        const notes = await r.json();
-        if (!notes.length) {
-          setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "No notes found." });
-        } else {
-          const text = notes.map((n: any) => `─── Call: ${n.call_id} ───\n\n${n.content_md}`).join("\n\n\n");
-          setPopup({ title: context, subtitle: `Notes for ${customer} · ${notes.length} call${notes.length !== 1 ? "s" : ""}`, text });
-        }
-      } else {
-        setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "Failed to load notes." });
-      }
-    } catch {
-      setPopup({ title: context, subtitle: `Notes for ${customer}`, text: "Failed to load notes." });
-    }
-  }
-
-  const procs: { name: string; compliant: number; violations: number }[] =
-    data?.compliance_aggregate?.procedures ?? [];
-
-  const savedAt: string | undefined = data?._saved_at;
-  const fmtSavedAt = savedAt
-    ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(savedAt + "Z"))
-    : null;
-
   return (
-    <div className="space-y-5">
-      {/* Transcript / Notes popup */}
-      {popup && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={() => setPopup(null)}>
-          <div className="bg-gray-950 border border-gray-700 rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="flex items-start justify-between px-4 py-3 border-b border-gray-800 shrink-0">
-              <div>
-                <p className="text-sm font-semibold text-white">{popup.title}</p>
-                {popup.subtitle && <p className="text-xs text-gray-500 mt-0.5">{popup.subtitle}</p>}
-              </div>
-              <button onClick={() => setPopup(null)} className="text-gray-500 hover:text-white transition-colors ml-4 shrink-0 mt-0.5">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="overflow-y-auto flex-1 p-4">
-              {popup.loading
-                ? <div className="flex items-center justify-center py-8"><Loader2 className="w-4 h-4 animate-spin text-gray-500" /></div>
-                : <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed">{popup.text}</pre>
-              }
-            </div>
-          </div>
-        </div>
-      )}
-      {/* Header */}
-      <div className="flex items-start gap-3 flex-wrap">
-        <RiskBadge risk={data?.overall_risk} />
-        <p className="flex-1 text-sm text-gray-300 leading-snug min-w-0">{data?.summary ?? ""}</p>
-        <div className="flex items-center gap-2 shrink-0">
-          {fmtSavedAt && (
-            <span className="flex items-center gap-1 text-[10px] text-gray-600">
-              <Clock className="w-3 h-3" />{fmtSavedAt}
-            </span>
-          )}
-          <button onClick={onRerun} disabled={running}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-gray-300 disabled:opacity-50 transition-colors">
-            {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-            Re-run
-          </button>
-        </div>
-      </div>
-
-      {/* Compliance table */}
-      {procs.length > 0 && (
-        <div>
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Compliance Aggregate</p>
-          <div className="rounded-lg border border-gray-800 overflow-hidden">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-gray-800 bg-gray-900/60 text-left">
-                  <th className="px-3 py-2 font-medium text-gray-400">Procedure</th>
-                  <th className="px-3 py-2 font-medium text-emerald-500 w-20 text-right">OK</th>
-                  <th className="px-3 py-2 font-medium text-red-400 w-20 text-right">Viol.</th>
-                  <th className="px-3 py-2 w-28">Rate</th>
-                </tr>
-              </thead>
-              <tbody>
-                {procs.map((p, i) => {
-                  const total = p.compliant + p.violations;
-                  const violPct = total > 0 ? (p.violations / total) * 100 : 0;
-                  const isViolated = p.violations > 0;
-                  return (
-                    <tr key={i} onClick={() => openNotes(p.name)} className={cn("border-b border-gray-800/50 last:border-0 cursor-pointer hover:bg-gray-800/30 transition-colors", isViolated && "bg-red-950/10")}>
-                      <td className={cn("px-3 py-2", isViolated ? "text-red-300" : "text-gray-300")}>{p.name}</td>
-                      <td className="px-3 py-2 text-right text-emerald-400 font-mono">{p.compliant}</td>
-                      <td className="px-3 py-2 text-right text-red-400 font-mono">{p.violations}</td>
-                      <td className="px-3 py-2">
-                        <div className="h-2 bg-gray-800 rounded-sm overflow-hidden">
-                          <div className="h-full bg-red-600 rounded-sm" style={{ width: `${violPct}%` }} />
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              {(data?.compliance_aggregate?.total_violations != null) && (
-                <tfoot>
-                  <tr className="bg-gray-900/40 border-t border-gray-700">
-                    <td className="px-3 py-2 text-[10px] text-gray-500 font-semibold uppercase">Total</td>
-                    <td className="px-3 py-2 text-right font-mono text-gray-400">
-                      {(data.compliance_aggregate.total_checks ?? 0) - (data.compliance_aggregate.total_violations ?? 0)}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-red-400 font-semibold">
-                      {data.compliance_aggregate.total_violations}
-                    </td>
-                    <td />
-                  </tr>
-                </tfoot>
-              )}
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Key Patterns + Next Steps — side by side */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {(data?.key_patterns ?? []).length > 0 && (
-          <div>
-            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Key Patterns</p>
-            <ul className="space-y-1.5">
-              {data.key_patterns.map((p: string, i: number) => (
-                <li key={i} onClick={() => openNotes(p)} className="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white transition-colors">
-                  <AlertTriangle className="w-3 h-3 mt-0.5 text-amber-500 shrink-0" />
-                  {p}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {(data?.next_steps ?? []).length > 0 && (
-          <div>
-            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Next Steps</p>
-            <ol className="space-y-1.5">
-              {data.next_steps.map((s: string, i: number) => (
-                <li key={i} onClick={() => openNotes(s)} className="flex items-start gap-2 text-xs cursor-pointer hover:opacity-80 transition-opacity">
-                  <span className="shrink-0 w-4 h-4 rounded-full bg-indigo-700 text-white text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
-                  <span className={cn("text-gray-300", i === 0 && "font-medium text-white")}>{s}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
-      </div>
-
-      {/* Call Progression */}
-      {(data?.call_progression ?? []).length > 0 && (
-        <div>
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Call Progression</p>
-          <div className="space-y-0.5">
-            {data.call_progression.map((c: any, i: number) => {
-              const info = callDates?.[c.call_id];
-              const date = info?.date?.slice(0, 10);
-              const hasAudio = info?.has_audio ?? true;
-              return (
-                <div key={i} onClick={() => openTranscript(c.call_id)}
-                  className="flex items-center gap-2 text-xs text-gray-400 py-1.5 border-b border-gray-800/40 last:border-0 cursor-pointer hover:bg-gray-800/30 rounded px-1 -mx-1 transition-colors">
-                  <span className="font-mono text-gray-600 shrink-0 truncate w-20">{c.call_id}</span>
-                  {date && <span className="text-gray-600 text-[10px] shrink-0">{date}</span>}
-                  {!hasAudio && <span title="No audio"><VolumeX className="w-3 h-3 text-gray-600 shrink-0" /></span>}
-                  <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
-                  <span className="text-indigo-400 shrink-0 truncate max-w-[120px]">{c.stage}</span>
-                  <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
-                  <span className="text-gray-300 truncate">{c.outcome}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Fallback: raw text if JSON parse failed */}
-      {data?._raw_text && (
-        <pre className="text-xs text-gray-400 whitespace-pre-wrap font-mono bg-gray-950 rounded p-3 max-h-80 overflow-y-auto">{data._raw_text}</pre>
-      )}
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+      <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">{label}</p>
+      <p className={cn("text-lg font-semibold", tone)}>{value}</p>
     </div>
   );
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-function _dss(k: string) { try { return sessionStorage.getItem(`dash_${k}`) ?? ""; } catch { return ""; } }
-function _dssSet(k: string, v: string) { try { sessionStorage.setItem(`dash_${k}`, v); } catch {} }
 
 export default function AgentDashboardPage() {
-  // Start from safe defaults; restored from sessionStorage post-mount
-  const [selected, _setSelected] = useState<string | null>(null);
-  const [agentSearch, _setAgentSearch] = useState("");
+  const {
+    salesAgent,
+    customer,
+    activePipelineId,
+    activePipelineName,
+  } = useAppCtx();
 
-  const setSelected    = (v: string | null) => { _setSelected(v);    _dssSet("selected",    v ?? ""); };
-  const setAgentSearch = (v: string)        => { _setAgentSearch(v); _dssSet("agentSearch", v); };
+  const hasContext = !!(salesAgent && customer && activePipelineId);
 
-  useEffect(() => {
-    _setSelected(_dss("selected") || null);
-    _setAgentSearch(_dss("agentSearch"));
-  }, []);
-
-  const { data: agents, isLoading } = useSWR<any[]>(`${API}/agent-stats`, fetcher);
-  const { data: detail } = useSWR<any>(
-    selected ? `${API}/agent-stats/${encodeURIComponent(selected)}` : null,
-    fetcher
+  const { data: stats } = useSWR<AgentStats>(
+    salesAgent ? `/api/agent-stats/${encodeURIComponent(salesAgent)}` : null,
+    fetcher,
   );
 
-  // Fetch customers who have notes for the selected agent
-  const { data: agentNotes } = useSWR<any[]>(
-    selected ? `${API}/notes?agent=${encodeURIComponent(selected)}` : null,
-    fetcher
-  );
-  const noteCustomers: string[] = agentNotes
-    ? [...new Set(agentNotes.map((n: any) => n.customer as string))].sort()
-    : [];
-
-  // Fetch saved notes-agent presets (used as "personas" for the roll-up)
-  const { data: notesPersonas } = useSWR<any[]>(`${API}/notes/agents`, fetcher);
-
-  const { mutate } = useSWRConfig();
-
-  // Roll-up state
-  const [rollupCustomer, setRollupCustomer] = useState("");
-  const [rollupPersona, setRollupPersona]   = useState(""); // name of selected notes agent preset
-  const [rollupRunning, setRollupRunning]   = useState(false);
-
-  // Call dates + audio status for the selected agent+customer pair (for call progression display)
-  const { data: callDates } = useSWR<Record<string, CallInfo>>(
-    selected && rollupCustomer
-      ? `${API}/crm/call-dates?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}`
-      : null,
-    fetcher
-  );
-  const [rollupResult, setRollupResult]     = useState<any>(null);
-  const [rollupError, setRollupError]       = useState<string | null>(null);
-  const [rollupThinking, setRollupThinking] = useState("");
-  const rollupThinkScroll = useRef<HTMLDivElement>(null);
-  const rollupAbort = useRef(false);
-
-  // Notes preview state (populated before LLM runs)
-  const [notesPreview, setNotesPreview] = useState<{ note_count: number; total_unique: number; total_chars: number; preset: string; preview: string } | null>(null);
-  const [showMergedNotes, setShowMergedNotes] = useState(false);
-
-  // Persisted rollup (null = 404 not yet run; object = saved result)
-  // Key includes preset so different presets get different cache entries
-  const savedRollupKey = selected && rollupCustomer && rollupPersona
-    ? `${API}/notes/rollup?agent=${encodeURIComponent(selected)}&customer=${encodeURIComponent(rollupCustomer)}&preset=${encodeURIComponent(rollupPersona)}`
+  const analyticsUrl = hasContext
+    ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/analytics?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&limit=120`
     : null;
-  const { data: savedRollup, isLoading: savedRollupLoading } = useSWR<any>(
-    savedRollupKey,
-    (url: string) => fetch(url).then(r => r.status === 404 ? null : r.json()),
-    { revalidateOnFocus: false }
+  const { data: analytics, isLoading, error, mutate } = useSWR<PipelineAnalytics>(
+    analyticsUrl,
+    fetcher,
+    { revalidateOnFocus: false },
   );
-  useEffect(() => {
-    if (rollupThinkScroll.current) rollupThinkScroll.current.scrollTop = rollupThinkScroll.current.scrollHeight;
-  }, [rollupThinking]);
 
-  // Reset when agent changes
-  useEffect(() => {
-    setRollupCustomer("");
-    setRollupResult(null);
-    setRollupError(null);
-    setRollupThinking("");
-    setNotesPreview(null);
-    setShowMergedNotes(false);
-  }, [selected]);
+  const [selectedRunId, setSelectedRunId] = useState<string>("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [scoreSection, setScoreSection] = useState("all");
+  const [violationType, setViolationType] = useState("all");
+  const [sortBy, setSortBy] = useState<"metric_asc" | "metric_desc" | "value_desc" | "value_asc" | "recent_desc" | "recent_asc">("value_desc");
 
-  // Reset result/preview when customer or persona changes (keep customer value itself)
   useEffect(() => {
-    setRollupResult(null);
-    setRollupError(null);
-    setRollupThinking("");
-    setNotesPreview(null);
-    setShowMergedNotes(false);
-  }, [rollupCustomer, rollupPersona]);
-
-  // Auto-select first customer when list loads
-  useEffect(() => {
-    if (noteCustomers.length > 0 && !rollupCustomer) {
-      setRollupCustomer(noteCustomers[0]);
+    if (!analytics?.runs?.length) {
+      setSelectedRunId("all");
+      return;
     }
-  }, [noteCustomers.join(",")]);
-
-  // Auto-select default persona when presets load
-  useEffect(() => {
-    if (notesPersonas && notesPersonas.length > 0 && !rollupPersona) {
-      const def = notesPersonas.find((p: any) => p.is_default) ?? notesPersonas[0];
-      setRollupPersona(def.name);
+    if (selectedRunId === "all") {
+      setSelectedRunId(analytics.runs[0].id);
+      return;
     }
-  }, [notesPersonas]);
+    if (!analytics.runs.some(r => r.id === selectedRunId)) {
+      setSelectedRunId(analytics.runs[0].id);
+    }
+  }, [analytics?.runs, selectedRunId]);
 
-  // Auto-run only when we have confirmed there is no saved result (savedRollup === null means 404)
-  useEffect(() => {
-    if (!selected || !rollupCustomer || !rollupPersona) return;
-    if (savedRollupLoading) return;        // SWR still fetching
-    if (savedRollup === undefined) return; // SWR key just changed, not resolved yet
-    if (savedRollup) return;              // saved result exists — display it, no LLM needed
-    triggerRollup(selected, rollupCustomer, "gemini-2.5-flash");
-  }, [rollupCustomer, rollupPersona, savedRollupLoading, savedRollup]);
+  const rows = analytics?.rows ?? [];
+  const scoreSections = useMemo(
+    () => [...new Set(rows.filter(r => r.metric_type === "score").map(r => r.metric_key))].sort((a, b) => a.localeCompare(b)),
+    [rows],
+  );
+  const violationTypes = useMemo(
+    () => [...new Set(rows.filter(r => r.metric_type === "violation").map(r => r.metric_key))].sort((a, b) => a.localeCompare(b)),
+    [rows],
+  );
 
-  const triggerRollup = async (agent: string, customer: string, model: string) => {
-    rollupAbort.current = false;
-    setRollupRunning(true);
-    setRollupResult(null);
-    setRollupError(null);
-    setRollupThinking("");
-    setNotesPreview(null);
-    setShowMergedNotes(false);
-    try {
-      const r = await fetch(`${API}/notes/rollup`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent, customer, model, temperature: 0, preset: rollupPersona, max_notes: 10 }),
-      });
-      if (!r.ok || !r.body) throw new Error(await r.text());
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (rollupAbort.current) { reader.cancel(); break; }
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const part of parts) {
-          const evLine   = part.split("\n").find(l => l.startsWith("event:"));
-          const dataLine = part.split("\n").find(l => l.startsWith("data:"));
-          if (!dataLine) continue;
-          const event = evLine?.replace("event:", "").trim() ?? "message";
-          try {
-            const data = JSON.parse(dataLine.replace("data:", "").trim());
-            if (event === "notes_preview") setNotesPreview(data);
-            else if (event === "thinking") setRollupThinking(prev => prev + data.text);
-            else if (event === "done") {
-              setRollupResult(data.result_json);
-              if (data.result_json && savedRollupKey) {
-                mutate(savedRollupKey, data.result_json, { revalidate: false });
-              }
-            }
-            else if (event === "error") setRollupError(data.msg ?? "Roll-up failed");
-          } catch {}
-        }
+  const filteredRows = useMemo(() => {
+    return rows.filter(r => {
+      if (selectedRunId !== "all" && r.run_id !== selectedRunId) return false;
+      const d = (r.run_started_at || "").slice(0, 10);
+      if (dateFrom && d < dateFrom) return false;
+      if (dateTo && d > dateTo) return false;
+      if (scoreSection !== "all" && r.metric_type === "score" && r.metric_key !== scoreSection) return false;
+      if (violationType !== "all" && r.metric_type === "violation" && r.metric_key !== violationType) return false;
+      return true;
+    });
+  }, [rows, selectedRunId, dateFrom, dateTo, scoreSection, violationType]);
+
+  const tableRows = useMemo(() => {
+    const map = new Map<string, {
+      metric_type: "score" | "violation";
+      metric_key: string;
+      values: number[];
+      runIds: Set<string>;
+      latestAt: string;
+    }>();
+
+    for (const r of filteredRows) {
+      const key = `${r.metric_type}::${r.metric_key}`;
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, {
+          metric_type: r.metric_type,
+          metric_key: r.metric_key,
+          values: [Number(r.metric_value || 0)],
+          runIds: new Set([r.run_id]),
+          latestAt: r.run_started_at || "",
+        });
+      } else {
+        existing.values.push(Number(r.metric_value || 0));
+        existing.runIds.add(r.run_id);
+        if ((r.run_started_at || "") > existing.latestAt) existing.latestAt = r.run_started_at || "";
       }
-    } catch (e: any) {
-      if (!rollupAbort.current) setRollupError(e.message ?? "Roll-up failed");
-    } finally {
-      setRollupRunning(false);
     }
-  };
 
-  const maxDeposits = Math.max(...(agents ?? []).map((a: any) => a.net_deposits || 0), 1);
-  const filteredAgents = (agents ?? []).filter((a: any) =>
-    !agentSearch || a.agent.toLowerCase().includes(agentSearch.toLowerCase())
-  );
+    const out = [...map.values()].map(g => {
+      const total = g.values.reduce((a, b) => a + b, 0);
+      const avg = g.values.length ? total / g.values.length : 0;
+      return {
+        metric_type: g.metric_type,
+        metric_key: g.metric_key,
+        value: g.metric_type === "score" ? avg : total,
+        samples: g.values.length,
+        runs: g.runIds.size,
+        latestAt: g.latestAt,
+      };
+    });
+
+    out.sort((a, b) => {
+      if (sortBy === "metric_asc") return a.metric_key.localeCompare(b.metric_key);
+      if (sortBy === "metric_desc") return b.metric_key.localeCompare(a.metric_key);
+      if (sortBy === "value_asc") return a.value - b.value;
+      if (sortBy === "value_desc") return b.value - a.value;
+      if (sortBy === "recent_asc") return a.latestAt.localeCompare(b.latestAt);
+      return b.latestAt.localeCompare(a.latestAt);
+    });
+    return out;
+  }, [filteredRows, sortBy]);
+
+  const scoreRows = tableRows.filter(r => r.metric_type === "score");
+  const violationRows = tableRows.filter(r => r.metric_type === "violation");
+  const overallAvgScore = scoreRows.length
+    ? scoreRows.reduce((s, r) => s + r.value, 0) / scoreRows.length
+    : 0;
+  const totalViolations = violationRows.reduce((s, r) => s + r.value, 0);
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-3rem)] overflow-hidden">
-      {/* ── Agent list ── */}
-      <div className="w-72 shrink-0 flex flex-col">
-        <div className="mb-3">
-          <h1 className="text-base font-bold text-white">Agent Dashboard</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Performance summary across all CRMs</p>
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-base font-bold text-white">Agent Dashboard</h1>
+        <p className="text-xs text-gray-500 mt-0.5">Pipeline metrics from selected context</p>
+      </div>
+
+      {!hasContext && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-gray-500">
+          <BarChart3 className="w-6 h-6 mx-auto mb-2 text-gray-700" />
+          Select `Sales Agent` + `Customer` + `Pipeline` in the top context bar.
         </div>
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col flex-1 min-h-0">
-          <div className="px-3 py-2 border-b border-gray-800">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />
-              <input
-                type="text"
-                value={agentSearch}
-                onChange={e => setAgentSearch(e.target.value)}
-                placeholder="Search agents…"
-                className="w-full pl-8 pr-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
-            </div>
+      )}
+
+      {hasContext && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <StatCard label="Agent" value={salesAgent} />
+            <StatCard label="Customer" value={customer} />
+            <StatCard label="Pipeline" value={activePipelineName || "Selected"} />
+            <StatCard
+              label="Net Deposits"
+              value={fmtCurrency(stats?.net_deposits)}
+              tone={(stats?.net_deposits || 0) >= 0 ? "text-emerald-400" : "text-red-400"}
+            />
+            <StatCard label="Total Calls" value={String(stats?.total_calls ?? "—")} />
           </div>
-          <div className="px-4 py-2 border-b border-gray-800 text-xs text-gray-500 grid grid-cols-[1fr_auto_auto] gap-2">
-            <span>Agent</span>
-            <span className="text-right">Calls</span>
-            <span className="text-right">Net Dep.</span>
-          </div>
-          <div className="overflow-y-auto flex-1">
-            {isLoading && (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
+
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs text-gray-400">
+                <Filter className="w-3.5 h-3.5" />
+                Metrics Filters
               </div>
-            )}
-            {filteredAgents.map((a: any) => (
               <button
-                key={a.agent}
-                onClick={() => setSelected(a.agent)}
-                className={`w-full text-left px-4 py-2.5 border-b border-gray-800/50 last:border-0 hover:bg-gray-800/40 transition-colors ${selected === a.agent ? "bg-indigo-900/20 border-l-2 border-l-indigo-500" : ""}`}
+                onClick={() => mutate()}
+                className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-300 transition-colors"
               >
-                <div className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
-                  <span className="text-xs font-medium text-white truncate">{a.agent}</span>
-                  <span className="text-xs text-gray-400">{fmt(a.total_calls)}</span>
-                  <span className={`text-xs font-mono ${(a.net_deposits || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {a.net_deposits != null ? `$${Math.round((a.net_deposits || 0) / 1000)}k` : "—"}
-                  </span>
-                </div>
-                {/* Deposit bar */}
-                <div className="mt-1.5 h-1 bg-gray-800 rounded-sm overflow-hidden">
-                  <div
-                    className="h-full bg-emerald-700/60 rounded-sm"
-                    style={{ width: `${Math.max(((a.net_deposits || 0) / maxDeposits) * 100, 0)}%` }}
-                  />
-                </div>
+                <RefreshCw className="w-3.5 h-3.5" /> Refresh
               </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* ── Detail panel ── */}
-      <div className="flex-1 min-w-0 overflow-y-auto">
-        {!selected && (
-          <div className="flex flex-col items-center justify-center h-full text-gray-600">
-            <BarChart3 className="w-8 h-8 mb-2" />
-            <p className="text-sm">Select an agent to see details</p>
-          </div>
-        )}
-        {selected && !detail && (
-          <div className="flex items-center justify-center h-40">
-            <Loader2 className="w-5 h-5 animate-spin text-gray-500" />
-          </div>
-        )}
-        {detail && !detail.not_found && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-xl font-bold text-white">{detail.agent}</h2>
-              <p className="text-xs text-gray-500 mt-0.5">Full performance summary</p>
             </div>
 
-            {/* Stat cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatCard label="Total Calls" value={fmt(detail.total_calls)} />
-              <StatCard label="Customers" value={fmt(detail.unique_customers)} />
-              <StatCard
-                label="Avg Call (2m+)"
-                value={fmtDur(detail.avg_call_duration_s)}
-                sub={`${detail.avg_call_duration_s}s`}
-              />
-              <StatCard
-                label="Net Deposits"
-                value={fmtMoney(detail.net_deposits)}
-                color={(detail.net_deposits || 0) >= 0 ? "text-emerald-400" : "text-red-400"}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatCard label="Total Deposits" value={fmtMoney(detail.total_deposits)} color="text-emerald-400" />
-              <StatCard label="Total Withdrawals" value={fmtMoney(detail.total_withdrawals)} color="text-red-400" />
-              <StatCard label="Session Analyses" value={fmt(detail.session_analysis_count)} />
-              <StatCard
-                label="Avg Session Score"
-                value={detail.avg_score ? `${detail.avg_score}%` : "—"}
-                color={detail.avg_score >= 75 ? "text-emerald-400" : detail.avg_score >= 50 ? "text-amber-400" : "text-red-400"}
-              />
-            </div>
-
-            {/* Topic frequency */}
-            {detail.topic_counts && Object.keys(detail.topic_counts).length > 0 && (
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                  Session Analysis Topics
-                </h3>
-                <div className="space-y-2">
-                  {(() => {
-                    const entries = Object.entries(detail.topic_counts) as [string, number][];
-                    const maxVal = Math.max(...entries.map(([, v]) => v), 1);
-                    return entries.map(([topic, count]) => (
-                      <TopicBar key={topic} label={topic} count={count} max={maxVal} />
-                    ));
-                  })()}
-                </div>
-              </div>
-            )}
-
-            {/* Top improvements */}
-            {detail.top_improvements?.length > 0 && (
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                  Top Improvement Areas
-                </h3>
-                <ul className="space-y-1.5">
-                  {detail.top_improvements.map((item: string, i: number) => (
-                    <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
-                      <ChevronRight className="w-3 h-3 mt-0.5 text-amber-500 shrink-0" />
-                      {item}
-                    </li>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2">
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Run</span>
+                <select
+                  value={selectedRunId}
+                  onChange={e => setSelectedRunId(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                >
+                  <option value="all">All Runs</option>
+                  {(analytics?.runs ?? []).map(r => (
+                    <option key={r.id} value={r.id}>
+                      {fmtVmDateTime(r.started_at)} · {r.id.slice(0, 8)} · {r.status}
+                    </option>
                   ))}
-                </ul>
+                </select>
+              </label>
+
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Date From</span>
+                <input
+                  type="date"
+                  value={dateFrom}
+                  onChange={e => setDateFrom(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                />
+              </label>
+
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Date To</span>
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={e => setDateTo(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                />
+              </label>
+
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Score Section</span>
+                <select
+                  value={scoreSection}
+                  onChange={e => setScoreSection(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                >
+                  <option value="all">All Sections</option>
+                  {scoreSections.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
+
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Violation Type</span>
+                <select
+                  value={violationType}
+                  onChange={e => setViolationType(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                >
+                  <option value="all">All Violations</option>
+                  {violationTypes.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </label>
+
+              <label className="text-[10px] text-gray-500 space-y-1">
+                <span className="block uppercase tracking-wide">Sort</span>
+                <select
+                  value={sortBy}
+                  onChange={e => setSortBy(e.target.value as typeof sortBy)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
+                >
+                  <option value="value_desc">Value high → low</option>
+                  <option value="value_asc">Value low → high</option>
+                  <option value="metric_asc">Metric A → Z</option>
+                  <option value="metric_desc">Metric Z → A</option>
+                  <option value="recent_desc">Latest run first</option>
+                  <option value="recent_asc">Oldest run first</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <StatCard label="Score Sections" value={String(scoreRows.length)} tone="text-indigo-300" />
+            <StatCard label="Avg Score (sections)" value={scoreRows.length ? `${overallAvgScore.toFixed(1)}` : "—"} tone="text-emerald-300" />
+            <StatCard label="Violation Types" value={String(violationRows.length)} tone="text-amber-300" />
+            <StatCard label="Total Violations" value={String(totalViolations)} tone="text-red-300" />
+          </div>
+
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            <div className="px-3 py-2 border-b border-gray-800">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Scores & Violations Table</p>
+            </div>
+
+            {isLoading && (
+              <div className="py-8 flex items-center justify-center text-gray-500 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading metrics…
               </div>
             )}
 
-            {/* Notes Roll-up */}
-            {noteCustomers.length > 0 && (
-              <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
-                  <BarChart2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                  <span className="text-xs font-semibold text-gray-300">Notes Roll-up Analysis</span>
-                  {rollupRunning && <Loader2 className="w-3 h-3 animate-spin text-teal-400 ml-1" />}
-                </div>
+            {error && !isLoading && (
+              <div className="py-8 px-4 text-sm text-red-400 flex items-center justify-center gap-2">
+                <AlertTriangle className="w-4 h-4" />
+                Failed to load pipeline analytics.
+              </div>
+            )}
 
-                <div className="p-4 space-y-3">
-                  {/* Two selectors — customer + persona */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="space-y-1">
-                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Customer</p>
-                      <select
-                        value={rollupCustomer}
-                        onChange={e => setRollupCustomer(e.target.value)}
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300"
-                      >
-                        {noteCustomers.map(c => <option key={c} value={c}>{c}</option>)}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Notes Persona</p>
-                      <select
-                        value={rollupPersona}
-                        onChange={e => setRollupPersona(e.target.value)}
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300"
-                      >
-                        {!notesPersonas?.length && <option value="">— no presets saved —</option>}
-                        {(notesPersonas ?? []).map((p: any) => (
-                          <option key={p.name} value={p.name}>{p.name}{p.is_default ? " ★" : ""}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
+            {!isLoading && !error && tableRows.length === 0 && (
+              <div className="py-8 px-4 text-sm text-gray-500 text-center">
+                No score/violation metrics found for this filter selection.
+              </div>
+            )}
 
-                  {/* Running indicator */}
-                  {rollupRunning && !notesPreview && (
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                      <span>Loading notes for {rollupCustomer}…</span>
-                    </div>
-                  )}
-
-                  {/* Notes preview — shown as soon as backend loads notes */}
-                  {notesPreview && (
-                    <div className="rounded-lg border border-gray-800 overflow-hidden">
-                      <div className="flex items-center justify-between px-3 py-2 bg-gray-900/60 border-b border-gray-800">
-                        <div className="flex items-center gap-3 text-xs">
-                          <span className="font-semibold text-gray-300">
-                            {notesPreview.note_count} note{notesPreview.note_count !== 1 ? "s" : ""}
-                            {notesPreview.total_unique > notesPreview.note_count && (
-                              <span className="text-gray-500 font-normal"> of {notesPreview.total_unique}</span>
-                            )}
+            {!isLoading && !error && tableRows.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-gray-950/70 border-b border-gray-800 text-gray-500">
+                      <th className="px-3 py-2 text-left font-medium">Type</th>
+                      <th className="px-3 py-2 text-left font-medium">Metric</th>
+                      <th className="px-3 py-2 text-right font-medium">Value</th>
+                      <th className="px-3 py-2 text-right font-medium">Samples</th>
+                      <th className="px-3 py-2 text-right font-medium">Runs</th>
+                      <th className="px-3 py-2 text-left font-medium">Latest Run</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tableRows.map((r) => (
+                      <tr key={`${r.metric_type}:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                        <td className="px-3 py-2">
+                          <span className={cn(
+                            "inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px]",
+                            r.metric_type === "score"
+                              ? "bg-indigo-900/30 border-indigo-700/50 text-indigo-300"
+                              : "bg-red-900/20 border-red-700/50 text-red-300",
+                          )}>
+                            {r.metric_type === "score" ? <CheckCircle2 className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                            {r.metric_type}
                           </span>
-                          <span className="text-gray-600">·</span>
-                          <span className="text-gray-500">{(notesPreview.total_chars / 1000).toFixed(1)}k chars</span>
-                          <span className="text-gray-600">·</span>
-                          <span className="text-gray-500">preset: <span className="text-indigo-400">{notesPreview.preset}</span></span>
-                          {rollupRunning && <Loader2 className="w-3 h-3 animate-spin text-teal-400 ml-1" />}
-                        </div>
-                        <button
-                          onClick={() => setShowMergedNotes(v => !v)}
-                          className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
-                        >
-                          {showMergedNotes ? "hide" : "show merged notes"}
-                        </button>
-                      </div>
-                      {showMergedNotes && (
-                        <pre className="text-[10px] text-gray-400 font-mono whitespace-pre-wrap leading-relaxed p-3 max-h-64 overflow-y-auto bg-gray-950">
-                          {notesPreview.preview}{notesPreview.total_chars > 4000 ? `\n\n… (${((notesPreview.total_chars - 4000) / 1000).toFixed(1)}k more chars truncated)` : ""}
-                        </pre>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Thinking stream */}
-                  {rollupRunning && rollupThinking && (
-                    <div className="space-y-1">
-                      <p className="text-[10px] font-semibold text-purple-500 uppercase tracking-wide flex items-center gap-1">
-                        <Brain className="w-2.5 h-2.5" /> Reasoning
-                      </p>
-                      <div ref={rollupThinkScroll}
-                        className="bg-gray-950 border border-purple-900/30 rounded p-2 max-h-24 overflow-y-auto font-mono text-[10px] text-purple-300/70 whitespace-pre-wrap leading-relaxed">
-                        {rollupThinking}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Error */}
-                  {rollupError && (
-                    <div className="p-2 bg-red-950/30 border border-red-800/40 rounded text-xs text-red-400">{rollupError}</div>
-                  )}
-
-                  {/* Saved result loading */}
-                  {savedRollupLoading && !rollupRunning && (
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                      <span>Loading saved analysis…</span>
-                    </div>
-                  )}
-
-                  {/* Result — live or persisted */}
-                  {(rollupResult ?? savedRollup) && (
-                    <div className="border border-gray-700/50 rounded-lg overflow-hidden">
-                      <div className="px-3 py-2 bg-gray-800 border-b border-gray-700/50 flex items-center gap-2">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
-                        <span className="text-xs font-semibold text-teal-300">{rollupCustomer}</span>
-                        <span className="text-[10px] text-gray-600 ml-1">via {rollupPersona}</span>
-                      </div>
-                      <div className="p-4 max-h-[600px] overflow-y-auto">
-                        <RollupDashboard
-                          data={rollupResult ?? savedRollup}
-                          agent={selected!}
-                          customer={rollupCustomer}
-                          persona={rollupPersona}
-                          running={rollupRunning}
-                          callDates={callDates}
-                          onRerun={() => {
-                            triggerRollup(selected!, rollupCustomer, "gemini-2.5-flash");
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
+                        </td>
+                        <td className="px-3 py-2 text-gray-200">{r.metric_key}</td>
+                        <td className={cn(
+                          "px-3 py-2 text-right font-mono",
+                          r.metric_type === "score" ? "text-emerald-400" : "text-red-400",
+                        )}>
+                          {r.metric_type === "score" ? r.value.toFixed(1) : Math.round(r.value)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
+                        <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
+                        <td className="px-3 py-2 text-gray-500">{fmtVmDateTime(r.latestAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
+

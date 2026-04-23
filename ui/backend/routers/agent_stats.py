@@ -9,35 +9,60 @@ from ui.backend.models.crm import CRMPair, CRMCall
 router = APIRouter(prefix="/agent-stats", tags=["agent-stats"])
 
 
+def _dedupe_pairs_with_deposits(
+    pairs: list[CRMPair],
+    key_fn,
+) -> list[dict]:
+    """Deduplicate pair rows but preserve non-zero deposit fields.
+
+    Some duplicate rows differ only by sync/source quality:
+    - one may have the highest call_count
+    - another may hold the non-zero deposit fields
+    This keeps call_count/duration from the best activity row while taking
+    strongest deposit values from duplicate siblings.
+    """
+    grouped: dict[tuple, list[CRMPair]] = {}
+    for p in pairs:
+        grouped.setdefault(key_fn(p), []).append(p)
+
+    out: list[dict] = []
+    for rows in grouped.values():
+        activity = max(rows, key=lambda r: (r.call_count or 0, r.total_duration_s or 0))
+        net_dep = max((float(r.net_deposits or 0) for r in rows), key=abs, default=0.0)
+        total_dep = max((float(r.total_deposits or 0) for r in rows), default=0.0)
+        total_with = max((float(r.total_withdrawals or 0) for r in rows), default=0.0)
+        out.append({
+            "agent": activity.agent,
+            "customer": activity.customer,
+            "call_count": activity.call_count or 0,
+            "total_duration_s": activity.total_duration_s or 0,
+            "net_deposits": net_dep,
+            "total_deposits": total_dep,
+            "total_withdrawals": total_with,
+        })
+    return out
+
+
 @router.get("")
 def list_agent_stats(db: Session = Depends(get_session)):
     """Summary row per agent across all CRMs."""
     all_pairs = db.exec(select(CRMPair)).all()
-
-    # Deduplicate per (agent, customer) — same logic as detail endpoint —
-    # keeps the row with the highest call_count to avoid double-counting
-    # when multiple CRM syncs create duplicate rows for the same pair.
-    best: dict[tuple, CRMPair] = {}
-    for p in all_pairs:
-        key = (p.agent, p.customer)
-        if key not in best or (p.call_count or 0) > (best[key].call_count or 0):
-            best[key] = p
-    deduped = list(best.values())
+    deduped = _dedupe_pairs_with_deposits(all_pairs, key_fn=lambda p: (p.agent, p.customer))
 
     # Aggregate per agent
     agents_map: dict[str, dict] = {}
     for p in deduped:
-        a = agents_map.setdefault(p.agent, {
-            "agent": p.agent,
+        a = agents_map.setdefault(p["agent"], {
+            "agent": p["agent"],
             "total_calls": 0,
             "unique_customers": 0,
             "net_deposits": 0.0,
             "total_deposits": 0.0,
         })
-        a["total_calls"] += p.call_count or 0
+        a["total_calls"] += p["call_count"]
         a["unique_customers"] += 1
-        a["net_deposits"] += p.net_deposits or 0
-        a["total_deposits"] += p.total_deposits or 0
+        a["net_deposits"] += p["net_deposits"]
+        a["total_deposits"] += p["total_deposits"]
 
     # Avg call duration (>120s) per agent from crm_call table
     dur_rows = db.exec(
@@ -82,18 +107,13 @@ def get_agent_stats(agent: str, db: Session = Depends(get_session)):
     if not pairs:
         return {"agent": agent, "not_found": True}
 
-    # Deduplicate by customer name, keeping highest call_count row
-    best: dict[str, CRMPair] = {}
-    for p in pairs:
-        if p.customer not in best or (p.call_count or 0) > (best[p.customer].call_count or 0):
-            best[p.customer] = p
-    deduped = list(best.values())
+    deduped = _dedupe_pairs_with_deposits(pairs, key_fn=lambda p: p.customer)
 
-    total_calls = sum(p.call_count or 0 for p in deduped)
+    total_calls = sum(p["call_count"] for p in deduped)
     unique_customers = len(deduped)
-    net_deposits = sum(p.net_deposits or 0 for p in deduped)
-    total_deposits = sum(p.total_deposits or 0 for p in deduped)
-    total_withdrawals = sum(p.total_withdrawals or 0 for p in deduped)
+    net_deposits = sum(p["net_deposits"] for p in deduped)
+    total_deposits = sum(p["total_deposits"] for p in deduped)
+    total_withdrawals = sum(p["total_withdrawals"] for p in deduped)
 
     call_rows = db.exec(
         select(CRMCall)

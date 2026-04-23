@@ -176,6 +176,188 @@ def _validate_pipeline_payload(req: PipelineIn) -> None:
             "Canvas/step mismatch: fewer assigned processing nodes than pipeline steps.",
         )
 
+
+def _extract_agent_output_subtypes(canvas_json: str) -> dict[str, str]:
+    """Map processing agent_id -> output subType from canvas snapshot."""
+    try:
+        canvas = json.loads(canvas_json or "{}")
+        nodes = canvas.get("nodes") or []
+        edges = canvas.get("edges") or []
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return {}
+
+        node_by_id: dict[str, dict] = {}
+        for n in nodes:
+            if isinstance(n, dict):
+                node_by_id[str(n.get("id") or "")] = n
+
+        out_edges: dict[str, list[str]] = {}
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            src = str(e.get("source") or "")
+            dst = str(e.get("target") or "")
+            if not src or not dst:
+                continue
+            out_edges.setdefault(src, []).append(dst)
+
+        out: dict[str, str] = {}
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            if str(n.get("type") or "") != "processing":
+                continue
+            data = n.get("data") or {}
+            if not isinstance(data, dict):
+                continue
+            agent_id = str(data.get("agentId") or "").strip()
+            if not agent_id:
+                continue
+            for dst in out_edges.get(str(n.get("id") or ""), []):
+                out_node = node_by_id.get(dst) or {}
+                if str(out_node.get("type") or "") != "output":
+                    continue
+                out_data = out_node.get("data") or {}
+                if not isinstance(out_data, dict):
+                    continue
+                sub_type = str(out_data.get("subType") or "").strip().lower()
+                if sub_type:
+                    out[agent_id] = sub_type
+                    break
+        return out
+    except Exception:
+        return {}
+
+
+def _normalise_metric_name(name: str) -> str:
+    return " ".join(str(name or "").strip().split())
+
+
+def _parse_scores_from_text(content: str) -> dict[str, float]:
+    """Extract section scores from JSON or markdown/text score blocks."""
+    txt = (content or "").strip()
+    if not txt:
+        return {}
+
+    def _from_obj(obj: Any) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if not isinstance(obj, dict):
+            return out
+        for raw_k, raw_v in obj.items():
+            key = _normalise_metric_name(str(raw_k or ""))
+            if not key or key.startswith("_"):
+                continue
+            score: Optional[float] = None
+            if isinstance(raw_v, (int, float)):
+                score = float(raw_v)
+            elif isinstance(raw_v, dict):
+                sv = raw_v.get("score")
+                if isinstance(sv, (int, float)):
+                    score = float(sv)
+            if score is None:
+                continue
+            out[key] = max(0.0, min(100.0, score))
+        return out
+
+    # Direct JSON first.
+    try:
+        parsed = json.loads(txt)
+        got = _from_obj(parsed)
+        if got:
+            return got
+    except Exception:
+        pass
+
+    # JSON embedded in text/codefence.
+    try:
+        m = _re.search(r"\{[\s\S]+\}", txt)
+        if m:
+            parsed = json.loads(m.group(0))
+            got = _from_obj(parsed)
+            if got:
+                return got
+    except Exception:
+        pass
+
+    out: dict[str, float] = {}
+
+    # Pattern: "Category Name" line followed by "Score: 88/100".
+    for sec, score in _re.findall(
+        r"(?im)^\s*([^\n:][^\n]{1,120})\s*\n\s*Score:\s*([0-9]{1,3})(?:\s*/\s*100)?\s*$",
+        txt,
+    ):
+        k = _normalise_metric_name(sec)
+        if not k:
+            continue
+        out[k] = max(0.0, min(100.0, float(score)))
+
+    # Pattern: "Category: 88/100".
+    for sec, score in _re.findall(
+        r"(?im)^\s*[•\-\*]?\s*([^:\n]{2,120})\s*:\s*([0-9]{1,3})\s*/\s*100\b",
+        txt,
+    ):
+        k = _normalise_metric_name(sec)
+        if not k:
+            continue
+        out[k] = max(0.0, min(100.0, float(score)))
+
+    return out
+
+
+def _parse_violations_from_text(content: str) -> dict[str, int]:
+    """Extract violation totals by procedure from notes/compliance text."""
+    txt = (content or "").strip()
+    if not txt:
+        return {}
+
+    summary_counts: dict[str, int] = {}
+    line_counts: dict[str, int] = {}
+    current_proc = ""
+    in_summary = False
+
+    for raw in txt.splitlines():
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        low = line.lower()
+
+        if "total violations by procedure" in low:
+            in_summary = True
+            continue
+
+        if in_summary:
+            m = _re.match(r"^[•\-\*]\s*(.+?)\s*:\s*(\d+)\s*$", line)
+            if m:
+                k = _normalise_metric_name(m.group(1))
+                if k:
+                    summary_counts[k] = int(m.group(2))
+                continue
+            # Allow plain "Total Violations (All Procedures): X"
+            m2 = _re.match(r"^total violations.*?:\s*(\d+)\s*$", low)
+            if m2:
+                summary_counts["Total Violations (All Procedures)"] = int(m2.group(1))
+                continue
+
+        # Track the current procedure title preceding status lines.
+        proc_match = _re.match(r"^[•\-\*]\s*(.+?)\s*$", line)
+        if proc_match:
+            current_proc = _normalise_metric_name(proc_match.group(1))
+
+        if "[violation]" in low:
+            key = current_proc
+            if not key:
+                m = _re.search(r"\[violation\]\s*[–-]\s*(.+)$", line, _re.IGNORECASE)
+                key = _normalise_metric_name(m.group(1)) if m else "Violation"
+            line_counts[key] = line_counts.get(key, 0) + 1
+
+    if summary_counts:
+        for k, v in line_counts.items():
+            if k not in summary_counts:
+                summary_counts[k] = v
+        return summary_counts
+
+    return line_counts
+
 def _load_all() -> list[dict]:
     _DIR.mkdir(parents=True, exist_ok=True)
     out = []
@@ -501,6 +683,178 @@ def list_pipeline_runs(
         }
         for r in rows
     ]
+
+
+@router.get("/{pipeline_id}/analytics")
+def get_pipeline_analytics(
+    pipeline_id: str,
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: Optional[str] = Query(None),
+    run_id: str = Query(""),
+    limit: int = Query(50),
+    db: Session = Depends(get_session),
+):
+    """Return parsed score + violation metrics from pipeline run outputs."""
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+
+    safe_limit = max(1, min(limit, 300))
+    stmt = select(PR).where(PR.pipeline_id == pipeline_id)
+    if sales_agent:
+        stmt = stmt.where(PR.sales_agent == sales_agent)
+    if customer:
+        stmt = stmt.where(PR.customer == customer)
+    if call_id is not None:
+        stmt = stmt.where(PR.call_id == call_id)
+    stmt = stmt.order_by(PR.started_at.desc()).limit(safe_limit)
+    rows = db.exec(stmt).all()
+
+    run_items: list[dict] = []
+    for r in rows:
+        run_items.append({
+            "id": r.id,
+            "pipeline_id": r.pipeline_id,
+            "pipeline_name": r.pipeline_name,
+            "sales_agent": r.sales_agent,
+            "customer": r.customer,
+            "call_id": r.call_id,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "status": r.status,
+        })
+
+    selected_runs = rows
+    if run_id:
+        selected_runs = [r for r in rows if str(r.id) == run_id]
+        if not selected_runs:
+            single = db.get(PR, run_id)
+            if single and single.pipeline_id == pipeline_id:
+                if (not sales_agent or single.sales_agent == sales_agent) and (not customer or single.customer == customer):
+                    if call_id is None or single.call_id == call_id:
+                        selected_runs = [single]
+                        run_items = [ri for ri in run_items if ri["id"] == run_id] or [{
+                            "id": single.id,
+                            "pipeline_id": single.pipeline_id,
+                            "pipeline_name": single.pipeline_name,
+                            "sales_agent": single.sales_agent,
+                            "customer": single.customer,
+                            "call_id": single.call_id,
+                            "started_at": single.started_at.isoformat() if single.started_at else None,
+                            "finished_at": single.finished_at.isoformat() if single.finished_at else None,
+                            "status": single.status,
+                        }]
+
+    parsed_rows: list[dict] = []
+    score_values: dict[str, list[float]] = {}
+    violation_totals: dict[str, int] = {}
+
+    for run in selected_runs:
+        try:
+            steps = json.loads(run.steps_json or "[]")
+            if not isinstance(steps, list):
+                steps = []
+        except Exception:
+            steps = []
+        subtype_by_agent = _extract_agent_output_subtypes(run.canvas_json or "")
+        run_started_at = run.started_at.isoformat() if run.started_at else ""
+        run_finished_at = run.finished_at.isoformat() if run.finished_at else None
+
+        for idx, raw_step in enumerate(steps):
+            step = raw_step if isinstance(raw_step, dict) else {}
+            content = str(step.get("content") or "")
+            if not content:
+                continue
+
+            agent_id = str(step.get("agent_id") or "")
+            agent_name = str(step.get("agent_name") or "") or agent_id or f"Step {idx + 1}"
+            model = str(step.get("model") or "")
+            sub_type = str(subtype_by_agent.get(agent_id, "") or "").strip().lower()
+
+            step_state = str(step.get("state") or step.get("status") or "").strip().lower()
+            step_done = step_state in {"done", "completed", "pass", "success", "ok"}
+
+            # Score rows
+            scores = _parse_scores_from_text(content) if sub_type in {"persona_score", ""} else {}
+            if not scores and sub_type == "":
+                # Fallback on unknown subtype only if strongly score-shaped.
+                if "score" in content.lower() and "/100" in content:
+                    scores = _parse_scores_from_text(content)
+
+            for sec, val in scores.items():
+                score_values.setdefault(sec, []).append(float(val))
+                parsed_rows.append({
+                    "metric_type": "score",
+                    "metric_key": sec,
+                    "metric_value": float(val),
+                    "run_id": run.id,
+                    "run_started_at": run_started_at,
+                    "run_finished_at": run_finished_at,
+                    "run_status": run.status,
+                    "step_index": idx,
+                    "step_done": step_done,
+                    "step_state": step_state,
+                    "step_agent_id": agent_id,
+                    "step_agent_name": agent_name,
+                    "step_model": model,
+                    "step_sub_type": sub_type or "unknown",
+                })
+
+            # Violation rows
+            violations = _parse_violations_from_text(content) if sub_type in {"notes_compliance", ""} else {}
+            if not violations and sub_type == "":
+                # Fallback on unknown subtype only if clearly compliance-shaped.
+                if "[violation]" in content.lower() or "total violations by procedure" in content.lower():
+                    violations = _parse_violations_from_text(content)
+
+            for proc, cnt in violations.items():
+                n = int(cnt or 0)
+                violation_totals[proc] = violation_totals.get(proc, 0) + n
+                parsed_rows.append({
+                    "metric_type": "violation",
+                    "metric_key": proc,
+                    "metric_value": n,
+                    "run_id": run.id,
+                    "run_started_at": run_started_at,
+                    "run_finished_at": run_finished_at,
+                    "run_status": run.status,
+                    "step_index": idx,
+                    "step_done": step_done,
+                    "step_state": step_state,
+                    "step_agent_id": agent_id,
+                    "step_agent_name": agent_name,
+                    "step_model": model,
+                    "step_sub_type": sub_type or "unknown",
+                })
+
+    score_by_section = [
+        {
+            "section": section,
+            "average": round(sum(vals) / len(vals), 2),
+            "count": len(vals),
+        }
+        for section, vals in score_values.items()
+        if vals
+    ]
+    score_by_section.sort(key=lambda x: x["section"].lower())
+
+    violation_by_type = [
+        {"type": proc, "total": total}
+        for proc, total in violation_totals.items()
+    ]
+    violation_by_type.sort(key=lambda x: (-x["total"], x["type"].lower()))
+
+    return {
+        "pipeline_id": pipeline_id,
+        "pipeline_name": run_items[0]["pipeline_name"] if run_items else "",
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "call_id": call_id or "",
+        "selected_run_id": run_id or "",
+        "runs": run_items,
+        "rows": parsed_rows,
+        "score_by_section": score_by_section,
+        "violation_by_type": violation_by_type,
+    }
 
 
 @router.get("/{pipeline_id}/state")
