@@ -3,7 +3,9 @@ import asyncio
 import json
 import os
 import queue as _queue
+import random
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -1031,6 +1033,10 @@ def _llm_call_openai_responses_files(
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     connect_timeout_s = float(os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "20"))
     read_timeout_s = float(os.environ.get("OPENAI_RESPONSES_TIMEOUT_S", "600"))
+    max_retries = max(0, int(os.environ.get("OPENAI_RESPONSES_MAX_RETRIES", "4")))
+    retry_base_s = max(0.1, float(os.environ.get("OPENAI_RESPONSES_RETRY_BASE_S", "1.2")))
+    retry_max_s = max(0.5, float(os.environ.get("OPENAI_RESPONSES_RETRY_MAX_S", "20")))
+    retry_jitter_s = max(0.0, float(os.environ.get("OPENAI_RESPONSES_RETRY_JITTER_S", "0.4")))
     ctx = getattr(db, "_agent_run_ctx", {})
 
     # Upload (or reuse cached) each file input — returns (file_id, _) tuple
@@ -1120,50 +1126,138 @@ def _llm_call_openai_responses_files(
         thinking = "\n\n".join(x.strip() for x in thinking_parts if x and x.strip())
         return text, thinking
 
-    try:
-        log_buffer.emit(f"[LLM] {model} — OpenAI responses request started")
-        resp = requests.post(
-            f"{base_url}/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=(connect_timeout_s, read_timeout_s),
-        )
-    except requests.Timeout as exc:
-        raise RuntimeError(
-            f"OpenAI Responses API timed out after {int(read_timeout_s)}s (model: {model})"
-        ) from exc
-    except requests.RequestException as exc:
-        raise RuntimeError(f"OpenAI Responses API request failed: {exc}") from exc
+    retriable_statuses = {408, 409, 429, 500, 502, 503, 504}
+    retriable_codes = {
+        "server_error",
+        "rate_limit_exceeded",
+        "temporarily_unavailable",
+        "overloaded_error",
+    }
+    total_attempts = max_retries + 1
+    last_err: Optional[Exception] = None
 
-    if not resp.ok:
-        body = (resp.text or "").strip()
-        if len(body) > 800:
-            body = body[:800] + "…"
-        if resp.status_code == 400 and "context_length_exceeded" in body:
-            inline_chars = sum(len(v or "") for v in inline_inputs.values())
-            file_chars = sum(len(v or "") for v in file_inputs.values())
-            raise RuntimeError(
-                "OpenAI context_length_exceeded "
-                f"(model={model}, inline_chars≈{inline_chars:,}, "
-                f"file_inputs={len(file_inputs)}, unique_files={len(unique_file_ids)}, "
-                f"file_chars≈{file_chars:,}). {body or 'empty response'}"
+    for attempt in range(1, total_attempts + 1):
+        if attempt == 1:
+            log_buffer.emit(f"[LLM] {model} — OpenAI responses request started")
+        else:
+            log_buffer.emit(
+                f"[LLM] {model} — OpenAI responses retry attempt {attempt}/{total_attempts}"
             )
-        raise RuntimeError(f"OpenAI Responses API HTTP {resp.status_code}: {body or 'empty response'}")
 
-    try:
-        data = resp.json()
-    except Exception as exc:
-        raise RuntimeError("OpenAI Responses API returned invalid JSON") from exc
+        try:
+            resp = requests.post(
+                f"{base_url}/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=(connect_timeout_s, read_timeout_s),
+            )
+        except requests.Timeout as exc:
+            last_err = RuntimeError(
+                f"OpenAI Responses API timed out after {int(read_timeout_s)}s (model: {model})"
+            )
+            if attempt >= total_attempts:
+                raise last_err from exc
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — timeout on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+        except requests.RequestException as exc:
+            last_err = RuntimeError(f"OpenAI Responses API request failed: {exc}")
+            if attempt >= total_attempts:
+                raise last_err from exc
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — transport error on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
 
-    text, thinking = _extract_text_and_thinking(data)
-    if not text:
-        raise RuntimeError("OpenAI Responses API returned empty output")
+        if not resp.ok:
+            raw_body = (resp.text or "").strip()
+            body = raw_body if len(raw_body) <= 800 else (raw_body[:800] + "…")
+            request_id = (resp.headers.get("x-request-id") or "").strip()
+            error_code = ""
+            retry_after_s = 0.0
+            try:
+                body_json = resp.json() if raw_body else {}
+                if isinstance(body_json, dict):
+                    err_obj = body_json.get("error") if isinstance(body_json.get("error"), dict) else {}
+                    error_code = str(err_obj.get("code") or "")
+                    if not request_id:
+                        request_id = str(err_obj.get("request_id") or "")
+            except Exception:
+                body_json = {}
 
-    log_buffer.emit(f"[LLM] {model} — OpenAI responses complete ({len(text):,} chars)")
-    return text, thinking
+            retry_after_hdr = (resp.headers.get("retry-after") or "").strip()
+            if retry_after_hdr:
+                try:
+                    retry_after_s = max(0.0, float(retry_after_hdr))
+                except Exception:
+                    retry_after_s = 0.0
+
+            if resp.status_code == 400 and "context_length_exceeded" in body:
+                inline_chars = sum(len(v or "") for v in inline_inputs.values())
+                file_chars = sum(len(v or "") for v in file_inputs.values())
+                raise RuntimeError(
+                    "OpenAI context_length_exceeded "
+                    f"(model={model}, inline_chars≈{inline_chars:,}, "
+                    f"file_inputs={len(file_inputs)}, unique_files={len(unique_file_ids)}, "
+                    f"file_chars≈{file_chars:,}). {body or 'empty response'}"
+                )
+
+            is_retriable = (resp.status_code in retriable_statuses) or (error_code in retriable_codes)
+            err_msg = f"OpenAI Responses API HTTP {resp.status_code}: {body or 'empty response'}"
+            if request_id:
+                err_msg += f" (request_id={request_id})"
+
+            if is_retriable and attempt < total_attempts:
+                exp_backoff_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+                sleep_s = max(exp_backoff_s, retry_after_s)
+                log_buffer.emit(
+                    f"[LLM] {model} — transient HTTP {resp.status_code} on attempt {attempt}/{total_attempts}; "
+                    f"retrying in {sleep_s:.1f}s"
+                )
+                time.sleep(sleep_s)
+                continue
+
+            raise RuntimeError(err_msg)
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            last_err = RuntimeError("OpenAI Responses API returned invalid JSON")
+            if attempt >= total_attempts:
+                raise last_err from exc
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — invalid JSON on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+
+        text, thinking = _extract_text_and_thinking(data)
+        if not text:
+            last_err = RuntimeError("OpenAI Responses API returned empty output")
+            if attempt >= total_attempts:
+                raise last_err
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — empty output on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+
+        log_buffer.emit(
+            f"[LLM] {model} — OpenAI responses complete ({len(text):,} chars, attempt {attempt}/{total_attempts})"
+        )
+        return text, thinking
+
+    raise RuntimeError(str(last_err or "OpenAI Responses API failed after retries"))
 
 
 def _llm_call_with_files(
