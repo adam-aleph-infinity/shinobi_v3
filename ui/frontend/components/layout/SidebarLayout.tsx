@@ -4,7 +4,6 @@ import AppSidebar from "./AppSidebar";
 import CopilotDock from "./CopilotDock";
 import { ContextBar } from "./ContextBar";
 import { PanelLeftOpen } from "lucide-react";
-import { DragHandle } from "@/components/shared/DragHandle";
 import { cn } from "@/lib/utils";
 
 const SIDEBAR_WIDTH = 224;
@@ -136,8 +135,20 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {mounted && !copilotCollapsed && (
         <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: copilotWidth }}>
           <CopilotDock onToggle={toggleCopilot} />
-          <div className={cn("absolute top-0 right-0 h-full translate-x-1/2 z-40", resizingCopilot && "bg-indigo-500/20")}>
-            <DragHandle onMouseDown={startCopilotResize} />
+          <div className="absolute top-0 -right-1 h-full w-3 z-40">
+            <button
+              type="button"
+              aria-label="Resize copilot panel"
+              onMouseDown={startCopilotResize}
+              className="group h-full w-full cursor-col-resize flex items-center justify-center"
+            >
+              <span
+                className={cn(
+                  "h-20 w-[2px] rounded bg-gray-700/70 group-hover:bg-indigo-400 transition-colors",
+                  resizingCopilot && "h-full bg-indigo-400"
+                )}
+              />
+            </button>
           </div>
         </div>
       )}
