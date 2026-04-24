@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta
+from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -2673,6 +2674,43 @@ async def run_pipeline(
             _input_fingerprint: str,
         ) -> tuple[Optional[Any], bool]:
             """Return (cached_row, used_resume_partial_fallback)."""
+            def _legacy_lookup_latest() -> Optional[Any]:
+                _sql = (
+                    "SELECT id, content, created_at "
+                    "FROM agent_result "
+                    "WHERE agent_id = :agent_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                )
+                _params = {
+                    "agent_id": _agent_id,
+                    "sales_agent": req.sales_agent or "",
+                    "customer": req.customer or "",
+                }
+                if req.call_id:
+                    _sql += "AND call_id = :call_id "
+                    _params["call_id"] = req.call_id
+                else:
+                    _sql += "AND call_id = '' "
+                _sql += "ORDER BY created_at DESC LIMIT 1"
+                _row = _sess.exec(_sql_text(_sql), _params).first()
+                if not _row:
+                    return None
+                _m = getattr(_row, "_mapping", _row)
+                if hasattr(_m, "get"):
+                    return _SimpleNamespace(
+                        id=_m.get("id"),
+                        content=_m.get("content", ""),
+                        created_at=_m.get("created_at"),
+                    )
+                return None
+
+            if not _agent_result_has_pipeline_cache:
+                _legacy = _legacy_lookup_latest()
+                if _legacy:
+                    return _legacy, bool(req.resume_partial)
+                return None, False
+
             _base = select(AR).where(
                 AR.agent_id == _agent_id,
                 _sql_func.lower(AR.sales_agent) == (req.sales_agent or "").lower(),
@@ -2710,6 +2748,37 @@ async def run_pipeline(
             _step_idx: int,
         ) -> Optional[Any]:
             """Best-effort step cache lookup for resume mode before input-resolution."""
+            if not _agent_result_has_pipeline_cache:
+                _sql = (
+                    "SELECT id, content, created_at "
+                    "FROM agent_result "
+                    "WHERE agent_id = :agent_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                )
+                _params = {
+                    "agent_id": _agent_id,
+                    "sales_agent": req.sales_agent or "",
+                    "customer": req.customer or "",
+                }
+                if req.call_id:
+                    _sql += "AND call_id = :call_id "
+                    _params["call_id"] = req.call_id
+                else:
+                    _sql += "AND call_id = '' "
+                _sql += "ORDER BY created_at DESC LIMIT 1"
+                _row = _sess.exec(_sql_text(_sql), _params).first()
+                if not _row:
+                    return None
+                _m = getattr(_row, "_mapping", _row)
+                if hasattr(_m, "get"):
+                    return _SimpleNamespace(
+                        id=_m.get("id"),
+                        content=_m.get("content", ""),
+                        created_at=_m.get("created_at"),
+                    )
+                return None
+
             _base = select(AR).where(
                 AR.agent_id == _agent_id,
                 _sql_func.lower(AR.sales_agent) == (req.sales_agent or "").lower(),
