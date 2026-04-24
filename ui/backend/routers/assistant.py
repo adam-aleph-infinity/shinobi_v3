@@ -28,14 +28,16 @@ from ui.backend.services import assistant_knowledge, execution_logs, log_buffer
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 
-_SESSION_DIR = settings.ui_data_dir / "_assistant_sessions"
+_SESSION_DIR = settings.ui_data_dir / "copilot" / "sessions"
 _SESSION_DIR.mkdir(parents=True, exist_ok=True)
+_LEGACY_SESSION_DIR = settings.ui_data_dir / "_assistant_sessions"
 
 _TEXT_EXTS = {".json", ".txt", ".md", ".log", ".csv", ".srt"}
 
 _DEFAULT_MODEL = os.environ.get("ASSISTANT_MODEL", "gpt-5.4")
 _MAX_MODEL_MESSAGES = 80
 _MAX_TOOL_ROUNDS = 12
+_MAX_SUB_AGENT_TOOL_ROUNDS = 4
 
 _SUPPORTED_ORCHESTRATION_PROVIDERS = {"openai", "anthropic"}
 _CORRECTION_HINTS = (
@@ -72,6 +74,22 @@ _DEFAULT_MODEL_CATALOG = [
         "description": "Strong long-context planning and correction handling.",
     },
 ]
+
+
+def _migrate_legacy_sessions() -> None:
+    if not _LEGACY_SESSION_DIR.exists() or not _LEGACY_SESSION_DIR.is_dir():
+        return
+    for legacy_file in _LEGACY_SESSION_DIR.glob("*.json"):
+        target = _SESSION_DIR / legacy_file.name
+        if target.exists():
+            continue
+        try:
+            target.write_text(legacy_file.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            continue
+
+
+_migrate_legacy_sessions()
 
 
 SYSTEM_PROMPT = (
@@ -183,8 +201,8 @@ def _append_model_message(session: dict[str, Any], message: dict[str, Any]) -> N
     items.append(message)
 
 
-def _tool_specs() -> list[dict[str, Any]]:
-    return [
+def _tool_specs(include_sub_agent: bool = True) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = [
         {
             "type": "function",
             "function": {
@@ -476,24 +494,46 @@ def _tool_specs() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "spawn_sub_agent",
+                "name": "distill_successful_run_skills",
                 "description": (
-                    "Run a focused sub-agent to plan/check a specific subtask. "
-                    "Useful for second-opinion reasoning."
+                    "Auto-distill reusable pipeline skills from recent successful runs. "
+                    "Use after completing or validating runs to improve future design quality."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "goal": {"type": "string"},
-                        "model": {"type": "string", "default": ""},
-                        "provider": {"type": "string", "default": ""},
+                        "limit": {"type": "integer", "minimum": 5, "maximum": 500, "default": 120},
+                        "force": {"type": "boolean", "default": False},
                     },
-                    "required": ["goal"],
                     "additionalProperties": False,
                 },
             },
         },
     ]
+    if include_sub_agent:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "spawn_sub_agent",
+                    "description": (
+                        "Run a focused sub-agent to plan/check a specific subtask. "
+                        "Useful for second-opinion reasoning."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {"type": "string"},
+                            "model": {"type": "string", "default": ""},
+                            "provider": {"type": "string", "default": ""},
+                        },
+                        "required": ["goal"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
+    return tools
 
 
 def _normalize_step(step: dict[str, Any]) -> dict[str, Any]:
@@ -872,6 +912,14 @@ def _tool_update_skill(args: dict[str, Any], *, session_id: str) -> dict[str, An
     return {"updated": True, "skill_id": row.get("id"), "name": row.get("name")}
 
 
+def _tool_distill_successful_run_skills(args: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    limit = max(5, min(500, int(args.get("limit", 120) or 120)))
+    do_force = bool(args.get("force")) or bool(force)
+    result = assistant_knowledge.distill_skills_from_successful_runs(limit=limit, force=do_force)
+    result["distillation_state"] = assistant_knowledge.get_distillation_state()
+    return result
+
+
 def _run_sub_agent(
     *,
     goal: str,
@@ -879,6 +927,7 @@ def _run_sub_agent(
     provider: str,
     parent_model: str,
     parent_provider: str,
+    parent_session_id: str,
 ) -> dict[str, Any]:
     chosen_model = str(model or "").strip() or parent_model
     chosen_provider = str(provider or "").strip().lower() or _assistant_model_provider(chosen_model)
@@ -888,42 +937,115 @@ def _run_sub_agent(
     if not key:
         raise HTTPException(400, f"Missing API key for provider '{chosen_provider}'")
 
-    pack = assistant_knowledge.context_pack(goal, memory_limit=8, skills_limit=8)
+    supports_tools = chosen_provider in _SUPPORTED_ORCHESTRATION_PROVIDERS
+    sub_tools = _tool_specs(include_sub_agent=False)
+    assistant_knowledge.ensure_app_map(sub_tools, force=False)
     sub_system = (
+        f"{_build_dynamic_system_prompt(goal, sub_tools)}\n"
+        "\n"
         "You are a Shinobi Copilot sub-agent.\n"
-        "Solve only the assigned goal with concrete recommendations.\n"
-        "Do not claim actions were executed.\n"
-        "Return concise output with assumptions and checks."
+        "- Solve only the assigned sub-goal.\n"
+        "- Use tools when factual verification is needed.\n"
+        "- Never claim actions were executed unless tool results confirm.\n"
+        "- Return concise findings, assumptions, and recommended next action."
     )
-    user = (
-        f"SUB-AGENT GOAL:\n{goal}\n\n"
-        "Context pack:\n"
-        f"{_compact_json(pack, cap=12000)}"
-    )
+    user = f"SUB-AGENT GOAL:\n{goal}"
 
+    model_messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
+    trace: list[dict[str, Any]] = []
     client = LLMClient(provider=chosen_provider, api_key=key)
-    resp = client.chat_completion(
-        model=chosen_model,
-        messages=[
-            {"role": "system", "content": sub_system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0,
-        max_tokens=3500,
-    )
-    text = _message_content_text(resp.choices[0].message).strip()
+    text = ""
+    tool_calls_used = 0
+
+    if not supports_tools:
+        resp = client.chat_completion(
+            model=chosen_model,
+            messages=[{"role": "system", "content": sub_system}] + model_messages,
+            temperature=0,
+            max_tokens=3500,
+        )
+        text = _message_content_text(resp.choices[0].message).strip()
+    else:
+        for round_idx in range(_MAX_SUB_AGENT_TOOL_ROUNDS):
+            resp = client.chat_completion(
+                model=chosen_model,
+                messages=[{"role": "system", "content": sub_system}] + model_messages,
+                temperature=0,
+                max_tokens=3500,
+                tools=sub_tools,
+                tool_choice="auto",
+            )
+            message = resp.choices[0].message
+            msg_text = _message_content_text(message)
+            raw_tool_calls = getattr(message, "tool_calls", None) or []
+            if raw_tool_calls:
+                tool_calls = [_serialize_tool_call(tc) for tc in raw_tool_calls]
+                model_messages.append({"role": "assistant", "content": msg_text, "tool_calls": tool_calls})
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    name = str(fn.get("name") or "")
+                    args_raw = str(fn.get("arguments") or "{}")
+                    tc_id = str(tc.get("id") or str(uuid.uuid4()))
+                    try:
+                        parsed_args = _parse_json_args(args_raw)
+                        tool_result = _execute_tool(
+                            name,
+                            parsed_args,
+                            ctx={
+                                "session_id": parent_session_id,
+                                "model": chosen_model,
+                                "provider": chosen_provider,
+                                "tools": sub_tools,
+                                "sub_agent": True,
+                            },
+                        )
+                        ok = True
+                    except Exception as exc:
+                        tool_result = {"ok": False, "error": str(exc)}
+                        ok = False
+                    tool_text = json.dumps(tool_result, ensure_ascii=False)
+                    model_messages.append({"role": "tool", "tool_call_id": tc_id, "content": tool_text})
+                    trace.append(
+                        {
+                            "round": round_idx + 1,
+                            "tool": name,
+                            "ok": ok,
+                            "preview": tool_text[:600] + ("…" if len(tool_text) > 600 else ""),
+                        }
+                    )
+                    tool_calls_used += 1
+                continue
+            text = msg_text.strip()
+            break
+
     if not text:
         text = "Sub-agent returned empty output."
+
+    artifact = assistant_knowledge.save_sub_agent_artifact(
+        {
+            "goal": goal,
+            "provider": chosen_provider,
+            "model": chosen_model,
+            "supports_tools": supports_tools,
+            "tool_calls_used": tool_calls_used,
+            "trace": trace[-80:],
+            "output": text,
+            "parent_session_id": parent_session_id,
+        }
+    )
     return {
         "ok": True,
         "goal": goal,
         "provider": chosen_provider,
         "model": chosen_model,
         "output": text,
+        "supports_tools": supports_tools,
+        "tool_calls_used": tool_calls_used,
+        "artifact": artifact,
     }
 
 
-def _tool_spawn_sub_agent(args: dict[str, Any], *, model: str, provider: str) -> dict[str, Any]:
+def _tool_spawn_sub_agent(args: dict[str, Any], *, model: str, provider: str, session_id: str) -> dict[str, Any]:
     goal = str(args.get("goal") or "").strip()
     if not goal:
         raise HTTPException(400, "goal is required")
@@ -935,6 +1057,7 @@ def _tool_spawn_sub_agent(args: dict[str, Any], *, model: str, provider: str) ->
         provider=requested_provider,
         parent_model=model,
         parent_provider=provider,
+        parent_session_id=session_id,
     )
 
 
@@ -981,11 +1104,14 @@ def _execute_tool(name: str, args: dict[str, Any], *, ctx: Optional[dict[str, An
             return _tool_remember_lesson(args, session_id=str(tool_ctx.get("session_id") or ""))
         if name == "update_skill":
             return _tool_update_skill(args, session_id=str(tool_ctx.get("session_id") or ""))
+        if name == "distill_successful_run_skills":
+            return _tool_distill_successful_run_skills(args)
         if name == "spawn_sub_agent":
             return _tool_spawn_sub_agent(
                 args,
                 model=str(tool_ctx.get("model") or _DEFAULT_MODEL),
                 provider=str(tool_ctx.get("provider") or "openai"),
+                session_id=str(tool_ctx.get("session_id") or ""),
             )
         raise HTTPException(400, f"Unknown tool '{name}'")
     return fn(args)
@@ -1338,6 +1464,7 @@ async def chat_session(session_id: str, req: ChatRequest):
 
     async def stream():
         tools = _tool_specs()
+        distill_boot = assistant_knowledge.distill_skills_from_successful_runs(limit=120, force=False)
         assistant_knowledge.ensure_app_map(tools, force=False)
         dynamic_system_prompt = _build_dynamic_system_prompt(user_message, tools)
         client = LLMClient(provider=provider, api_key=api_key)
@@ -1345,6 +1472,17 @@ async def chat_session(session_id: str, req: ChatRequest):
         try:
             yield _sse("execution_session", {"execution_session_id": execution_session_id})
             yield _sse("progress", {"msg": f"Thinking with {model} ({provider})…"})
+            if distill_boot.get("distilled", 0):
+                yield _sse(
+                    "progress",
+                    {"msg": f"Distilled {int(distill_boot.get('distilled', 0))} new skills from successful runs."},
+                )
+                execution_logs.append_event(
+                    execution_session_id,
+                    "Copilot run distillation",
+                    level="info",
+                    data=distill_boot,
+                )
 
             if not supports_tools:
                 messages = [{"role": "system", "content": dynamic_system_prompt}] + list(session.get("model_messages") or [])
