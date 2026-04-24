@@ -48,6 +48,8 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         thinking: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ):
         if self.provider == "openai":
             # Reasoning models (o-series and gpt-5.x) reject temperature — omit it entirely.
@@ -60,6 +62,10 @@ class LLMClient:
                 kwargs["seed"] = 12345
             if max_tokens is not None:
                 kwargs["max_completion_tokens"] = max_tokens
+            if tools:
+                kwargs["tools"] = tools
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
             return self.client.chat.completions.create(**kwargs)
 
         if self.provider == "anthropic":

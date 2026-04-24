@@ -25,6 +25,7 @@ const GROUPS = [
   {
     label: "Agents",
     items: [
+      { href: "/copilot",  icon: Bot,       label: "AI Copilot" },
       { href: "/agents",   icon: Bot,       label: "Agents" },
       { href: "/pipeline", icon: GitBranch, label: "Pipeline Workflow" },
       { href: "/history",  icon: History,   label: "Run History" },
