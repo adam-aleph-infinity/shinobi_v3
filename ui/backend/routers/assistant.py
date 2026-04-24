@@ -45,6 +45,12 @@ _PLANNER_CRITIC_ENABLED = os.environ.get("ASSISTANT_PLANNER_CRITIC_ENABLED", "1"
     "no",
 }
 _PLANNER_CRITIC_MAX_TOKENS = int(os.environ.get("ASSISTANT_PLANNER_CRITIC_MAX_TOKENS", "12000"))
+_MODEL_ALIASES = {
+    # Anthropic currently exposes Sonnet 4.6 as the active Sonnet 4 API model.
+    # Keep this alias so users can request "Sonnet 4.7" without breaking requests.
+    "claude-sonnet-4-7": "claude-sonnet-4-6",
+    "claude-sonnet-4.7": "claude-sonnet-4-6",
+}
 
 _SUPPORTED_ORCHESTRATION_PROVIDERS = {"openai", "anthropic"}
 _CORRECTION_HINTS = (
@@ -69,16 +75,22 @@ _DEFAULT_MODEL_CATALOG = [
         "description": "Max-quality OpenAI reasoning/tool orchestration.",
     },
     {
-        "id": "claude-opus-4-1-20250805",
-        "label": "Anthropic Best (Claude Opus 4.1)",
+        "id": "claude-opus-4-7",
+        "label": "Anthropic Best (Claude Opus 4.7)",
         "provider": "anthropic",
         "description": "Max-quality Anthropic reasoning/tool orchestration.",
     },
     {
-        "id": "claude-sonnet-4-20250514",
-        "label": "Claude Sonnet 4 (fallback)",
+        "id": "claude-sonnet-4-7",
+        "label": "Claude Sonnet 4.7 (compat alias)",
         "provider": "anthropic",
-        "description": "Fast fallback Anthropic model if Opus is unavailable.",
+        "description": "Compatibility alias that routes to Claude Sonnet 4.6.",
+    },
+    {
+        "id": "claude-sonnet-4-6",
+        "label": "Claude Sonnet 4.6 (stable)",
+        "provider": "anthropic",
+        "description": "Current stable Sonnet 4 API model.",
     },
     {
         "id": "gpt-5.3-codex",
@@ -969,7 +981,8 @@ def _run_sub_agent(
     parent_provider: str,
     parent_session_id: str,
 ) -> dict[str, Any]:
-    chosen_model = str(model or "").strip() or parent_model
+    requested_model = str(model or "").strip() or parent_model
+    chosen_model = _canonical_model_id(requested_model)
     chosen_provider = str(provider or "").strip().lower() or _assistant_model_provider(chosen_model)
     if chosen_provider not in {"openai", "anthropic", "gemini", "grok", "mistral"}:
         chosen_provider = parent_provider
@@ -1067,6 +1080,7 @@ def _run_sub_agent(
         {
             "goal": goal,
             "provider": chosen_provider,
+            "requested_model": requested_model,
             "model": chosen_model,
             "supports_tools": supports_tools,
             "tool_calls_used": tool_calls_used,
@@ -1079,6 +1093,7 @@ def _run_sub_agent(
         "ok": True,
         "goal": goal,
         "provider": chosen_provider,
+        "requested_model": requested_model,
         "model": chosen_model,
         "output": text,
         "supports_tools": supports_tools,
@@ -1159,6 +1174,13 @@ def _execute_tool(name: str, args: dict[str, Any], *, ctx: Optional[dict[str, An
             )
         raise HTTPException(400, f"Unknown tool '{name}'")
     return fn(args)
+
+
+def _canonical_model_id(model: str) -> str:
+    raw = str(model or "").strip()
+    if not raw:
+        return raw
+    return _MODEL_ALIASES.get(raw.lower(), raw)
 
 
 def _assistant_model_provider(model: str) -> str:
@@ -1561,7 +1583,9 @@ def delete_session(session_id: str):
 async def chat_session(session_id: str, req: ChatRequest):
     session = _load_session(session_id)
     user_message = req.message.strip()
-    model = (req.model or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+    requested_model = (req.model or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+    model = _canonical_model_id(requested_model)
+    model_alias_applied = requested_model != model
 
     provider = _assistant_model_provider(model)
     supports_tools = provider in _SUPPORTED_ORCHESTRATION_PROVIDERS
@@ -1581,6 +1605,8 @@ async def chat_session(session_id: str, req: ChatRequest):
         context={
             "assistant_session_id": session_id,
             "model": model,
+            "requested_model": requested_model,
+            "model_alias_applied": model_alias_applied,
             "provider": provider,
             "supports_tools": supports_tools,
             "user_message_chars": len(user_message),
@@ -1592,7 +1618,14 @@ async def chat_session(session_id: str, req: ChatRequest):
         "Assistant chat started",
         level="stage",
         status="running",
-        data={"session_id": session_id, "model": model, "provider": provider, "supports_tools": supports_tools},
+        data={
+            "session_id": session_id,
+            "model": model,
+            "requested_model": requested_model,
+            "model_alias_applied": model_alias_applied,
+            "provider": provider,
+            "supports_tools": supports_tools,
+        },
     )
 
     async def stream():
@@ -1606,6 +1639,16 @@ async def chat_session(session_id: str, req: ChatRequest):
         try:
             yield _sse("execution_session", {"execution_session_id": execution_session_id})
             yield _sse("progress", {"msg": f"Thinking with {model} ({provider}) at max effort…"})
+            if model_alias_applied:
+                yield _sse(
+                    "progress",
+                    {
+                        "msg": (
+                            f"Requested model '{requested_model}' is mapped to '{model}' "
+                            "for API compatibility."
+                        )
+                    },
+                )
             if not familiarity_boot.get("skipped"):
                 msg = (
                     f"Familiarized with app/CRM snapshot "
@@ -1688,6 +1731,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                     status="success",
                     report={
                         "model": model,
+                        "requested_model": requested_model,
+                        "model_alias_applied": model_alias_applied,
                         "provider": provider,
                         "assistant_session_id": session_id,
                         "assistant_message_chars": len(final_text),
@@ -1849,6 +1894,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                     status="success",
                     report={
                         "model": model,
+                        "requested_model": requested_model,
+                        "model_alias_applied": model_alias_applied,
                         "provider": provider,
                         "assistant_session_id": session_id,
                         "assistant_message_chars": len(final_text),
@@ -1869,6 +1916,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                 error=err,
                 report={
                     "model": model,
+                    "requested_model": requested_model,
+                    "model_alias_applied": model_alias_applied,
                     "assistant_session_id": session_id,
                 },
             )
