@@ -39,6 +39,12 @@ _DEFAULT_MAX_TOKENS = int(os.environ.get("ASSISTANT_MAX_TOKENS", "32000"))
 _MAX_MODEL_MESSAGES = 80
 _MAX_TOOL_ROUNDS = 14
 _MAX_SUB_AGENT_TOOL_ROUNDS = 6
+_PLANNER_CRITIC_ENABLED = os.environ.get("ASSISTANT_PLANNER_CRITIC_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+_PLANNER_CRITIC_MAX_TOKENS = int(os.environ.get("ASSISTANT_PLANNER_CRITIC_MAX_TOKENS", "12000"))
 
 _SUPPORTED_ORCHESTRATION_PROVIDERS = {"openai", "anthropic"}
 _CORRECTION_HINTS = (
@@ -1373,6 +1379,94 @@ def _message_content_text(message: Any) -> str:
     return str(content)
 
 
+def _recent_tool_evidence(model_messages: list[dict[str, Any]], *, max_items: int = 10, max_chars: int = 12000) -> str:
+    rows: list[str] = []
+    for msg in reversed(model_messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "")
+        if role == "tool":
+            content = str(msg.get("content") or "").strip()
+            if not content:
+                continue
+            tc_id = str(msg.get("tool_call_id") or "")
+            label = f"tool_result({tc_id})" if tc_id else "tool_result"
+            rows.append(f"{label}:\n{content[:1800]}")
+        elif role == "assistant":
+            tcs = msg.get("tool_calls")
+            if not isinstance(tcs, list) or not tcs:
+                continue
+            names: list[str] = []
+            for tc in tcs[:8]:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                name = str(fn.get("name") or "").strip()
+                if name:
+                    names.append(name)
+            if names:
+                rows.append(f"tool_calls: {', '.join(names)}")
+        if len(rows) >= max_items:
+            break
+    rows.reverse()
+    blob = "\n\n".join(rows)
+    return blob[:max_chars]
+
+
+def _planner_critic_refine(
+    *,
+    client: LLMClient,
+    model: str,
+    user_message: str,
+    draft: str,
+    dynamic_system_prompt: str,
+    model_messages: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    original = str(draft or "").strip()
+    if not original:
+        return original, {"enabled": _PLANNER_CRITIC_ENABLED, "used": False, "reason": "empty_draft"}
+    if not _PLANNER_CRITIC_ENABLED:
+        return original, {"enabled": False, "used": False, "reason": "disabled"}
+
+    evidence = _recent_tool_evidence(model_messages)
+    critic_system = (
+        f"{dynamic_system_prompt}\n"
+        "\n"
+        "You are the Planner+Critic final quality pass.\n"
+        "- Critique the draft internally, then output only the improved final answer.\n"
+        "- Keep claims grounded in available tool evidence and avoid unsupported certainty.\n"
+        "- Prioritize actionable next steps and explicit assumptions where needed.\n"
+        "- Keep the tone concise and practical.\n"
+    )
+    critic_user = (
+        f"ORIGINAL_USER_REQUEST:\n{user_message}\n\n"
+        f"DRAFT_RESPONSE:\n{original}\n\n"
+        "RECENT_TOOL_EVIDENCE:\n"
+        f"{evidence or '(no tool evidence captured for this turn)'}\n\n"
+        "Return the best final response only."
+    )
+    resp = client.chat_completion(
+        model=model,
+        messages=[
+            {"role": "system", "content": critic_system},
+            {"role": "user", "content": critic_user},
+        ],
+        temperature=0,
+        max_tokens=max(1024, min(_DEFAULT_MAX_TOKENS, _PLANNER_CRITIC_MAX_TOKENS)),
+        thinking=True,
+    )
+    improved = _message_content_text(resp.choices[0].message).strip()
+    if not improved:
+        return original, {"enabled": True, "used": False, "reason": "empty_critic_output"}
+    return improved, {
+        "enabled": True,
+        "used": True,
+        "draft_chars": len(original),
+        "final_chars": len(improved),
+        "tool_evidence_chars": len(evidence),
+    }
+
+
 @router.get("/tools")
 def list_tools():
     return [
@@ -1546,20 +1640,49 @@ async def chat_session(session_id: str, req: ChatRequest):
                     max_tokens=_DEFAULT_MAX_TOKENS,
                     thinking=True,
                 )
-                text = _message_content_text(resp.choices[0].message).strip()
-                if not text:
-                    text = "I couldn't produce a response. Please try again with more detail."
-                _append_model_message(session, {"role": "assistant", "content": text})
+                draft_text = _message_content_text(resp.choices[0].message).strip()
+                if not draft_text:
+                    draft_text = "I couldn't produce a response. Please try again with more detail."
+                yield _sse("progress", {"msg": "Running planner + critic quality pass…"})
+                try:
+                    final_text, reviewer_meta = _planner_critic_refine(
+                        client=client,
+                        model=model,
+                        user_message=user_message,
+                        draft=draft_text,
+                        dynamic_system_prompt=dynamic_system_prompt,
+                        model_messages=list(session.get("model_messages") or []),
+                    )
+                except Exception as exc:
+                    final_text = draft_text
+                    reviewer_meta = {
+                        "enabled": True,
+                        "used": False,
+                        "reason": f"critic_error:{exc}",
+                    }
+
+                _append_model_message(session, {"role": "assistant", "content": final_text})
                 _append_display_message(
                     session,
                     "assistant",
-                    text,
-                    {"provider": provider, "model": model, "tools_used": False},
+                    final_text,
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "tools_used": False,
+                        "planner_critic": bool(reviewer_meta.get("used")),
+                    },
                 )
                 _save_session(session)
-                for chunk in _chunk_text(text):
+                for chunk in _chunk_text(final_text):
                     yield _sse("stream", {"text": chunk})
-                yield _sse("done", {"content": text})
+                yield _sse("done", {"content": final_text})
+                execution_logs.append_event(
+                    execution_session_id,
+                    "Planner+Critic pass",
+                    level="info",
+                    data=reviewer_meta,
+                )
                 execution_logs.finish_session(
                     execution_session_id,
                     status="success",
@@ -1567,8 +1690,9 @@ async def chat_session(session_id: str, req: ChatRequest):
                         "model": model,
                         "provider": provider,
                         "assistant_session_id": session_id,
-                        "assistant_message_chars": len(text),
+                        "assistant_message_chars": len(final_text),
                         "tools_used": False,
+                        "planner_critic_used": bool(reviewer_meta.get("used")),
                     },
                 )
                 return
@@ -1675,17 +1799,50 @@ async def chat_session(session_id: str, req: ChatRequest):
                     yield _sse("progress", {"msg": f"Continuing after tools (round {round_idx + 1})…"})
                     continue
 
-                final_text = text.strip()
-                if not final_text:
-                    final_text = "I couldn't produce a response. Please try again with more detail."
+                draft_text = text.strip()
+                if not draft_text:
+                    draft_text = "I couldn't produce a response. Please try again with more detail."
+                yield _sse("progress", {"msg": "Running planner + critic quality pass…"})
+                try:
+                    final_text, reviewer_meta = _planner_critic_refine(
+                        client=client,
+                        model=model,
+                        user_message=user_message,
+                        draft=draft_text,
+                        dynamic_system_prompt=dynamic_system_prompt,
+                        model_messages=list(session.get("model_messages") or []),
+                    )
+                except Exception as exc:
+                    final_text = draft_text
+                    reviewer_meta = {
+                        "enabled": True,
+                        "used": False,
+                        "reason": f"critic_error:{exc}",
+                    }
 
                 _append_model_message(session, {"role": "assistant", "content": final_text})
-                _append_display_message(session, "assistant", final_text)
+                _append_display_message(
+                    session,
+                    "assistant",
+                    final_text,
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "tools_used": True,
+                        "planner_critic": bool(reviewer_meta.get("used")),
+                    },
+                )
                 _save_session(session)
 
                 for chunk in _chunk_text(final_text):
                     yield _sse("stream", {"text": chunk})
                 yield _sse("done", {"content": final_text})
+                execution_logs.append_event(
+                    execution_session_id,
+                    "Planner+Critic pass",
+                    level="info",
+                    data=reviewer_meta,
+                )
 
                 execution_logs.finish_session(
                     execution_session_id,
@@ -1696,6 +1853,7 @@ async def chat_session(session_id: str, req: ChatRequest):
                         "assistant_session_id": session_id,
                         "assistant_message_chars": len(final_text),
                         "tools_used": True,
+                        "planner_critic_used": bool(reviewer_meta.get("used")),
                     },
                 )
                 log_buffer.emit(f"[ASSISTANT] done ({len(final_text):,} chars)")
