@@ -2693,7 +2693,7 @@ async def run_pipeline(
                 else:
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
-                _row = _sess.exec(_sql_text(_sql), _params).first()
+                _row = _sess.execute(_sql_text(_sql), _params).first()
                 if not _row:
                     return None
                 _m = getattr(_row, "_mapping", _row)
@@ -2767,7 +2767,7 @@ async def run_pipeline(
                 else:
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
-                _row = _sess.exec(_sql_text(_sql), _params).first()
+                _row = _sess.execute(_sql_text(_sql), _params).first()
                 if not _row:
                     return None
                 _m = getattr(_row, "_mapping", _row)
