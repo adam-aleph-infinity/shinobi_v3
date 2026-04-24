@@ -151,6 +151,16 @@ interface UniversalAgent {
   folder?: string;
 }
 
+interface PipelineDef {
+  id: string;
+  name: string;
+  description?: string;
+  folder?: string;
+  scope?: string;
+  steps: { agent_id: string; input_overrides: Record<string, string> }[];
+  canvas?: { nodes: any[]; edges: any[]; stages: string[] };
+}
+
 const BLANK_AGENT = {
   name: "New Agent", description: "", agent_class: "general",
   model: "gpt-5.4", temperature: 0,
@@ -994,8 +1004,10 @@ export default function AgentsPage() {
   const { mutate } = useSWRConfig();
   const { activeAgentId, setActiveAgent } = useAppCtx();
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
+  const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: foldersData } = useSWR<string[]>("/api/universal-agents/folders", fetcher);
   const allAgents = agents ?? [];
+  const allPipelines = pipelinesData ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(() => activeAgentId || null);
   const [importing, setImporting]   = useState(false);
@@ -1056,11 +1068,154 @@ export default function AgentsPage() {
 
   async function saveAgent(draft: Omit<UniversalAgent, "id" | "created_at">) {
     if (!selectedId) return;
-    await fetch(`/api/universal-agents/${selectedId}`, {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
-    });
-    mutate("/api/universal-agents");
+    try {
+      const current = allAgents.find(a => a.id === selectedId);
+      if (!current) return;
+    const currentCmp = {
+      name: current.name,
+      description: current.description ?? "",
+      agent_class: current.agent_class ?? "",
+      model: current.model ?? "gpt-5.4",
+      temperature: current.temperature ?? 0,
+      system_prompt: current.system_prompt ?? "",
+      user_prompt: current.user_prompt ?? "",
+      inputs: current.inputs ?? [],
+      output_format: current.output_format ?? "markdown",
+      tags: current.tags ?? [],
+      is_default: current.is_default ?? false,
+      folder: current.folder ?? "",
+    };
+    const nextCmp = {
+      ...draft,
+      folder: draft.folder ?? "",
+      inputs: draft.inputs ?? [],
+      tags: draft.tags ?? [],
+    };
+    if (JSON.stringify(currentCmp) === JSON.stringify(nextCmp)) return;
+
+    const usagePipelines = allPipelines.filter(p =>
+      (p.steps ?? []).some(s => String(s.agent_id || "") === selectedId),
+    );
+
+    async function putAgent(agentId: string, payload: Omit<UniversalAgent, "id" | "created_at">) {
+      const res = await fetch(`/api/universal-agents/${agentId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`save failed (${res.status})`);
+    }
+
+    async function createCopyWithDraft(payload: Omit<UniversalAgent, "id" | "created_at">) {
+      const copyRes = await fetch(`/api/universal-agents/${selectedId}/copy`, { method: "POST" });
+      if (!copyRes.ok) throw new Error(`copy failed (${copyRes.status})`);
+      const copied: UniversalAgent = await copyRes.json();
+      await putAgent(copied.id, payload);
+      return copied;
+    }
+
+    async function rewirePipelineToAgent(pipelineId: string, newAgent: UniversalAgent, oldAgentId: string) {
+      const getRes = await fetch(`/api/pipelines/${pipelineId}`);
+      if (!getRes.ok) throw new Error(`pipeline load failed (${getRes.status})`);
+      const pl: PipelineDef = await getRes.json();
+
+      const nextSteps = (pl.steps ?? []).map(s =>
+        String(s.agent_id || "") === oldAgentId ? { ...s, agent_id: newAgent.id } : s,
+      );
+      const nextCanvas = pl.canvas
+        ? {
+            ...pl.canvas,
+            nodes: (pl.canvas.nodes ?? []).map((n: any) => {
+              if (String(n?.type || "") !== "processing") return n;
+              const d = (n?.data ?? {}) as Record<string, any>;
+              if (String(d.agentId || "") !== oldAgentId) return n;
+              const prevLabel = String(d.label || "");
+              const prevAgentName = String(d.agentName || "");
+              const shouldSyncLabel = !prevLabel || prevLabel === prevAgentName || prevLabel === oldAgentId;
+              return {
+                ...n,
+                data: {
+                  ...d,
+                  agentId: newAgent.id,
+                  agentClass: newAgent.agent_class ?? "",
+                  agentName: newAgent.name,
+                  ...(shouldSyncLabel ? { label: newAgent.name } : {}),
+                },
+              };
+            }),
+          }
+        : pl.canvas;
+
+      const putRes = await fetch(`/api/pipelines/${pipelineId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: pl.name,
+          description: pl.description ?? "",
+          scope: pl.scope ?? "per_pair",
+          steps: nextSteps,
+          canvas: nextCanvas ?? {},
+          folder: pl.folder ?? "",
+        }),
+      });
+      if (!putRes.ok) throw new Error(`pipeline update failed (${putRes.status})`);
+    }
+
+      if (usagePipelines.length <= 1) {
+        await putAgent(selectedId, draft);
+        mutate("/api/universal-agents");
+        return;
+      }
+
+      const choice = window.prompt(
+        `This agent is used in ${usagePipelines.length} workflows.\n` +
+        "How should this update be applied?\n" +
+        "1 = Apply to ALL workflows\n" +
+        "2 = Select specific workflow(s)\n" +
+        "3 = Make a COPY (keep existing workflows unchanged)\n" +
+        "Anything else = Cancel",
+        "3",
+      );
+      if (!choice || !["1", "2", "3"].includes(choice.trim())) return;
+
+      if (choice.trim() === "1") {
+        await putAgent(selectedId, draft);
+        mutate("/api/universal-agents");
+        mutate("/api/pipelines");
+        return;
+      }
+
+      const copied = await createCopyWithDraft(draft);
+
+      if (choice.trim() === "2") {
+        const numbered = usagePipelines
+          .map((p, i) => `${i + 1}. ${p.name} (${p.id.slice(0, 8)})`)
+          .join("\n");
+        const raw = window.prompt(
+          `Select workflows by number (comma separated):\n\n${numbered}\n\nExample: 1,3`,
+          "",
+        );
+        const pickedIdx = new Set(
+          String(raw || "")
+            .split(",")
+            .map(x => parseInt(x.trim(), 10))
+            .filter(n => Number.isFinite(n) && n >= 1 && n <= usagePipelines.length),
+        );
+        const targets = usagePipelines.filter((_, i) => pickedIdx.has(i + 1));
+        for (const p of targets) {
+          await rewirePipelineToAgent(p.id, copied, selectedId);
+        }
+        mutate("/api/pipelines");
+      }
+
+      mutate("/api/universal-agents");
+      mutate("/api/universal-agents/folders");
+      setSelectedId(copied.id);
+      setActiveAgent(copied.id, draft.name || copied.name, draft.agent_class || copied.agent_class || "general");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      window.alert(`Agent update failed: ${msg}`);
+    }
   }
 
   async function deleteAgent() {

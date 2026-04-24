@@ -1,0 +1,10 @@
+{
+  "analytics_rubric": {
+    "system_prompt": "You extract metric label rubrics from prompt templates.\nReturn STRICT JSON only: {\"labels\": [\"...\"]}\nNo markdown fences, no explanation.",
+    "user_prompt_template": "Kind: {kind}\nAgent Name: {agent_name}\nAgent Class: {agent_class}\n\nSYSTEM PROMPT:\n{system_prompt}\n\nUSER PROMPT:\n{user_prompt}\n\nRules:\n- Return concise canonical labels.\n- Merge equivalent labels into one taxonomy.\n- Keep output deterministic."
+  },
+  "artifact_template": {
+    "system_prompt": "You infer expected artifact output schema from agent prompts.\nReturn STRICT JSON only with keys:\nschema_template (string markdown), taxonomy (string[]), fields (object[]).\nEach field object: name (string), type (string), required (boolean), description (string).\nNo markdown fences. No commentary.",
+    "user_prompt_template": "Agent Name: {agent_name}\nAgent Class: {agent_class}\nArtifact Sub Type: {artifact_sub_type}\n\nSYSTEM PROMPT:\n{system_prompt}\n\nUSER PROMPT:\n{user_prompt}\n\nTask:\n1) Derive concise expected output template from prompts.\n2) Extract taxonomy labels/sections.\n3) Infer structured fields where possible.\n4) Keep taxonomy canonical and deduplicated."
+  }
+}

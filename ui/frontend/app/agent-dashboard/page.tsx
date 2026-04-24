@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import {
   BarChart3,
@@ -8,6 +8,8 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppCtx } from "@/lib/app-context";
@@ -247,6 +249,28 @@ export default function AgentDashboardPage() {
       return true;
     });
   }, [baseFilteredRows, scoreSection, violationType]);
+
+  const [expandedMetrics, setExpandedMetrics] = useState<Record<string, boolean>>({});
+  const metricDrilldown = useMemo(() => {
+    const map = new Map<string, AnalyticsRow[]>();
+    for (const r of filteredRows) {
+      const key = `${r.metric_type}::${r.metric_key}`;
+      const arr = map.get(key) ?? [];
+      arr.push(r);
+      map.set(key, arr);
+    }
+    for (const [k, arr] of map.entries()) {
+      arr.sort((a, b) => {
+        const ad = a.run_started_at || "";
+        const bd = b.run_started_at || "";
+        if (ad !== bd) return bd.localeCompare(ad);
+        if (a.run_id !== b.run_id) return String(a.run_id).localeCompare(String(b.run_id));
+        return Number(a.step_index || 0) - Number(b.step_index || 0);
+      });
+      map.set(k, arr);
+    }
+    return map;
+  }, [filteredRows]);
 
   const tableRows = useMemo(() => {
     const map = new Map<string, {
@@ -592,15 +616,54 @@ export default function AgentDashboardPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {scoreRows.map((r) => (
-                        <tr key={`score:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                          <td className="px-3 py-2 text-gray-200">{r.metric_key}</td>
-                          <td className="px-3 py-2 text-right font-mono text-emerald-400">{r.value.toFixed(1)}</td>
-                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
-                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
-                          <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
-                        </tr>
-                      ))}
+                      {scoreRows.map((r) => {
+                        const k = `score::${r.metric_key}`;
+                        const expanded = !!expandedMetrics[k];
+                        const details = metricDrilldown.get(k) ?? [];
+                        return (
+                          <Fragment key={`score-rowgrp:${r.metric_key}`}>
+                            <tr key={`score:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                              <td className="px-3 py-2 text-gray-200">
+                                <button
+                                  onClick={() => setExpandedMetrics(prev => ({ ...prev, [k]: !expanded }))}
+                                  className="inline-flex items-center gap-1.5 hover:text-white transition-colors"
+                                >
+                                  {expanded ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+                                  {r.metric_key}
+                                </button>
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-400">{r.value.toFixed(1)}</td>
+                              <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
+                              <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
+                              <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
+                            </tr>
+                            {expanded && (
+                              <tr key={`score:${r.metric_key}:drill`} className="border-b border-gray-800/50 bg-gray-950/50">
+                                <td colSpan={5} className="px-3 py-2">
+                                  {details.length === 0 ? (
+                                    <p className="text-[11px] text-gray-600 italic">No sample details in this view.</p>
+                                  ) : (
+                                    <div className="space-y-1 max-h-56 overflow-y-auto">
+                                      {details.map((d, i) => (
+                                        <div key={`${d.run_id}-${d.step_index}-${i}`} className="text-[11px] flex flex-wrap items-center gap-2 text-gray-400">
+                                          <span className="font-mono text-emerald-300">{Number(d.metric_value || 0).toFixed(1)}</span>
+                                          <span className="text-gray-600">•</span>
+                                          <span>Run {String(d.run_id).slice(0, 8)}</span>
+                                          <span className="text-gray-600">•</span>
+                                          <span>{formatLocalDateTime(d.run_started_at)}</span>
+                                          <span className="text-gray-600">•</span>
+                                          <span>Step {Number(d.step_index) + 1}</span>
+                                          <span className="truncate">({d.step_agent_name || "Agent"})</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -641,15 +704,54 @@ export default function AgentDashboardPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {violationRows.map((r) => (
-                        <tr key={`violation:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                          <td className="px-3 py-2 text-gray-200">{r.metric_key}</td>
-                          <td className="px-3 py-2 text-right font-mono text-red-400">{Math.round(r.value)}</td>
-                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
-                          <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
-                          <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
-                        </tr>
-                      ))}
+                      {violationRows.map((r) => {
+                        const k = `violation::${r.metric_key}`;
+                        const expanded = !!expandedMetrics[k];
+                        const details = metricDrilldown.get(k) ?? [];
+                        return (
+                          <Fragment key={`violation-rowgrp:${r.metric_key}`}>
+                            <tr key={`violation:${r.metric_key}`} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                              <td className="px-3 py-2 text-gray-200">
+                                <button
+                                  onClick={() => setExpandedMetrics(prev => ({ ...prev, [k]: !expanded }))}
+                                  className="inline-flex items-center gap-1.5 hover:text-white transition-colors"
+                                >
+                                  {expanded ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+                                  {r.metric_key}
+                                </button>
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono text-red-400">{Math.round(r.value)}</td>
+                              <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.samples}</td>
+                              <td className="px-3 py-2 text-right text-gray-400 font-mono">{r.runs}</td>
+                              <td className="px-3 py-2 text-gray-500">{r.latestAt ? formatLocalDateTime(r.latestAt) : "—"}</td>
+                            </tr>
+                            {expanded && (
+                              <tr key={`violation:${r.metric_key}:drill`} className="border-b border-gray-800/50 bg-gray-950/50">
+                                <td colSpan={5} className="px-3 py-2">
+                                  {details.length === 0 ? (
+                                    <p className="text-[11px] text-gray-600 italic">No sample details in this view.</p>
+                                  ) : (
+                                    <div className="space-y-1 max-h-56 overflow-y-auto">
+                                      {details.map((d, i) => (
+                                        <div key={`${d.run_id}-${d.step_index}-${i}`} className="text-[11px] flex flex-wrap items-center gap-2 text-gray-400">
+                                          <span className="font-mono text-red-300">{Math.round(Number(d.metric_value || 0))}</span>
+                                          <span className="text-gray-600">•</span>
+                                          <span>Run {String(d.run_id).slice(0, 8)}</span>
+                                          <span className="text-gray-600">•</span>
+                                          <span>{formatLocalDateTime(d.run_started_at)}</span>
+                                          <span className="text-gray-600">•</span>
+                                          <span>Step {Number(d.step_index) + 1}</span>
+                                          <span className="truncate">({d.step_agent_name || "Agent"})</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

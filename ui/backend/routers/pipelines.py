@@ -27,11 +27,156 @@ _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 _RUBRIC_DIR = settings.ui_data_dir / "_analytics_rubrics"
 _ARTIFACT_SCHEMA_DIR = settings.ui_data_dir / "_artifact_prompt_schemas"
+_AI_REGISTRY_DIR = settings.ui_data_dir / "_ai_registry"
+_AI_PIPELINES_FILE = _AI_REGISTRY_DIR / "pipelines_snapshot.json"
+_AI_INTERNAL_PROMPTS_FILE = _AI_REGISTRY_DIR / "internal_prompt_templates.json"
+_AI_README_FILE = _AI_REGISTRY_DIR / "README.md"
 _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
 _RUN_SUBSCRIBERS: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+
+
+def _safe_template_format(template: str, values: dict[str, Any]) -> str:
+    class _SafeDict(dict):
+        def __missing__(self, key: str) -> str:
+            return "{" + key + "}"
+    try:
+        return str(template or "").format_map(_SafeDict(values))
+    except Exception:
+        return str(template or "")
+
+
+def _default_internal_prompt_templates() -> dict[str, Any]:
+    return {
+        "analytics_rubric": {
+            "system_prompt": (
+                "You extract metric label rubrics from prompt templates.\n"
+                "Return STRICT JSON only: {\"labels\": [\"...\"]}\n"
+                "No markdown fences, no explanation."
+            ),
+            "user_prompt_template": (
+                "Kind: {kind}\n"
+                "Agent Name: {agent_name}\n"
+                "Agent Class: {agent_class}\n\n"
+                "SYSTEM PROMPT:\n{system_prompt}\n\n"
+                "USER PROMPT:\n{user_prompt}\n\n"
+                "Rules:\n"
+                "- Return concise canonical labels.\n"
+                "- Merge equivalent labels into one taxonomy.\n"
+                "- Keep output deterministic."
+            ),
+        },
+        "artifact_template": {
+            "system_prompt": (
+                "You infer expected artifact output schema from agent prompts.\n"
+                "Return STRICT JSON only with keys:\n"
+                "schema_template (string markdown), taxonomy (string[]), fields (object[]).\n"
+                "Each field object: name (string), type (string), required (boolean), description (string).\n"
+                "No markdown fences. No commentary."
+            ),
+            "user_prompt_template": (
+                "Agent Name: {agent_name}\n"
+                "Agent Class: {agent_class}\n"
+                "Artifact Sub Type: {artifact_sub_type}\n\n"
+                "SYSTEM PROMPT:\n{system_prompt}\n\n"
+                "USER PROMPT:\n{user_prompt}\n\n"
+                "Task:\n"
+                "1) Derive concise expected output template from prompts.\n"
+                "2) Extract taxonomy labels/sections.\n"
+                "3) Infer structured fields where possible.\n"
+                "4) Keep taxonomy canonical and deduplicated."
+            ),
+        },
+    }
+
+
+def _ensure_ai_registry_layout() -> None:
+    try:
+        _AI_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        if not _AI_README_FILE.exists():
+            _AI_README_FILE.write_text(
+                (
+                    "# AI Registry\n\n"
+                    "This folder exposes app AI configurations in one place.\n\n"
+                    "- `universal_agents_snapshot.json`: user-defined universal agents\n"
+                    "- `pipelines_snapshot.json`: pipeline definitions\n"
+                    "- `internal_prompt_templates.json`: internal LLM prompt templates used by analytics/artifact schema helpers\n"
+                ),
+                encoding="utf-8",
+            )
+    except Exception:
+        pass
+
+
+def _load_internal_prompt_templates() -> dict[str, Any]:
+    defaults = _default_internal_prompt_templates()
+    _ensure_ai_registry_layout()
+    try:
+        if _AI_INTERNAL_PROMPTS_FILE.exists():
+            raw = json.loads(_AI_INTERNAL_PROMPTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                out = defaults.copy()
+                for k, v in raw.items():
+                    if isinstance(v, dict):
+                        base = out.get(k, {}) if isinstance(out.get(k), dict) else {}
+                        out[k] = {**base, **v}
+                _AI_INTERNAL_PROMPTS_FILE.write_text(
+                    json.dumps(out, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                return out
+        _AI_INTERNAL_PROMPTS_FILE.write_text(
+            json.dumps(defaults, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return defaults
+
+
+def _sync_ai_registry_pipelines() -> None:
+    try:
+        _ensure_ai_registry_layout()
+        rows = _load_all()
+        payload = []
+        for p in rows:
+            payload.append({
+                "id": str(p.get("id") or ""),
+                "name": str(p.get("name") or ""),
+                "folder": str(p.get("folder") or ""),
+                "scope": str(p.get("scope") or ""),
+                "step_count": len(p.get("steps") or []),
+                "updated_at": str(p.get("updated_at") or p.get("created_at") or ""),
+                "path": f"_pipelines/{str(p.get('id') or '')}.json",
+            })
+        payload.sort(key=lambda x: (x["name"].lower(), x["id"]))
+        _AI_PIPELINES_FILE.write_text(
+            json.dumps(
+                {
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "count": len(payload),
+                    "source_directories": {
+                        "universal_agents": "_universal_agents/",
+                        "pipelines": "_pipelines/",
+                        "notes_agents": "_notes_agents/",
+                        "persona_agents": "_persona_agents/",
+                        "fpa_analyzer_presets": "_fpa_analyzer_presets/",
+                        "fpa_generator_presets": "_fpa_generator_presets/",
+                        "fpa_scorer_presets": "_fpa_scorer_presets/",
+                        "analytics_rubrics": "_analytics_rubrics/",
+                        "artifact_prompt_schemas": "_artifact_prompt_schemas/",
+                    },
+                    "pipelines": payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def _pair_key(pipeline_id: str, sales_agent: str, customer: str) -> str:
@@ -557,6 +702,7 @@ def _infer_prompt_rubric_with_llm(
     """Use an LLM once to extract stable metric labels from an agent prompt pair."""
     from ui.backend.routers.universal_agents import _llm_call_with_files
 
+    templates = _load_internal_prompt_templates().get("analytics_rubric", {})
     model = os.environ.get("ANALYTICS_RUBRIC_MODEL", "gpt-5.4")
     key = "score_sections" if kind == "score" else "violation_types"
     task = (
@@ -565,35 +711,49 @@ def _infer_prompt_rubric_with_llm(
         else "Extract ONLY the canonical company procedure / violation type labels used for compliance totals."
     )
 
-    sys = (
+    sys = str(templates.get("system_prompt") or "").strip() or (
         "You extract metric label rubrics from prompt templates.\n"
         "Return STRICT JSON only, no markdown, no commentary."
     )
-    user = (
-        f"Agent name: {agent_name}\n"
-        f"Agent class: {agent_class}\n\n"
-        "SYSTEM PROMPT:\n"
-        f"{system_prompt}\n\n"
-        "USER PROMPT:\n"
-        f"{user_prompt}\n\n"
-        f"TASK: {task}\n\n"
-        f'Return exactly: {{"{key}": ["label 1", "label 2"]}}\n'
+    user_template = str(templates.get("user_prompt_template") or "").strip() or (
+        "Kind: {kind}\n"
+        "Agent Name: {agent_name}\n"
+        "Agent Class: {agent_class}\n\n"
+        "SYSTEM PROMPT:\n{system_prompt}\n\n"
+        "USER PROMPT:\n{user_prompt}\n\n"
+        "TASK: {task}\n\n"
+        'Return exactly: {{"{key}": ["label 1", "label 2"]}}\n'
         "Rules:\n"
         "- Keep labels short, canonical, and human-readable.\n"
         "- Normalize equivalent labels into a consistent taxonomy across agents.\n"
         "- Remove duplicates.\n"
         "- Exclude helper/meta keys (for example keys that start with _).\n"
-        + (
-            "- For violation taxonomy, prefer these canonical labels when equivalent:\n"
-            "  Secret Code Violations\n"
-            "  Simple Truth About Your Money Email Violations\n"
-            "  Email Verification Missing\n"
-            "  Multi-Platform Offer Missing\n"
-            "  Multi-Platform Follow-Up Missing\n"
-            if kind == "violation"
-            else ""
-        )
+        "{violation_hint}"
     )
+    violation_hint = (
+        "- For violation taxonomy, prefer these canonical labels when equivalent:\n"
+        "  Secret Code Violations\n"
+        "  Simple Truth About Your Money Email Violations\n"
+        "  Email Verification Missing\n"
+        "  Multi-Platform Offer Missing\n"
+        "  Multi-Platform Follow-Up Missing\n"
+        if kind == "violation"
+        else ""
+    )
+    user = _safe_template_format(
+        user_template,
+        {
+            "kind": kind,
+            "agent_name": agent_name,
+            "agent_class": agent_class,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "task": task,
+            "key": key,
+            "violation_hint": violation_hint,
+        },
+    )
+
     raw, _ = _llm_call_with_files(sys, user, {}, {}, model, 0.0, db)
     parsed = _extract_json_obj_from_text(raw)
     vals = parsed.get(key, [])
@@ -784,28 +944,37 @@ def _infer_artifact_template_with_llm(
 ) -> tuple[dict[str, Any], str]:
     from ui.backend.routers.universal_agents import _llm_call_with_files
 
+    templates = _load_internal_prompt_templates().get("artifact_template", {})
     model = os.environ.get("ARTIFACT_TEMPLATE_MODEL", "gpt-5.4")
-    sys = (
+    sys = str(templates.get("system_prompt") or "").strip() or (
         "You infer expected artifact output schema from agent prompts.\n"
         "Return STRICT JSON only with keys:\n"
         "schema_template (string markdown), taxonomy (string[]), fields (object[]).\n"
         "Each field object: name (string), type (string), required (boolean), description (string).\n"
         "No markdown fences. No commentary."
     )
-    user = (
-        f"Agent Name: {agent_name}\n"
-        f"Agent Class: {agent_class}\n"
-        f"Artifact Sub Type: {artifact_sub_type}\n\n"
-        "SYSTEM PROMPT:\n"
-        f"{system_prompt}\n\n"
-        "USER PROMPT:\n"
-        f"{user_prompt}\n\n"
+    user_template = str(templates.get("user_prompt_template") or "").strip() or (
+        "Agent Name: {agent_name}\n"
+        "Agent Class: {agent_class}\n"
+        "Artifact Sub Type: {artifact_sub_type}\n\n"
+        "SYSTEM PROMPT:\n{system_prompt}\n\n"
+        "USER PROMPT:\n{user_prompt}\n\n"
         "Task:\n"
         "1) Derive a concise expected output template from these prompts.\n"
         "2) Extract taxonomy labels/sections the output should contain.\n"
         "3) Infer structured fields where possible.\n"
         "4) Keep taxonomy canonical and deduplicated.\n"
         "5) If uncertain, provide best-effort placeholders."
+    )
+    user = _safe_template_format(
+        user_template,
+        {
+            "agent_name": agent_name,
+            "agent_class": agent_class,
+            "artifact_sub_type": artifact_sub_type,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        },
     )
     raw, _ = _llm_call_with_files(sys, user, {}, {}, model, 0.0, db)
     parsed = _extract_json_obj_from_text(raw)
@@ -1291,6 +1460,8 @@ def _ensure_folder_exists(folder: str) -> None:
 
 @router.get("")
 def list_pipelines():
+    _load_internal_prompt_templates()
+    _sync_ai_registry_pipelines()
     return _load_all()
 
 
@@ -1336,6 +1507,7 @@ def create_pipeline(req: PipelineIn):
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _sync_ai_registry_pipelines()
     return record
 
 
@@ -1479,6 +1651,7 @@ def update_pipeline(pipeline_id: str, req: PipelineIn):
     if data["folder"]:
         _ensure_folder_exists(data["folder"])
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _sync_ai_registry_pipelines()
     return data
 
 
@@ -1491,6 +1664,7 @@ def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     if folder:
         _ensure_folder_exists(folder)
+    _sync_ai_registry_pipelines()
     return data
 
 
@@ -1498,6 +1672,7 @@ def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
 def delete_pipeline(pipeline_id: str):
     f, _ = _find_file(pipeline_id)
     f.unlink()
+    _sync_ai_registry_pipelines()
     return {"ok": True}
 
 

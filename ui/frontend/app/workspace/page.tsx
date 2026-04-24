@@ -173,15 +173,21 @@ export default function WorkspacePage() {
                   : "text-gray-400 hover:bg-gray-800 hover:text-white"
               }`}>
               {browsePath.startsWith(entry.path)
-                ? <FolderOpen className="w-3.5 h-3.5 text-yellow-400 shrink-0 mt-0.5" />
-                : <Folder     className="w-3.5 h-3.5 text-yellow-400 shrink-0 mt-0.5" />
+                ? <FolderOpen className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${entry.kind === "system" ? "text-indigo-400" : "text-yellow-400"}`} />
+                : <Folder     className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${entry.kind === "system" ? "text-indigo-400" : "text-yellow-400"}`} />
               }
               <div className="min-w-0">
                 <p className="truncate font-medium">{entry.name}</p>
-                <p className="text-gray-600">
-                  {entry.customer_count} customer{entry.customer_count !== 1 ? "s" : ""}
-                  {entry.file_count ? ` · ${entry.file_count} calls` : ""}
-                </p>
+                {entry.kind === "system" ? (
+                  <p className="text-gray-600">
+                    {entry.file_count ?? 0} item{(entry.file_count ?? 0) !== 1 ? "s" : ""}
+                  </p>
+                ) : (
+                  <p className="text-gray-600">
+                    {entry.customer_count} customer{entry.customer_count !== 1 ? "s" : ""}
+                    {entry.file_count ? ` · ${entry.file_count} calls` : ""}
+                  </p>
+                )}
               </div>
             </button>
           ))}

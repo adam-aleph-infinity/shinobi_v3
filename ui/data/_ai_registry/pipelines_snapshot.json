@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-04-24T11:40:19.302127",
+  "count": 0,
+  "source_directories": {
+    "universal_agents": "_universal_agents/",
+    "pipelines": "_pipelines/",
+    "notes_agents": "_notes_agents/",
+    "persona_agents": "_persona_agents/",
+    "fpa_analyzer_presets": "_fpa_analyzer_presets/",
+    "fpa_generator_presets": "_fpa_generator_presets/",
+    "fpa_scorer_presets": "_fpa_scorer_presets/",
+    "analytics_rubrics": "_analytics_rubrics/",
+    "artifact_prompt_schemas": "_artifact_prompt_schemas/"
+  },
+  "pipelines": []
+}

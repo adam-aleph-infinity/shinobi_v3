@@ -26,6 +26,9 @@ _PIPELINES    = settings.ui_data_dir / "_pipelines"
 _FPA_PRESETS  = settings.ui_data_dir / "_fpa_analyzer_presets"
 _NOTES_AGENTS = settings.ui_data_dir / "_notes_agents"
 _FOLDERS_FILE = settings.ui_data_dir / "_universal_agents_folders.json"
+_AI_REGISTRY_DIR = settings.ui_data_dir / "_ai_registry"
+_AI_AGENTS_FILE = _AI_REGISTRY_DIR / "universal_agents_snapshot.json"
+_AI_README_FILE = _AI_REGISTRY_DIR / "README.md"
 
 # Valid input source types
 INPUT_SOURCES = [
@@ -160,10 +163,57 @@ def _next_copy_name(base_name: str) -> str:
         i += 1
 
 
+def _sync_ai_registry_agents() -> None:
+    """Mirror current universal agents into ui/data/_ai_registry for workspace visibility."""
+    try:
+        _AI_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        if not _AI_README_FILE.exists():
+            _AI_README_FILE.write_text(
+                (
+                    "# AI Registry\n\n"
+                    "This folder exposes app AI configurations in one place.\n\n"
+                    "- `universal_agents_snapshot.json`: user-defined universal agents\n"
+                    "- `pipelines_snapshot.json`: pipeline definitions\n"
+                    "- `internal_prompt_templates.json`: internal LLM prompt templates used by analytics/artifact schema helpers\n"
+                ),
+                encoding="utf-8",
+            )
+
+        rows = []
+        for a in _load_all():
+            rows.append({
+                "id": str(a.get("id") or ""),
+                "name": str(a.get("name") or ""),
+                "agent_class": str(a.get("agent_class") or ""),
+                "model": str(a.get("model") or ""),
+                "temperature": a.get("temperature", 0),
+                "folder": str(a.get("folder") or ""),
+                "updated_at": str(a.get("updated_at") or a.get("created_at") or ""),
+                "path": f"_universal_agents/{str(a.get('id') or '')}.json",
+            })
+        rows.sort(key=lambda x: (x["name"].lower(), x["id"]))
+
+        _AI_AGENTS_FILE.write_text(
+            json.dumps(
+                {
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "count": len(rows),
+                    "agents": rows,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
 def list_agents():
+    _sync_ai_registry_agents()
     return _load_all()
 
 
@@ -208,6 +258,7 @@ def create_agent(req: UniversalAgentIn):
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _sync_ai_registry_agents()
     return record
 
 
@@ -294,6 +345,7 @@ def update_agent(agent_id: str, req: UniversalAgentIn):
     if data["folder"]:
         _ensure_folder_exists(data["folder"])
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _sync_ai_registry_agents()
     return data
 
 
@@ -306,6 +358,7 @@ def move_agent_to_folder(agent_id: str, req: FolderMoveIn):
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     if folder:
         _ensure_folder_exists(folder)
+    _sync_ai_registry_agents()
     return data
 
 
@@ -327,6 +380,7 @@ def copy_agent(agent_id: str):
     (_DIR / f"{copy_record['id']}.json").write_text(
         json.dumps(copy_record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _sync_ai_registry_agents()
     return copy_record
 
 
@@ -334,6 +388,7 @@ def copy_agent(agent_id: str):
 def delete_agent(agent_id: str):
     f, _ = _find_file(agent_id)
     f.unlink()
+    _sync_ai_registry_agents()
     return {"ok": True}
 
 
@@ -349,6 +404,7 @@ def set_default(agent_id: str):
                 f.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
+    _sync_ai_registry_agents()
     return {"ok": True}
 
 
@@ -522,6 +578,7 @@ def import_presets():
             _write_agent(agent)
             created_agents.append(agent_name)
 
+    _sync_ai_registry_agents()
     return {
         "created_agents":    created_agents,
         "created_pipelines": created_pipelines,

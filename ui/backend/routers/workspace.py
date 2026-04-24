@@ -116,9 +116,18 @@ def _count_calls(pair_dir: Path) -> int:
 
 @router.get("")
 def list_workspace():
-    """List Agent folders in ui/data/agents/ with customer & call counts."""
+    """List primary roots for workspace sidebar."""
     agents_root = settings.agents_dir
     entries = []
+
+    # System-visible AI registry (ui/data/_ai_registry)
+    ai_registry = DATA_ROOT / "_ai_registry"
+    if ai_registry.exists() and ai_registry.is_dir():
+        info = _file_info(ai_registry, DATA_ROOT)
+        info["kind"] = "system"
+        info["file_count"] = sum(1 for c in ai_registry.iterdir() if not c.name.startswith("."))
+        entries.append(info)
+
     if not agents_root.exists():
         return entries
     for p in sorted(agents_root.iterdir()):

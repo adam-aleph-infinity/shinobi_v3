@@ -87,6 +87,15 @@ interface UniversalAgent {
   is_default: boolean; created_at: string;
 }
 
+interface PipelineDef {
+  id: string;
+  name: string;
+  description: string;
+  folder?: string;
+  steps: { agent_id: string; input_overrides: Record<string, string> }[];
+  canvas?: { nodes: any[]; edges: any[]; stages: string[] };
+}
+
 const MODEL_GROUPS = [
   { provider: "OpenAI",    models: ["gpt-5.4", "gpt-4.1", "gpt-4.1-mini"] },
   { provider: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-6"] },
@@ -170,8 +179,14 @@ function AgentClassIcon({ cls, size = "md" }: { cls: string; size?: "sm" | "md" 
   );
 }
 
-function AgentPickerGrid({ value, allAgents, onChange }: {
+function AgentPickerGrid({
+  value,
+  allAgents,
+  usageByAgent,
+  onChange,
+}: {
   value: string; allAgents: UniversalAgent[];
+  usageByAgent: Record<string, { total: number; other: number }>;
   onChange: (agent: UniversalAgent) => void;
 }) {
   const [search, setSearch] = useState("");
@@ -188,6 +203,7 @@ function AgentPickerGrid({ value, allAgents, onChange }: {
           const meta  = classMeta(a.agent_class ?? "");
           const isSel = value === a.id;
           const req   = CLASS_REQUIRES_PREV[a.agent_class?.toLowerCase() ?? ""];
+          const usage = usageByAgent[a.id] ?? { total: 0, other: 0 };
           return (
             <button key={a.id} onClick={() => onChange(a)} title={a.description}
               className={`flex items-center gap-1.5 p-2 rounded-lg border text-left transition-colors
@@ -196,6 +212,13 @@ function AgentPickerGrid({ value, allAgents, onChange }: {
               <div className="min-w-0 flex-1">
                 <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : "text-gray-300"}`}>{a.name}</p>
                 <p className={`text-[9px] ${meta.textColor}`}>{meta.label}</p>
+                {usage.total > 0 && (
+                  <p className={`text-[9px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
+                    {usage.other > 0
+                      ? `Used in ${usage.total} pipelines (${usage.other} other)`
+                      : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
+                  </p>
+                )}
               </div>
               {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
               {req && !isSel && (
@@ -735,6 +758,25 @@ function SwimbarBackdrop({
   );
 }
 
+function PropertiesSection({
+  title,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <details open={defaultOpen} className="border border-gray-800 rounded-lg overflow-hidden">
+      <summary className="list-none cursor-pointer px-2.5 py-1.5 bg-gray-900/70 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+        {title}
+      </summary>
+      <div className="p-2.5">{children}</div>
+    </details>
+  );
+}
+
 // ── Palette groups ────────────────────────────────────────────────────────────
 
 interface PaletteItem { subType: string; meta: Meta }
@@ -853,7 +895,7 @@ function PipelineCanvas() {
 
   // Backend data
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
-  const { data: pipelinesData } = useSWR<{ id: string; name: string; description: string; folder?: string; steps: {agent_id: string; input_overrides: Record<string,string>}[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }[]>("/api/pipelines", fetcher);
+  const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
@@ -877,6 +919,23 @@ function PipelineCanvas() {
   const [agentDeleting, setAgentDeleting] = useState(false);
   const [showModel,     setShowModel]     = useState(false);
   const [canvasViewport, setCanvasViewport] = useState({ x: 0, y: 0, zoom: 1 });
+
+  const agentUsageByPipeline = useMemo(() => {
+    const out: Record<string, { total: number; other: number }> = {};
+    for (const p of allPipelines) {
+      const seen = new Set<string>();
+      for (const s of (p.steps ?? [])) {
+        const aid = String(s?.agent_id || "").trim();
+        if (!aid || seen.has(aid)) continue;
+        seen.add(aid);
+        const row = out[aid] ?? { total: 0, other: 0 };
+        row.total += 1;
+        if (!pipelineId || p.id !== pipelineId) row.other += 1;
+        out[aid] = row;
+      }
+    }
+    return out;
+  }, [allPipelines, pipelineId]);
 
   const normalizeFolder = (name?: string | null) => (name ?? "").trim();
   const pipelineFolders = useMemo(() => {
@@ -909,6 +968,40 @@ function PipelineCanvas() {
   nodesRef.current  = nodes;
   edgesRef.current  = edges;
   stagesRef.current = stages;
+
+  // Keep processing node agent metadata in sync with agent library edits from other pages.
+  useEffect(() => {
+    if (!allAgents.length) return;
+    setNodes(ns => {
+      let changed = false;
+      const next = ns.map(n => {
+        if (n.type !== "processing") return n;
+        const d = n.data as PipelineNodeData;
+        const aid = String(d.agentId || "").trim();
+        if (!aid) return n;
+        const ag = allAgents.find(a => a.id === aid);
+        if (!ag) return n;
+        const prevAgentName = String(d.agentName || "");
+        const prevLabel = String(d.label || "");
+        const shouldSyncLabel = !prevLabel || prevLabel === prevAgentName || prevLabel === aid;
+        const nextLabel = shouldSyncLabel ? ag.name : prevLabel;
+        if (prevAgentName === ag.name && String(d.agentClass || "") === String(ag.agent_class || "") && prevLabel === nextLabel) {
+          return n;
+        }
+        changed = true;
+        return {
+          ...n,
+          data: {
+            ...d,
+            agentName: ag.name,
+            agentClass: ag.agent_class ?? "",
+            label: nextLabel,
+          } satisfies PipelineNodeData,
+        };
+      });
+      return changed ? next : ns;
+    });
+  }, [allAgents, setNodes]);
 
   // Reactive fit: auto-zoom so all lanes fill the canvas height
   useEffect(() => {
@@ -1628,14 +1721,72 @@ function PipelineCanvas() {
     if (!nd?.agentId) return;
     setAgentSaving(true);
     try {
-      const res = await fetch(`/api/universal-agents/${nd.agentId}`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(agentDraft),
-      });
-      if (!res.ok) { showToast(`Agent save failed (${res.status})`, false); return; }
+      const usagePipelines = allPipelines.filter(p =>
+        (p.steps ?? []).some(s => String(s.agent_id || "") === nd.agentId),
+      );
+      const usedInOther = usagePipelines.filter(p => p.id !== pipelineId);
+
+      let targetAgentId = String(nd.agentId || "");
+      if (usedInOther.length > 0) {
+        const choice = window.prompt(
+          `This agent is used in ${usagePipelines.length} pipelines (${usedInOther.length} other).\n` +
+          "Type:\n" +
+          "1 = Apply changes to all workflows\n" +
+          "2 = Create copy and apply only in this workflow\n" +
+          "Anything else = Cancel",
+          "2",
+        );
+        if (!choice || !["1", "2"].includes(choice.trim())) {
+          showToast("Agent update cancelled", false);
+          return;
+        }
+        if (choice.trim() === "2") {
+          const copyRes = await fetch(`/api/universal-agents/${nd.agentId}/copy`, { method: "POST" });
+          if (!copyRes.ok) {
+            showToast(`Agent copy failed (${copyRes.status})`, false);
+            return;
+          }
+          const copied: UniversalAgent = await copyRes.json();
+          targetAgentId = copied.id;
+          const putCopy = await fetch(`/api/universal-agents/${copied.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(agentDraft),
+          });
+          if (!putCopy.ok) {
+            showToast(`Copied agent save failed (${putCopy.status})`, false);
+            return;
+          }
+          // Rebind all nodes in current workflow using the old agent id to the new copy.
+          setNodes(ns => ns.map(n => {
+            if (n.type !== "processing") return n;
+            const d = n.data as PipelineNodeData;
+            if (String(d.agentId || "") !== nd.agentId) return n;
+            return {
+              ...n,
+              data: {
+                ...d,
+                agentId: copied.id,
+                agentClass: agentDraft.agent_class || copied.agent_class || "",
+                agentName: agentDraft.name,
+                label: agentDraft.name,
+              } satisfies PipelineNodeData,
+            };
+          }));
+          showToast("Created copied agent and applied changes only in this workflow", true);
+        }
+      }
+
+      if (targetAgentId === nd.agentId) {
+        const res = await fetch(`/api/universal-agents/${nd.agentId}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(agentDraft),
+        });
+        if (!res.ok) { showToast(`Agent save failed (${res.status})`, false); return; }
+      }
       mutate("/api/universal-agents");
       // Keep canvas node header in sync with the (possibly renamed) agent
-      updateNodeData(selectedNodeId, { agentName: agentDraft.name });
+      updateNodeData(selectedNodeId, { agentId: targetAgentId, agentName: agentDraft.name, label: agentDraft.name });
       setAgentSaved(true); setTimeout(() => setAgentSaved(false), 2000);
     } finally { setAgentSaving(false); }
   }
@@ -1659,7 +1810,7 @@ function PipelineCanvas() {
       const created: UniversalAgent = await res.json();
       mutate("/api/universal-agents");
       updateNodeData(selectedNodeId, {
-        agentId: created.id, agentClass: created.agent_class, agentName: created.name,
+        agentId: created.id, agentClass: created.agent_class, agentName: created.name, label: created.name,
       });
       setAgentDraft({ ...draft, inputs: created.inputs ?? draft.inputs });
       setAgentSaved(false);
@@ -1775,6 +1926,7 @@ function PipelineCanvas() {
       const agId  = selData.agentId as string;
       const agCls = selData.agentClass as string;
       const cm    = classMeta(agCls);
+      const usage = agId ? (agentUsageByPipeline[agId] ?? { total: 0, other: 0 }) : { total: 0, other: 0 };
 
       return (
         <div className="flex flex-col h-full">
@@ -1786,6 +1938,13 @@ function PipelineCanvas() {
                 {agId ? (selData.agentName as string || "Agent") : "Configure Agent"}
               </p>
               <p className={`text-[9px] ${cm.textColor}`}>{agId ? cm.label : "No agent selected"}</p>
+              {agId && usage.total > 0 && (
+                <p className={`text-[9px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
+                  {usage.other > 0
+                    ? `Used in ${usage.total} pipelines (${usage.other} other)`
+                    : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
+                </p>
+              )}
             </div>
             <button onClick={() => setSelectedNodeId(null)} className="p-1 text-gray-600 hover:text-white transition-colors shrink-0">
               <X className="w-4 h-4" />
@@ -1793,57 +1952,57 @@ function PipelineCanvas() {
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {/* Agent picker */}
-            <div className="p-3 border-b border-gray-800">
-              <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Select Agent</p>
-              {allAgents.length === 0 ? (
-                <p className="text-xs text-gray-600 italic">Loading agents…</p>
-              ) : (
-                <AgentPickerGrid
-                  value={agId}
-                  allAgents={allAgents}
-                  onChange={agent => {
-                    updateNodeData(selectedNode.id, {
-                      agentId: agent.id, agentClass: agent.agent_class, agentName: agent.name,
-                    });
-                    setAgentDraft({
-                      name: agent.name, description: agent.description ?? "",
-                      agent_class: agent.agent_class ?? "", model: agent.model ?? "gpt-5.4",
-                      temperature: agent.temperature ?? 0, system_prompt: agent.system_prompt ?? "",
-                      user_prompt: agent.user_prompt ?? "",
-                      // Preserve the agent's inputs — pipeline executor uses these for source resolution
-                      inputs: agent.inputs ?? [],
-                      output_format: agent.output_format ?? "markdown",
-                      tags: agent.tags ?? [], is_default: agent.is_default ?? false,
-                    });
-                    setAgentSaved(false);
-                  }}
-                />
-              )}
-              {/* Agent action buttons — New / Detach / Delete */}
-              <div className="flex gap-1.5 mt-2">
-                <button onClick={handleCreateAgent}
-                  title="Create a new blank agent and attach it to this node"
-                  className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-[10px] transition-colors">
-                  <Plus className="w-3 h-3" /> New
-                </button>
-                {agId && (
-                  <>
-                    <button onClick={handleDetachAgent}
-                      title="Remove the agent from this node (agent stays in library)"
-                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-amber-400 hover:border-amber-800 text-[10px] transition-colors">
-                      <X className="w-3 h-3" /> Detach
-                    </button>
-                    <button onClick={handleDeleteAgent} disabled={agentDeleting}
-                      title="Permanently delete this agent from the backend"
-                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40">
-                      {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                      Delete
-                    </button>
-                  </>
+            <div className="p-3 space-y-2.5">
+              <PropertiesSection title="Select Agent">
+                {allAgents.length === 0 ? (
+                  <p className="text-xs text-gray-600 italic">Loading agents…</p>
+                ) : (
+                  <AgentPickerGrid
+                    value={agId}
+                    allAgents={allAgents}
+                    usageByAgent={agentUsageByPipeline}
+                    onChange={agent => {
+                      updateNodeData(selectedNode.id, {
+                        agentId: agent.id, agentClass: agent.agent_class, agentName: agent.name, label: agent.name,
+                      });
+                      setAgentDraft({
+                        name: agent.name, description: agent.description ?? "",
+                        agent_class: agent.agent_class ?? "", model: agent.model ?? "gpt-5.4",
+                        temperature: agent.temperature ?? 0, system_prompt: agent.system_prompt ?? "",
+                        user_prompt: agent.user_prompt ?? "",
+                        // Preserve the agent's inputs — pipeline executor uses these for source resolution
+                        inputs: agent.inputs ?? [],
+                        output_format: agent.output_format ?? "markdown",
+                        tags: agent.tags ?? [], is_default: agent.is_default ?? false,
+                      });
+                      setAgentSaved(false);
+                    }}
+                  />
                 )}
-              </div>
-            </div>
+                {/* Agent action buttons — New / Detach / Delete */}
+                <div className="flex gap-1.5 mt-2">
+                  <button onClick={handleCreateAgent}
+                    title="Create a new blank agent and attach it to this node"
+                    className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-[10px] transition-colors">
+                    <Plus className="w-3 h-3" /> New
+                  </button>
+                  {agId && (
+                    <>
+                      <button onClick={handleDetachAgent}
+                        title="Remove the agent from this node (agent stays in library)"
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-amber-400 hover:border-amber-800 text-[10px] transition-colors">
+                        <X className="w-3 h-3" /> Detach
+                      </button>
+                      <button onClick={handleDeleteAgent} disabled={agentDeleting}
+                        title="Permanently delete this agent from the backend"
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40">
+                        {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
+              </PropertiesSection>
 
             {/* Connected inputs — auto-derived from canvas connections (input + artifact + agent nodes) */}
             {(() => {
@@ -1894,8 +2053,7 @@ function PipelineCanvas() {
 
               if (connectedSources.length === 0) return null;
               return (
-                <div className="p-3 border-b border-gray-800">
-                  <p className="text-[9px] text-gray-600 uppercase tracking-wide mb-2">Connected Inputs</p>
+                <PropertiesSection title="Connected Inputs" defaultOpen={false}>
                   <div className="space-y-1">
                     {connectedSources.map(cs => (
                       <div key={cs.nodeId} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[10px] ${cs.badge}`}>
@@ -1905,13 +2063,14 @@ function PipelineCanvas() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </PropertiesSection>
               );
             })()}
 
             {/* Prompts + settings — always visible when processing node selected */}
             {agentDraft && (
-              <div className="p-3 space-y-3">
+              <PropertiesSection title="Agent Prompt & Settings">
+              <div className="space-y-3">
                 {agId && (
                   <div>
                     <label className="block text-[9px] text-gray-500 mb-1">Name</label>
@@ -1983,7 +2142,9 @@ function PipelineCanvas() {
                   {agentSaved ? "Saved" : agId ? "Save agent" : "Select an agent above to save"}
                 </button>
               </div>
+              </PropertiesSection>
             )}
+            </div>
           </div>
 
           {/* Footer: delete */}
@@ -2010,16 +2171,14 @@ function PipelineCanvas() {
           </div>
         </div>
 
-        <div className="space-y-1.5">
-          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Name</label>
+        <PropertiesSection title="Name">
           <input value={selData.label}
             onChange={e => updateNodeData(selectedNode.id, { label: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors" />
-        </div>
+        </PropertiesSection>
 
         {selKind === "output" && (
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Locked Producer</label>
+          <PropertiesSection title="Locked Producer">
             {selectedOutputProducer?.agent_id ? (
               <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/60">
                 <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -2030,12 +2189,11 @@ function PipelineCanvas() {
                 Connect this artifact to a processing node with an assigned agent to lock its template.
               </div>
             )}
-          </div>
+          </PropertiesSection>
         )}
 
         {selKind === "input" && (
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Source Type</label>
+          <PropertiesSection title="Source Type">
             <div className="grid grid-cols-2 gap-1">
               {INPUT_SOURCES.map(s => {
                 const SrcIcon = s.icon;
@@ -2054,12 +2212,11 @@ function PipelineCanvas() {
                 );
               })}
             </div>
-          </div>
+          </PropertiesSection>
         )}
 
         {selKind === "output" && (
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Artifact Type</label>
+          <PropertiesSection title="Artifact Type">
             <div className="grid grid-cols-2 gap-1">
               {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
                 const req = ARTIFACT_REQUIRES[k];
@@ -2093,12 +2250,11 @@ function PipelineCanvas() {
                 );
               })}
             </div>
-          </div>
+          </PropertiesSection>
         )}
 
         {selKind === "output" && (
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Expected Output Template (Auto)</label>
+          <PropertiesSection title="Expected Output Template (Auto)" defaultOpen={false}>
             {!selectedOutputProducer?.agent_id && (
               <p className="text-[11px] text-gray-600">
                 Template appears automatically once this artifact is linked to a producing agent.
@@ -2130,7 +2286,7 @@ function PipelineCanvas() {
                 </p>
               </>
             )}
-          </div>
+          </PropertiesSection>
         )}
 
         <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
