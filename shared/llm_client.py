@@ -69,8 +69,8 @@ class LLMClient:
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
             if thinking:
-                # Push OpenAI reasoning models toward best-quality reasoning.
-                kwargs["reasoning_effort"] = os.environ.get("ASSISTANT_OPENAI_REASONING_EFFORT", "high")
+                # Enforce highest OpenAI reasoning setting for copilot quality.
+                kwargs["reasoning_effort"] = "high"
             try:
                 return self.client.chat.completions.create(**kwargs)
             except Exception as exc:
@@ -166,14 +166,15 @@ class LLMClient:
 
             kwargs = {
                 "model": model,
-                "max_tokens": max_tokens or (16000 if thinking else 8192),
+                "max_tokens": max_tokens or (32000 if thinking else 8192),
                 "messages": anthropic_messages,
             }
             if system_content:
                 kwargs["system"] = system_content
             if thinking:
                 # Extended thinking requires temperature=1 (Anthropic hard requirement)
-                budget = int(os.environ.get("ASSISTANT_ANTHROPIC_THINKING_BUDGET", "12000"))
+                budget = int(os.environ.get("ASSISTANT_ANTHROPIC_THINKING_BUDGET", "32000"))
+                budget = max(32000, budget)
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, min(32000, budget))}
                 kwargs["temperature"] = 1
             elif temperature is not None:

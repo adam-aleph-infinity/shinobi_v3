@@ -33,6 +33,9 @@ ui/data/_persona_agents/*.json
 ui/data/_fpa_generator_presets/*.json
 ui/data/_fpa_scorer_presets/*.json
 ui/data/_comparison_presets/*.json
+ui/data/copilot/*.json
+ui/data/copilot/sessions/*.json
+ui/data/copilot/sub_agents/*.json
 
 # OS
 .DS_Store

@@ -35,10 +35,10 @@ _LEGACY_SESSION_DIR = settings.ui_data_dir / "_assistant_sessions"
 _TEXT_EXTS = {".json", ".txt", ".md", ".log", ".csv", ".srt"}
 
 _DEFAULT_MODEL = os.environ.get("ASSISTANT_MODEL", "gpt-5.4")
-_DEFAULT_MAX_TOKENS = int(os.environ.get("ASSISTANT_MAX_TOKENS", "16000"))
+_DEFAULT_MAX_TOKENS = int(os.environ.get("ASSISTANT_MAX_TOKENS", "32000"))
 _MAX_MODEL_MESSAGES = 80
-_MAX_TOOL_ROUNDS = 12
-_MAX_SUB_AGENT_TOOL_ROUNDS = 4
+_MAX_TOOL_ROUNDS = 14
+_MAX_SUB_AGENT_TOOL_ROUNDS = 6
 
 _SUPPORTED_ORCHESTRATION_PROVIDERS = {"openai", "anthropic"}
 _CORRECTION_HINTS = (
@@ -123,7 +123,7 @@ class SessionCreateIn(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=40000)
     model: str = ""
-    max_tool_rounds: int = Field(default=6, ge=1, le=_MAX_TOOL_ROUNDS)
+    max_tool_rounds: int = Field(default=8, ge=1, le=_MAX_TOOL_ROUNDS)
 
 
 def _now_iso() -> str:
@@ -494,6 +494,23 @@ def _tool_specs(include_sub_agent: bool = True) -> list[dict[str, Any]]:
                         "tags": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["name", "guidance"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "refresh_copilot_familiarity",
+                "description": (
+                    "Refresh copilot familiarization snapshot from live app state (CRM DB, agents, pipelines, runs). "
+                    "Use this when data changed and copilot should re-learn current topology."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "force": {"type": "boolean", "default": False},
+                    },
                     "additionalProperties": False,
                 },
             },
@@ -927,6 +944,16 @@ def _tool_distill_successful_run_skills(args: dict[str, Any], *, force: bool = F
     return result
 
 
+def _tool_refresh_copilot_familiarity(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    do_force = bool(args.get("force"))
+    result = assistant_knowledge.familiarize_with_live_app(
+        tool_specs=tools,
+        force=do_force,
+    )
+    result["distillation_state"] = assistant_knowledge.get_distillation_state()
+    return result
+
+
 def _run_sub_agent(
     *,
     goal: str,
@@ -1113,6 +1140,8 @@ def _execute_tool(name: str, args: dict[str, Any], *, ctx: Optional[dict[str, An
             return _tool_remember_lesson(args, session_id=str(tool_ctx.get("session_id") or ""))
         if name == "update_skill":
             return _tool_update_skill(args, session_id=str(tool_ctx.get("session_id") or ""))
+        if name == "refresh_copilot_familiarity":
+            return _tool_refresh_copilot_familiarity(args, tools=tool_ctx.get("tools") or _tool_specs())
         if name == "distill_successful_run_skills":
             return _tool_distill_successful_run_skills(args)
         if name == "spawn_sub_agent":
@@ -1205,7 +1234,7 @@ def _compact_json(payload: Any, cap: int = 12000) -> str:
 
 def _build_dynamic_system_prompt(user_message: str, tools: list[dict[str, Any]]) -> str:
     assistant_knowledge.ensure_app_map(tools, force=False)
-    pack = assistant_knowledge.context_pack(user_message, memory_limit=6, skills_limit=6)
+    pack = assistant_knowledge.context_pack(user_message, memory_limit=10, skills_limit=10)
     app_map = pack.get("app_map") if isinstance(pack.get("app_map"), dict) else {}
     summary = app_map.get("summary") if isinstance(app_map.get("summary"), dict) else {}
     app_map_snippet = {
@@ -1228,6 +1257,7 @@ def _build_dynamic_system_prompt(user_message: str, tools: list[dict[str, Any]])
         f"- retrieved_memory_entries: {memory_count}\n"
         "\n"
         "When user asks for pipeline design/debugging, combine tool facts with learned skills/memory.\n"
+        "Treat crm_pair/crm_call and pipeline run data as first-class context for recommendations.\n"
         "When user provides correction, update memory/skills so future answers improve.\n"
         "Prefer spawning a sub-agent when task decomposition or second-opinion reasoning helps.\n"
         "\n"
@@ -1473,6 +1503,7 @@ async def chat_session(session_id: str, req: ChatRequest):
 
     async def stream():
         tools = _tool_specs()
+        familiarity_boot = assistant_knowledge.familiarize_with_live_app(tool_specs=tools, force=False)
         distill_boot = assistant_knowledge.distill_skills_from_successful_runs(limit=120, force=False)
         assistant_knowledge.ensure_app_map(tools, force=False)
         dynamic_system_prompt = _build_dynamic_system_prompt(user_message, tools)
@@ -1481,6 +1512,19 @@ async def chat_session(session_id: str, req: ChatRequest):
         try:
             yield _sse("execution_session", {"execution_session_id": execution_session_id})
             yield _sse("progress", {"msg": f"Thinking with {model} ({provider}) at max effort…"})
+            if not familiarity_boot.get("skipped"):
+                msg = (
+                    f"Familiarized with app/CRM snapshot "
+                    f"(memory +{int(familiarity_boot.get('updated_memory_entries', 0))}, "
+                    f"skills +{int(familiarity_boot.get('updated_skill_entries', 0))})."
+                )
+                yield _sse("progress", {"msg": msg})
+                execution_logs.append_event(
+                    execution_session_id,
+                    "Copilot familiarization refreshed",
+                    level="info",
+                    data=familiarity_boot,
+                )
             if distill_boot.get("distilled", 0):
                 yield _sse(
                     "progress",

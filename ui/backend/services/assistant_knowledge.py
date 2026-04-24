@@ -13,14 +13,16 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from ui.backend.config import settings
 from ui.backend.database import engine
+from ui.backend.models.crm import CRMCall, CRMPair
 from ui.backend.models.pipeline_run import PipelineRun
 from ui.backend.routers import pipelines as pipelines_router
 from ui.backend.routers import universal_agents as universal_agents_router
@@ -42,6 +44,7 @@ _MAX_TEXT = 12000
 
 _SUCCESS_STATES = {"success", "succeeded", "done", "completed", "complete", "ok"}
 _FAILURE_STATES = {"failed", "error", "errored", "timeout", "cancelled", "canceled"}
+_MAX_SNAPSHOT_ITEMS = 12
 
 
 def _now() -> datetime:
@@ -147,9 +150,7 @@ def ensure_app_map(tool_specs: list[dict[str, Any]], force: bool = False) -> dic
 
     agents = universal_agents_router._load_all()
     pipelines = pipelines_router._load_all()
-
-    with Session(engine) as db:
-        total_runs = db.exec(select(PipelineRun)).all()
+    total_runs = _safe_recent_pipeline_runs(limit=20000)
 
     app_map = {
         "generated_at": now,
@@ -354,11 +355,442 @@ def _distill_state() -> dict[str, Any]:
     state.setdefault("last_scan_at", "")
     state.setdefault("last_distilled_at", "")
     state.setdefault("last_distilled_run_ids", [])
+    state.setdefault("last_familiarized_at", "")
+    state.setdefault("last_familiarization_summary", {})
     return state
 
 
 def _save_distill_state(state: dict[str, Any]) -> None:
     _save_json(_DISTILL_STATE_PATH, state)
+
+
+def _table_count(db: Session, model: Any) -> int:
+    try:
+        row = db.exec(select(func.count()).select_from(model)).one()
+        return int(row or 0)
+    except Exception:
+        return 0
+
+
+def _safe_recent_pipeline_runs(limit: int = 240) -> list[PipelineRun]:
+    cap = max(1, min(50000, int(limit)))
+    with Session(engine) as db:
+        try:
+            rows = db.exec(
+                select(PipelineRun).order_by(PipelineRun.finished_at.desc(), PipelineRun.started_at.desc()).limit(cap)
+            ).all()
+            return rows
+        except Exception:
+            return []
+
+
+def _ensure_memory_snapshot(
+    *,
+    snapshot_key: str,
+    text: str,
+    source: str,
+    kind: str,
+    confidence: float,
+    tags: list[str] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows = _load_json_list(_MEMORY_PATH)
+    key = str(snapshot_key or "").strip().lower()
+    now = _now_iso()
+    payload = {
+        "kind": _safe_text(kind, cap=48) or "snapshot",
+        "text": _safe_text(text),
+        "source": _safe_text(source, cap=120) or "assistant",
+        "confidence": max(0.0, min(1.0, float(confidence))),
+        "tags": [str(t).strip().lower() for t in (tags or []) if str(t).strip()],
+        "meta": {
+            **(meta or {}),
+            "snapshot_key": key,
+        },
+        "updated_at": now,
+    }
+
+    target: dict[str, Any] | None = None
+    for row in rows:
+        m = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        if str(m.get("snapshot_key") or "").strip().lower() == key:
+            target = row
+            break
+
+    if target:
+        target.update(payload)
+        target.setdefault("id", str(uuid.uuid4()))
+        target.setdefault("created_at", now)
+        out = target
+    else:
+        out = {
+            "id": str(uuid.uuid4()),
+            "created_at": now,
+            "last_used_at": "",
+            **payload,
+        }
+        rows.append(out)
+
+    if len(rows) > 3000:
+        rows = rows[-3000:]
+    _save_json(_MEMORY_PATH, rows)
+    return out
+
+
+def _pipeline_health_summary(runs: list[PipelineRun]) -> dict[str, Any]:
+    status_counts: Counter[str] = Counter()
+    by_pipeline: dict[str, Counter[str]] = defaultdict(Counter)
+    latest_failures: list[dict[str, Any]] = []
+
+    for run in runs:
+        status = str(getattr(run, "status", "") or "unknown").strip().lower()
+        pipeline_id = str(getattr(run, "pipeline_id", "") or "")
+        pipeline_name = str(getattr(run, "pipeline_name", "") or pipeline_id or "unknown")
+        status_counts[status] += 1
+        by_pipeline[pipeline_name][status] += 1
+
+        if status in _FAILURE_STATES:
+            latest_failures.append(
+                {
+                    "run_id": str(getattr(run, "id", "") or ""),
+                    "pipeline": pipeline_name,
+                    "sales_agent": str(getattr(run, "sales_agent", "") or ""),
+                    "customer": str(getattr(run, "customer", "") or ""),
+                    "finished_at": str(getattr(run, "finished_at", "") or ""),
+                }
+            )
+
+    pipeline_health: list[dict[str, Any]] = []
+    for name, counts in by_pipeline.items():
+        total = sum(counts.values())
+        success = sum(v for k, v in counts.items() if k in _SUCCESS_STATES)
+        failures = sum(v for k, v in counts.items() if k in _FAILURE_STATES)
+        pipeline_health.append(
+            {
+                "pipeline": name,
+                "runs": total,
+                "success_runs": success,
+                "failure_runs": failures,
+                "success_rate": round((success / total) if total else 0.0, 3),
+            }
+        )
+    pipeline_health.sort(key=lambda r: (r["runs"], r["success_rate"]), reverse=True)
+
+    return {
+        "status_counts": dict(status_counts),
+        "pipeline_health": pipeline_health[:_MAX_SNAPSHOT_ITEMS],
+        "latest_failures": latest_failures[:_MAX_SNAPSHOT_ITEMS],
+    }
+
+
+def _crm_snapshot() -> dict[str, Any]:
+    with Session(engine) as db:
+        pair_count = _table_count(db, CRMPair)
+        call_count = _table_count(db, CRMCall)
+
+        top_agents: list[dict[str, Any]] = []
+        top_customers: list[dict[str, Any]] = []
+        crm_domains: list[dict[str, Any]] = []
+        recent_pairs: list[dict[str, Any]] = []
+
+        try:
+            rows = db.exec(
+                select(
+                    CRMPair.agent,
+                    func.count().label("cnt"),
+                    func.sum(CRMPair.call_count).label("call_total"),
+                    func.sum(CRMPair.net_deposits).label("net_dep"),
+                )
+                .group_by(CRMPair.agent)
+                .order_by(func.count().desc())
+                .limit(_MAX_SNAPSHOT_ITEMS)
+            ).all()
+            for agent, cnt, call_total, net_dep in rows:
+                top_agents.append(
+                    {
+                        "agent": str(agent or ""),
+                        "pair_count": int(cnt or 0),
+                        "call_count": int(call_total or 0),
+                        "net_deposits": float(net_dep or 0.0),
+                    }
+                )
+        except Exception:
+            top_agents = []
+
+        try:
+            rows = db.exec(
+                select(
+                    CRMPair.customer,
+                    func.count().label("cnt"),
+                    func.sum(CRMPair.call_count).label("call_total"),
+                    func.sum(CRMPair.net_deposits).label("net_dep"),
+                )
+                .group_by(CRMPair.customer)
+                .order_by(func.count().desc())
+                .limit(_MAX_SNAPSHOT_ITEMS)
+            ).all()
+            for customer, cnt, call_total, net_dep in rows:
+                top_customers.append(
+                    {
+                        "customer": str(customer or ""),
+                        "pair_count": int(cnt or 0),
+                        "call_count": int(call_total or 0),
+                        "net_deposits": float(net_dep or 0.0),
+                    }
+                )
+        except Exception:
+            top_customers = []
+
+        try:
+            rows = db.exec(
+                select(
+                    CRMPair.crm_url,
+                    func.count().label("cnt"),
+                    func.sum(CRMPair.call_count).label("call_total"),
+                )
+                .group_by(CRMPair.crm_url)
+                .order_by(func.count().desc())
+                .limit(_MAX_SNAPSHOT_ITEMS)
+            ).all()
+            for crm_url, cnt, call_total in rows:
+                crm_domains.append(
+                    {
+                        "crm_url": str(crm_url or ""),
+                        "pair_count": int(cnt or 0),
+                        "call_count": int(call_total or 0),
+                    }
+                )
+        except Exception:
+            crm_domains = []
+
+        try:
+            rows = db.exec(
+                select(CRMPair)
+                .order_by(CRMPair.last_synced_at.desc())
+                .limit(_MAX_SNAPSHOT_ITEMS)
+            ).all()
+            for row in rows:
+                recent_pairs.append(
+                    {
+                        "crm_url": str(getattr(row, "crm_url", "") or ""),
+                        "agent": str(getattr(row, "agent", "") or ""),
+                        "customer": str(getattr(row, "customer", "") or ""),
+                        "call_count": int(getattr(row, "call_count", 0) or 0),
+                        "net_deposits": float(getattr(row, "net_deposits", 0.0) or 0.0),
+                        "last_synced_at": str(getattr(row, "last_synced_at", "") or ""),
+                    }
+                )
+        except Exception:
+            recent_pairs = []
+
+    return {
+        "pair_count": pair_count,
+        "call_count": call_count,
+        "top_agents": top_agents,
+        "top_customers": top_customers,
+        "crm_domains": crm_domains,
+        "recent_pairs": recent_pairs,
+    }
+
+
+def _familiarization_text(
+    *,
+    app_summary: dict[str, Any],
+    crm: dict[str, Any],
+    pipeline_health: dict[str, Any],
+    agents_preview: list[str],
+    pipelines_preview: list[str],
+) -> dict[str, str]:
+    topology = (
+        "Copilot familiarization snapshot:\n"
+        f"- agents_defined: {int(app_summary.get('agent_count', 0) or 0)}\n"
+        f"- pipelines_defined: {int(app_summary.get('pipeline_count', 0) or 0)}\n"
+        f"- pipeline_runs_total: {int(app_summary.get('run_count', 0) or 0)}\n"
+        f"- sample_agents: {', '.join(agents_preview) if agents_preview else 'none'}\n"
+        f"- sample_pipelines: {', '.join(pipelines_preview) if pipelines_preview else 'none'}"
+    )
+    crm_text = (
+        "CRM DB familiarization snapshot:\n"
+        f"- crm_pairs_total: {int(crm.get('pair_count', 0) or 0)}\n"
+        f"- crm_calls_total: {int(crm.get('call_count', 0) or 0)}\n"
+        f"- top_agents_by_pairs: {json.dumps(crm.get('top_agents') or [], ensure_ascii=False)}\n"
+        f"- top_customers_by_pairs: {json.dumps(crm.get('top_customers') or [], ensure_ascii=False)}\n"
+        f"- crm_domains: {json.dumps(crm.get('crm_domains') or [], ensure_ascii=False)}"
+    )
+    run_text = (
+        "Pipeline run health snapshot:\n"
+        f"- status_counts: {json.dumps(pipeline_health.get('status_counts') or {}, ensure_ascii=False)}\n"
+        f"- pipeline_health: {json.dumps(pipeline_health.get('pipeline_health') or [], ensure_ascii=False)}\n"
+        f"- latest_failures: {json.dumps(pipeline_health.get('latest_failures') or [], ensure_ascii=False)}"
+    )
+    return {
+        "topology": topology,
+        "crm": crm_text,
+        "runs": run_text,
+    }
+
+
+def familiarize_with_live_app(
+    *,
+    tool_specs: list[dict[str, Any]],
+    force: bool = False,
+    min_interval_seconds: int = 900,
+) -> dict[str, Any]:
+    state = _distill_state()
+    now = _now()
+
+    last_familiarized = str(state.get("last_familiarized_at") or "")
+    if not force and last_familiarized:
+        try:
+            dt = datetime.fromisoformat(last_familiarized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if now - dt < timedelta(seconds=max(1, int(min_interval_seconds))):
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "familiarization_interval_guard",
+                    "last_familiarized_at": last_familiarized,
+                    "updated_memory_entries": 0,
+                    "updated_skill_entries": 0,
+                }
+        except Exception:
+            pass
+
+    app_map = ensure_app_map(tool_specs, force=force)
+    app_summary = app_map.get("summary") if isinstance(app_map.get("summary"), dict) else {}
+    agents = app_map.get("agents") if isinstance(app_map.get("agents"), list) else []
+    pipelines = app_map.get("pipelines") if isinstance(app_map.get("pipelines"), list) else []
+
+    crm = _crm_snapshot()
+    recent_runs = _safe_recent_pipeline_runs(limit=240)
+    pipeline_health = _pipeline_health_summary(recent_runs)
+    app_summary = {
+        **app_summary,
+        "run_count": len(recent_runs) if recent_runs else int(app_summary.get("run_count", 0) or 0),
+    }
+
+    agents_preview = [str((a or {}).get("name") or (a or {}).get("id") or "") for a in agents[:8]]
+    pipelines_preview = [str((p or {}).get("name") or (p or {}).get("id") or "") for p in pipelines[:8]]
+    text_parts = _familiarization_text(
+        app_summary=app_summary,
+        crm=crm,
+        pipeline_health=pipeline_health,
+        agents_preview=[x for x in agents_preview if x],
+        pipelines_preview=[x for x in pipelines_preview if x],
+    )
+
+    mem_rows = [
+        _ensure_memory_snapshot(
+            snapshot_key="familiarization_topology",
+            source="auto_familiarization",
+            kind="familiarization",
+            confidence=0.84,
+            tags=["familiarization", "topology", "agents", "pipelines"],
+            text=text_parts["topology"],
+            meta={
+                "agent_count": int(app_summary.get("agent_count", 0) or 0),
+                "pipeline_count": int(app_summary.get("pipeline_count", 0) or 0),
+                "run_count": int(app_summary.get("run_count", 0) or 0),
+            },
+        ),
+        _ensure_memory_snapshot(
+            snapshot_key="familiarization_crm",
+            source="auto_familiarization",
+            kind="familiarization",
+            confidence=0.84,
+            tags=["familiarization", "crm", "database"],
+            text=text_parts["crm"],
+            meta={
+                "crm_pair_count": int(crm.get("pair_count", 0) or 0),
+                "crm_call_count": int(crm.get("call_count", 0) or 0),
+            },
+        ),
+        _ensure_memory_snapshot(
+            snapshot_key="familiarization_pipeline_health",
+            source="auto_familiarization",
+            kind="familiarization",
+            confidence=0.8,
+            tags=["familiarization", "runs", "pipeline_health", "debugging"],
+            text=text_parts["runs"],
+            meta={
+                "status_counts": pipeline_health.get("status_counts") or {},
+            },
+        ),
+    ]
+
+    skill_rows = [
+        upsert_skill(
+            name="Mandatory context-first workflow",
+            guidance=(
+                "Before proposing a pipeline or debugging explanation, gather current facts from tools: "
+                "list/get pipelines, list/get agents, relevant run history, and latest execution logs. "
+                "If CRM context is relevant, read crm_pair/crm_call snapshots from memory/app map before finalizing."
+            ),
+            source="auto_familiarization",
+            confidence=0.9,
+            tags=["workflow", "familiarization", "pipeline", "debugging", "crm"],
+            meta={
+                "version": "v1",
+                "last_familiarized_at": _now_iso(),
+            },
+        ),
+        upsert_skill(
+            name="CRM-aware pipeline design checklist",
+            guidance=(
+                "When building a new pipeline for agent/customer workflows: "
+                "(1) verify target agent IDs exist, "
+                "(2) align steps to known successful run patterns when available, "
+                "(3) account for CRM pair coverage and customer context, "
+                "(4) after creation, validate with run/log inspection and adjust."
+            ),
+            source="auto_familiarization",
+            confidence=0.88,
+            tags=["crm", "pipeline_design", "validation", "agents"],
+            meta={
+                "version": "v1",
+                "last_familiarized_at": _now_iso(),
+            },
+        ),
+        upsert_skill(
+            name="Failure triage from pipeline evidence",
+            guidance=(
+                "For failed runs: use get_run + analyze_run_failure + execution logs. "
+                "Report root cause, evidence lines/signals, and a corrected pipeline/tool plan. "
+                "If user says correction is still wrong, record memory and revise assumptions explicitly."
+            ),
+            source="auto_familiarization",
+            confidence=0.9,
+            tags=["debugging", "pipeline_run", "evidence", "correction"],
+            meta={
+                "version": "v1",
+                "last_familiarized_at": _now_iso(),
+            },
+        ),
+    ]
+
+    summary = {
+        "app_summary": app_summary,
+        "crm_summary": {
+            "pair_count": int(crm.get("pair_count", 0) or 0),
+            "call_count": int(crm.get("call_count", 0) or 0),
+            "crm_domains": crm.get("crm_domains") or [],
+        },
+        "pipeline_health": pipeline_health,
+    }
+
+    state["last_familiarized_at"] = _now_iso()
+    state["last_familiarization_summary"] = summary
+    _save_distill_state(state)
+
+    return {
+        "ok": True,
+        "skipped": False,
+        "last_familiarized_at": state["last_familiarized_at"],
+        "updated_memory_entries": len(mem_rows),
+        "updated_skill_entries": len(skill_rows),
+        "summary": summary,
+    }
 
 
 def distill_skills_from_successful_runs(
@@ -388,10 +820,7 @@ def distill_skills_from_successful_runs(
             pass
 
     cap = max(1, min(500, int(limit)))
-    with Session(engine) as db:
-        candidate_rows = db.exec(
-            select(PipelineRun).order_by(PipelineRun.finished_at.desc(), PipelineRun.started_at.desc()).limit(cap * 3)
-        ).all()
+    candidate_rows = _safe_recent_pipeline_runs(limit=cap * 3)
 
     success_rows = [r for r in candidate_rows if _status_is_success(getattr(r, "status", ""))][:cap]
     processed: list[str] = [str(x) for x in (state.get("processed_success_run_ids") or []) if str(x).strip()]
@@ -516,6 +945,22 @@ def get_distillation_state() -> dict[str, Any]:
     ids = state.get("processed_success_run_ids") or []
     state["processed_success_run_count"] = len(ids)
     state["processed_success_run_ids"] = ids[-30:]
+    summary = state.get("last_familiarization_summary")
+    if isinstance(summary, dict):
+        app = summary.get("app_summary") if isinstance(summary.get("app_summary"), dict) else {}
+        crm = summary.get("crm_summary") if isinstance(summary.get("crm_summary"), dict) else {}
+        state["last_familiarization_summary"] = {
+            "app_summary": {
+                "agent_count": int(app.get("agent_count", 0) or 0),
+                "pipeline_count": int(app.get("pipeline_count", 0) or 0),
+                "run_count": int(app.get("run_count", 0) or 0),
+            },
+            "crm_summary": {
+                "pair_count": int(crm.get("pair_count", 0) or 0),
+                "call_count": int(crm.get("call_count", 0) or 0),
+                "crm_domains": (crm.get("crm_domains") or [])[:6] if isinstance(crm.get("crm_domains"), list) else [],
+            },
+        }
     return state
 
 
