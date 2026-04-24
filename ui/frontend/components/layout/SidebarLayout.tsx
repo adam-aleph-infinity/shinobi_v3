@@ -4,25 +4,63 @@ import AppSidebar from "./AppSidebar";
 import CopilotDock from "./CopilotDock";
 import { ContextBar } from "./ContextBar";
 import { PanelLeftOpen } from "lucide-react";
+import { DragHandle } from "@/components/shared/DragHandle";
+import { cn } from "@/lib/utils";
 
 const SIDEBAR_WIDTH = 224;
-const COPILOT_WIDTH = 304;
+const COPILOT_DEFAULT_WIDTH = 304;
+const COPILOT_MIN_WIDTH = 280;
+const COPILOT_MAX_WIDTH = 520;
+const MIN_CONTENT_WIDTH = 560;
+
+function clampCopilotWidth(raw: number, sidebarCollapsed: boolean): number {
+  const hardClamped = Math.min(COPILOT_MAX_WIDTH, Math.max(COPILOT_MIN_WIDTH, raw));
+  if (typeof window === "undefined") return hardClamped;
+  const sidebarSpace = sidebarCollapsed ? 0 : SIDEBAR_WIDTH;
+  const viewportMax = Math.max(COPILOT_MIN_WIDTH, window.innerWidth - sidebarSpace - MIN_CONTENT_WIDTH);
+  return Math.min(hardClamped, viewportMax);
+}
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [copilotCollapsed, setCopilotCollapsed] = useState(false);
+  const [copilotWidth, setCopilotWidth] = useState(COPILOT_DEFAULT_WIDTH);
+  const [resizingCopilot, setResizingCopilot] = useState(false);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    const savedSidebarCollapsed = localStorage.getItem("sidebar-collapsed") === "true";
+    const savedCopilotCollapsed = localStorage.getItem("copilot-collapsed") === "true";
+    const rawSavedWidth = Number(localStorage.getItem("copilot-width"));
+
+    setCollapsed(savedSidebarCollapsed);
+    setCopilotCollapsed(savedCopilotCollapsed);
+    if (Number.isFinite(rawSavedWidth) && rawSavedWidth > 0) {
+      setCopilotWidth(clampCopilotWidth(rawSavedWidth, savedSidebarCollapsed));
+    }
+
     setMounted(true);
-    if (localStorage.getItem("sidebar-collapsed") === "true") setCollapsed(true);
-    if (localStorage.getItem("copilot-collapsed") === "true") setCopilotCollapsed(true);
   }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem("copilot-width", String(copilotWidth));
+  }, [copilotWidth, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const onResize = () => {
+      setCopilotWidth((current) => clampCopilotWidth(current, collapsed));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [collapsed, mounted]);
 
   const toggleSidebar = () => {
     setCollapsed(c => {
       const next = !c;
       localStorage.setItem("sidebar-collapsed", String(next));
+      setCopilotWidth((current) => clampCopilotWidth(current, next));
       return next;
     });
   };
@@ -35,8 +73,33 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     });
   };
 
+  const startCopilotResize = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+
+    const panelLeft = collapsed ? 0 : SIDEBAR_WIDTH;
+    setResizingCopilot(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (ev: MouseEvent) => {
+      const next = clampCopilotWidth(ev.clientX - panelLeft, collapsed);
+      setCopilotWidth(next);
+    };
+    const onUp = () => {
+      setResizingCopilot(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
-  const copilotOffset = mounted ? (copilotCollapsed ? 0 : COPILOT_WIDTH) : COPILOT_WIDTH;
+  const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
   const contentOffset = sidebarOffset + copilotOffset;
 
   return (
@@ -46,7 +109,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {!mounted && (
         <div
           className="fixed top-0 h-screen bg-gray-900 border-r border-gray-800 z-30"
-          style={{ left: SIDEBAR_WIDTH, width: COPILOT_WIDTH }}
+          style={{ left: SIDEBAR_WIDTH, width: COPILOT_DEFAULT_WIDTH }}
         />
       )}
       {mounted && collapsed && (
@@ -71,13 +134,16 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         </button>
       )}
       {mounted && !copilotCollapsed && (
-        <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: COPILOT_WIDTH }}>
+        <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: copilotWidth }}>
           <CopilotDock onToggle={toggleCopilot} />
+          <div className={cn("absolute top-0 right-0 h-full translate-x-1/2 z-40", resizingCopilot && "bg-indigo-500/20")}>
+            <DragHandle onMouseDown={startCopilotResize} />
+          </div>
         </div>
       )}
 
       {/* Main content — always same structure so React doesn't remount children */}
-      <div className="transition-[margin] duration-200" style={{ marginLeft: contentOffset }}>
+      <div className={cn("transition-[margin] duration-200", resizingCopilot && "transition-none")} style={{ marginLeft: contentOffset }}>
         <div className="sticky top-0 z-30">
           {mounted && <ContextBar />}
         </div>
