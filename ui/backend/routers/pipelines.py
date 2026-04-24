@@ -1682,6 +1682,7 @@ class PipelineRunRequest(BaseModel):
     call_id: str = ""
     force: bool = False
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
+    resume_partial: bool = False  # allow per-step cache fallback when exact fingerprint miss
 
 
 class PipelineStopRequest(BaseModel):
@@ -2467,6 +2468,7 @@ async def run_pipeline(
                 "call_id": req.call_id,
                 "force": bool(req.force),
                 "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
+                "resume_partial": bool(req.resume_partial),
             },
             client_local_time=client_local_time,
             client_timezone=client_timezone,
@@ -2498,6 +2500,7 @@ async def run_pipeline(
                 "input_sources":    [],
                 "input_fingerprint": "",
                 "input_ready":      False,
+                "cache_mode":       "",
             }
             for s in steps
         ]
@@ -2662,6 +2665,44 @@ async def run_pipeline(
         def _public_input_source(_source: str) -> str:
             # Keep legacy compatibility internally but avoid surfacing chain_previous.
             return "artifact_output" if _source == "chain_previous" else _source
+
+        def _lookup_step_cache(
+            _sess: Session,
+            _agent_id: str,
+            _step_idx: int,
+            _input_fingerprint: str,
+        ) -> tuple[Optional[Any], bool]:
+            """Return (cached_row, used_resume_partial_fallback)."""
+            _base = select(AR).where(
+                AR.agent_id == _agent_id,
+                AR.sales_agent == req.sales_agent,
+                AR.customer == req.customer,
+            )
+            if _agent_result_has_pipeline_cache:
+                _base = _base.where(
+                    AR.pipeline_id == pipeline_id,
+                    AR.pipeline_step_index == _step_idx,
+                )
+            if req.call_id:
+                _base = _base.where(AR.call_id == req.call_id)
+            else:
+                _base = _base.where(AR.call_id == "")
+
+            _exact = _base
+            if _agent_result_has_pipeline_cache:
+                _exact = _exact.where(AR.input_fingerprint == _input_fingerprint)
+            _exact = _exact.order_by(AR.created_at.desc())
+            _cached = _sess.exec(_exact).first()
+            if _cached:
+                return _cached, False
+
+            # Resume-partial mode: if exact fingerprint misses, reuse the latest
+            # cached artifact for this pipeline step in the current context.
+            if req.resume_partial and _agent_result_has_pipeline_cache:
+                _fallback = _sess.exec(_base.order_by(AR.created_at.desc())).first()
+                if _fallback:
+                    return _fallback, True
+            return None, False
 
         def _has_call_transcript(_call_id: str) -> bool:
             if not _call_id:
@@ -3337,25 +3378,12 @@ async def run_pipeline(
                     # ── Check cache (pipeline+step+input fingerprint) ────────
                     if not req.force and step_idx not in req.force_step_indices:
                         cached = None
+                        cached_via_resume_partial = False
                         try:
-                            stmt = select(AR).where(
-                                AR.agent_id == agent_id,
-                                AR.sales_agent == req.sales_agent,
-                                AR.customer == req.customer,
-                            )
-                            if _agent_result_has_pipeline_cache:
-                                stmt = stmt.where(
-                                    AR.pipeline_id == pipeline_id,
-                                    AR.pipeline_step_index == step_idx,
-                                    AR.input_fingerprint == input_fingerprint,
-                                )
-                            if req.call_id:
-                                stmt = stmt.where(AR.call_id == req.call_id)
-                            else:
-                                stmt = stmt.where(AR.call_id == "")
-                            stmt = stmt.order_by(AR.created_at.desc())
                             with Session(_db_engine) as _s:
-                                cached = _s.exec(stmt).first()
+                                cached, cached_via_resume_partial = _lookup_step_cache(
+                                    _s, agent_id, step_idx, input_fingerprint
+                                )
                         except Exception as _cache_exc:
                             log_buffer.emit(
                                 f"[PIPELINE] ⚠ Cache lookup failed for step {step_idx + 1}: {_cache_exc}"
@@ -3376,13 +3404,22 @@ async def run_pipeline(
                                 "end_time":         datetime.utcnow().isoformat(),
                                 "content":          cached.content,
                                 "input_ready":      True,
+                                "cache_mode":       "resume_partial" if cached_via_resume_partial else "exact",
                                 "cached_locations": [{"type": "agent_result", "id": cached.id, "created_at": cached.created_at.isoformat() if cached.created_at else None}],
                             })
                             save_steps()  # write state BEFORE yield so file is correct if client disconnects
-                            log_buffer.emit(f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}")
+                            if cached_via_resume_partial:
+                                log_buffer.emit(
+                                    f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached (resume fallback) · {cid_short}"
+                                )
+                            else:
+                                log_buffer.emit(
+                                    f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached · {cid_short}"
+                                )
                             yield _sse("step_cached", {
                                 "step": step_idx, "agent_name": agent_name,
                                 "result_id": cached.id, "content": cached.content,
+                                "cache_mode": "resume_partial" if cached_via_resume_partial else "exact",
                             })
                             continue  # advance to next canvas stage
 
@@ -3677,24 +3714,11 @@ async def run_pipeline(
 
                                 if not req.force and par_idx not in req.force_step_indices:
                                     _cached = None
+                                    _cached_via_resume_partial = False
                                     try:
-                                        _cs = select(AR).where(
-                                            AR.agent_id == _par_aid,
-                                            AR.sales_agent == req.sales_agent,
-                                            AR.customer == req.customer,
+                                        _cached, _cached_via_resume_partial = _lookup_step_cache(
+                                            _par_db, _par_aid, par_idx, _par_fp
                                         )
-                                        if _agent_result_has_pipeline_cache:
-                                            _cs = _cs.where(
-                                                AR.pipeline_id == pipeline_id,
-                                                AR.pipeline_step_index == par_idx,
-                                                AR.input_fingerprint == _par_fp,
-                                            )
-                                        if req.call_id:
-                                            _cs = _cs.where(AR.call_id == req.call_id)
-                                        else:
-                                            _cs = _cs.where(AR.call_id == "")
-                                        _cs = _cs.order_by(AR.created_at.desc())
-                                        _cached = _par_db.exec(_cs).first()
                                     except Exception as _cache_exc:
                                         log_buffer.emit(
                                             f"[PIPELINE] ⚠ Parallel cache lookup failed for step {par_idx + 1}: {_cache_exc}"
@@ -3711,6 +3735,7 @@ async def run_pipeline(
                                             "model": _par_model,
                                             "input_fingerprint": _par_fp,
                                             "input_ready": _par_input_ready,
+                                            "cache_mode": "resume_partial" if _cached_via_resume_partial else "exact",
                                         }
 
                                 _par_ic  = sum(len(v) for v in _par_ii.values())
@@ -3817,6 +3842,7 @@ async def run_pipeline(
                                 "end_time":         datetime.utcnow().isoformat(),
                                 "content":          _res["content"],
                                 "input_ready":      _res.get("input_ready", True),
+                                "cache_mode":       _res.get("cache_mode", "exact"),
                                 "cached_locations": [{
                                     "type": "agent_result",
                                     "id": _res.get("result_id", ""),
@@ -3825,9 +3851,17 @@ async def run_pipeline(
                                 "input_fingerprint": _res.get("input_fingerprint", ""),
                             })
                             save_steps()  # write BEFORE yield so file is correct if client disconnects
-                            log_buffer.emit(f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached · {cid_short}")
+                            if _res.get("cache_mode") == "resume_partial":
+                                log_buffer.emit(
+                                    f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached (resume fallback) · {cid_short}"
+                                )
+                            else:
+                                log_buffer.emit(
+                                    f"[PIPELINE] ↩ Step {_ri + 1}/{len(steps)}: {_rn} → cached · {cid_short}"
+                                )
                             yield _sse("step_cached", {"step": _ri, "agent_name": _rn,
-                                                        "result_id": _res.get("result_id", ""), "content": _res["content"]})
+                                                        "result_id": _res.get("result_id", ""), "content": _res["content"],
+                                                        "cache_mode": _res.get("cache_mode", "exact")})
                         elif _rst == "done":
                             _rc  = _res["content"]
                             _ret = _res["exec_time_s"]

@@ -884,7 +884,7 @@ export function PipelineSidePanel({
   }
 
   // ── per_pair run ──────────────────────────────────────────────────────────────
-  async function run(force = true, forceStepIndices: number[] = []) {
+  async function run(force = true, forceStepIndices: number[] = [], resumePartial = false) {
     if (!activePipelineId || !contextOk || !pipeline || !agents) return;
     // Kill any in-progress run, then start fresh
     abortCtrlRef.current?.abort();
@@ -903,7 +903,14 @@ export function PipelineSidePanel({
         ...withClientMetaHeaders({
           method: "POST", headers: { "Content-Type": "application/json" },
         }),
-        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force, force_step_indices: forceStepIndices }),
+        body: JSON.stringify({
+          sales_agent: salesAgent,
+          customer,
+          call_id: "",
+          force,
+          force_step_indices: forceStepIndices,
+          resume_partial: resumePartial,
+        }),
         signal: ctrl.signal,
       });
       if (!res.ok) {
@@ -1015,6 +1022,7 @@ export function PipelineSidePanel({
             call_id: "",
             force,
             force_step_indices: forceStepIndices,
+            resume_partial: resumePartial,
           },
           error: String(msg),
           finish: true,
@@ -1301,7 +1309,7 @@ export function PipelineSidePanel({
                   setCachedView(true);
                   return;
                 }
-                void run(false);
+                void run(false, [], true);
               }}
               disabled={!cachedResults?.some(cr => cr.result) || anyBusy}
               title={
