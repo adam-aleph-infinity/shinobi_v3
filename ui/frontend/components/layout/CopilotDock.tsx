@@ -34,6 +34,15 @@ type StreamEvent = {
   data: any;
 };
 
+type ModelOption = {
+  id: string;
+  label: string;
+  provider: string;
+  description?: string;
+  ready?: boolean;
+  supports_tools?: boolean;
+};
+
 function fmtTime(iso: string): string {
   if (!iso) return "";
   try {
@@ -54,6 +63,8 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
   const [liveAssistant, setLiveAssistant] = useState("");
   const [statusLine, setStatusLine] = useState("");
   const [error, setError] = useState("");
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [selectedModel, setSelectedModel] = useState("gpt-5.4");
 
   const canSend = useMemo(() => !!input.trim() && !sending, [input, sending]);
 
@@ -125,8 +136,28 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
     }
   }
 
+  async function fetchModels() {
+    try {
+      const res = await fetch("/api/assistant/models");
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as ModelOption[];
+      const rows = Array.isArray(data) ? data.filter((m) => !!m?.id) : [];
+      setModels(rows);
+
+      const local = typeof window !== "undefined" ? localStorage.getItem("copilot-model") || "" : "";
+      const preferred = local && rows.some((m) => m.id === local) ? local : "";
+      const fallback = rows.find((m) => m.ready)?.id || rows[0]?.id || "gpt-5.4";
+      const next = preferred || fallback;
+      setSelectedModel(next);
+      if (typeof window !== "undefined") localStorage.setItem("copilot-model", next);
+    } catch {
+      // Keep existing default silently.
+    }
+  }
+
   useEffect(() => {
     fetchSessions(true);
+    fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -156,7 +187,7 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
       const res = await fetch(`/api/assistant/sessions/${encodeURIComponent(sid)}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: prompt }),
+        body: JSON.stringify({ message: prompt, model: selectedModel }),
       });
       if (!res.ok || !res.body) throw new Error((await res.text()) || `HTTP ${res.status}`);
 
@@ -231,6 +262,22 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
           <p className="text-[11px] text-gray-500 truncate">Pipeline builder + run debugger</p>
         </div>
         <div className="ml-auto flex items-center gap-1">
+          <select
+            value={selectedModel}
+            onChange={(e) => {
+              const next = e.target.value;
+              setSelectedModel(next);
+              localStorage.setItem("copilot-model", next);
+            }}
+            className="max-w-[148px] bg-gray-800 border border-gray-700 text-gray-200 text-[10px] rounded px-1.5 py-1 outline-none focus:border-indigo-500"
+            title="Copilot model/provider"
+          >
+            {(models.length ? models : [{ id: "gpt-5.4", label: "OpenAI Codex", provider: "openai" }]).map((m) => (
+              <option key={m.id} value={m.id} disabled={m.ready === false}>
+                {m.label}{m.ready === false ? " (missing key)" : ""}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => createSession().catch((e) => setError(e?.message || "Failed to create session"))}
             className="p-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"

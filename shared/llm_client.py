@@ -1,4 +1,6 @@
 import os
+import json
+import uuid
 from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 
@@ -69,18 +71,92 @@ class LLMClient:
             return self.client.chat.completions.create(**kwargs)
 
         if self.provider == "anthropic":
-            # Anthropic expects system prompt separate from messages
+            # Anthropic expects system prompt separate from messages, and uses
+            # content blocks for tool_use/tool_result.
             system_content = ""
-            user_msgs = []
+            anthropic_messages: List[Dict[str, Any]] = []
+
+            def _append_user_tool_result(tool_use_id: str, content: str) -> None:
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                }
+                if anthropic_messages and anthropic_messages[-1].get("role") == "user":
+                    prev = anthropic_messages[-1].get("content")
+                    if isinstance(prev, list):
+                        prev.append(block)
+                        return
+                anthropic_messages.append({"role": "user", "content": [block]})
+
             for m in messages:
-                if m.get("role") == "system":
-                    system_content = m.get("content", "")
-                else:
-                    user_msgs.append(m)
+                role = str(m.get("role") or "")
+                if role == "system":
+                    text = str(m.get("content") or "").strip()
+                    if text:
+                        system_content = f"{system_content}\n\n{text}".strip() if system_content else text
+                    continue
+
+                if role == "tool":
+                    tool_call_id = str(m.get("tool_call_id") or "").strip()
+                    _append_user_tool_result(tool_call_id, str(m.get("content") or ""))
+                    continue
+
+                if role == "assistant":
+                    blocks: List[Dict[str, Any]] = []
+                    text = str(m.get("content") or "")
+                    if text.strip():
+                        blocks.append({"type": "text", "text": text})
+                    raw_tool_calls = m.get("tool_calls") or []
+                    if isinstance(raw_tool_calls, list):
+                        for tc in raw_tool_calls:
+                            if not isinstance(tc, dict):
+                                continue
+                            fn = tc.get("function") or {}
+                            name = str(fn.get("name") or "").strip()
+                            if not name:
+                                continue
+                            raw_args = str(fn.get("arguments") or "{}")
+                            try:
+                                parsed_args = json.loads(raw_args) if raw_args.strip() else {}
+                            except Exception:
+                                parsed_args = {}
+                            blocks.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": str(tc.get("id") or str(uuid.uuid4())),
+                                    "name": name,
+                                    "input": parsed_args if isinstance(parsed_args, dict) else {},
+                                }
+                            )
+                    if blocks:
+                        anthropic_messages.append({"role": "assistant", "content": blocks})
+                    continue
+
+                # default user-like message
+                anthropic_messages.append({"role": "user", "content": str(m.get("content") or "")})
+
+            anthropic_tools: List[Dict[str, Any]] = []
+            if tools:
+                for t in tools:
+                    if not isinstance(t, dict):
+                        continue
+                    fn = t.get("function") or {}
+                    name = str(fn.get("name") or "").strip()
+                    if not name:
+                        continue
+                    anthropic_tools.append(
+                        {
+                            "name": name,
+                            "description": str(fn.get("description") or ""),
+                            "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+                        }
+                    )
+
             kwargs = {
                 "model": model,
                 "max_tokens": max_tokens or (16000 if thinking else 8192),
-                "messages": user_msgs,
+                "messages": anthropic_messages,
             }
             if system_content:
                 kwargs["system"] = system_content
@@ -90,14 +166,58 @@ class LLMClient:
                 kwargs["temperature"] = 1
             elif temperature is not None:
                 kwargs["temperature"] = temperature
+            if anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+                if tool_choice is not None:
+                    if isinstance(tool_choice, str):
+                        if tool_choice in {"auto", "none"}:
+                            kwargs["tool_choice"] = {"type": tool_choice}
+                    elif isinstance(tool_choice, dict):
+                        # OpenAI-style {"type":"function","function":{"name":"..."}}
+                        if (
+                            tool_choice.get("type") == "function"
+                            and isinstance(tool_choice.get("function"), dict)
+                            and str(tool_choice["function"].get("name") or "").strip()
+                        ):
+                            kwargs["tool_choice"] = {
+                                "type": "tool",
+                                "name": str(tool_choice["function"]["name"]),
+                            }
+                        elif str(tool_choice.get("type") or "") in {"auto", "none", "tool"}:
+                            kwargs["tool_choice"] = tool_choice
+
             response = self.client.messages.create(**kwargs)
-            # Extract only text blocks (thinking blocks are separate)
-            content = "\n\n".join(
-                block.text for block in response.content
-                if getattr(block, "type", None) == "text"
-            )
+            # Extract text + convert tool_use blocks into OpenAI-like tool_calls.
+            text_parts: List[str] = []
+            tool_calls: List[Dict[str, Any]] = []
+            for block in getattr(response, "content", []) or []:
+                btype = getattr(block, "type", None)
+                if btype == "text":
+                    text_parts.append(getattr(block, "text", "") or "")
+                elif btype == "tool_use":
+                    args = getattr(block, "input", {}) or {}
+                    if not isinstance(args, dict):
+                        args = {}
+                    tool_calls.append(
+                        {
+                            "id": str(getattr(block, "id", "") or str(uuid.uuid4())),
+                            "type": "function",
+                            "function": {
+                                "name": str(getattr(block, "name", "") or ""),
+                                "arguments": json.dumps(args, ensure_ascii=False),
+                            },
+                        }
+                    )
+            content = "\n\n".join(p for p in text_parts if p).strip()
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=content,
+                            tool_calls=tool_calls,
+                        )
+                    )
+                ]
             )
 
         if self.provider == "gemini":

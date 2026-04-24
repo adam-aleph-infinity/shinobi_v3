@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from ui.backend.database import engine
 from ui.backend.models.pipeline_run import PipelineRun
 from ui.backend.routers import pipelines as pipelines_router
 from ui.backend.routers import universal_agents as universal_agents_router
-from ui.backend.services import execution_logs, log_buffer
+from ui.backend.services import assistant_knowledge, execution_logs, log_buffer
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 
@@ -35,6 +36,42 @@ _TEXT_EXTS = {".json", ".txt", ".md", ".log", ".csv", ".srt"}
 _DEFAULT_MODEL = os.environ.get("ASSISTANT_MODEL", "gpt-5.4")
 _MAX_MODEL_MESSAGES = 80
 _MAX_TOOL_ROUNDS = 12
+
+_SUPPORTED_ORCHESTRATION_PROVIDERS = {"openai", "anthropic"}
+_CORRECTION_HINTS = (
+    "wrong",
+    "incorrect",
+    "not right",
+    "didnt work",
+    "didn't work",
+    "failed",
+    "fix this",
+    "fix it",
+    "try again",
+    "you missed",
+    "not what i asked",
+)
+
+_DEFAULT_MODEL_CATALOG = [
+    {
+        "id": "gpt-5.4",
+        "label": "OpenAI Codex (gpt-5.4)",
+        "provider": "openai",
+        "description": "High-quality planning, coding-style reasoning, and tool orchestration.",
+    },
+    {
+        "id": "gpt-5.3-codex",
+        "label": "OpenAI Codex Fast (gpt-5.3-codex)",
+        "provider": "openai",
+        "description": "Faster Codex-style reasoning for iterative workflow edits.",
+    },
+    {
+        "id": "claude-sonnet-4-20250514",
+        "label": "Claude Code (Sonnet 4)",
+        "provider": "anthropic",
+        "description": "Strong long-context planning and correction handling.",
+    },
+]
 
 
 SYSTEM_PROMPT = (
@@ -356,6 +393,106 @@ def _tool_specs() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_app_map",
+                "description": "Get the auto-generated internal app map and counts.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "refresh": {"type": "boolean", "default": False},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_copilot_memory",
+                "description": "Retrieve learned memory entries relevant to a query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "default": ""},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 12},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_copilot_skills",
+                "description": "Retrieve learned skill entries relevant to a query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "default": ""},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 12},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember_lesson",
+                "description": "Persist a lesson/memory so future chats improve.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "kind": {"type": "string", "default": "lesson"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.7},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_skill",
+                "description": "Create or update a reusable skill guideline for Copilot.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "guidance": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.75},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["name", "guidance"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "spawn_sub_agent",
+                "description": (
+                    "Run a focused sub-agent to plan/check a specific subtask. "
+                    "Useful for second-opinion reasoning."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string"},
+                        "model": {"type": "string", "default": ""},
+                        "provider": {"type": "string", "default": ""},
+                    },
+                    "required": ["goal"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     ]
 
 
@@ -672,6 +809,135 @@ def _tool_preview_workspace_file(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_get_app_map(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    refresh = bool(args.get("refresh"))
+    if refresh:
+        assistant_knowledge.ensure_app_map(tools, force=True)
+    return assistant_knowledge.get_app_map()
+
+
+def _tool_list_copilot_memory(args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "")
+    limit = max(1, min(100, int(args.get("limit", 12) or 12)))
+    rows = assistant_knowledge.list_memory(limit=limit, query=query)
+    return {"count": len(rows), "memory": rows}
+
+
+def _tool_list_copilot_skills(args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "")
+    limit = max(1, min(100, int(args.get("limit", 12) or 12)))
+    rows = assistant_knowledge.list_skills(limit=limit, query=query)
+    return {"count": len(rows), "skills": rows}
+
+
+def _tool_remember_lesson(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+    text = str(args.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    kind = str(args.get("kind") or "lesson").strip() or "lesson"
+    confidence = float(args.get("confidence", 0.7) or 0.7)
+    tags = args.get("tags")
+    if not isinstance(tags, list):
+        tags = []
+    row = assistant_knowledge.add_memory(
+        text=text,
+        source="assistant_tool",
+        kind=kind,
+        confidence=confidence,
+        tags=[str(t) for t in tags],
+        meta={"session_id": session_id},
+    )
+    return {"saved": True, "memory_id": row.get("id"), "kind": row.get("kind")}
+
+
+def _tool_update_skill(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+    name = str(args.get("name") or "").strip()
+    guidance = str(args.get("guidance") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    if not guidance:
+        raise HTTPException(400, "guidance is required")
+    confidence = float(args.get("confidence", 0.75) or 0.75)
+    tags = args.get("tags")
+    if not isinstance(tags, list):
+        tags = []
+    row = assistant_knowledge.upsert_skill(
+        name=name,
+        guidance=guidance,
+        source="assistant_tool",
+        confidence=confidence,
+        tags=[str(t) for t in tags],
+        meta={"session_id": session_id},
+    )
+    return {"updated": True, "skill_id": row.get("id"), "name": row.get("name")}
+
+
+def _run_sub_agent(
+    *,
+    goal: str,
+    model: str,
+    provider: str,
+    parent_model: str,
+    parent_provider: str,
+) -> dict[str, Any]:
+    chosen_model = str(model or "").strip() or parent_model
+    chosen_provider = str(provider or "").strip().lower() or _assistant_model_provider(chosen_model)
+    if chosen_provider not in {"openai", "anthropic", "gemini", "grok", "mistral"}:
+        chosen_provider = parent_provider
+    key = _resolve_provider_key(chosen_provider)
+    if not key:
+        raise HTTPException(400, f"Missing API key for provider '{chosen_provider}'")
+
+    pack = assistant_knowledge.context_pack(goal, memory_limit=8, skills_limit=8)
+    sub_system = (
+        "You are a Shinobi Copilot sub-agent.\n"
+        "Solve only the assigned goal with concrete recommendations.\n"
+        "Do not claim actions were executed.\n"
+        "Return concise output with assumptions and checks."
+    )
+    user = (
+        f"SUB-AGENT GOAL:\n{goal}\n\n"
+        "Context pack:\n"
+        f"{_compact_json(pack, cap=12000)}"
+    )
+
+    client = LLMClient(provider=chosen_provider, api_key=key)
+    resp = client.chat_completion(
+        model=chosen_model,
+        messages=[
+            {"role": "system", "content": sub_system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0,
+        max_tokens=3500,
+    )
+    text = _message_content_text(resp.choices[0].message).strip()
+    if not text:
+        text = "Sub-agent returned empty output."
+    return {
+        "ok": True,
+        "goal": goal,
+        "provider": chosen_provider,
+        "model": chosen_model,
+        "output": text,
+    }
+
+
+def _tool_spawn_sub_agent(args: dict[str, Any], *, model: str, provider: str) -> dict[str, Any]:
+    goal = str(args.get("goal") or "").strip()
+    if not goal:
+        raise HTTPException(400, "goal is required")
+    requested_model = str(args.get("model") or "").strip()
+    requested_provider = str(args.get("provider") or "").strip().lower()
+    return _run_sub_agent(
+        goal=goal,
+        model=requested_model,
+        provider=requested_provider,
+        parent_model=model,
+        parent_provider=provider,
+    )
+
+
 _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "list_universal_agents": _tool_list_universal_agents,
     "get_universal_agent": _tool_get_universal_agent,
@@ -701,9 +967,26 @@ def _parse_json_args(raw: str) -> dict[str, Any]:
     return parsed
 
 
-def _execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+def _execute_tool(name: str, args: dict[str, Any], *, ctx: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     fn = _TOOL_HANDLERS.get(name)
     if not fn:
+        tool_ctx = ctx or {}
+        if name == "get_app_map":
+            return _tool_get_app_map(args, tools=tool_ctx.get("tools") or _tool_specs())
+        if name == "list_copilot_memory":
+            return _tool_list_copilot_memory(args)
+        if name == "list_copilot_skills":
+            return _tool_list_copilot_skills(args)
+        if name == "remember_lesson":
+            return _tool_remember_lesson(args, session_id=str(tool_ctx.get("session_id") or ""))
+        if name == "update_skill":
+            return _tool_update_skill(args, session_id=str(tool_ctx.get("session_id") or ""))
+        if name == "spawn_sub_agent":
+            return _tool_spawn_sub_agent(
+                args,
+                model=str(tool_ctx.get("model") or _DEFAULT_MODEL),
+                provider=str(tool_ctx.get("provider") or "openai"),
+            )
         raise HTTPException(400, f"Unknown tool '{name}'")
     return fn(args)
 
@@ -743,6 +1026,142 @@ def _resolve_provider_key(provider: str) -> str:
     return ""
 
 
+def _model_catalog() -> list[dict[str, Any]]:
+    raw = os.environ.get("ASSISTANT_MODEL_CATALOG_JSON", "").strip()
+    if not raw:
+        return list(_DEFAULT_MODEL_CATALOG)
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return list(_DEFAULT_MODEL_CATALOG)
+    if not isinstance(parsed, list):
+        return list(_DEFAULT_MODEL_CATALOG)
+
+    out: list[dict[str, Any]] = []
+    for row in parsed:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("id") or "").strip()
+        if not model_id:
+            continue
+        provider = str(row.get("provider") or _assistant_model_provider(model_id)).strip().lower()
+        if provider not in {"openai", "anthropic", "gemini", "grok", "mistral"}:
+            provider = _assistant_model_provider(model_id)
+        out.append(
+            {
+                "id": model_id,
+                "label": str(row.get("label") or model_id),
+                "provider": provider,
+                "description": str(row.get("description") or ""),
+            }
+        )
+    return out or list(_DEFAULT_MODEL_CATALOG)
+
+
+def _compact_json(payload: Any, cap: int = 12000) -> str:
+    try:
+        txt = json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception:
+        txt = str(payload)
+    if len(txt) <= cap:
+        return txt
+    return txt[:cap] + "\n... [truncated]"
+
+
+def _build_dynamic_system_prompt(user_message: str, tools: list[dict[str, Any]]) -> str:
+    assistant_knowledge.ensure_app_map(tools, force=False)
+    pack = assistant_knowledge.context_pack(user_message, memory_limit=6, skills_limit=6)
+    app_map = pack.get("app_map") if isinstance(pack.get("app_map"), dict) else {}
+    summary = app_map.get("summary") if isinstance(app_map.get("summary"), dict) else {}
+    app_map_snippet = {
+        "tools": (app_map.get("tools") or [])[:40] if isinstance(app_map.get("tools"), list) else [],
+        "agents": (app_map.get("agents") or [])[:60] if isinstance(app_map.get("agents"), list) else [],
+        "pipelines": (app_map.get("pipelines") or [])[:40] if isinstance(app_map.get("pipelines"), list) else [],
+    }
+    skill_count = len(pack.get("skills") or [])
+    memory_count = len(pack.get("memory") or [])
+
+    return (
+        f"{SYSTEM_PROMPT}\n"
+        "\n"
+        "Autogenerated operating context (live app + learned knowledge):\n"
+        f"- app_map_generated_at: {str(app_map.get('generated_at') or '')}\n"
+        f"- agent_count: {summary.get('agent_count', 0)}\n"
+        f"- pipeline_count: {summary.get('pipeline_count', 0)}\n"
+        f"- run_count: {summary.get('run_count', 0)}\n"
+        f"- retrieved_skill_entries: {skill_count}\n"
+        f"- retrieved_memory_entries: {memory_count}\n"
+        "\n"
+        "When user asks for pipeline design/debugging, combine tool facts with learned skills/memory.\n"
+        "When user provides correction, update memory/skills so future answers improve.\n"
+        "Prefer spawning a sub-agent when task decomposition or second-opinion reasoning helps.\n"
+        "\n"
+        "APP_MAP_SNIPPET:\n"
+        f"{_compact_json(app_map_snippet, cap=14000)}\n"
+        "\n"
+        "RETRIEVED_SKILLS:\n"
+        f"{_compact_json(pack.get('skills') or [], cap=10000)}\n"
+        "\n"
+        "RETRIEVED_MEMORY:\n"
+        f"{_compact_json(pack.get('memory') or [], cap=10000)}\n"
+    )
+
+
+def _looks_like_correction(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    if any(k in msg for k in _CORRECTION_HINTS):
+        return True
+    # "no, ..." / "this is wrong" / "not correct"
+    return bool(re.match(r"^(no|nah|not really|this is wrong|that is wrong)\b", msg))
+
+
+def _latest_assistant_display_message(session: dict[str, Any]) -> str:
+    rows = session.get("messages")
+    if not isinstance(rows, list):
+        return ""
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("role") or "") == "assistant":
+            return str(row.get("content") or "")
+    return ""
+
+
+def _auto_capture_correction(session: dict[str, Any], user_message: str) -> None:
+    if not _looks_like_correction(user_message):
+        return
+    prev_assistant = _latest_assistant_display_message(session)
+    if not prev_assistant:
+        return
+    assistant_knowledge.add_memory(
+        kind="correction",
+        source="user_feedback",
+        confidence=0.85,
+        tags=["correction", "pipeline", "debugging"],
+        text=(
+            "User indicated prior answer/tool plan was wrong.\n"
+            f"Previous assistant answer:\n{prev_assistant}\n\n"
+            f"User correction/request:\n{user_message}"
+        ),
+        meta={
+            "session_id": str(session.get("id") or ""),
+        },
+    )
+    assistant_knowledge.upsert_skill(
+        name="Correction-driven pipeline refinement",
+        guidance=(
+            "When a user says the proposed pipeline/debugging answer was wrong, first summarize the mismatch, "
+            "re-check live pipeline/run evidence via tools, then produce a corrected design with explicit assumptions."
+        ),
+        source="user_feedback",
+        confidence=0.8,
+        tags=["correction", "pipeline", "debugging"],
+        meta={"session_id": str(session.get("id") or "")},
+    )
+
+
 def _chunk_text(text: str, size: int = 160) -> list[str]:
     txt = str(text or "")
     if not txt:
@@ -751,6 +1170,16 @@ def _chunk_text(text: str, size: int = 160) -> list[str]:
 
 
 def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
+    if isinstance(tool_call, dict):
+        fn_raw = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+        return {
+            "id": str(tool_call.get("id") or str(uuid.uuid4())),
+            "type": "function",
+            "function": {
+                "name": str(fn_raw.get("name") or ""),
+                "arguments": str(fn_raw.get("arguments") or "{}"),
+            },
+        }
     fn = getattr(tool_call, "function", None)
     return {
         "id": str(getattr(tool_call, "id", "") or str(uuid.uuid4())),
@@ -788,6 +1217,24 @@ def list_tools():
         }
         for t in _tool_specs()
     ]
+
+
+@router.get("/models")
+def list_models():
+    rows = []
+    for row in _model_catalog():
+        provider = str(row.get("provider") or _assistant_model_provider(str(row.get("id") or ""))).lower()
+        rows.append(
+            {
+                "id": str(row.get("id") or ""),
+                "label": str(row.get("label") or row.get("id") or ""),
+                "provider": provider,
+                "description": str(row.get("description") or ""),
+                "ready": bool(_resolve_provider_key(provider)),
+                "supports_tools": provider in _SUPPORTED_ORCHESTRATION_PROVIDERS,
+            }
+        )
+    return rows
 
 
 @router.get("/sessions")
@@ -858,19 +1305,13 @@ async def chat_session(session_id: str, req: ChatRequest):
     model = (req.model or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
 
     provider = _assistant_model_provider(model)
-    if provider != "openai":
-        raise HTTPException(
-            400,
-            (
-                f"Assistant tool orchestration currently requires an OpenAI chat model. "
-                f"Received model '{model}' (provider={provider})."
-            ),
-        )
+    supports_tools = provider in _SUPPORTED_ORCHESTRATION_PROVIDERS
 
     api_key = _resolve_provider_key(provider)
     if not api_key:
         raise HTTPException(400, f"Missing API key for provider '{provider}'")
 
+    _auto_capture_correction(session, user_message)
     _append_display_message(session, "user", user_message)
     _append_model_message(session, {"role": "user", "content": user_message})
     _save_session(session)
@@ -881,6 +1322,8 @@ async def chat_session(session_id: str, req: ChatRequest):
         context={
             "assistant_session_id": session_id,
             "model": model,
+            "provider": provider,
+            "supports_tools": supports_tools,
             "user_message_chars": len(user_message),
         },
         status="running",
@@ -890,19 +1333,56 @@ async def chat_session(session_id: str, req: ChatRequest):
         "Assistant chat started",
         level="stage",
         status="running",
-        data={"session_id": session_id, "model": model},
+        data={"session_id": session_id, "model": model, "provider": provider, "supports_tools": supports_tools},
     )
 
     async def stream():
         tools = _tool_specs()
+        assistant_knowledge.ensure_app_map(tools, force=False)
+        dynamic_system_prompt = _build_dynamic_system_prompt(user_message, tools)
         client = LLMClient(provider=provider, api_key=api_key)
 
         try:
             yield _sse("execution_session", {"execution_session_id": execution_session_id})
-            yield _sse("progress", {"msg": f"Thinking with {model}…"})
+            yield _sse("progress", {"msg": f"Thinking with {model} ({provider})…"})
+
+            if not supports_tools:
+                messages = [{"role": "system", "content": dynamic_system_prompt}] + list(session.get("model_messages") or [])
+                resp = client.chat_completion(
+                    model=model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=6000,
+                )
+                text = _message_content_text(resp.choices[0].message).strip()
+                if not text:
+                    text = "I couldn't produce a response. Please try again with more detail."
+                _append_model_message(session, {"role": "assistant", "content": text})
+                _append_display_message(
+                    session,
+                    "assistant",
+                    text,
+                    {"provider": provider, "model": model, "tools_used": False},
+                )
+                _save_session(session)
+                for chunk in _chunk_text(text):
+                    yield _sse("stream", {"text": chunk})
+                yield _sse("done", {"content": text})
+                execution_logs.finish_session(
+                    execution_session_id,
+                    status="success",
+                    report={
+                        "model": model,
+                        "provider": provider,
+                        "assistant_session_id": session_id,
+                        "assistant_message_chars": len(text),
+                        "tools_used": False,
+                    },
+                )
+                return
 
             for round_idx in range(req.max_tool_rounds):
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(session.get("model_messages") or [])
+                messages = [{"role": "system", "content": dynamic_system_prompt}] + list(session.get("model_messages") or [])
                 resp = client.chat_completion(
                     model=model,
                     messages=messages,
@@ -944,7 +1424,16 @@ async def chat_session(session_id: str, req: ChatRequest):
 
                         try:
                             parsed_args = _parse_json_args(args_raw)
-                            tool_result = _execute_tool(name, parsed_args)
+                            tool_result = _execute_tool(
+                                name,
+                                parsed_args,
+                                ctx={
+                                    "session_id": session_id,
+                                    "model": model,
+                                    "provider": provider,
+                                    "tools": tools,
+                                },
+                            )
                             ok = True
                         except HTTPException as exc:
                             tool_result = {"ok": False, "error": str(exc.detail)}
@@ -1010,8 +1499,10 @@ async def chat_session(session_id: str, req: ChatRequest):
                     status="success",
                     report={
                         "model": model,
+                        "provider": provider,
                         "assistant_session_id": session_id,
                         "assistant_message_chars": len(final_text),
+                        "tools_used": True,
                     },
                 )
                 log_buffer.emit(f"[ASSISTANT] done ({len(final_text):,} chars)")
