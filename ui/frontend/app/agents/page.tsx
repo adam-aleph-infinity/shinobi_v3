@@ -9,6 +9,7 @@ import {
   X, Download, Mic2, Layers, BookOpen, PenLine, StickyNote,
   User, Star, Shield, Zap, Play, FileText, Braces, AlignLeft, Copy,
   BadgeCheck, ShieldCheck,
+  Maximize2, Minimize2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppCtx } from "@/lib/app-context";
@@ -172,12 +173,14 @@ const BLANK_AGENT = {
 // ── AgentEditor ───────────────────────────────────────────────────────────────
 
 function AgentEditor({
-  agent, allAgents, onSave, onDelete, onCopy,
+  agent, allAgents, onSave, onDelete, onCopy, onToggleExpand, isExpanded,
 }: {
   agent: UniversalAgent; allAgents: UniversalAgent[];
   onSave: (draft: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
   onDelete: () => void;
   onCopy: () => void;
+  onToggleExpand: () => void;
+  isExpanded: boolean;
 }) {
   const [draft, setDraft] = useState<Omit<UniversalAgent, "id" | "created_at">>({
     name: agent.name, description: agent.description ?? "",
@@ -251,6 +254,13 @@ function AgentEditor({
           />
           <p className={cn("text-[10px] mt-0.5", cm.textColor)}>{cm.label || "—"}</p>
         </div>
+        <button
+          onClick={onToggleExpand}
+          className="p-1.5 text-gray-500 hover:text-indigo-300 transition-colors shrink-0"
+          title={isExpanded ? "Restore split view" : "Expand properties panel"}
+        >
+          {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+        </button>
         <button
           onClick={onCopy}
           className="p-1.5 text-gray-500 hover:text-indigo-300 transition-colors shrink-0"
@@ -456,7 +466,15 @@ function AgentEditor({
 
 type PreviewState = { status: "idle" | "loading" | "ok" | "error"; chars: number; snippet: string; errMsg?: string };
 
-function TestPanel({ agent }: { agent: UniversalAgent }) {
+function TestPanel({
+  agent,
+  onToggleExpand,
+  isExpanded,
+}: {
+  agent: UniversalAgent;
+  onToggleExpand: () => void;
+  isExpanded: boolean;
+}) {
   const {
     salesAgent: ctxSalesAgent,
     customer: ctxCustomer,
@@ -706,7 +724,16 @@ function TestPanel({ agent }: { agent: UniversalAgent }) {
   return (
     <div className="flex flex-col h-full border-l border-gray-800 bg-gray-950">
       <div className="px-3 py-2.5 border-b border-gray-800 shrink-0">
-        <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Quick Test</p>
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Quick Test</p>
+          <button
+            onClick={onToggleExpand}
+            className="p-1 text-gray-500 hover:text-indigo-300 transition-colors"
+            title={isExpanded ? "Restore split view" : "Expand quick test panel"}
+          >
+            {isExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -1010,6 +1037,7 @@ export default function AgentsPage() {
   const allPipelines = pipelinesData ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(() => activeAgentId || null);
+  const [panelMode, setPanelMode] = useState<"split" | "editor" | "test">("split");
   const [importing, setImporting]   = useState(false);
   const [importMsg, setImportMsg]   = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
@@ -1378,7 +1406,10 @@ export default function AgentsPage() {
       </aside>
 
       {/* ── Center: editor ───────────────────────────────────────── */}
-      <div className="flex-1 min-w-0 flex flex-col bg-gray-900 overflow-hidden">
+      <div className={cn(
+        "min-w-0 flex flex-col bg-gray-900 overflow-hidden",
+        panelMode === "test" ? "hidden" : "flex-1",
+      )}>
         {selected ? (
           <AgentEditor
             key={selected.id}
@@ -1387,6 +1418,8 @@ export default function AgentsPage() {
             onSave={saveAgent}
             onDelete={deleteAgent}
             onCopy={() => copyAgent(selected.id)}
+            isExpanded={panelMode === "editor"}
+            onToggleExpand={() => setPanelMode(prev => prev === "editor" ? "split" : "editor")}
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-700">
@@ -1401,9 +1434,19 @@ export default function AgentsPage() {
       </div>
 
       {/* ── Right: test panel ────────────────────────────────────── */}
-      <div className="w-80 shrink-0 overflow-hidden flex flex-col">
+      <div className={cn(
+        "overflow-hidden flex flex-col",
+        panelMode === "editor" ? "hidden" : (panelMode === "test" ? "flex-1 min-w-0" : "w-80 shrink-0"),
+      )}>
         {selected
-          ? <TestPanel key={selected.id} agent={selected} />
+          ? (
+            <TestPanel
+              key={selected.id}
+              agent={selected}
+              isExpanded={panelMode === "test"}
+              onToggleExpand={() => setPanelMode(prev => prev === "test" ? "split" : "test")}
+            />
+          )
           : (
             <div className="h-full border-l border-gray-800 bg-gray-950 flex items-center justify-center">
               <p className="text-[10px] text-gray-700 italic">Select an agent to test</p>
