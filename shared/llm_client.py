@@ -68,7 +68,18 @@ class LLMClient:
                 kwargs["tools"] = tools
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
-            return self.client.chat.completions.create(**kwargs)
+            if thinking:
+                # Push OpenAI reasoning models toward best-quality reasoning.
+                kwargs["reasoning_effort"] = os.environ.get("ASSISTANT_OPENAI_REASONING_EFFORT", "high")
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                # Backward-compat fallback if an endpoint/model rejects reasoning_effort.
+                if "reasoning_effort" in kwargs:
+                    fallback = dict(kwargs)
+                    fallback.pop("reasoning_effort", None)
+                    return self.client.chat.completions.create(**fallback)
+                raise exc
 
         if self.provider == "anthropic":
             # Anthropic expects system prompt separate from messages, and uses
@@ -162,7 +173,8 @@ class LLMClient:
                 kwargs["system"] = system_content
             if thinking:
                 # Extended thinking requires temperature=1 (Anthropic hard requirement)
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+                budget = int(os.environ.get("ASSISTANT_ANTHROPIC_THINKING_BUDGET", "12000"))
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, min(32000, budget))}
                 kwargs["temperature"] = 1
             elif temperature is not None:
                 kwargs["temperature"] = temperature

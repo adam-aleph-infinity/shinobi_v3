@@ -35,6 +35,7 @@ _LEGACY_SESSION_DIR = settings.ui_data_dir / "_assistant_sessions"
 _TEXT_EXTS = {".json", ".txt", ".md", ".log", ".csv", ".srt"}
 
 _DEFAULT_MODEL = os.environ.get("ASSISTANT_MODEL", "gpt-5.4")
+_DEFAULT_MAX_TOKENS = int(os.environ.get("ASSISTANT_MAX_TOKENS", "16000"))
 _MAX_MODEL_MESSAGES = 80
 _MAX_TOOL_ROUNDS = 12
 _MAX_SUB_AGENT_TOOL_ROUNDS = 4
@@ -57,21 +58,27 @@ _CORRECTION_HINTS = (
 _DEFAULT_MODEL_CATALOG = [
     {
         "id": "gpt-5.4",
-        "label": "OpenAI Codex (gpt-5.4)",
+        "label": "OpenAI Best (gpt-5.4)",
         "provider": "openai",
-        "description": "High-quality planning, coding-style reasoning, and tool orchestration.",
+        "description": "Max-quality OpenAI reasoning/tool orchestration.",
     },
     {
-        "id": "gpt-5.3-codex",
-        "label": "OpenAI Codex Fast (gpt-5.3-codex)",
-        "provider": "openai",
-        "description": "Faster Codex-style reasoning for iterative workflow edits.",
+        "id": "claude-opus-4-1-20250805",
+        "label": "Anthropic Best (Claude Opus 4.1)",
+        "provider": "anthropic",
+        "description": "Max-quality Anthropic reasoning/tool orchestration.",
     },
     {
         "id": "claude-sonnet-4-20250514",
-        "label": "Claude Code (Sonnet 4)",
+        "label": "Claude Sonnet 4 (fallback)",
         "provider": "anthropic",
-        "description": "Strong long-context planning and correction handling.",
+        "description": "Fast fallback Anthropic model if Opus is unavailable.",
+    },
+    {
+        "id": "gpt-5.3-codex",
+        "label": "OpenAI Codex Fast (fallback)",
+        "provider": "openai",
+        "description": "Faster fallback OpenAI model for iteration.",
     },
 ]
 
@@ -962,7 +969,8 @@ def _run_sub_agent(
             model=chosen_model,
             messages=[{"role": "system", "content": sub_system}] + model_messages,
             temperature=0,
-            max_tokens=3500,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            thinking=True,
         )
         text = _message_content_text(resp.choices[0].message).strip()
     else:
@@ -971,7 +979,8 @@ def _run_sub_agent(
                 model=chosen_model,
                 messages=[{"role": "system", "content": sub_system}] + model_messages,
                 temperature=0,
-                max_tokens=3500,
+                max_tokens=_DEFAULT_MAX_TOKENS,
+                thinking=True,
                 tools=sub_tools,
                 tool_choice="auto",
             )
@@ -1471,7 +1480,7 @@ async def chat_session(session_id: str, req: ChatRequest):
 
         try:
             yield _sse("execution_session", {"execution_session_id": execution_session_id})
-            yield _sse("progress", {"msg": f"Thinking with {model} ({provider})…"})
+            yield _sse("progress", {"msg": f"Thinking with {model} ({provider}) at max effort…"})
             if distill_boot.get("distilled", 0):
                 yield _sse(
                     "progress",
@@ -1490,7 +1499,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                     model=model,
                     messages=messages,
                     temperature=0,
-                    max_tokens=6000,
+                    max_tokens=_DEFAULT_MAX_TOKENS,
+                    thinking=True,
                 )
                 text = _message_content_text(resp.choices[0].message).strip()
                 if not text:
@@ -1525,7 +1535,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                     model=model,
                     messages=messages,
                     temperature=0,
-                    max_tokens=8000,
+                    max_tokens=_DEFAULT_MAX_TOKENS,
+                    thinking=True,
                     tools=tools,
                     tool_choice="auto",
                 )
