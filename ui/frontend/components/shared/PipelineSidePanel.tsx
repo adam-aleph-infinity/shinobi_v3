@@ -1293,12 +1293,23 @@ export function PipelineSidePanel({
           {/* Cached/Run toggle (per_pair only) */}
           {!isPerCall && (
             <button
-              onClick={() => setCachedView(v => !v)}
-              disabled={!cachedResults?.some(cr => cr.result)}
+              onClick={() => {
+                // "Cached" opens cached-results view.
+                // "Run" from cached view executes cache-first mode:
+                // reuse cached steps and run only missing ones.
+                if (!cachedView) {
+                  setCachedView(true);
+                  return;
+                }
+                void run(false);
+              }}
+              disabled={!cachedResults?.some(cr => cr.result) || anyBusy}
               title={
                 !cachedResults?.some(cr => cr.result)
                   ? "No cached results yet for this context"
-                  : (cachedView ? "Switch to current run view" : "Switch to cached results view")
+                  : (cachedView
+                    ? "Run using cached artifacts and compute only missing steps"
+                    : "Switch to cached results view")
               }
               className={`flex items-center gap-1.5 px-2.5 py-2 border disabled:opacity-50 text-[11px] font-medium rounded-lg transition-colors shrink-0 ${
                 cachedView
