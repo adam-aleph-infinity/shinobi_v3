@@ -14,7 +14,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import text as _sql_text, inspect as _sa_inspect
+from sqlalchemy import text as _sql_text, inspect as _sa_inspect, func as _sql_func
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -1740,8 +1740,8 @@ def get_pipeline_results(
     try:
         run_stmt = select(PR).where(
             PR.pipeline_id == pipeline_id,
-            PR.sales_agent == sales_agent,
-            PR.customer == customer,
+            _sql_func.lower(PR.sales_agent) == (sales_agent or "").lower(),
+            _sql_func.lower(PR.customer) == (customer or "").lower(),
         )
         # For pipeline_run fallback, respect explicit call_id including empty string.
         if call_id is not None:
@@ -1782,8 +1782,8 @@ def get_pipeline_results(
                 "SELECT id, content, agent_name, created_at "
                 "FROM agent_result "
                 "WHERE agent_id = :agent_id "
-                "AND sales_agent = :sales_agent "
-                "AND customer = :customer "
+                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                "AND LOWER(customer) = LOWER(:customer) "
                 "AND pipeline_id = :pipeline_id "
                 "AND pipeline_step_index = :step_idx "
             )
@@ -1808,8 +1808,8 @@ def get_pipeline_results(
                 "SELECT id, content, agent_name, created_at "
                 "FROM agent_result "
                 "WHERE agent_id = :agent_id "
-                "AND sales_agent = :sales_agent "
-                "AND customer = :customer "
+                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                "AND LOWER(customer) = LOWER(:customer) "
             )
             params2 = {
                 "agent_id": agent_id,
@@ -2675,8 +2675,8 @@ async def run_pipeline(
             """Return (cached_row, used_resume_partial_fallback)."""
             _base = select(AR).where(
                 AR.agent_id == _agent_id,
-                AR.sales_agent == req.sales_agent,
-                AR.customer == req.customer,
+                _sql_func.lower(AR.sales_agent) == (req.sales_agent or "").lower(),
+                _sql_func.lower(AR.customer) == (req.customer or "").lower(),
             )
             if _agent_result_has_pipeline_cache:
                 _base = _base.where(
@@ -2703,6 +2703,28 @@ async def run_pipeline(
                 if _fallback:
                     return _fallback, True
             return None, False
+
+        def _lookup_step_cache_resume_only(
+            _sess: Session,
+            _agent_id: str,
+            _step_idx: int,
+        ) -> Optional[Any]:
+            """Best-effort step cache lookup for resume mode before input-resolution."""
+            _base = select(AR).where(
+                AR.agent_id == _agent_id,
+                _sql_func.lower(AR.sales_agent) == (req.sales_agent or "").lower(),
+                _sql_func.lower(AR.customer) == (req.customer or "").lower(),
+            )
+            if _agent_result_has_pipeline_cache:
+                _base = _base.where(
+                    AR.pipeline_id == pipeline_id,
+                    AR.pipeline_step_index == _step_idx,
+                )
+            if req.call_id:
+                _base = _base.where(AR.call_id == req.call_id)
+            else:
+                _base = _base.where(AR.call_id == "")
+            return _sess.exec(_base.order_by(AR.created_at.desc())).first()
 
         def _has_call_transcript(_call_id: str) -> bool:
             if not _call_id:
@@ -3300,6 +3322,51 @@ async def run_pipeline(
                         for inp in agent_def.get("inputs", [])
                     ]
 
+                    # Resume-partial fast path: reuse latest step cache immediately,
+                    # before potentially expensive input resolution/fingerprint work.
+                    if req.resume_partial and (not req.force) and step_idx not in req.force_step_indices:
+                        _resume_cached = None
+                        try:
+                            with Session(_db_engine) as _s:
+                                _resume_cached = _lookup_step_cache_resume_only(_s, agent_id, step_idx)
+                        except Exception as _cache_exc:
+                            log_buffer.emit(
+                                f"[PIPELINE] ⚠ Resume cache lookup failed for step {step_idx + 1}: {_cache_exc}"
+                            )
+                        if _resume_cached:
+                            prev_content = _resume_cached.content
+                            _persist_structured_artifact(
+                                _step_idx=step_idx,
+                                _content=_resume_cached.content,
+                                _model=model,
+                                _agent_name=agent_name,
+                                _input_fingerprint="",
+                            )
+                            run_steps[step_idx].update({
+                                "state":            "completed",
+                                "end_time":         datetime.utcnow().isoformat(),
+                                "content":          _resume_cached.content,
+                                "input_ready":      True,
+                                "cache_mode":       "resume_partial",
+                                "cached_locations": [{
+                                    "type": "agent_result",
+                                    "id": _resume_cached.id,
+                                    "created_at": _resume_cached.created_at.isoformat() if _resume_cached.created_at else None,
+                                }],
+                            })
+                            save_steps()
+                            log_buffer.emit(
+                                f"[PIPELINE] ↩ Step {step_idx + 1}/{len(steps)}: {agent_name} → cached (resume fast-path) · {cid_short}"
+                            )
+                            yield _sse("step_cached", {
+                                "step": step_idx,
+                                "agent_name": agent_name,
+                                "result_id": _resume_cached.id,
+                                "content": _resume_cached.content,
+                                "cache_mode": "resume_partial",
+                            })
+                            continue
+
                     # ── Resolve inputs ───────────────────────────────────────
                     temperature   = float(agent_def.get("temperature", 0.0))
                     system_prompt = agent_def.get("system_prompt", "")
@@ -3675,6 +3742,29 @@ async def run_pipeline(
                                     "call_id": req.call_id,
                                     "source_for_key": _source_for_key,
                                 }
+
+                                # Resume-partial fast path for parallel stages too.
+                                if req.resume_partial and (not req.force) and par_idx not in req.force_step_indices:
+                                    _resume_cached = None
+                                    try:
+                                        _resume_cached = _lookup_step_cache_resume_only(_par_db, _par_aid, par_idx)
+                                    except Exception as _cache_exc:
+                                        log_buffer.emit(
+                                            f"[PIPELINE] ⚠ Parallel resume cache lookup failed for step {par_idx + 1}: {_cache_exc}"
+                                        )
+                                    if _resume_cached:
+                                        return {
+                                            "step_idx": par_idx,
+                                            "status": "cached",
+                                            "content": _resume_cached.content,
+                                            "result_id": _resume_cached.id,
+                                            "cached_created_at": _resume_cached.created_at.isoformat() if _resume_cached.created_at else None,
+                                            "agent_name": _par_aname,
+                                            "model": _par_model,
+                                            "input_fingerprint": "",
+                                            "input_ready": True,
+                                            "cache_mode": "resume_partial",
+                                        }
 
                                 _par_resolved: dict[str, str] = {}
                                 for _inp in _par_adef.get("inputs", []):
