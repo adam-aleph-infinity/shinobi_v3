@@ -26,6 +26,7 @@ router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 _RUBRIC_DIR = settings.ui_data_dir / "_analytics_rubrics"
+_ARTIFACT_SCHEMA_DIR = settings.ui_data_dir / "_artifact_prompt_schemas"
 _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
@@ -711,6 +712,194 @@ def _derive_agent_prompt_rubric(
     return labels, method, model
 
 
+def _artifact_template_key(agent_id: str, artifact_sub_type: str) -> str:
+    aid = str(agent_id or "").strip()
+    sub = str(artifact_sub_type or "").strip().lower() or "output"
+    safe_sub = _re.sub(r"[^a-z0-9_\-]+", "_", sub)
+    return f"{aid}_{safe_sub}.json"
+
+
+def _load_cached_artifact_template(
+    agent_id: str,
+    artifact_sub_type: str,
+    prompt_hash: str,
+) -> Optional[dict[str, Any]]:
+    try:
+        path = _ARTIFACT_SCHEMA_DIR / _artifact_template_key(agent_id, artifact_sub_type)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if str(data.get("prompt_hash") or "") != str(prompt_hash or ""):
+            return None
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        return {
+            **payload,
+            "method": str(data.get("method") or payload.get("method") or "cache"),
+            "model": str(data.get("model") or payload.get("model") or ""),
+            "updated_at": str(data.get("updated_at") or payload.get("updated_at") or ""),
+        }
+    except Exception:
+        return None
+
+
+def _save_cached_artifact_template(
+    agent_id: str,
+    artifact_sub_type: str,
+    prompt_hash: str,
+    payload: dict[str, Any],
+    method: str,
+    model: str,
+) -> None:
+    try:
+        _ARTIFACT_SCHEMA_DIR.mkdir(parents=True, exist_ok=True)
+        path = _ARTIFACT_SCHEMA_DIR / _artifact_template_key(agent_id, artifact_sub_type)
+        path.write_text(
+            json.dumps(
+                {
+                    "agent_id": str(agent_id or ""),
+                    "artifact_sub_type": str(artifact_sub_type or ""),
+                    "prompt_hash": str(prompt_hash or ""),
+                    "method": str(method or ""),
+                    "model": str(model or ""),
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "payload": payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _infer_artifact_template_with_llm(
+    *,
+    agent_name: str,
+    agent_class: str,
+    artifact_sub_type: str,
+    system_prompt: str,
+    user_prompt: str,
+    db: Session,
+) -> tuple[dict[str, Any], str]:
+    from ui.backend.routers.universal_agents import _llm_call_with_files
+
+    model = os.environ.get("ARTIFACT_TEMPLATE_MODEL", "gpt-5.4")
+    sys = (
+        "You infer expected artifact output schema from agent prompts.\n"
+        "Return STRICT JSON only with keys:\n"
+        "schema_template (string markdown), taxonomy (string[]), fields (object[]).\n"
+        "Each field object: name (string), type (string), required (boolean), description (string).\n"
+        "No markdown fences. No commentary."
+    )
+    user = (
+        f"Agent Name: {agent_name}\n"
+        f"Agent Class: {agent_class}\n"
+        f"Artifact Sub Type: {artifact_sub_type}\n\n"
+        "SYSTEM PROMPT:\n"
+        f"{system_prompt}\n\n"
+        "USER PROMPT:\n"
+        f"{user_prompt}\n\n"
+        "Task:\n"
+        "1) Derive a concise expected output template from these prompts.\n"
+        "2) Extract taxonomy labels/sections the output should contain.\n"
+        "3) Infer structured fields where possible.\n"
+        "4) Keep taxonomy canonical and deduplicated.\n"
+        "5) If uncertain, provide best-effort placeholders."
+    )
+    raw, _ = _llm_call_with_files(sys, user, {}, {}, model, 0.0, db)
+    parsed = _extract_json_obj_from_text(raw)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("artifact template parse failed")
+    schema_template = str(parsed.get("schema_template") or "").strip()
+    if not schema_template:
+        raise RuntimeError("artifact template missing schema_template")
+    raw_tax = parsed.get("taxonomy")
+    taxonomy = [str(x or "").strip() for x in raw_tax] if isinstance(raw_tax, list) else []
+    taxonomy = [x for x in taxonomy if x]
+    raw_fields = parsed.get("fields")
+    fields: list[dict[str, Any]] = []
+    if isinstance(raw_fields, list):
+        for item in raw_fields:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            fields.append({
+                "name": name,
+                "type": str(item.get("type") or "string").strip() or "string",
+                "required": bool(item.get("required", False)),
+                "description": str(item.get("description") or "").strip(),
+            })
+    return {
+        "schema_template": schema_template,
+        "taxonomy": taxonomy,
+        "fields": fields,
+    }, model
+
+
+def _heuristic_artifact_template(
+    *,
+    artifact_sub_type: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> dict[str, Any]:
+    txt = f"{system_prompt or ''}\n\n{user_prompt or ''}"
+    headers = [
+        _normalise_metric_name(h)
+        for h in _re.findall(r"(?im)^\s*##\s+(.+?)\s*$", txt)
+    ]
+    headers = [h for h in headers if h]
+
+    taxonomy: list[str]
+    sub = str(artifact_sub_type or "").strip().lower()
+    if sub == "persona_score":
+        taxonomy = _heuristic_extract_score_sections_from_prompt(system_prompt, user_prompt)
+    elif sub == "notes_compliance":
+        taxonomy = _heuristic_extract_violation_types_from_prompt(system_prompt, user_prompt)
+    else:
+        taxonomy = _unique_metric_list(headers, kind="")
+
+    placeholders = [
+        _normalise_metric_name(p)
+        for p in _re.findall(r"\{([a-zA-Z0-9_]+)\}", txt)
+    ]
+    placeholders = [p for p in placeholders if p]
+
+    fields = [
+        {
+            "name": p,
+            "type": "string",
+            "required": True,
+            "description": f"Prompt placeholder: {p}",
+        }
+        for p in placeholders
+    ]
+
+    if taxonomy:
+        lines = ["# Expected Artifact Output", ""]
+        for label in taxonomy:
+            lines.append(f"## {label}")
+            lines.append("- <required content>")
+            lines.append("")
+        schema_template = "\n".join(lines).strip()
+    else:
+        schema_template = (
+            "# Expected Artifact Output\n\n"
+            "## Summary\n"
+            "- <required content>\n\n"
+            "## Details\n"
+            "- <required content>"
+        )
+
+    return {
+        "schema_template": schema_template,
+        "taxonomy": taxonomy,
+        "fields": fields,
+    }
+
+
 def _is_score_agent_def(agent_def: dict, sub_type: str) -> bool:
     st = str(sub_type or "").strip().lower()
     if st == "persona_score":
@@ -1148,6 +1337,131 @@ def create_pipeline(req: PipelineIn):
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return record
+
+
+@router.get("/artifact-template")
+def get_artifact_template(
+    agent_id: str = Query(...),
+    artifact_sub_type: str = Query(...),
+    db: Session = Depends(get_session),
+):
+    aid = str(agent_id or "").strip()
+    sub_type = str(artifact_sub_type or "").strip().lower()
+    if not aid:
+        raise HTTPException(400, "agent_id is required")
+    if not sub_type:
+        raise HTTPException(400, "artifact_sub_type is required")
+
+    from ui.backend.routers import universal_agents as _ua
+
+    agent_def = next((a for a in _ua._load_all() if str(a.get("id") or "") == aid), None)
+    if not agent_def:
+        raise HTTPException(404, f"Agent '{aid}' not found")
+
+    system_prompt = str(agent_def.get("system_prompt") or "")
+    user_prompt = str(agent_def.get("user_prompt") or "")
+    prompt_hash = _hash_text(
+        json.dumps(
+            {
+                "agent_id": aid,
+                "artifact_sub_type": sub_type,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+    cached = _load_cached_artifact_template(aid, sub_type, prompt_hash)
+    if cached:
+        return cached
+
+    payload = _heuristic_artifact_template(
+        artifact_sub_type=sub_type,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+    )
+    method = "heuristic"
+    model = ""
+    try:
+        llm_payload, llm_model = _infer_artifact_template_with_llm(
+            agent_name=str(agent_def.get("name") or aid),
+            agent_class=str(agent_def.get("agent_class") or ""),
+            artifact_sub_type=sub_type,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            db=db,
+        )
+        if isinstance(llm_payload, dict) and str(llm_payload.get("schema_template") or "").strip():
+            payload = llm_payload
+            method = "llm"
+            model = llm_model
+    except Exception:
+        pass
+
+    tax_kind = ""
+    if sub_type == "persona_score":
+        tax_kind = "score"
+    elif sub_type == "notes_compliance":
+        tax_kind = "violation"
+
+    raw_taxonomy = payload.get("taxonomy")
+    payload["taxonomy"] = _unique_metric_list(
+        [str(x or "").strip() for x in raw_taxonomy] if isinstance(raw_taxonomy, list) else [],
+        kind=tax_kind,
+    )
+
+    raw_fields = payload.get("fields")
+    clean_fields: list[dict[str, Any]] = []
+    if isinstance(raw_fields, list):
+        for f in raw_fields:
+            if not isinstance(f, dict):
+                continue
+            name = str(f.get("name") or "").strip()
+            if not name:
+                continue
+            clean_fields.append({
+                "name": name,
+                "type": str(f.get("type") or "string").strip() or "string",
+                "required": bool(f.get("required", False)),
+                "description": str(f.get("description") or "").strip(),
+            })
+    payload["fields"] = clean_fields
+
+    schema_template = str(payload.get("schema_template") or "").strip()
+    if not schema_template:
+        schema_template = "# Expected Artifact Output\n\n## Summary\n- <required content>"
+
+    response_payload = {
+        "agent_id": aid,
+        "agent_name": str(agent_def.get("name") or aid),
+        "artifact_sub_type": sub_type,
+        "schema_template": schema_template,
+        "taxonomy": payload.get("taxonomy") or [],
+        "fields": payload.get("fields") or [],
+    }
+
+    _save_cached_artifact_template(
+        agent_id=aid,
+        artifact_sub_type=sub_type,
+        prompt_hash=prompt_hash,
+        payload=response_payload,
+        method=method,
+        model=model,
+    )
+
+    reloaded = _load_cached_artifact_template(aid, sub_type, prompt_hash)
+    if reloaded:
+        return reloaded
+
+    return {
+        **response_payload,
+        "method": method,
+        "model": model,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
 
 
 @router.get("/{pipeline_id}")

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import {
-  ReactFlow, ReactFlowProvider, Background,
+  ReactFlow, ReactFlowProvider, Background, BackgroundVariant,
   useNodesState, useEdgesState, useReactFlow,
   addEdge,
   getBezierPath, EdgeLabelRenderer,
@@ -17,6 +17,7 @@ import {
   Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
   Mic2, Layers, BookOpen, PenLine, FileText, Braces, AlignLeft,
   Plus, Trash2, ChevronRight, X, Download, Workflow, Copy,
+  Lock,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
@@ -232,6 +233,18 @@ interface PipelineNodeData extends Record<string, unknown> {
   inputSource: string;
 }
 
+interface ArtifactPromptTemplate {
+  agent_id: string;
+  agent_name: string;
+  artifact_sub_type: string;
+  method: string;
+  model: string;
+  schema_template: string;
+  taxonomy: string[];
+  fields: Array<{ name: string; type: string; required: boolean; description: string }>;
+  updated_at: string;
+}
+
 // ── Layout constants & helpers ────────────────────────────────────────────────
 
 const NODE_W         = 200;   // node width
@@ -257,6 +270,12 @@ const CENTERED_X: readonly (readonly number[])[] = [
   [140, 380, 620],      // 3 nodes — evenly spaced around 480
   [20, 260, 500, 740],  // 4 nodes — full X_SLOTS
 ];
+
+const STAGE_LABELS: Record<NodeKind, string> = {
+  input: "Inputs",
+  processing: "Processing",
+  output: "Artifacts",
+};
 
 // Maximum total stages: input + 3 × (processing + output)
 const MAX_TOTAL_STAGES = 7;
@@ -348,9 +367,6 @@ function SleeveNode({ data }: { data: Record<string, unknown> }) {
 }
 
 function makeSleeves(stages: NodeKind[]): Node[] {
-  const labelMap: Record<NodeKind, string> = {
-    input: "Inputs", processing: "Processing", output: "Artifacts",
-  };
   return stages.map((kind, i) => ({
     id:         `sleeve_${i}`,
     type:       "sleeve",
@@ -362,7 +378,7 @@ function makeSleeves(stages: NodeKind[]): Node[] {
     width:      LANE_WIDTH,
     height:     LANE_VISIBLE_H,
     style:      { background: "transparent", padding: 0, border: "none", boxShadow: "none", pointerEvents: "none" },
-    data:       { step: i + 1, label: labelMap[kind], kind } satisfies SleeveData,
+    data:       { step: i + 1, label: STAGE_LABELS[kind], kind } satisfies SleeveData,
   }));
 }
 
@@ -451,7 +467,64 @@ function NodeCard({
   );
 }
 
-function InputNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
+function EditableNodeLabel({
+  value,
+  onCommit,
+}: {
+  value: string;
+  onCommit: (next: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+
+  const commit = () => {
+    const next = (draft || "").trim();
+    setEditing(false);
+    if (next && next !== value) onCommit(next);
+    if (!next) setDraft(value);
+  };
+
+  if (editing) {
+    return (
+      <input
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onClick={e => e.stopPropagation()}
+        onDoubleClick={e => e.stopPropagation()}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") {
+            setDraft(value);
+            setEditing(false);
+          }
+        }}
+        autoFocus
+        className="nodrag w-full bg-white/10 border border-white/20 rounded px-1.5 py-0.5 text-sm font-bold text-white outline-none"
+      />
+    );
+  }
+
+  return (
+    <span
+      className="truncate cursor-text"
+      title="Double-click to rename"
+      onDoubleClick={e => {
+        e.stopPropagation();
+        setEditing(true);
+      }}
+    >
+      {value}
+    </span>
+  );
+}
+
+function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData; selected?: boolean }) {
+  const { setNodes } = useReactFlow();
   const m   = getMeta("input", data.subType);
   const src = INPUT_SOURCES.find(s => s.value === (data.inputSource as string)) ?? null;
   const SrcIcon = src?.icon ?? null;
@@ -459,7 +532,14 @@ function InputNode({ data, selected }: { data: PipelineNodeData; selected?: bool
     <NodeCard meta={m} selected={!!selected} kind="input">
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{SrcIcon ? <SrcIcon className="w-4 h-4" /> : m.icon}</span>
-        <span className="text-sm font-bold text-white truncate">{data.label}</span>
+        <EditableNodeLabel
+          value={String(data.label || "Input")}
+          onCommit={(next) => setNodes(ns => ns.map(n =>
+            n.id === id
+              ? { ...n, data: { ...(n.data as PipelineNodeData), label: next } }
+              : n
+          ))}
+        />
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide`}>
@@ -471,7 +551,8 @@ function InputNode({ data, selected }: { data: PipelineNodeData; selected?: bool
   );
 }
 
-function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
+function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNodeData; selected?: boolean }) {
+  const { setNodes } = useReactFlow();
   const m   = getMeta("processing", data.subType);
   const cls = (data.agentClass as string) ?? "";
   const cm  = classMeta(cls);
@@ -484,9 +565,21 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
         <span className="text-white/90 shrink-0">
           {hasAgent ? <Icon className="w-4 h-4" /> : m.icon}
         </span>
-        <span className="text-sm font-bold text-white truncate">
-          {hasAgent ? (data.agentName as string) : data.label}
-        </span>
+        <EditableNodeLabel
+          value={String(hasAgent ? (data.agentName as string) : data.label || "Agent")}
+          onCommit={(next) => setNodes(ns => ns.map(n =>
+            n.id === id
+              ? {
+                  ...n,
+                  data: {
+                    ...(n.data as PipelineNodeData),
+                    label: next,
+                    ...(hasAgent ? { agentName: next } : {}),
+                  },
+                }
+              : n
+          ))}
+        />
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         {hasAgent ? (
@@ -502,14 +595,22 @@ function ProcessingNode({ data, selected }: { data: PipelineNodeData; selected?:
   );
 }
 
-function OutputNode({ data, selected }: { data: PipelineNodeData; selected?: boolean }) {
+function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData; selected?: boolean }) {
+  const { setNodes } = useReactFlow();
   const m = getMeta("output", data.subType);
   return (
     <NodeCard meta={m} selected={!!selected} kind="output">
       <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
-        <span className="text-sm font-bold text-white truncate">{data.label}</span>
+        <EditableNodeLabel
+          value={String(data.label || "Output")}
+          onCommit={(next) => setNodes(ns => ns.map(n =>
+            n.id === id
+              ? { ...n, data: { ...(n.data as PipelineNodeData), label: next } }
+              : n
+          ))}
+        />
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl">
         {(ARTIFACT_META as Record<string, Meta>)[data.subType as string] ? (
@@ -582,6 +683,57 @@ const NODE_TYPES: NodeTypes = {
   output:     OutputNode     as NodeTypes[string],
   sleeve:     SleeveNode     as NodeTypes[string],
 };
+
+function SwimbarBackdrop({
+  stages,
+  viewport,
+}: {
+  stages: NodeKind[];
+  viewport: { x: number; y: number; zoom: number };
+}) {
+  const z = viewport.zoom || 1;
+  return (
+    <div className="absolute inset-0 pointer-events-none z-0">
+      {stages.map((kind, i) => {
+        const top = laneY(i) * z + viewport.y;
+        const h = LANE_VISIBLE_H * z;
+        return (
+          <div
+            key={`swimbar_${i}`}
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              top,
+              height: h,
+              borderTop: "1px solid #1f2937",
+              background:
+                "linear-gradient(90deg, rgba(55,65,81,0.07) 0%, rgba(17,24,39,0.0) 18%)",
+            }}
+          >
+            <span
+              style={{
+                position: "absolute",
+                left: 12,
+                top: "50%",
+                transform: "translateY(-50%)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                color: "#374151",
+                userSelect: "none",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {STAGE_LABELS[kind]}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 // ── Palette groups ────────────────────────────────────────────────────────────
 
@@ -724,6 +876,7 @@ function PipelineCanvas() {
   const [agentSaved,    setAgentSaved]    = useState(false);
   const [agentDeleting, setAgentDeleting] = useState(false);
   const [showModel,     setShowModel]     = useState(false);
+  const [canvasViewport, setCanvasViewport] = useState({ x: 0, y: 0, zoom: 1 });
 
   const normalizeFolder = (name?: string | null) => (name ?? "").trim();
   const pipelineFolders = useMemo(() => {
@@ -768,6 +921,7 @@ function PipelineCanvas() {
       const zoom   = height / totalH;
       const x      = width / 2 - LANE_CENTER_X * zoom;
       const y      = 8 - Y_INIT * zoom;
+      setCanvasViewport({ x, y, zoom });
       setViewport({ x, y, zoom }, { duration: 200 });
     };
     update();
@@ -777,35 +931,32 @@ function PipelineCanvas() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stages.length, setViewport]);
 
-  // Combine sleeve backgrounds with real nodes for rendering
-  const allNodes = useMemo(() => [...makeSleeves(stages), ...nodes], [stages, nodes]);
+  // Render only actual flow nodes; swimbars are drawn as a non-interactive backdrop.
+  const allNodes = useMemo(() => [...nodes], [nodes]);
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
-    const processed = changes
-      .filter(c => !(c.type === "remove" && c.id.startsWith("sleeve_")))
-      .map(c => {
-        if (c.type === "position" && c.position && !c.id.startsWith("sleeve_")) {
-          const node = nodesRef.current.find(n => n.id === c.id);
-          if (node && node.type === "input") {
-            const snapY = laneY(0) + SLEEVE_INNER;
-            return {
-              ...c,
-              position:         { x: c.position.x, y: snapY },
-              positionAbsolute: c.positionAbsolute
-                ? { x: c.positionAbsolute.x, y: snapY }
-                : undefined,
-            };
-          }
+    const processed = changes.map(c => {
+      if (c.type === "position" && c.position) {
+        const node = nodesRef.current.find(n => n.id === c.id);
+        if (node && node.type === "input") {
+          const snapY = laneY(0) + SLEEVE_INNER;
+          return {
+            ...c,
+            position:         { x: c.position.x, y: snapY },
+            positionAbsolute: c.positionAbsolute
+              ? { x: c.positionAbsolute.x, y: snapY }
+              : undefined,
+          };
         }
-        return c;
-      });
+      }
+      return c;
+    });
     onNodesChange(processed as NodeChange[]);
   }, [onNodesChange]);
 
   // Snap processing/output nodes to the nearest same-type lane on drag end
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
-    if (String(node.id).startsWith("sleeve_")) return;
     const kind = node.type as NodeKind;
     if (kind === "input") {
       // Y is locked during drag; just snap X to nearest slot
@@ -844,7 +995,6 @@ function PipelineCanvas() {
   const isValidConnectionFn = useCallback((conn: Connection | Edge): boolean => {
     const src = String(conn.source ?? "");
     const tgt = String(conn.target ?? "");
-    if (src.startsWith("sleeve_") || tgt.startsWith("sleeve_")) return false;
     if (edgesRef.current.some(e => e.source === src && e.target === tgt)) return false;
     const sn = nodesRef.current.find(n => n.id === src);
     const tn = nodesRef.current.find(n => n.id === tgt);
@@ -1028,7 +1178,7 @@ function PipelineCanvas() {
   // ── Node interactions ─────────────────────────────────────────────────────
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    if (!String(node.id).startsWith("sleeve_")) setSelectedNodeId(node.id);
+    setSelectedNodeId(node.id);
   }, []);
 
   const onPaneClick = useCallback(() => setSelectedNodeId(null), []);
@@ -1556,6 +1706,34 @@ function PipelineCanvas() {
   const selData      = selectedNode ? (selectedNode.data as PipelineNodeData) : null;
   const selKind      = selectedNode?.type as NodeKind | undefined;
   const selMeta      = selData && selKind ? getMeta(selKind, selData.subType) : null;
+  const selectedOutputProducer = useMemo(() => {
+    if (!selectedNode || selectedNode.type !== "output") return null;
+    const incoming = edges.find(e => e.target === selectedNode.id);
+    if (!incoming) return null;
+    const src = nodes.find(n => n.id === incoming.source);
+    if (!src || src.type !== "processing") return null;
+    const d = src.data as PipelineNodeData;
+    return {
+      node_id: src.id,
+      agent_id: String(d.agentId || ""),
+      agent_name: String(d.agentName || d.label || "Agent"),
+    };
+  }, [selectedNode, edges, nodes]);
+
+  const artifactTemplateUrl = useMemo(() => {
+    if (selKind !== "output" || !selData?.subType) return null;
+    if (!selectedOutputProducer?.agent_id) return null;
+    const qp = new URLSearchParams({
+      agent_id: selectedOutputProducer.agent_id,
+      artifact_sub_type: String(selData.subType),
+    });
+    return `/api/pipelines/artifact-template?${qp.toString()}`;
+  }, [selKind, selData?.subType, selectedOutputProducer?.agent_id]);
+
+  const {
+    data: artifactTemplate,
+    isLoading: artifactTemplateLoading,
+  } = useSWR<ArtifactPromptTemplate>(artifactTemplateUrl, fetcher, { revalidateOnFocus: false });
 
   // Sync agentDraft when selected node changes — always init so prompts are visible immediately
   useEffect(() => {
@@ -1839,6 +2017,22 @@ function PipelineCanvas() {
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors" />
         </div>
 
+        {selKind === "output" && (
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Locked Producer</label>
+            {selectedOutputProducer?.agent_id ? (
+              <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/60">
+                <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="text-xs text-white truncate">{selectedOutputProducer.agent_name}</span>
+              </div>
+            ) : (
+              <div className="px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/40 text-[11px] text-amber-300">
+                Connect this artifact to a processing node with an assigned agent to lock its template.
+              </div>
+            )}
+          </div>
+        )}
+
         {selKind === "input" && (
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Source Type</label>
@@ -1899,6 +2093,43 @@ function PipelineCanvas() {
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {selKind === "output" && (
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Expected Output Template (Auto)</label>
+            {!selectedOutputProducer?.agent_id && (
+              <p className="text-[11px] text-gray-600">
+                Template appears automatically once this artifact is linked to a producing agent.
+              </p>
+            )}
+            {selectedOutputProducer?.agent_id && artifactTemplateLoading && (
+              <div className="flex items-center gap-2 text-[11px] text-gray-500">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Generating schema from agent prompts…
+              </div>
+            )}
+            {selectedOutputProducer?.agent_id && !artifactTemplateLoading && artifactTemplate && (
+              <>
+                <textarea
+                  readOnly
+                  value={artifactTemplate.schema_template || ""}
+                  rows={8}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y"
+                />
+                <div className="flex flex-wrap gap-1">
+                  {(artifactTemplate.taxonomy || []).map((tag) => (
+                    <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded border border-indigo-700/50 bg-indigo-900/30 text-indigo-300">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-600">
+                  Locked to producer agent prompt: {selectedOutputProducer.agent_name}
+                </p>
+              </>
+            )}
           </div>
         )}
 
@@ -2128,6 +2359,7 @@ function PipelineCanvas() {
         {/* ── Canvas ────────────────────────────────────────────────────── */}
         <style>{HANDLE_CSS}</style>
         <div className="flex-1 relative" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
+          <SwimbarBackdrop stages={stages} viewport={canvasViewport} />
           <ReactFlow
             nodes={allNodes}
             edges={edges}
@@ -2147,9 +2379,9 @@ function PipelineCanvas() {
             zoomOnDoubleClick={false}
             deleteKeyCode="Delete"
             proOptions={{ hideAttribution: true }}
-            className="bg-gray-900"
+            className="bg-gray-900 relative z-10"
           >
-            <Background color="#374151" gap={24} size={1} />
+            <Background variant={BackgroundVariant.Dots} color="#4b5563" gap={22} size={1.25} />
           </ReactFlow>
 
           {nodes.length === 0 && (
