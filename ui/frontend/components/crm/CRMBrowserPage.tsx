@@ -70,11 +70,17 @@ type ArtifactMetricsIndex = {
   pipeline_id: string;
   pipeline_name: string;
   run_count: number;
+  run_from?: string;
+  run_to?: string;
   score_sections: string[];
   violation_types: string[];
   pairs: ArtifactPairMetric[];
   agents: ArtifactAgentMetric[];
 };
+
+type ScoreAggregateMode = "avg" | "sum";
+type PairViolationAggregateMode = "sum" | "avg_per_run";
+type AgentViolationAggregateMode = "sum" | "avg_per_run" | "avg_per_customer";
 
 const ARTIFACT_SORT_KEYS: SortKey[] = [
   "artifact_pair_avg_score",
@@ -137,6 +143,14 @@ export default function CRMBrowserPage({
   const [ftdAfter, _setFtdAfter]             = useState("");
   const [ftdBefore, _setFtdBefore]           = useState("");
   const [showArtifactOptions, _setShowArtifactOptions] = useState(false);
+  const [artifactRunFrom, _setArtifactRunFrom] = useState("");
+  const [artifactRunTo, _setArtifactRunTo] = useState("");
+  const [pairScoreAgg, _setPairScoreAgg] = useState<ScoreAggregateMode>("avg");
+  const [pairViolationAgg, _setPairViolationAgg] = useState<PairViolationAggregateMode>("sum");
+  const [agentScoreAgg, _setAgentScoreAgg] = useState<ScoreAggregateMode>("avg");
+  const [agentViolationAgg, _setAgentViolationAgg] = useState<AgentViolationAggregateMode>("sum");
+  const [expandScoreColumns, setExpandScoreColumns] = useState(false);
+  const [expandViolationColumns, setExpandViolationColumns] = useState(false);
   const [minArtifactAvgScore, _setMinArtifactAvgScore] = useState("");
   const [maxArtifactAvgScore, _setMaxArtifactAvgScore] = useState("");
   const [minArtifactTotalViolations, _setMinArtifactTotalViolations] = useState("");
@@ -151,6 +165,8 @@ export default function CRMBrowserPage({
   const [maxArtifactAgentTotalViolations, _setMaxArtifactAgentTotalViolations] = useState("");
   const ftdAfterRef  = useRef<HTMLInputElement>(null);
   const ftdBeforeRef = useRef<HTMLInputElement>(null);
+  const artifactRunFromRef = useRef<HTMLInputElement>(null);
+  const artifactRunToRef = useRef<HTMLInputElement>(null);
 
   function setAgentFilter(v: string)      { _setAgentFilter(v);      ssSave({ agentFilter: v }); }
   function setCustomerFilter(v: string)   { _setCustomerFilter(v);   ssSave({ customerFilter: v }); }
@@ -166,6 +182,12 @@ export default function CRMBrowserPage({
   function setFtdAfter(v: string)       { _setFtdAfter(v);       ssSave({ ftdAfter: v }); }
   function setFtdBefore(v: string)      { _setFtdBefore(v);      ssSave({ ftdBefore: v }); }
   function setShowArtifactOptions(v: boolean) { _setShowArtifactOptions(v); ssSave({ showArtifactOptions: v ? "1" : "0" }); }
+  function setArtifactRunFrom(v: string) { _setArtifactRunFrom(v); ssSave({ artifactRunFrom: v }); }
+  function setArtifactRunTo(v: string) { _setArtifactRunTo(v); ssSave({ artifactRunTo: v }); }
+  function setPairScoreAgg(v: ScoreAggregateMode) { _setPairScoreAgg(v); ssSave({ pairScoreAgg: v }); }
+  function setPairViolationAgg(v: PairViolationAggregateMode) { _setPairViolationAgg(v); ssSave({ pairViolationAgg: v }); }
+  function setAgentScoreAgg(v: ScoreAggregateMode) { _setAgentScoreAgg(v); ssSave({ agentScoreAgg: v }); }
+  function setAgentViolationAgg(v: AgentViolationAggregateMode) { _setAgentViolationAgg(v); ssSave({ agentViolationAgg: v }); }
   function setMinArtifactAvgScore(v: string) { _setMinArtifactAvgScore(v); ssSave({ minArtifactAvgScore: v }); }
   function setMaxArtifactAvgScore(v: string) { _setMaxArtifactAvgScore(v); ssSave({ maxArtifactAvgScore: v }); }
   function setMinArtifactTotalViolations(v: string) { _setMinArtifactTotalViolations(v); ssSave({ minArtifactTotalViolations: v }); }
@@ -200,6 +222,14 @@ export default function CRMBrowserPage({
     if (s.ftdAfter)       _setFtdAfter(s.ftdAfter);
     if (s.ftdBefore)      _setFtdBefore(s.ftdBefore);
     if (s.showArtifactOptions) _setShowArtifactOptions(s.showArtifactOptions === "1");
+    if (s.artifactRunFrom) _setArtifactRunFrom(s.artifactRunFrom);
+    if (s.artifactRunTo) _setArtifactRunTo(s.artifactRunTo);
+    if (s.pairScoreAgg === "avg" || s.pairScoreAgg === "sum") _setPairScoreAgg(s.pairScoreAgg);
+    if (s.pairViolationAgg === "sum" || s.pairViolationAgg === "avg_per_run") _setPairViolationAgg(s.pairViolationAgg);
+    if (s.agentScoreAgg === "avg" || s.agentScoreAgg === "sum") _setAgentScoreAgg(s.agentScoreAgg);
+    if (s.agentViolationAgg === "sum" || s.agentViolationAgg === "avg_per_run" || s.agentViolationAgg === "avg_per_customer") {
+      _setAgentViolationAgg(s.agentViolationAgg);
+    }
     if (s.minArtifactAvgScore) _setMinArtifactAvgScore(s.minArtifactAvgScore);
     if (s.maxArtifactAvgScore) _setMaxArtifactAvgScore(s.maxArtifactAvgScore);
     if (s.minArtifactTotalViolations) _setMinArtifactTotalViolations(s.minArtifactTotalViolations);
@@ -259,10 +289,16 @@ export default function CRMBrowserPage({
 
   const { data: txStats } = useSWR<TxStats>(`/final-transcript/tx-stats`, fetcher, { refreshInterval: 30000 });
 
+  const artifactMetricsPath = useMemo(() => {
+    if (!artifactsEnabled || !ctx.activePipelineId) return null;
+    const qp = new URLSearchParams({ limit: "10000" });
+    if (artifactRunFrom) qp.set("run_from", artifactRunFrom);
+    if (artifactRunTo) qp.set("run_to", artifactRunTo);
+    return `/pipelines/${encodeURIComponent(ctx.activePipelineId)}/metrics-index?${qp.toString()}`;
+  }, [artifactsEnabled, ctx.activePipelineId, artifactRunFrom, artifactRunTo]);
+
   const { data: artifactIndex } = useSWR<ArtifactMetricsIndex>(
-    artifactsEnabled && ctx.activePipelineId
-      ? `/pipelines/${encodeURIComponent(ctx.activePipelineId)}/metrics-index?limit=2000`
-      : null,
+    artifactMetricsPath,
     fetcher,
     { revalidateOnFocus: false },
   );
@@ -283,7 +319,37 @@ export default function CRMBrowserPage({
     return m;
   }, [artifactIndex?.agents]);
 
+  const scoreSections = artifactIndex?.score_sections ?? [];
+  const violationTypes = artifactIndex?.violation_types ?? [];
+
+  function pairScoreMetric(row?: ArtifactPairMetric): number | null {
+    if (!row || row.avg_score_all_sections == null) return null;
+    if (pairScoreAgg === "sum") return Number((row.avg_score_all_sections * Math.max(0, row.run_count || 0)).toFixed(2));
+    return row.avg_score_all_sections;
+  }
+
+  function pairViolationMetric(row?: ArtifactPairMetric): number | null {
+    if (!row) return null;
+    if (pairViolationAgg === "avg_per_run") return row.avg_violations_per_run;
+    return row.total_violations;
+  }
+
+  function agentScoreMetric(row?: ArtifactAgentMetric): number | null {
+    if (!row || row.avg_score_all_sections == null) return null;
+    if (agentScoreAgg === "sum") return Number((row.avg_score_all_sections * Math.max(0, row.run_count || 0)).toFixed(2));
+    return row.avg_score_all_sections;
+  }
+
+  function agentViolationMetric(row?: ArtifactAgentMetric): number | null {
+    if (!row) return null;
+    if (agentViolationAgg === "avg_per_run") return row.avg_violations_per_run;
+    if (agentViolationAgg === "avg_per_customer") return row.avg_violations_per_customer;
+    return row.total_violations;
+  }
+
   const hasArtifactFilter = artifactsEnabled && !!(
+    artifactRunFrom ||
+    artifactRunTo ||
     minArtifactAvgScore ||
     maxArtifactAvgScore ||
     minArtifactTotalViolations ||
@@ -301,13 +367,13 @@ export default function CRMBrowserPage({
   const hasFilter = !!(agentFilter || customerFilter || accountIdFilter || crmFilter || minCalls || minDuration || minTx ||
     minDeposits || maxDeposits || minAgentDep || maxAgentDep || ftdAfter || ftdBefore || hasArtifactFilter);
 
-  const showArtifactColumns = artifactsEnabled && hasArtifactFilter;
-  const showArtifactScoreSectionColumn = showArtifactColumns && artifactScoreSection !== "all";
-  const showArtifactViolationTypeColumn = showArtifactColumns && artifactViolationType !== "all";
+  const showArtifactColumns = artifactsEnabled && !!ctx.activePipelineId;
+  const showArtifactScoreColumns = showArtifactColumns && expandScoreColumns && scoreSections.length > 0;
+  const showArtifactViolationColumns = showArtifactColumns && expandViolationColumns && violationTypes.length > 0;
   const artifactColumnCount =
     (showArtifactColumns ? 4 : 0)
-    + (showArtifactScoreSectionColumn ? 1 : 0)
-    + (showArtifactViolationTypeColumn ? 1 : 0);
+    + (showArtifactScoreColumns ? scoreSections.length : 0)
+    + (showArtifactViolationColumns ? violationTypes.length : 0);
   const tableColSpan = 11 + artifactColumnCount;
 
   function clearFilters() {
@@ -315,6 +381,7 @@ export default function CRMBrowserPage({
     setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
     setMinAgentDep(""); setMaxAgentDep(""); setFtdAfter(""); setFtdBefore("");
     if (artifactsEnabled) {
+      setArtifactRunFrom(""); setArtifactRunTo("");
       setMinArtifactAvgScore(""); setMaxArtifactAvgScore("");
       setMinArtifactTotalViolations(""); setMaxArtifactTotalViolations("");
       setArtifactScoreSection("all"); setMinArtifactScoreSectionValue("");
@@ -349,22 +416,26 @@ export default function CRMBrowserPage({
       result = result.filter((p) => {
         const pairMetric = artifactPairMap.get(`${p.agent}::${p.customer}`);
         const agentMetric = artifactAgentMap.get(p.agent);
+        const pairScore = pairScoreMetric(pairMetric);
+        const pairViolations = pairViolationMetric(pairMetric);
+        const agentScore = agentScoreMetric(agentMetric);
+        const agentViolations = agentViolationMetric(agentMetric);
 
         if (minArtifactAvgScore) {
           const min = Number(minArtifactAvgScore) || 0;
-          if (pairMetric?.avg_score_all_sections == null || pairMetric.avg_score_all_sections < min) return false;
+          if (pairScore == null || pairScore < min) return false;
         }
         if (maxArtifactAvgScore) {
           const max = Number(maxArtifactAvgScore) || 0;
-          if (pairMetric?.avg_score_all_sections == null || pairMetric.avg_score_all_sections > max) return false;
+          if (pairScore == null || pairScore > max) return false;
         }
         if (minArtifactTotalViolations) {
           const min = Number(minArtifactTotalViolations) || 0;
-          if ((pairMetric?.total_violations ?? -1) < min) return false;
+          if ((pairViolations ?? -1) < min) return false;
         }
         if (maxArtifactTotalViolations) {
           const max = Number(maxArtifactTotalViolations) || 0;
-          if ((pairMetric?.total_violations ?? 0) > max) return false;
+          if ((pairViolations ?? 0) > max) return false;
         }
 
         if (artifactScoreSection !== "all") {
@@ -386,19 +457,19 @@ export default function CRMBrowserPage({
 
         if (minArtifactAgentAvgScore) {
           const min = Number(minArtifactAgentAvgScore) || 0;
-          if (agentMetric?.avg_score_all_sections == null || agentMetric.avg_score_all_sections < min) return false;
+          if (agentScore == null || agentScore < min) return false;
         }
         if (maxArtifactAgentAvgScore) {
           const max = Number(maxArtifactAgentAvgScore) || 0;
-          if (agentMetric?.avg_score_all_sections == null || agentMetric.avg_score_all_sections > max) return false;
+          if (agentScore == null || agentScore > max) return false;
         }
         if (minArtifactAgentTotalViolations) {
           const min = Number(minArtifactAgentTotalViolations) || 0;
-          if ((agentMetric?.total_violations ?? -1) < min) return false;
+          if ((agentViolations ?? -1) < min) return false;
         }
         if (maxArtifactAgentTotalViolations) {
           const max = Number(maxArtifactAgentTotalViolations) || 0;
-          if ((agentMetric?.total_violations ?? 0) > max) return false;
+          if ((agentViolations ?? 0) > max) return false;
         }
         return true;
       });
@@ -418,26 +489,26 @@ export default function CRMBrowserPage({
       });
     } else if (sortKey === "artifact_pair_avg_score") {
       result = [...result].sort((a, b) => {
-        const av = artifactPairMap.get(`${a.agent}::${a.customer}`)?.avg_score_all_sections ?? -1;
-        const bv = artifactPairMap.get(`${b.agent}::${b.customer}`)?.avg_score_all_sections ?? -1;
+        const av = pairScoreMetric(artifactPairMap.get(`${a.agent}::${a.customer}`)) ?? -1;
+        const bv = pairScoreMetric(artifactPairMap.get(`${b.agent}::${b.customer}`)) ?? -1;
         return sortDir === "asc" ? av - bv : bv - av;
       });
     } else if (sortKey === "artifact_pair_total_violations") {
       result = [...result].sort((a, b) => {
-        const av = artifactPairMap.get(`${a.agent}::${a.customer}`)?.total_violations ?? -1;
-        const bv = artifactPairMap.get(`${b.agent}::${b.customer}`)?.total_violations ?? -1;
+        const av = pairViolationMetric(artifactPairMap.get(`${a.agent}::${a.customer}`)) ?? -1;
+        const bv = pairViolationMetric(artifactPairMap.get(`${b.agent}::${b.customer}`)) ?? -1;
         return sortDir === "asc" ? av - bv : bv - av;
       });
     } else if (sortKey === "artifact_agent_avg_score") {
       result = [...result].sort((a, b) => {
-        const av = artifactAgentMap.get(a.agent)?.avg_score_all_sections ?? -1;
-        const bv = artifactAgentMap.get(b.agent)?.avg_score_all_sections ?? -1;
+        const av = agentScoreMetric(artifactAgentMap.get(a.agent)) ?? -1;
+        const bv = agentScoreMetric(artifactAgentMap.get(b.agent)) ?? -1;
         return sortDir === "asc" ? av - bv : bv - av;
       });
     } else if (sortKey === "artifact_agent_total_violations") {
       result = [...result].sort((a, b) => {
-        const av = artifactAgentMap.get(a.agent)?.total_violations ?? -1;
-        const bv = artifactAgentMap.get(b.agent)?.total_violations ?? -1;
+        const av = agentViolationMetric(artifactAgentMap.get(a.agent)) ?? -1;
+        const bv = agentViolationMetric(artifactAgentMap.get(b.agent)) ?? -1;
         return sortDir === "asc" ? av - bv : bv - av;
       });
     }
@@ -451,6 +522,7 @@ export default function CRMBrowserPage({
     artifactViolationType, minArtifactViolationTypeValue,
     minArtifactAgentAvgScore, maxArtifactAgentAvgScore,
     minArtifactAgentTotalViolations, maxArtifactAgentTotalViolations,
+    pairScoreAgg, pairViolationAgg, agentScoreAgg, agentViolationAgg,
   ]); // eslint-disable-line
 
   // ── Selection helpers ──────────────────────────────────────────────────────
@@ -683,28 +755,130 @@ export default function CRMBrowserPage({
 
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair avg score:</span>
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Run date:</span>
+                <div className="relative flex items-center">
+                  <input
+                    ref={artifactRunFromRef}
+                    type="date"
+                    value={artifactRunFrom}
+                    onChange={e => setArtifactRunFrom(e.target.value)}
+                    className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
+                  />
+                  <button
+                    onClick={() => artifactRunFromRef.current?.showPicker()}
+                    className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    <CalendarDays className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <span className="text-[10px] text-gray-700">–</span>
+                <div className="relative flex items-center">
+                  <input
+                    ref={artifactRunToRef}
+                    type="date"
+                    value={artifactRunTo}
+                    onChange={e => setArtifactRunTo(e.target.value)}
+                    className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
+                  />
+                  <button
+                    onClick={() => artifactRunToRef.current?.showPicker()}
+                    className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    <CalendarDays className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair agg:</span>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={pairScoreAgg}
+                  onChange={e => setPairScoreAgg(e.target.value as ScoreAggregateMode)}
+                >
+                  <option value="avg">Score avg</option>
+                  <option value="sum">Score sum</option>
+                </select>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={pairViolationAgg}
+                  onChange={e => setPairViolationAgg(e.target.value as PairViolationAggregateMode)}
+                >
+                  <option value="sum">Violations sum</option>
+                  <option value="avg_per_run">Violations avg/run</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent agg:</span>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={agentScoreAgg}
+                  onChange={e => setAgentScoreAgg(e.target.value as ScoreAggregateMode)}
+                >
+                  <option value="avg">Score avg</option>
+                  <option value="sum">Score sum</option>
+                </select>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={agentViolationAgg}
+                  onChange={e => setAgentViolationAgg(e.target.value as AgentViolationAggregateMode)}
+                >
+                  <option value="sum">Violations sum</option>
+                  <option value="avg_per_run">Violations avg/run</option>
+                  <option value="avg_per_customer">Violations avg/customer</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Columns:</span>
+                <button
+                  onClick={() => setExpandScoreColumns(v => !v)}
+                  className="px-2 py-1.5 text-xs rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+                >
+                  {expandScoreColumns ? "Hide" : "Show"} Score Sections
+                </button>
+                <button
+                  onClick={() => setExpandViolationColumns(v => !v)}
+                  className="px-2 py-1.5 text-xs rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+                >
+                  {expandViolationColumns ? "Hide" : "Show"} Compliance Violations
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                  Pair {pairScoreAgg === "sum" ? "score sum" : "score avg"}:
+                </span>
                 <FilterInput label="Min…" value={minArtifactAvgScore} onChange={setMinArtifactAvgScore} type="number" step="1" />
                 <span className="text-[10px] text-gray-700">–</span>
                 <FilterInput label="Max…" value={maxArtifactAvgScore} onChange={setMaxArtifactAvgScore} type="number" step="1" />
               </div>
 
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair violations:</span>
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                  Pair {pairViolationAgg === "avg_per_run" ? "viol avg/run" : "viol sum"}:
+                </span>
                 <FilterInput label="Min…" value={minArtifactTotalViolations} onChange={setMinArtifactTotalViolations} type="number" step="1" />
                 <span className="text-[10px] text-gray-700">–</span>
                 <FilterInput label="Max…" value={maxArtifactTotalViolations} onChange={setMaxArtifactTotalViolations} type="number" step="1" />
               </div>
 
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent avg score:</span>
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                  Agent {agentScoreAgg === "sum" ? "score sum" : "score avg"}:
+                </span>
                 <FilterInput label="Min…" value={minArtifactAgentAvgScore} onChange={setMinArtifactAgentAvgScore} type="number" step="1" />
                 <span className="text-[10px] text-gray-700">–</span>
                 <FilterInput label="Max…" value={maxArtifactAgentAvgScore} onChange={setMaxArtifactAgentAvgScore} type="number" step="1" />
               </div>
 
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent violations:</span>
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                  Agent {agentViolationAgg === "avg_per_run" ? "viol avg/run" : agentViolationAgg === "avg_per_customer" ? "viol avg/cust" : "viol sum"}:
+                </span>
                 <FilterInput label="Min…" value={minArtifactAgentTotalViolations} onChange={setMinArtifactAgentTotalViolations} type="number" step="1" />
                 <span className="text-[10px] text-gray-700">–</span>
                 <FilterInput label="Max…" value={maxArtifactAgentTotalViolations} onChange={setMaxArtifactAgentTotalViolations} type="number" step="1" />
@@ -720,7 +894,7 @@ export default function CRMBrowserPage({
                   onChange={e => setArtifactScoreSection(e.target.value)}
                 >
                   <option value="all">All</option>
-                  {(artifactIndex?.score_sections ?? []).map(s => (
+                  {scoreSections.map(s => (
                     <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
@@ -741,7 +915,7 @@ export default function CRMBrowserPage({
                   onChange={e => setArtifactViolationType(e.target.value)}
                 >
                   <option value="all">All</option>
-                  {(artifactIndex?.violation_types ?? []).map(v => (
+                  {violationTypes.map(v => (
                     <option key={v} value={v}>{v}</option>
                   ))}
                 </select>
@@ -782,10 +956,30 @@ export default function CRMBrowserPage({
       </div>
       )}
 
+      {showArtifactColumns && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-400 shrink-0">
+          <span className="text-gray-500">
+            Pipeline metrics: {artifactIndex?.pipeline_name || "selected pipeline"} · runs {artifactIndex?.run_count ?? 0}
+          </span>
+          <button
+            onClick={() => setExpandScoreColumns(v => !v)}
+            className="px-2 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+          >
+            {expandScoreColumns ? "Hide" : "Show"} Score Sections ({scoreSections.length})
+          </button>
+          <button
+            onClick={() => setExpandViolationColumns(v => !v)}
+            className="px-2 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+          >
+            {expandViolationColumns ? "Hide" : "Show"} Compliance Violations ({violationTypes.length})
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       <div className="flex-1 min-h-0 flex flex-col">
         <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex flex-col flex-1 min-h-0">
-          <div className="overflow-y-auto flex-1">
+          <div className="overflow-auto flex-1">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-gray-900 z-10">
                 <tr className="border-b border-gray-800">
@@ -808,20 +1002,28 @@ export default function CRMBrowserPage({
                   <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">FTD</th>
                   {showArtifactColumns && (
                     <>
-                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Art Avg Score</th>
-                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Art Violations</th>
-                      {showArtifactScoreSectionColumn && (
-                        <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
-                          {artifactScoreSection}
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
+                        Pair {pairScoreAgg === "sum" ? "Score Σ" : "Score Avg"}
+                      </th>
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
+                        Pair {pairViolationAgg === "avg_per_run" ? "Viol Avg/Run" : "Viol Σ"}
+                      </th>
+                      {showArtifactScoreColumns && scoreSections.map((sec) => (
+                        <th key={`score-col-${sec}`} className="px-3 py-3 text-right font-medium text-gray-400 text-xs whitespace-nowrap">
+                          Score · {sec}
                         </th>
-                      )}
-                      {showArtifactViolationTypeColumn && (
-                        <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
-                          {artifactViolationType}
+                      ))}
+                      {showArtifactViolationColumns && violationTypes.map((v) => (
+                        <th key={`viol-col-${v}`} className="px-3 py-3 text-right font-medium text-gray-400 text-xs whitespace-nowrap">
+                          Compliance · {v}
                         </th>
-                      )}
-                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Agent Avg Score</th>
-                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">Agent Violations</th>
+                      ))}
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
+                        Agent {agentScoreAgg === "sum" ? "Score Σ" : "Score Avg"}
+                      </th>
+                      <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
+                        Agent {agentViolationAgg === "avg_per_run" ? "Viol Avg/Run" : agentViolationAgg === "avg_per_customer" ? "Viol Avg/Cust" : "Viol Σ"}
+                      </th>
                     </>
                   )}
                   <th className="w-8 px-2 py-3" />
@@ -842,6 +1044,10 @@ export default function CRMBrowserPage({
                   const tx = txStats?.[slug];
                   const artifactPair = artifactPairMap.get(`${pair.agent}::${pair.customer}`);
                   const artifactAgent = artifactAgentMap.get(pair.agent);
+                  const pairScoreValue = pairScoreMetric(artifactPair);
+                  const pairViolationValue = pairViolationMetric(artifactPair);
+                  const agentScoreValue = agentScoreMetric(artifactAgent);
+                  const agentViolationValue = agentViolationMetric(artifactAgent);
                   return (
                     <tr
                       key={pair.id}
@@ -909,30 +1115,30 @@ export default function CRMBrowserPage({
                       {showArtifactColumns && (
                         <>
                           <td className="px-3 py-3 text-right text-indigo-300 font-mono text-xs">
-                            {artifactPair?.avg_score_all_sections != null ? artifactPair.avg_score_all_sections.toFixed(1) : "—"}
+                            {pairScoreValue != null ? pairScoreValue.toFixed(1) : "—"}
                           </td>
                           <td className="px-3 py-3 text-right text-red-300 font-mono text-xs">
-                            {artifactPair ? Math.round(artifactPair.total_violations || 0) : "—"}
+                            {pairViolationValue != null ? Number(pairViolationValue).toFixed(pairViolationAgg === "avg_per_run" ? 2 : 0) : "—"}
                           </td>
-                          {showArtifactScoreSectionColumn && (
-                            <td className="px-3 py-3 text-right text-emerald-300 font-mono text-xs">
-                              {artifactPair?.score_by_section?.[artifactScoreSection] != null
-                                ? Number(artifactPair.score_by_section[artifactScoreSection]).toFixed(1)
+                          {showArtifactScoreColumns && scoreSections.map((sec) => (
+                            <td key={`score-${pair.id}-${sec}`} className="px-3 py-3 text-right text-emerald-300 font-mono text-xs">
+                              {artifactPair?.score_by_section?.[sec] != null
+                                ? Number(artifactPair.score_by_section[sec]).toFixed(1)
                                 : "—"}
                             </td>
-                          )}
-                          {showArtifactViolationTypeColumn && (
-                            <td className="px-3 py-3 text-right text-amber-300 font-mono text-xs">
-                              {artifactPair?.violations_by_type?.[artifactViolationType] != null
-                                ? Math.round(Number(artifactPair.violations_by_type[artifactViolationType] || 0))
+                          ))}
+                          {showArtifactViolationColumns && violationTypes.map((v) => (
+                            <td key={`viol-${pair.id}-${v}`} className="px-3 py-3 text-right text-amber-300 font-mono text-xs">
+                              {artifactPair?.violations_by_type?.[v] != null
+                                ? Math.round(Number(artifactPair.violations_by_type[v] || 0))
                                 : "—"}
                             </td>
-                          )}
+                          ))}
                           <td className="px-3 py-3 text-right text-indigo-300 font-mono text-xs">
-                            {artifactAgent?.avg_score_all_sections != null ? artifactAgent.avg_score_all_sections.toFixed(1) : "—"}
+                            {agentScoreValue != null ? agentScoreValue.toFixed(1) : "—"}
                           </td>
                           <td className="px-3 py-3 text-right text-red-300 font-mono text-xs">
-                            {artifactAgent ? Math.round(artifactAgent.total_violations || 0) : "—"}
+                            {agentViolationValue != null ? Number(agentViolationValue).toFixed(agentViolationAgg === "sum" ? 0 : 2) : "—"}
                           </td>
                         </>
                       )}

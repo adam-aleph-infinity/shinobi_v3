@@ -8,7 +8,7 @@ import re as _re
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -2162,6 +2162,8 @@ def get_pipeline_metrics_index(
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: Optional[str] = Query(None),
+    run_from: str = Query(""),
+    run_to: str = Query(""),
     limit: int = Query(1200),
     db: Session = Depends(get_session),
 ):
@@ -2183,7 +2185,20 @@ def get_pipeline_metrics_index(
     score_catalog = rubric.get("score_sections") or []
     violation_catalog = rubric.get("violation_types") or []
 
-    safe_limit = max(100, min(limit, 3000))
+    safe_limit = max(100, min(limit, 20000))
+    from_dt = None
+    to_dt_exclusive = None
+    if run_from:
+        try:
+            from_dt = datetime.fromisoformat(str(run_from).strip()[:10] + "T00:00:00")
+        except Exception:
+            raise HTTPException(400, "Invalid run_from date. Use YYYY-MM-DD.")
+    if run_to:
+        try:
+            to_dt_exclusive = datetime.fromisoformat(str(run_to).strip()[:10] + "T00:00:00") + timedelta(days=1)
+        except Exception:
+            raise HTTPException(400, "Invalid run_to date. Use YYYY-MM-DD.")
+
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
     if sales_agent:
         stmt = stmt.where(PR.sales_agent == sales_agent)
@@ -2191,9 +2206,14 @@ def get_pipeline_metrics_index(
         stmt = stmt.where(PR.customer == customer)
     if call_id is not None:
         stmt = stmt.where(PR.call_id == call_id)
+    if from_dt is not None:
+        stmt = stmt.where(PR.started_at >= from_dt)
+    if to_dt_exclusive is not None:
+        stmt = stmt.where(PR.started_at < to_dt_exclusive)
     stmt = stmt.order_by(PR.started_at.desc()).limit(safe_limit)
     runs = db.exec(stmt).all()
-    runs = _dedupe_runs_by_source(runs)
+    # Deep-dive metrics should aggregate across all matching runs in the date range.
+    # Do not dedupe by source/call here.
 
     _rows_unused, _score_unused, _viol_unused, run_summaries = _collect_metrics_for_runs(
         runs=runs,
@@ -2352,6 +2372,8 @@ def get_pipeline_metrics_index(
         "pipeline_id": pipeline_id,
         "pipeline_name": runs[0].pipeline_name if runs else "",
         "run_count": len(runs),
+        "run_from": run_from or "",
+        "run_to": run_to or "",
         "score_sections": score_catalog,
         "violation_types": violation_catalog,
         "pairs": pairs_out,
