@@ -919,6 +919,42 @@ function PipelineCanvas() {
   const [agentDeleting, setAgentDeleting] = useState(false);
   const [showModel,     setShowModel]     = useState(false);
   const [canvasViewport, setCanvasViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const [propertiesPanelWidth, setPropertiesPanelWidth] = useState(320);
+  const [isResizingPropertiesPanel, setIsResizingPropertiesPanel] = useState(false);
+  const propertiesResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  function startPropertiesPanelResize(clientX: number) {
+    propertiesResizeRef.current = { startX: clientX, startWidth: propertiesPanelWidth };
+    setIsResizingPropertiesPanel(true);
+  }
+
+  useEffect(() => {
+    if (!isResizingPropertiesPanel) return;
+    const onMove = (e: MouseEvent) => {
+      const drag = propertiesResizeRef.current;
+      if (!drag) return;
+      const delta = drag.startX - e.clientX;
+      const draftWidth = drag.startWidth + delta;
+      const minWidth = 240;
+      const maxWidth = Math.max(minWidth, Math.min(760, window.innerWidth - 460));
+      const clamped = Math.max(minWidth, Math.min(maxWidth, draftWidth));
+      setPropertiesPanelWidth(clamped);
+    };
+    const onUp = () => {
+      propertiesResizeRef.current = null;
+      setIsResizingPropertiesPanel(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [isResizingPropertiesPanel]);
 
   const agentUsageByPipeline = useMemo(() => {
     const out: Record<string, { total: number; other: number }> = {};
@@ -2560,8 +2596,17 @@ function PipelineCanvas() {
           )}
         </div>
 
+        <div
+          onMouseDown={e => startPropertiesPanelResize(e.clientX)}
+          className="w-1.5 shrink-0 cursor-col-resize bg-gray-900 hover:bg-indigo-500/40 transition-colors"
+          title="Drag to resize properties panel"
+        />
+
         {/* ── Right properties panel ────────────────────────────────────── */}
-        <aside className={`shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col transition-all ${selKind === "processing" ? "w-80" : "w-60"}`}>
+        <aside
+          className="shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col transition-[width] duration-75"
+          style={{ width: `${propertiesPanelWidth}px` }}
+        >
           {selKind !== "processing" && (
             <div className="p-3 border-b border-gray-800 flex items-center justify-between">
               <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Properties</p>

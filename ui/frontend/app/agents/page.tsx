@@ -468,12 +468,8 @@ type PreviewState = { status: "idle" | "loading" | "ok" | "error"; chars: number
 
 function TestPanel({
   agent,
-  onToggleExpand,
-  isExpanded,
 }: {
   agent: UniversalAgent;
-  onToggleExpand: () => void;
-  isExpanded: boolean;
 }) {
   const {
     salesAgent: ctxSalesAgent,
@@ -724,16 +720,7 @@ function TestPanel({
   return (
     <div className="flex flex-col h-full border-l border-gray-800 bg-gray-950">
       <div className="px-3 py-2.5 border-b border-gray-800 shrink-0">
-        <div className="flex items-center justify-between">
-          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Quick Test</p>
-          <button
-            onClick={onToggleExpand}
-            className="p-1 text-gray-500 hover:text-indigo-300 transition-colors"
-            title={isExpanded ? "Restore split view" : "Expand quick test panel"}
-          >
-            {isExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-          </button>
-        </div>
+        <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Quick Test</p>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -1037,10 +1024,46 @@ export default function AgentsPage() {
   const allPipelines = pipelinesData ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(() => activeAgentId || null);
-  const [panelMode, setPanelMode] = useState<"split" | "editor" | "test">("split");
+  const [panelMode, setPanelMode] = useState<"split" | "editor">("split");
+  const [testPanelWidth, setTestPanelWidth] = useState(320);
+  const [isResizingTestPanel, setIsResizingTestPanel] = useState(false);
+  const testPanelResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [importing, setImporting]   = useState(false);
   const [importMsg, setImportMsg]   = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
+
+  function startTestPanelResize(clientX: number) {
+    testPanelResizeRef.current = { startX: clientX, startWidth: testPanelWidth };
+    setIsResizingTestPanel(true);
+  }
+
+  useEffect(() => {
+    if (!isResizingTestPanel) return;
+    const onMove = (e: MouseEvent) => {
+      const drag = testPanelResizeRef.current;
+      if (!drag) return;
+      const delta = drag.startX - e.clientX;
+      const draftWidth = drag.startWidth + delta;
+      const minWidth = 280;
+      const maxWidth = Math.max(minWidth, Math.min(760, window.innerWidth - 420));
+      const clamped = Math.max(minWidth, Math.min(maxWidth, draftWidth));
+      setTestPanelWidth(clamped);
+    };
+    const onUp = () => {
+      testPanelResizeRef.current = null;
+      setIsResizingTestPanel(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [isResizingTestPanel]);
 
   useEffect(() => {
     if (!activeAgentId) return;
@@ -1406,10 +1429,7 @@ export default function AgentsPage() {
       </aside>
 
       {/* ── Center: editor ───────────────────────────────────────── */}
-      <div className={cn(
-        "min-w-0 flex flex-col bg-gray-900 overflow-hidden",
-        panelMode === "test" ? "hidden" : "flex-1",
-      )}>
+      <div className="min-w-0 flex-1 flex flex-col bg-gray-900 overflow-hidden">
         {selected ? (
           <AgentEditor
             key={selected.id}
@@ -1433,18 +1453,24 @@ export default function AgentsPage() {
         )}
       </div>
 
+      {panelMode !== "editor" && (
+        <div
+          onMouseDown={e => startTestPanelResize(e.clientX)}
+          className="w-1.5 shrink-0 cursor-col-resize bg-gray-900 hover:bg-indigo-500/40 transition-colors"
+          title="Drag to resize quick test panel"
+        />
+      )}
+
       {/* ── Right: test panel ────────────────────────────────────── */}
       <div className={cn(
-        "overflow-hidden flex flex-col",
-        panelMode === "editor" ? "hidden" : (panelMode === "test" ? "flex-1 min-w-0" : "w-80 shrink-0"),
-      )}>
+        "overflow-hidden flex flex-col shrink-0",
+        panelMode === "editor" && "hidden",
+      )} style={panelMode === "editor" ? undefined : { width: `${testPanelWidth}px` }}>
         {selected
           ? (
             <TestPanel
               key={selected.id}
               agent={selected}
-              isExpanded={panelMode === "test"}
-              onToggleExpand={() => setPanelMode(prev => prev === "test" ? "split" : "test")}
             />
           )
           : (
