@@ -33,6 +33,7 @@ const GROUPS = [
   {
     label: "Analyze",
     items: [
+      { href: "/agent-deep-dive",  icon: BarChart3,  label: "Agent Deep Dive" },
       { href: "/agent-dashboard",  icon: BarChart3,  label: "Agent Dashboard" },
       { href: "/personas",         icon: FileText,   label: "Personas" },
       { href: "/comparison",       icon: BarChart3,  label: "Compare Personas" },

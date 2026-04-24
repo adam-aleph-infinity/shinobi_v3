@@ -245,6 +245,14 @@ def _normalise_metric_name(name: str) -> str:
     return " ".join(str(name or "").strip().split())
 
 
+def _is_summary_violation_metric(name: str) -> bool:
+    low = _normalise_metric_name(name).lower()
+    if not low:
+        return False
+    # Summary lines should not be counted as a violation type.
+    return low.startswith("total violations")
+
+
 def _canonical_score_taxonomy_label(name: str) -> str:
     n = _normalise_metric_name(name)
     if not n:
@@ -283,8 +291,6 @@ def _canonical_violation_taxonomy_label(name: str) -> str:
         "offer" in slug or "introduction" in slug or "introduced" in slug
     ):
         return "Multi-Platform Offer Missing"
-    if "totalviolationsallprocedures" in slug:
-        return "Total Violations (All Procedures)"
     return n
 
 
@@ -399,7 +405,7 @@ def _parse_violations_from_text(content: str) -> dict[str, int]:
             # Allow plain "Total Violations (All Procedures): X"
             m2 = _re.match(r"^total violations.*?:\s*(\d+)\s*$", low)
             if m2:
-                summary_counts["Total Violations (All Procedures)"] = int(m2.group(1))
+                # This is a summary row, not a violation type metric.
                 continue
 
         # Track the current procedure title preceding status lines.
@@ -415,12 +421,15 @@ def _parse_violations_from_text(content: str) -> dict[str, int]:
             line_counts[key] = line_counts.get(key, 0) + 1
 
     if summary_counts:
+        for k in list(summary_counts.keys()):
+            if _is_summary_violation_metric(k):
+                summary_counts.pop(k, None)
         for k, v in line_counts.items():
             if k not in summary_counts:
                 summary_counts[k] = v
         return summary_counts
 
-    return line_counts
+    return {k: v for k, v in line_counts.items() if not _is_summary_violation_metric(k)}
 
 
 def _unique_metric_list(items: list[str], kind: str = "") -> list[str]:
@@ -429,6 +438,8 @@ def _unique_metric_list(items: list[str], kind: str = "") -> list[str]:
     for raw in items:
         key = _canonical_taxonomy_label(kind, raw)
         if not key:
+            continue
+        if str(kind).strip().lower() == "violation" and _is_summary_violation_metric(key):
             continue
         low = key.lower()
         if low in seen:
@@ -893,6 +904,8 @@ def _collect_metrics_for_runs(
                     violations = _parse_violations_from_text(content)
 
             for proc, cnt in violations.items():
+                if _is_summary_violation_metric(proc):
+                    continue
                 n = int(cnt or 0)
                 canonical_proc = _canonical_metric_name(proc, violation_lookup, kind="violation")
                 violation_totals[canonical_proc] = violation_totals.get(canonical_proc, 0) + n
@@ -938,6 +951,69 @@ def _collect_metrics_for_runs(
         })
 
     return parsed_rows, score_values, violation_totals, run_summaries
+
+
+def _run_dedupe_source_key(run: Any) -> str:
+    call_id = str(getattr(run, "call_id", "") or "").strip()
+    low_call_id = call_id.lower()
+    if call_id and low_call_id not in {"pair", "merged", "all", "none", "null"}:
+        source = f"call:{low_call_id}"
+    else:
+        source = ""
+        try:
+            steps = json.loads(getattr(run, "steps_json", "") or "[]")
+            if not isinstance(steps, list):
+                steps = []
+        except Exception:
+            steps = []
+
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            fp = str(step.get("input_fingerprint") or "").strip().lower()
+            if fp:
+                source = f"fingerprint:{fp}"
+                break
+
+        if not source:
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                srcs = step.get("input_sources")
+                if not isinstance(srcs, list):
+                    continue
+                parts: list[str] = []
+                for src in srcs:
+                    if not isinstance(src, dict):
+                        continue
+                    k = str(src.get("key") or "").strip().lower()
+                    v = str(src.get("source") or "").strip().lower()
+                    if k or v:
+                        parts.append(f"{k}={v}")
+                if parts:
+                    source = "sources:" + "|".join(sorted(parts))
+                    break
+
+    if not source:
+        source = f"run:{str(getattr(run, 'id', '') or '').lower()}"
+
+    sa = str(getattr(run, "sales_agent", "") or "").strip().lower()
+    cu = str(getattr(run, "customer", "") or "").strip().lower()
+    return f"{sa}::{cu}::{source}"
+
+
+def _dedupe_runs_by_source(runs: list[Any]) -> list[Any]:
+    """Keep the newest run per pair+call-source. Input runs are already newest-first."""
+    out: list[Any] = []
+    seen: set[str] = set()
+    for run in runs:
+        key = _run_dedupe_source_key(run)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(run)
+    return out
+
 
 def _load_all() -> list[dict]:
     _DIR.mkdir(parents=True, exist_ok=True)
@@ -1432,8 +1508,10 @@ def get_pipeline_analytics(
     stmt = stmt.order_by(PR.started_at.desc()).limit(safe_limit)
     rows = db.exec(stmt).all()
 
+    scoped_rows = _dedupe_runs_by_source(rows) if not run_id else rows
+
     run_items: list[dict] = []
-    for r in rows:
+    for r in scoped_rows:
         run_items.append({
             "id": r.id,
             "pipeline_id": r.pipeline_id,
@@ -1446,7 +1524,7 @@ def get_pipeline_analytics(
             "status": r.status,
         })
 
-    selected_runs = rows
+    selected_runs = scoped_rows
     if run_id:
         selected_runs = [r for r in rows if str(r.id) == run_id]
         if not selected_runs:
@@ -1515,6 +1593,7 @@ def get_pipeline_analytics(
             stmt_agent = stmt_agent.where(PR.call_id == call_id)
         stmt_agent = stmt_agent.order_by(PR.started_at.desc()).limit(agent_limit)
         agent_runs = db.exec(stmt_agent).all()
+        agent_runs = _dedupe_runs_by_source(agent_runs)
 
         (
             _agent_rows_unused,
@@ -1625,6 +1704,7 @@ def get_pipeline_metrics_index(
         stmt = stmt.where(PR.call_id == call_id)
     stmt = stmt.order_by(PR.started_at.desc()).limit(safe_limit)
     runs = db.exec(stmt).all()
+    runs = _dedupe_runs_by_source(runs)
 
     _rows_unused, _score_unused, _viol_unused, run_summaries = _collect_metrics_for_runs(
         runs=runs,
