@@ -1,11 +1,11 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from typing import Optional
 
 from ui.backend.database import get_session
 from ui.backend.models.crm import CRMPair
-from ui.backend.services import crm_service
+from ui.backend.services import crm_service, execution_logs
 
 router = APIRouter(prefix="/crm", tags=["crm"])
 
@@ -263,18 +263,128 @@ def get_calls(
 @router.post("/calls/{account_id}/refresh")
 def refresh_calls(
     account_id: str,
+    request: Request,
     crm_url: str = Query(...),
     agent: str = Query(""),
     customer: str = Query(""),
 ):
-    result = crm_service.refresh_calls(account_id, crm_url, agent, customer)
-    return {"ok": result["error"] is None, "count": result["count"], "error": result["error"]}
+    client_local_time = request.headers.get("x-client-local-time", "")
+    client_timezone = request.headers.get("x-client-timezone", "")
+    session_id = execution_logs.start_session(
+        action="crm_refresh_calls",
+        source="backend",
+        context={
+            "crm_url": crm_url,
+            "account_id": str(account_id),
+            "agent": agent,
+            "customer": customer,
+        },
+        client_local_time=client_local_time,
+        client_timezone=client_timezone,
+    )
+    execution_logs.append_event(
+        session_id,
+        "CRM call refresh started",
+        level="stage",
+        status="running",
+    )
+    try:
+        result = crm_service.refresh_calls(account_id, crm_url, agent, customer)
+        ok = result["error"] is None
+        execution_logs.append_event(
+            session_id,
+            "CRM call refresh completed",
+            level="info" if ok else "error",
+            status="success" if ok else "failed",
+            data={"count": int(result.get("count") or 0), "error": result.get("error")},
+            error=str(result.get("error") or ""),
+        )
+        execution_logs.finish_session(
+            session_id,
+            status="success" if ok else "failed",
+            report={
+                "count": int(result.get("count") or 0),
+                "error": result.get("error"),
+            },
+            error=str(result.get("error") or ""),
+        )
+        return {
+            "ok": ok,
+            "count": result["count"],
+            "error": result["error"],
+            "execution_session_id": session_id,
+        }
+    except Exception as exc:
+        execution_logs.append_event(
+            session_id,
+            "CRM call refresh crashed",
+            level="error",
+            status="failed",
+            error=str(exc),
+        )
+        execution_logs.finish_session(
+            session_id,
+            status="failed",
+            report={"count": 0},
+            error=str(exc),
+        )
+        raise
 
 
 @router.post("/refresh")
-def refresh_cache(background_tasks: BackgroundTasks):
-    background_tasks.add_task(crm_service.refresh_pairs)
-    return {"ok": True, "status": "refresh started in background"}
+def refresh_cache(background_tasks: BackgroundTasks, request: Request):
+    client_local_time = request.headers.get("x-client-local-time", "")
+    client_timezone = request.headers.get("x-client-timezone", "")
+    session_id = execution_logs.start_session(
+        action="crm_refresh_pairs",
+        source="backend",
+        context={"trigger": "ui"},
+        client_local_time=client_local_time,
+        client_timezone=client_timezone,
+    )
+
+    def _run_refresh(sid: str):
+        execution_logs.append_event(
+            sid,
+            "CRM pairs refresh started",
+            level="stage",
+            status="running",
+        )
+        try:
+            result = crm_service.refresh_pairs()
+            errors = result.get("errors") or []
+            status = "success" if not errors else "completed_with_errors"
+            execution_logs.append_event(
+                sid,
+                "CRM pairs refresh completed",
+                level="info" if not errors else "warn",
+                status=status,
+                data={"count": int(result.get("count") or 0), "errors": errors},
+                error="; ".join(str(e) for e in errors[:10]),
+            )
+            execution_logs.finish_session(
+                sid,
+                status=status,
+                report=result,
+                error="; ".join(str(e) for e in errors[:10]),
+            )
+        except Exception as exc:
+            execution_logs.append_event(
+                sid,
+                "CRM pairs refresh crashed",
+                level="error",
+                status="failed",
+                error=str(exc),
+            )
+            execution_logs.finish_session(
+                sid,
+                status="failed",
+                report={"count": 0, "errors": [str(exc)]},
+                error=str(exc),
+            )
+
+    background_tasks.add_task(_run_refresh, session_id)
+    return {"ok": True, "status": "refresh started in background", "execution_session_id": session_id}
 
 
 @router.post("/update-audio-lengths")

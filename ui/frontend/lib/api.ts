@@ -1,7 +1,8 @@
 import { API } from "./utils";
+import { withClientMetaHeaders } from "./request-meta";
 
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, options);
+  const res = await fetch(`${API}${path}`, withClientMetaHeaders(options));
   if (!res.ok) {
     const err = await res.text();
     throw new Error(err || `HTTP ${res.status}`);

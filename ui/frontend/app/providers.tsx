@@ -1,6 +1,7 @@
 "use client";
 import { SWRConfig } from "swr";
 import { AppContextProvider } from "@/lib/app-context";
+import { logClientExecutionEvent } from "@/lib/execution-log";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
@@ -11,8 +12,17 @@ export function Providers({ children }: { children: React.ReactNode }) {
             if (retryCount >= 20) return;
             setTimeout(() => revalidate({ retryCount }), 3000);
           },
-          onError: (err) => {
+          onError: (err, key) => {
             const msg: string = err?.message ?? "";
+            void logClientExecutionEvent({
+              action: "swr_fetch_error",
+              status: "failed",
+              level: "error",
+              message: msg || "SWR fetch error",
+              context: { key: String(key || "") },
+              error: msg,
+              finish: true,
+            });
             if (
               msg.includes("ECONNRESET") ||
               msg.includes("fetch failed") ||

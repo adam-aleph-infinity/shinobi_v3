@@ -16,6 +16,7 @@ import { PipelineSidePanel } from "@/components/shared/PipelineSidePanel";
 import { SectionContent } from "@/components/shared/SectionCards";
 import { useResize } from "@/lib/useResize";
 import { CallCitationProvider } from "@/lib/call-citation-context";
+import { logClientExecutionEvent } from "@/lib/execution-log";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -430,6 +431,19 @@ export default function CallsPage() {
       if (!res.ok) throw new Error(await res.text());
     } catch (e: any) {
       setTranscribeError(e.message ?? "Failed to start transcription");
+      void logClientExecutionEvent({
+        action: "calls_single_transcription_failed",
+        status: "failed",
+        level: "error",
+        message: "Single-call transcription request failed in UI",
+        context: {
+          agent: selectedAgent,
+          customer: selectedCustomerName,
+          call_id: selectedCallData?.call_id || "",
+        },
+        error: String(e?.message || e || ""),
+        finish: true,
+      });
     } finally {
       setTranscribing(false);
       mutateTx();
@@ -487,6 +501,19 @@ export default function CallsPage() {
       mutateTx();
     } catch (e: any) {
       setBatchError(e.message ?? "Failed to queue transcriptions");
+      void logClientExecutionEvent({
+        action: "calls_batch_transcription_failed",
+        status: "failed",
+        level: "error",
+        message: "Batch transcription request failed in UI",
+        context: {
+          agent: selectedAgent,
+          customer: selectedCustomerName,
+          selected_calls: checkedCallIds.size,
+        },
+        error: String(e?.message || e || ""),
+        finish: true,
+      });
     } finally {
       setBatchTranscribing(false);
     }

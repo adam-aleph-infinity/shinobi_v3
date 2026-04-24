@@ -21,7 +21,7 @@ from ui.backend.models.note import Note                     # noqa: F401 — reg
 from ui.backend.models.agent_result import AgentResult      # noqa: F401 — registers table
 from ui.backend.models.uploaded_file import UploadedFile    # noqa: F401 — registers table
 from ui.backend.models.pipeline_run import PipelineRun      # noqa: F401 — registers table
-from ui.backend.routers import crm, jobs, personas, logs, workspace
+from ui.backend.routers import crm, jobs, personas, logs, workspace, execution_logs
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
 from ui.backend.routers.sync import router as sync_router
@@ -52,6 +52,7 @@ app.include_router(crm.router)
 app.include_router(jobs.router)
 app.include_router(personas.router)
 app.include_router(logs.router)
+app.include_router(execution_logs.router)
 app.include_router(workspace.router)
 app.include_router(transcription_process.router)
 app.include_router(final_transcript.router)

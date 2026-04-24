@@ -11,6 +11,8 @@ import {
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
 import { formatLocalDateTime, formatLocalTime, utcHmsToLocal } from "@/lib/time";
+import { withClientMetaHeaders } from "@/lib/request-meta";
+import { logClientExecutionEvent } from "@/lib/execution-log";
 import { SectionContent } from "./SectionCards";
 
 const fetcher = (url: string) => fetch(url).then(r => {
@@ -832,15 +834,31 @@ export function PipelineSidePanel({
     const runningCallId = callResults.find(cr => cr.runStatus === "running")?.callId ?? "";
     try {
       await fetch(`/api/pipelines/${activePipelineId}/stop`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        ...withClientMetaHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        }),
         body: JSON.stringify({
           sales_agent: salesAgent,
           customer,
           call_id: isPerCall ? runningCallId : "",
         }),
       });
-    } catch {
+    } catch (e: any) {
+      void logClientExecutionEvent({
+        action: "pipeline_stop_request_failed",
+        status: "failed",
+        level: "error",
+        message: "Pipeline stop request failed",
+        context: {
+          pipeline_id: activePipelineId,
+          sales_agent: salesAgent,
+          customer,
+          call_id: runningCallId || "",
+        },
+        error: String(e?.message || e || ""),
+        finish: true,
+      });
       // ignore network failure; local abort state still unblocks UI
     }
 
@@ -879,9 +897,12 @@ export function PipelineSidePanel({
     setRunning(true); setRunError("");
     setSteps(initStepsFor(pipeline, agents));
     setStepInputStatus(new Array(pipeline.steps.length).fill("pending") as StepStatus[]);
+    let executionSessionId = "";
     try {
       const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        ...withClientMetaHeaders({
+          method: "POST", headers: { "Content-Type": "application/json" },
+        }),
         body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: "", force, force_step_indices: forceStepIndices }),
         signal: ctrl.signal,
       });
@@ -893,6 +914,9 @@ export function PipelineSidePanel({
       mutatePipelineState();
       const summary = await readPipelineSSE(res,
         (type, evt, _s) => {
+          if (type === "execution_session") {
+            executionSessionId = String(evt?.execution_session_id || executionSessionId || "");
+          }
           const stepIdx = typeof evt?.step === "number" ? evt.step : _s;
           if (type === "step_start" && stepIdx != null) {
             setSteps(prev => prev.map((st, j) =>
@@ -978,6 +1002,23 @@ export function PipelineSidePanel({
       if (e.name !== "AbortError") {
         const msg = e.message ?? "Unexpected error";
         setRunError(msg);
+        void logClientExecutionEvent({
+          session_id: executionSessionId,
+          action: "pipeline_run_failed",
+          status: "failed",
+          level: "error",
+          message: "Pipeline run failed in UI",
+          context: {
+            pipeline_id: activePipelineId,
+            sales_agent: salesAgent,
+            customer,
+            call_id: "",
+            force,
+            force_step_indices: forceStepIndices,
+          },
+          error: String(msg),
+          finish: true,
+        });
       }
     } finally {
       setRunning(false);
@@ -1021,9 +1062,12 @@ export function PipelineSidePanel({
       setFlowCallIdx(ci); // auto-advance flow view to the currently running call
       setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, runStatus: "running", expanded: true } : cr));
       let hadLLM = false;
+      let executionSessionId = "";
       try {
         const res = await fetch(`/api/pipelines/${activePipelineId}/run`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          ...withClientMetaHeaders({
+            method: "POST", headers: { "Content-Type": "application/json" },
+          }),
           body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: cid, force }),
           signal: ctrl.signal,
         });
@@ -1033,6 +1077,9 @@ export function PipelineSidePanel({
         }
         if (!res.body) throw new Error("No response body");
         const summary = await readPipelineSSE(res, (type, evt, s) => {
+          if (type === "execution_session") {
+            executionSessionId = String(evt?.execution_session_id || executionSessionId || "");
+          }
           if (type === "step_start")  setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "loading", agentName: evt.agent_name, model: evt.model, stepStartTs: Date.now() } : st) } : cr));
           if (type === "step_cached") setCallResults(p => p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, status: "cached", content: evt.content, model: evt.model } : st) } : cr));
           if (type === "stream")      setCallResults(p => { const n = p.map((cr, i) => i === ci ? { ...cr, steps: cr.steps.map((st, j) => j === s ? { ...st, stream: st.stream + (evt.text ?? "") } : st) } : cr); setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0); return n; });
@@ -1056,6 +1103,22 @@ export function PipelineSidePanel({
       } catch (e: any) {
         if ((e as any).name === "AbortError") return; // killed by re-run, stop silently
         const msg = e.message ?? "Error";
+        void logClientExecutionEvent({
+          session_id: executionSessionId,
+          action: "pipeline_run_failed_per_call",
+          status: "failed",
+          level: "error",
+          message: "Per-call pipeline run failed in UI",
+          context: {
+            pipeline_id: activePipelineId,
+            sales_agent: salesAgent,
+            customer,
+            call_id: cid,
+            force,
+          },
+          error: String(msg),
+          finish: true,
+        });
         setCallResults(p => p.map((cr, i) => i === ci ? {
           ...cr,
           error: msg,

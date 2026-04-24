@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { refreshCache } from "@/lib/api";
 import { useAppCtx } from "@/lib/app-context";
+import { logClientExecutionEvent } from "@/lib/execution-log";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(`${API}${url}`).then(r => r.json());
@@ -203,6 +204,7 @@ export default function CRMPage() {
 
   // ── UI state ───────────────────────────────────────────────────────────────
   const [refreshing, setRefreshing]           = useState(false);
+  const [refreshError, setRefreshError]       = useState("");
   const [transcribing, setTranscribing]       = useState(false);
   const [transcribeResult, setTranscribeResult] = useState<{ submitted: number; skipped: number } | null>(null);
   const [txingPairId, setTxingPairId]         = useState<string | null>(null);
@@ -531,12 +533,36 @@ export default function CRMPage() {
         <button
           onClick={async () => {
             setRefreshing(true);
-            await refreshCache();
-            for (let i = 0; i < 12; i++) {
-              await new Promise(r => setTimeout(r, 5000));
-              await mutate();
+            setRefreshError("");
+            try {
+              const refreshRes: any = await refreshCache();
+              const executionSessionId = String(refreshRes?.execution_session_id || "");
+              void logClientExecutionEvent({
+                session_id: executionSessionId,
+                action: "crm_refresh_triggered",
+                status: "running",
+                level: "stage",
+                message: "CRM full refresh triggered from UI",
+                finish: false,
+              });
+              for (let i = 0; i < 12; i++) {
+                await new Promise(r => setTimeout(r, 5000));
+                await mutate();
+              }
+            } catch (e: any) {
+              const msg = e?.message || "Failed to refresh CRMs";
+              setRefreshError(msg);
+              void logClientExecutionEvent({
+                action: "crm_refresh_request_failed",
+                status: "failed",
+                level: "error",
+                message: "CRM refresh request failed in UI",
+                error: String(msg),
+                finish: true,
+              });
+            } finally {
+              setRefreshing(false);
             }
-            setRefreshing(false);
           }}
           disabled={refreshing}
           className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 transition-colors disabled:opacity-50"
@@ -545,6 +571,9 @@ export default function CRMPage() {
           {refreshing ? "Fetching from CRMs..." : "Refresh from CRMs"}
         </button>
       </div>
+      {refreshError && (
+        <p className="text-xs text-red-400 mb-2">{refreshError}</p>
+      )}
 
       {/* Filters — row 1: text/dropdown */}
       <div className="flex flex-wrap gap-2 mb-2 shrink-0">

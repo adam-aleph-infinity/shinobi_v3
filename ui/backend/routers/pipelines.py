@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text as _sql_text, inspect as _sa_inspect
@@ -19,7 +19,7 @@ from sqlmodel import Session, select
 
 from ui.backend.config import settings
 from ui.backend.database import get_session, engine as _db_engine
-from ui.backend.services import log_buffer
+from ui.backend.services import log_buffer, execution_logs
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
@@ -1277,8 +1277,27 @@ def get_pipeline_results(
 
 
 @router.post("/{pipeline_id}/stop")
-async def stop_pipeline(pipeline_id: str, req: PipelineStopRequest):
+async def stop_pipeline(
+    pipeline_id: str,
+    req: PipelineStopRequest,
+    request: Request,
+):
     """Request cancellation of an active pipeline run for this context."""
+    client_local_time = request.headers.get("x-client-local-time", "")
+    client_timezone = request.headers.get("x-client-timezone", "")
+    execution_session_id = execution_logs.start_session(
+        action="pipeline_stop",
+        source="backend",
+        context={
+            "pipeline_id": pipeline_id,
+            "sales_agent": req.sales_agent,
+            "customer": req.customer,
+            "call_id": req.call_id,
+        },
+        client_local_time=client_local_time,
+        client_timezone=client_timezone,
+        status="running",
+    )
     slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
     task: Optional[asyncio.Task] = None
     with _ACTIVE_RUN_LOCK:
@@ -1322,7 +1341,20 @@ async def stop_pipeline(pipeline_id: str, req: PipelineStopRequest):
     except Exception:
         pass
 
-    return {"ok": True, "cancelled": cancelled, "slot": slot}
+    execution_logs.append_event(
+        execution_session_id,
+        "Pipeline stop requested",
+        level="stage",
+        status="success" if cancelled else "running",
+        data={"slot": slot, "cancelled": cancelled},
+        client_local_time=client_local_time,
+    )
+    execution_logs.finish_session(
+        execution_session_id,
+        status="success" if cancelled else "completed_with_no_active_task",
+        report={"slot": slot, "cancelled": cancelled},
+    )
+    return {"ok": True, "cancelled": cancelled, "slot": slot, "execution_session_id": execution_session_id}
 
 
 @router.get("/{pipeline_id}/runs")
@@ -1798,7 +1830,10 @@ def get_pipeline_state(
 
 @router.post("/{pipeline_id}/run")
 async def run_pipeline(
-    pipeline_id: str, req: PipelineRunRequest, db: Session = Depends(get_session)
+    pipeline_id: str,
+    req: PipelineRunRequest,
+    request: Request,
+    db: Session = Depends(get_session),
 ):
     """Execute a pipeline step-by-step, streaming SSE events."""
     from ui.backend.models.agent_result import AgentResult as AR
@@ -1816,6 +1851,8 @@ async def run_pipeline(
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
 
     run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
+    client_local_time = request.headers.get("x-client-local-time", "")
+    client_timezone = request.headers.get("x-client-timezone", "")
 
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
@@ -1827,6 +1864,31 @@ async def run_pipeline(
 
         run_id = str(uuid.uuid4())
         run_start_dt = datetime.utcnow().isoformat()
+        execution_session_id = execution_logs.start_session(
+            action="pipeline_run",
+            source="backend",
+            context={
+                "pipeline_id": pipeline_id,
+                "pipeline_name": pipeline_name,
+                "run_slot": run_slot,
+                "sales_agent": req.sales_agent,
+                "customer": req.customer,
+                "call_id": req.call_id,
+                "force": bool(req.force),
+                "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
+            },
+            client_local_time=client_local_time,
+            client_timezone=client_timezone,
+            status="running",
+        )
+        execution_logs.append_event(
+            execution_session_id,
+            f"Pipeline run started: {pipeline_name}",
+            level="stage",
+            status="running",
+            data={"run_id": run_id, "steps_total": len(steps)},
+            client_local_time=client_local_time,
+        )
         run_steps = [
             {
                 "agent_id":         s.get("agent_id", ""),
@@ -1862,6 +1924,11 @@ async def run_pipeline(
             _s.add(run_record)
             _s.commit()
 
+        yield _sse(
+            "execution_session",
+            {"execution_session_id": execution_session_id, "run_id": run_id},
+        )
+
         _agent_result_has_pipeline_cache = _agent_result_supports_pipeline_cache(_db_engine)
         if not _agent_result_has_pipeline_cache:
             log_buffer.emit(
@@ -1874,6 +1941,7 @@ async def run_pipeline(
                     force=True, start_datetime=run_start_dt)
 
         run_final_status = "error"
+        execution_error_msg = ""
         loop = asyncio.get_event_loop()
         prev_content = ""
         LLM_TIMEOUT_S = 600.0
@@ -2115,6 +2183,16 @@ async def run_pipeline(
                 f"({'call' if _missing_call_ids else 'merged'}). Starting auto-transcription…"
             )
             log_buffer.emit(f"[PIPELINE] ⏳ {yield_msg} · {cid_short}")
+            execution_logs.append_event(
+                execution_session_id,
+                yield_msg,
+                level="stage",
+                status="running",
+                data={
+                    "missing_call_ids": sorted(_missing_call_ids),
+                    "needs_merged_transcript": bool(_needs_merged),
+                },
+            )
             yield _sse("progress", {"msg": yield_msg})
 
             _file_aliases = _crm_load_aliases()
@@ -2180,6 +2258,17 @@ async def run_pipeline(
 
             log_buffer.emit(
                 f"[PIPELINE] ✓ Auto-transcription ready (submitted {_submitted}, skipped {_skipped}) · {cid_short}"
+            )
+            execution_logs.append_event(
+                execution_session_id,
+                "Auto-transcription ready",
+                level="stage",
+                status="running",
+                data={
+                    "submitted": _submitted,
+                    "skipped": _skipped,
+                    "job_count": len(_job_ids),
+                },
             )
             yield _sse("progress", {
                 "msg": f"Auto-transcription ready (submitted {_submitted}, skipped {_skipped})",
@@ -3224,6 +3313,7 @@ async def run_pipeline(
 
         except asyncio.CancelledError:
             cancel_msg = cancel_state["reason"]
+            execution_error_msg = cancel_msg
             if cancel_msg == "run stopped by user":
                 now_iso = datetime.utcnow().isoformat()
                 for s in run_steps:
@@ -3247,6 +3337,7 @@ async def run_pipeline(
             raise
         except Exception as exc:
             err_msg = f"Pipeline execution failed: {exc}"
+            execution_error_msg = err_msg
             now_iso = datetime.utcnow().isoformat()
             for s in run_steps:
                 if s.get("state") == "running":
@@ -3300,6 +3391,7 @@ async def run_pipeline(
                                     _s.commit()
                 except Exception:
                     pass
+            log_lines: list[dict[str, Any]] = []
             try:
                 log_lines = [
                     {"ts": l.ts, "text": l.text, "level": l.level}
@@ -3322,6 +3414,64 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                 pass
+            try:
+                if not execution_error_msg:
+                    _step_errors = [
+                        str(s.get("error_msg") or "").strip()
+                        for s in run_steps
+                        if str(s.get("state") or "") == "failed" and str(s.get("error_msg") or "").strip()
+                    ]
+                    if _step_errors:
+                        execution_error_msg = " | ".join(_step_errors[:5])
+
+                _status_counts: dict[str, int] = {"waiting": 0, "running": 0, "completed": 0, "failed": 0}
+                _step_summaries: list[dict[str, Any]] = []
+                for _idx, _step in enumerate(run_steps):
+                    _state = str(_step.get("state") or "waiting")
+                    _status_counts[_state] = _status_counts.get(_state, 0) + 1
+                    _step_summaries.append(
+                        {
+                            "step_index": _idx,
+                            "agent_id": _step.get("agent_id", ""),
+                            "agent_name": _step.get("agent_name", ""),
+                            "model": _step.get("model", ""),
+                            "state": _state,
+                            "start_time": _step.get("start_time"),
+                            "end_time": _step.get("end_time"),
+                            "execution_time_s": _step.get("execution_time_s"),
+                            "cached": bool(_step.get("cached_locations")),
+                            "error_msg": _step.get("error_msg", ""),
+                        }
+                    )
+
+                _exec_status = (
+                    "success"
+                    if run_final_status == "done"
+                    else "cancelled"
+                    if run_final_status == "cancelled"
+                    else "failed"
+                )
+                execution_logs.finish_session(
+                    execution_session_id,
+                    status=_exec_status,
+                    report={
+                        "pipeline_id": pipeline_id,
+                        "pipeline_name": pipeline_name,
+                        "run_id": run_id,
+                        "run_slot": run_slot,
+                        "sales_agent": req.sales_agent,
+                        "customer": req.customer,
+                        "call_id": req.call_id,
+                        "final_status": run_final_status,
+                        "steps_total": len(run_steps),
+                        "status_counts": _status_counts,
+                        "step_summaries": _step_summaries,
+                        "log_lines_tail": log_lines[-500:],
+                    },
+                    error=execution_error_msg,
+                )
+            except Exception as _elog_err:
+                log_buffer.emit(f"[PIPELINE] ⚠ Execution log finalize failed: {_elog_err}")
 
     # Run the pipeline in a background task that broadcasts SSE payloads to subscribers.
     # This decouples execution from the client HTTP stream so page refresh/navigation
