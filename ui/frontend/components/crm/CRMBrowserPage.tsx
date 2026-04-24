@@ -81,6 +81,7 @@ type ArtifactMetricsIndex = {
 type ScoreAggregateMode = "avg" | "sum";
 type PairViolationAggregateMode = "sum" | "avg_per_run";
 type AgentViolationAggregateMode = "sum" | "avg_per_run" | "avg_per_customer";
+type ArtifactSectionScope = "pair" | "agent";
 
 const ARTIFACT_SORT_KEYS: SortKey[] = [
   "artifact_pair_avg_score",
@@ -149,6 +150,7 @@ export default function CRMBrowserPage({
   const [pairViolationAgg, _setPairViolationAgg] = useState<PairViolationAggregateMode>("sum");
   const [agentScoreAgg, _setAgentScoreAgg] = useState<ScoreAggregateMode>("avg");
   const [agentViolationAgg, _setAgentViolationAgg] = useState<AgentViolationAggregateMode>("sum");
+  const [artifactSectionScope, _setArtifactSectionScope] = useState<ArtifactSectionScope>("pair");
   const [expandScoreColumns, setExpandScoreColumns] = useState(false);
   const [expandViolationColumns, setExpandViolationColumns] = useState(false);
   const [minArtifactAvgScore, _setMinArtifactAvgScore] = useState("");
@@ -188,6 +190,7 @@ export default function CRMBrowserPage({
   function setPairViolationAgg(v: PairViolationAggregateMode) { _setPairViolationAgg(v); ssSave({ pairViolationAgg: v }); }
   function setAgentScoreAgg(v: ScoreAggregateMode) { _setAgentScoreAgg(v); ssSave({ agentScoreAgg: v }); }
   function setAgentViolationAgg(v: AgentViolationAggregateMode) { _setAgentViolationAgg(v); ssSave({ agentViolationAgg: v }); }
+  function setArtifactSectionScope(v: ArtifactSectionScope) { _setArtifactSectionScope(v); ssSave({ artifactSectionScope: v }); }
   function setMinArtifactAvgScore(v: string) { _setMinArtifactAvgScore(v); ssSave({ minArtifactAvgScore: v }); }
   function setMaxArtifactAvgScore(v: string) { _setMaxArtifactAvgScore(v); ssSave({ maxArtifactAvgScore: v }); }
   function setMinArtifactTotalViolations(v: string) { _setMinArtifactTotalViolations(v); ssSave({ minArtifactTotalViolations: v }); }
@@ -230,6 +233,7 @@ export default function CRMBrowserPage({
     if (s.agentViolationAgg === "sum" || s.agentViolationAgg === "avg_per_run" || s.agentViolationAgg === "avg_per_customer") {
       _setAgentViolationAgg(s.agentViolationAgg);
     }
+    if (s.artifactSectionScope === "pair" || s.artifactSectionScope === "agent") _setArtifactSectionScope(s.artifactSectionScope);
     if (s.minArtifactAvgScore) _setMinArtifactAvgScore(s.minArtifactAvgScore);
     if (s.maxArtifactAvgScore) _setMaxArtifactAvgScore(s.maxArtifactAvgScore);
     if (s.minArtifactTotalViolations) _setMinArtifactTotalViolations(s.minArtifactTotalViolations);
@@ -334,6 +338,27 @@ export default function CRMBrowserPage({
     return row.total_violations;
   }
 
+  function pairSectionScoreMetric(row: ArtifactPairMetric | undefined, section: string): number | null {
+    if (!row) return null;
+    const raw = row.score_by_section?.[section];
+    if (raw == null) return null;
+    if (pairScoreAgg === "sum") {
+      return Number((Number(raw) * Math.max(0, row.run_count || 0)).toFixed(2));
+    }
+    return Number(raw);
+  }
+
+  function pairViolationTypeMetric(row: ArtifactPairMetric | undefined, vType: string): number | null {
+    if (!row) return null;
+    const raw = Number(row.violations_by_type?.[vType] ?? 0);
+    if (pairViolationAgg === "avg_per_run") {
+      const denom = Math.max(0, row.run_count || 0);
+      if (denom <= 0) return null;
+      return Number((raw / denom).toFixed(3));
+    }
+    return raw;
+  }
+
   function agentScoreMetric(row?: ArtifactAgentMetric): number | null {
     if (!row || row.avg_score_all_sections == null) return null;
     if (agentScoreAgg === "sum") return Number((row.avg_score_all_sections * Math.max(0, row.run_count || 0)).toFixed(2));
@@ -346,6 +371,51 @@ export default function CRMBrowserPage({
     if (agentViolationAgg === "avg_per_customer") return row.avg_violations_per_customer;
     return row.total_violations;
   }
+
+  function agentSectionScoreMetric(row: ArtifactAgentMetric | undefined, section: string): number | null {
+    if (!row) return null;
+    const raw = row.score_by_section?.[section];
+    if (raw == null) return null;
+    if (agentScoreAgg === "sum") {
+      return Number((Number(raw) * Math.max(0, row.run_count || 0)).toFixed(2));
+    }
+    return Number(raw);
+  }
+
+  function agentViolationTypeMetric(row: ArtifactAgentMetric | undefined, vType: string): number | null {
+    if (!row) return null;
+    const raw = Number(row.violations_by_type?.[vType] ?? 0);
+    if (agentViolationAgg === "avg_per_run") {
+      const denom = Math.max(0, row.run_count || 0);
+      if (denom <= 0) return null;
+      return Number((raw / denom).toFixed(3));
+    }
+    if (agentViolationAgg === "avg_per_customer") {
+      const denom = Math.max(0, row.customer_count || 0);
+      if (denom <= 0) return null;
+      return Number((raw / denom).toFixed(3));
+    }
+    return raw;
+  }
+
+  function sectionScoreMetric(pairRow: ArtifactPairMetric | undefined, agentRow: ArtifactAgentMetric | undefined, section: string): number | null {
+    return artifactSectionScope === "agent"
+      ? agentSectionScoreMetric(agentRow, section)
+      : pairSectionScoreMetric(pairRow, section);
+  }
+
+  function sectionViolationMetric(pairRow: ArtifactPairMetric | undefined, agentRow: ArtifactAgentMetric | undefined, vType: string): number | null {
+    return artifactSectionScope === "agent"
+      ? agentViolationTypeMetric(agentRow, vType)
+      : pairViolationTypeMetric(pairRow, vType);
+  }
+
+  const sectionScoreLabel = artifactSectionScope === "agent"
+    ? `Agent ${agentScoreAgg === "sum" ? "score sum" : "score avg"}`
+    : `Pair ${pairScoreAgg === "sum" ? "score sum" : "score avg"}`;
+  const sectionViolationLabel = artifactSectionScope === "agent"
+    ? `Agent ${agentViolationAgg === "avg_per_run" ? "viol avg/run" : agentViolationAgg === "avg_per_customer" ? "viol avg/cust" : "viol sum"}`
+    : `Pair ${pairViolationAgg === "avg_per_run" ? "viol avg/run" : "viol sum"}`;
 
   const hasArtifactFilter = artifactsEnabled && !!(
     artifactRunFrom ||
@@ -439,7 +509,7 @@ export default function CRMBrowserPage({
         }
 
         if (artifactScoreSection !== "all") {
-          const secValue = pairMetric?.score_by_section?.[artifactScoreSection];
+          const secValue = sectionScoreMetric(pairMetric, agentMetric, artifactScoreSection);
           if (secValue == null) return false;
           if (minArtifactScoreSectionValue) {
             const min = Number(minArtifactScoreSectionValue) || 0;
@@ -448,7 +518,7 @@ export default function CRMBrowserPage({
         }
 
         if (artifactViolationType !== "all") {
-          const violValue = pairMetric?.violations_by_type?.[artifactViolationType] ?? 0;
+          const violValue = sectionViolationMetric(pairMetric, agentMetric, artifactViolationType) ?? 0;
           if (minArtifactViolationTypeValue) {
             const min = Number(minArtifactViolationTypeValue) || 0;
             if (violValue < min) return false;
@@ -522,7 +592,7 @@ export default function CRMBrowserPage({
     artifactViolationType, minArtifactViolationTypeValue,
     minArtifactAgentAvgScore, maxArtifactAgentAvgScore,
     minArtifactAgentTotalViolations, maxArtifactAgentTotalViolations,
-    pairScoreAgg, pairViolationAgg, agentScoreAgg, agentViolationAgg,
+    pairScoreAgg, pairViolationAgg, agentScoreAgg, agentViolationAgg, artifactSectionScope,
   ]); // eslint-disable-line
 
   // ── Selection helpers ──────────────────────────────────────────────────────
@@ -832,6 +902,14 @@ export default function CRMBrowserPage({
 
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-gray-600 whitespace-nowrap">Columns:</span>
+                <select
+                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                  value={artifactSectionScope}
+                  onChange={e => setArtifactSectionScope(e.target.value as ArtifactSectionScope)}
+                >
+                  <option value="pair">Section cols by pair</option>
+                  <option value="agent">Section cols by agent avg</option>
+                </select>
                 <button
                   onClick={() => setExpandScoreColumns(v => !v)}
                   className="px-2 py-1.5 text-xs rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
@@ -885,9 +963,9 @@ export default function CRMBrowserPage({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Score section:</span>
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Score section ({artifactSectionScope}):</span>
                 <select
                   className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
                   value={artifactScoreSection}
@@ -899,7 +977,7 @@ export default function CRMBrowserPage({
                   ))}
                 </select>
                 <FilterInput
-                  label="Min score…"
+                  label={`Min ${sectionScoreLabel}…`}
                   value={minArtifactScoreSectionValue}
                   onChange={setMinArtifactScoreSectionValue}
                   type="number"
@@ -908,7 +986,7 @@ export default function CRMBrowserPage({
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Violation type:</span>
+                <span className="text-[10px] text-gray-600 whitespace-nowrap">Violation type ({artifactSectionScope}):</span>
                 <select
                   className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
                   value={artifactViolationType}
@@ -920,7 +998,7 @@ export default function CRMBrowserPage({
                   ))}
                 </select>
                 <FilterInput
-                  label="Min count…"
+                  label={`Min ${sectionViolationLabel}…`}
                   value={minArtifactViolationTypeValue}
                   onChange={setMinArtifactViolationTypeValue}
                   type="number"
@@ -973,6 +1051,9 @@ export default function CRMBrowserPage({
           >
             {expandViolationColumns ? "Hide" : "Show"} Compliance Violations ({violationTypes.length})
           </button>
+          <span className="px-2 py-1 rounded border border-gray-700 text-gray-300">
+            Section columns: {artifactSectionScope === "agent" ? "Agent aggregate" : "Pair aggregate"}
+          </span>
         </div>
       )}
 
@@ -1010,12 +1091,12 @@ export default function CRMBrowserPage({
                       </th>
                       {showArtifactScoreColumns && scoreSections.map((sec) => (
                         <th key={`score-col-${sec}`} className="px-3 py-3 text-right font-medium text-gray-400 text-xs whitespace-nowrap">
-                          Score · {sec}
+                          {artifactSectionScope === "agent" ? "Agent Score" : "Pair Score"} · {sec}
                         </th>
                       ))}
                       {showArtifactViolationColumns && violationTypes.map((v) => (
                         <th key={`viol-col-${v}`} className="px-3 py-3 text-right font-medium text-gray-400 text-xs whitespace-nowrap">
-                          Compliance · {v}
+                          {artifactSectionScope === "agent" ? "Agent Compliance" : "Pair Compliance"} · {v}
                         </th>
                       ))}
                       <th className="px-3 py-3 text-right font-medium text-gray-400 text-xs">
@@ -1122,16 +1203,22 @@ export default function CRMBrowserPage({
                           </td>
                           {showArtifactScoreColumns && scoreSections.map((sec) => (
                             <td key={`score-${pair.id}-${sec}`} className="px-3 py-3 text-right text-emerald-300 font-mono text-xs">
-                              {artifactPair?.score_by_section?.[sec] != null
-                                ? Number(artifactPair.score_by_section[sec]).toFixed(1)
-                                : "—"}
+                              {(() => {
+                                const val = sectionScoreMetric(artifactPair, artifactAgent, sec);
+                                return val != null ? Number(val).toFixed(1) : "—";
+                              })()}
                             </td>
                           ))}
                           {showArtifactViolationColumns && violationTypes.map((v) => (
                             <td key={`viol-${pair.id}-${v}`} className="px-3 py-3 text-right text-amber-300 font-mono text-xs">
-                              {artifactPair?.violations_by_type?.[v] != null
-                                ? Math.round(Number(artifactPair.violations_by_type[v] || 0))
-                                : "—"}
+                              {(() => {
+                                const val = sectionViolationMetric(artifactPair, artifactAgent, v);
+                                if (val == null) return "—";
+                                const decimals = artifactSectionScope === "agent"
+                                  ? (agentViolationAgg === "sum" ? 0 : 2)
+                                  : (pairViolationAgg === "sum" ? 0 : 2);
+                                return Number(val).toFixed(decimals);
+                              })()}
                             </td>
                           ))}
                           <td className="px-3 py-3 text-right text-indigo-300 font-mono text-xs">
