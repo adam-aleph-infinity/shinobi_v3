@@ -8,7 +8,7 @@ import re as _re
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, Optional
 
@@ -2166,6 +2166,8 @@ def get_pipeline_metrics_index(
     call_id: Optional[str] = Query(None),
     run_from: str = Query(""),
     run_to: str = Query(""),
+    event_from: str = Query(""),
+    event_to: str = Query(""),
     limit: int = Query(1200),
     db: Session = Depends(get_session),
 ):
@@ -2188,18 +2190,52 @@ def get_pipeline_metrics_index(
     violation_catalog = rubric.get("violation_types") or []
 
     safe_limit = max(100, min(limit, 20000))
+    effective_from = str(event_from or run_from or "").strip()
+    effective_to = str(event_to or run_to or "").strip()
     from_dt = None
     to_dt_exclusive = None
-    if run_from:
+    if effective_from:
         try:
-            from_dt = datetime.fromisoformat(str(run_from).strip()[:10] + "T00:00:00")
+            from_dt = datetime.fromisoformat(effective_from[:10] + "T00:00:00")
         except Exception:
-            raise HTTPException(400, "Invalid run_from date. Use YYYY-MM-DD.")
-    if run_to:
+            raise HTTPException(400, "Invalid event_from date. Use YYYY-MM-DD.")
+    if effective_to:
         try:
-            to_dt_exclusive = datetime.fromisoformat(str(run_to).strip()[:10] + "T00:00:00") + timedelta(days=1)
+            to_dt_exclusive = datetime.fromisoformat(effective_to[:10] + "T00:00:00") + timedelta(days=1)
         except Exception:
-            raise HTTPException(400, "Invalid run_to date. Use YYYY-MM-DD.")
+            raise HTTPException(400, "Invalid event_to date. Use YYYY-MM-DD.")
+
+    def _parse_dt(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            s = str(value).strip()
+            if not s:
+                return None
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(s)
+            except Exception:
+                try:
+                    dt = datetime.fromisoformat(s[:10] + "T00:00:00")
+                except Exception:
+                    return None
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    def _has_specific_call_id(v: Any) -> bool:
+        s = str(v or "").strip().lower()
+        if not s:
+            return False
+        if s in {"pair", "merged", "all", "none", "null"}:
+            return False
+        if s.startswith("pipeline:"):
+            return False
+        return True
 
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
     if sales_agent:
@@ -2208,21 +2244,105 @@ def get_pipeline_metrics_index(
         stmt = stmt.where(PR.customer == customer)
     if call_id is not None:
         stmt = stmt.where(PR.call_id == call_id)
-    if from_dt is not None:
-        stmt = stmt.where(PR.started_at >= from_dt)
-    if to_dt_exclusive is not None:
-        stmt = stmt.where(PR.started_at < to_dt_exclusive)
-    stmt = stmt.order_by(PR.started_at.desc()).limit(safe_limit)
+    # Date filtering is applied after call-date resolution (event time), so we
+    # fetch a larger window when date filters are active.
+    fetch_limit = min(50000, safe_limit * (5 if (from_dt is not None or to_dt_exclusive is not None) else 1))
+    stmt = stmt.order_by(PR.started_at.desc()).limit(fetch_limit)
     runs = db.exec(stmt).all()
+    run_event_meta: dict[str, dict[str, Any]] = {}
+
+    # Resolve per-call event timestamps from CRM call dates when available.
+    call_date_by_key: dict[str, datetime] = {}
+    call_ids = sorted({
+        str(getattr(r, "call_id", "") or "").strip().lower()
+        for r in runs
+        if _has_specific_call_id(getattr(r, "call_id", ""))
+    })
+    if call_ids:
+        try:
+            from ui.backend.models.crm import CRMCall
+            call_stmt = select(CRMCall.agent, CRMCall.customer, CRMCall.call_id, CRMCall.started_at).where(
+                _sql_func.lower(CRMCall.call_id).in_(call_ids)
+            )
+            if sales_agent:
+                call_stmt = call_stmt.where(_sql_func.lower(CRMCall.agent) == sales_agent.strip().lower())
+            if customer:
+                call_stmt = call_stmt.where(_sql_func.lower(CRMCall.customer) == customer.strip().lower())
+            for row in db.exec(call_stmt).all():
+                try:
+                    agent_v, customer_v, call_id_v, started_v = row[0], row[1], row[2], row[3]
+                except Exception:
+                    continue
+                cdt = _parse_dt(started_v)
+                if cdt is None:
+                    continue
+                key = (
+                    f"{str(agent_v or '').strip().lower()}::"
+                    f"{str(customer_v or '').strip().lower()}::"
+                    f"{str(call_id_v or '').strip().lower()}"
+                )
+                prev = call_date_by_key.get(key)
+                if prev is None or cdt > prev:
+                    call_date_by_key[key] = cdt
+        except Exception:
+            # Fallback silently to run started_at when CRM call dates are unavailable.
+            call_date_by_key = {}
+
+    filtered_runs: list[Any] = []
+    for run in runs:
+        rid = str(getattr(run, "id", "") or "")
+        run_started_dt = _parse_dt(getattr(run, "started_at", None))
+        call_id_raw = str(getattr(run, "call_id", "") or "").strip()
+        event_dt = run_started_dt
+        event_source = "run_started_at"
+        if _has_specific_call_id(call_id_raw):
+            key = (
+                f"{str(getattr(run, 'sales_agent', '') or '').strip().lower()}::"
+                f"{str(getattr(run, 'customer', '') or '').strip().lower()}::"
+                f"{call_id_raw.lower()}"
+            )
+            call_dt = call_date_by_key.get(key)
+            if call_dt is not None:
+                event_dt = call_dt
+                event_source = "crm_call.started_at"
+        if event_dt is None:
+            continue
+        if from_dt is not None and event_dt < from_dt:
+            continue
+        if to_dt_exclusive is not None and event_dt >= to_dt_exclusive:
+            continue
+        filtered_runs.append(run)
+        run_event_meta[rid] = {
+            "event_dt": event_dt,
+            "event_at": event_dt.isoformat(),
+            "event_source": event_source,
+            "call_id": call_id_raw,
+        }
+
+    filtered_runs.sort(
+        key=lambda r: run_event_meta.get(str(getattr(r, "id", "") or ""), {}).get("event_dt", datetime.min),
+        reverse=True,
+    )
+    if len(filtered_runs) > safe_limit:
+        filtered_runs = filtered_runs[:safe_limit]
+        run_event_meta = {
+            str(getattr(r, "id", "") or ""): run_event_meta.get(str(getattr(r, "id", "") or ""), {})
+            for r in filtered_runs
+        }
     # Deep-dive metrics should aggregate across all matching runs in the date range.
     # Do not dedupe by source/call here.
 
     _rows_unused, _score_unused, _viol_unused, run_summaries = _collect_metrics_for_runs(
-        runs=runs,
+        runs=filtered_runs,
         agent_map=agent_map,
         score_catalog=score_catalog,
         violation_catalog=violation_catalog,
     )
+    for rs in run_summaries:
+        meta = run_event_meta.get(str(rs.get("run_id") or ""), {})
+        rs["event_at"] = str(meta.get("event_at") or rs.get("started_at") or "")
+        rs["event_source"] = str(meta.get("event_source") or "run_started_at")
+        rs["call_id"] = str(meta.get("call_id") or "")
 
     pair_buckets: dict[str, dict[str, Any]] = {}
     for rs in run_summaries:
@@ -2245,9 +2365,9 @@ def get_pipeline_metrics_index(
         if isinstance(rs.get("run_avg_score"), (int, float)):
             bucket["run_avg_scores"].append(float(rs["run_avg_score"]))
         bucket["total_violations"] += int(rs.get("run_total_violations") or 0)
-        started_at = str(rs.get("started_at") or "")
-        if started_at > bucket["latest_run_at"]:
-            bucket["latest_run_at"] = started_at
+        event_at = str(rs.get("event_at") or rs.get("started_at") or "")
+        if event_at > bucket["latest_run_at"]:
+            bucket["latest_run_at"] = event_at
 
         score_map = rs.get("score_by_section") if isinstance(rs.get("score_by_section"), dict) else {}
         for sec, val in score_map.items():
@@ -2372,10 +2492,12 @@ def get_pipeline_metrics_index(
 
     return {
         "pipeline_id": pipeline_id,
-        "pipeline_name": runs[0].pipeline_name if runs else "",
-        "run_count": len(runs),
-        "run_from": run_from or "",
-        "run_to": run_to or "",
+        "pipeline_name": filtered_runs[0].pipeline_name if filtered_runs else "",
+        "run_count": len(filtered_runs),
+        "run_from": effective_from,
+        "run_to": effective_to,
+        "event_from": effective_from,
+        "event_to": effective_to,
         "score_sections": score_catalog,
         "violation_types": violation_catalog,
         "pairs": pairs_out,

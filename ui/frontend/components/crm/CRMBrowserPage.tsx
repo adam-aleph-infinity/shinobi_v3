@@ -143,7 +143,6 @@ export default function CRMBrowserPage({
   const [maxAgentDep, _setMaxAgentDep]       = useState("");
   const [ftdAfter, _setFtdAfter]             = useState("");
   const [ftdBefore, _setFtdBefore]           = useState("");
-  const [showArtifactOptions, _setShowArtifactOptions] = useState(false);
   const [artifactRunFrom, _setArtifactRunFrom] = useState("");
   const [artifactRunTo, _setArtifactRunTo] = useState("");
   const [pairScoreAgg, _setPairScoreAgg] = useState<ScoreAggregateMode>("avg");
@@ -151,8 +150,6 @@ export default function CRMBrowserPage({
   const [agentScoreAgg, _setAgentScoreAgg] = useState<ScoreAggregateMode>("avg");
   const [agentViolationAgg, _setAgentViolationAgg] = useState<AgentViolationAggregateMode>("sum");
   const [artifactSectionScope, _setArtifactSectionScope] = useState<ArtifactSectionScope>("pair");
-  const [expandScoreColumns, setExpandScoreColumns] = useState(false);
-  const [expandViolationColumns, setExpandViolationColumns] = useState(false);
   const [minArtifactAvgScore, _setMinArtifactAvgScore] = useState("");
   const [maxArtifactAvgScore, _setMaxArtifactAvgScore] = useState("");
   const [minArtifactTotalViolations, _setMinArtifactTotalViolations] = useState("");
@@ -183,7 +180,6 @@ export default function CRMBrowserPage({
   function setMaxAgentDep(v: string)    { _setMaxAgentDep(v);    ssSave({ maxAgentDep: v }); }
   function setFtdAfter(v: string)       { _setFtdAfter(v);       ssSave({ ftdAfter: v }); }
   function setFtdBefore(v: string)      { _setFtdBefore(v);      ssSave({ ftdBefore: v }); }
-  function setShowArtifactOptions(v: boolean) { _setShowArtifactOptions(v); ssSave({ showArtifactOptions: v ? "1" : "0" }); }
   function setArtifactRunFrom(v: string) { _setArtifactRunFrom(v); ssSave({ artifactRunFrom: v }); }
   function setArtifactRunTo(v: string) { _setArtifactRunTo(v); ssSave({ artifactRunTo: v }); }
   function setPairScoreAgg(v: ScoreAggregateMode) { _setPairScoreAgg(v); ssSave({ pairScoreAgg: v }); }
@@ -224,7 +220,6 @@ export default function CRMBrowserPage({
     if (s.maxAgentDep)    _setMaxAgentDep(s.maxAgentDep);
     if (s.ftdAfter)       _setFtdAfter(s.ftdAfter);
     if (s.ftdBefore)      _setFtdBefore(s.ftdBefore);
-    if (s.showArtifactOptions) _setShowArtifactOptions(s.showArtifactOptions === "1");
     if (s.artifactRunFrom) _setArtifactRunFrom(s.artifactRunFrom);
     if (s.artifactRunTo) _setArtifactRunTo(s.artifactRunTo);
     if (s.pairScoreAgg === "avg" || s.pairScoreAgg === "sum") _setPairScoreAgg(s.pairScoreAgg);
@@ -296,8 +291,8 @@ export default function CRMBrowserPage({
   const artifactMetricsPath = useMemo(() => {
     if (!artifactsEnabled || !ctx.activePipelineId) return null;
     const qp = new URLSearchParams({ limit: "10000" });
-    if (artifactRunFrom) qp.set("run_from", artifactRunFrom);
-    if (artifactRunTo) qp.set("run_to", artifactRunTo);
+    if (artifactRunFrom) qp.set("event_from", artifactRunFrom);
+    if (artifactRunTo) qp.set("event_to", artifactRunTo);
     return `/pipelines/${encodeURIComponent(ctx.activePipelineId)}/metrics-index?${qp.toString()}`;
   }, [artifactsEnabled, ctx.activePipelineId, artifactRunFrom, artifactRunTo]);
 
@@ -438,8 +433,8 @@ export default function CRMBrowserPage({
     minDeposits || maxDeposits || minAgentDep || maxAgentDep || ftdAfter || ftdBefore || hasArtifactFilter);
 
   const showArtifactColumns = artifactsEnabled && !!ctx.activePipelineId;
-  const showArtifactScoreColumns = showArtifactColumns && expandScoreColumns && scoreSections.length > 0;
-  const showArtifactViolationColumns = showArtifactColumns && expandViolationColumns && violationTypes.length > 0;
+  const showArtifactScoreColumns = showArtifactColumns && scoreSections.length > 0;
+  const showArtifactViolationColumns = showArtifactColumns && violationTypes.length > 0;
   const artifactColumnCount =
     (showArtifactColumns ? 4 : 0)
     + (showArtifactScoreColumns ? scoreSections.length : 0)
@@ -681,16 +676,12 @@ export default function CRMBrowserPage({
 
   useEffect(() => {
     if (artifactsEnabled) return;
-    if (showArtifactOptions) {
-      _setShowArtifactOptions(false);
-      ssSave({ showArtifactOptions: "0" });
-    }
     if (ARTIFACT_SORT_KEYS.includes(sortKey)) {
       _setSortKey("agent");
       _setSortDir("asc");
       ssSave({ sortKey: "agent", sortDir: "asc" });
     }
-  }, [artifactsEnabled, showArtifactOptions, sortKey]);
+  }, [artifactsEnabled, sortKey]);
 
   const fmtDate = (s?: string | null) => s ? s.slice(0, 10) : "—";
 
@@ -805,232 +796,211 @@ export default function CRMBrowserPage({
         </div>
       </div>
 
-      {/* Extra artifact filters/sorts */}
+      {/* Artifact filters/sorts */}
       {artifactsEnabled && (
       <div className="mb-3 shrink-0">
-        <button
-          onClick={() => setShowArtifactOptions(!showArtifactOptions)}
-          className="px-3 py-1.5 text-xs rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
-        >
-          Extra Artifact Options {showArtifactOptions ? "▾" : "▸"}
-        </button>
+        <div className="p-3 bg-gray-900 border border-gray-800 rounded-xl space-y-3">
+          {!ctx.activePipelineId && (
+            <p className="text-xs text-amber-400">
+              Select a pipeline in the top context bar to enable artifact metrics.
+            </p>
+          )}
 
-        {showArtifactOptions && (
-          <div className="mt-2 p-3 bg-gray-900 border border-gray-800 rounded-xl space-y-3">
-            {!ctx.activePipelineId && (
-              <p className="text-xs text-amber-400">
-                Select a pipeline in the top context bar to enable artifact metrics.
-              </p>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Run date:</span>
-                <div className="relative flex items-center">
-                  <input
-                    ref={artifactRunFromRef}
-                    type="date"
-                    value={artifactRunFrom}
-                    onChange={e => setArtifactRunFrom(e.target.value)}
-                    className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
-                  />
-                  <button
-                    onClick={() => artifactRunFromRef.current?.showPicker()}
-                    className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors"
-                  >
-                    <CalendarDays className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <span className="text-[10px] text-gray-700">–</span>
-                <div className="relative flex items-center">
-                  <input
-                    ref={artifactRunToRef}
-                    type="date"
-                    value={artifactRunTo}
-                    onChange={e => setArtifactRunTo(e.target.value)}
-                    className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
-                  />
-                  <button
-                    onClick={() => artifactRunToRef.current?.showPicker()}
-                    className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors"
-                  >
-                    <CalendarDays className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair agg:</span>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={pairScoreAgg}
-                  onChange={e => setPairScoreAgg(e.target.value as ScoreAggregateMode)}
-                >
-                  <option value="avg">Score avg</option>
-                  <option value="sum">Score sum</option>
-                </select>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={pairViolationAgg}
-                  onChange={e => setPairViolationAgg(e.target.value as PairViolationAggregateMode)}
-                >
-                  <option value="sum">Violations sum</option>
-                  <option value="avg_per_run">Violations avg/run</option>
-                </select>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent agg:</span>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={agentScoreAgg}
-                  onChange={e => setAgentScoreAgg(e.target.value as ScoreAggregateMode)}
-                >
-                  <option value="avg">Score avg</option>
-                  <option value="sum">Score sum</option>
-                </select>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={agentViolationAgg}
-                  onChange={e => setAgentViolationAgg(e.target.value as AgentViolationAggregateMode)}
-                >
-                  <option value="sum">Violations sum</option>
-                  <option value="avg_per_run">Violations avg/run</option>
-                  <option value="avg_per_customer">Violations avg/customer</option>
-                </select>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Columns:</span>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={artifactSectionScope}
-                  onChange={e => setArtifactSectionScope(e.target.value as ArtifactSectionScope)}
-                >
-                  <option value="pair">Section cols by pair</option>
-                  <option value="agent">Section cols by agent avg</option>
-                </select>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Artifact date:</span>
+              <div className="relative flex items-center">
+                <input
+                  ref={artifactRunFromRef}
+                  type="date"
+                  value={artifactRunFrom}
+                  onChange={e => setArtifactRunFrom(e.target.value)}
+                  className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
+                />
                 <button
-                  onClick={() => setExpandScoreColumns(v => !v)}
-                  className="px-2 py-1.5 text-xs rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+                  onClick={() => artifactRunFromRef.current?.showPicker()}
+                  className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors"
                 >
-                  {expandScoreColumns ? "Hide" : "Show"} Score Sections
+                  <CalendarDays className="w-3.5 h-3.5" />
                 </button>
+              </div>
+              <span className="text-[10px] text-gray-700">–</span>
+              <div className="relative flex items-center">
+                <input
+                  ref={artifactRunToRef}
+                  type="date"
+                  value={artifactRunTo}
+                  onChange={e => setArtifactRunTo(e.target.value)}
+                  className="pl-2 pr-7 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
+                />
                 <button
-                  onClick={() => setExpandViolationColumns(v => !v)}
-                  className="px-2 py-1.5 text-xs rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
+                  onClick={() => artifactRunToRef.current?.showPicker()}
+                  className="absolute right-1.5 text-gray-500 hover:text-gray-300 transition-colors"
                 >
-                  {expandViolationColumns ? "Hide" : "Show"} Compliance Violations
+                  <CalendarDays className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">
-                  Pair {pairScoreAgg === "sum" ? "score sum" : "score avg"}:
-                </span>
-                <FilterInput label="Min…" value={minArtifactAvgScore} onChange={setMinArtifactAvgScore} type="number" step="1" />
-                <span className="text-[10px] text-gray-700">–</span>
-                <FilterInput label="Max…" value={maxArtifactAvgScore} onChange={setMaxArtifactAvgScore} type="number" step="1" />
-              </div>
-
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">
-                  Pair {pairViolationAgg === "avg_per_run" ? "viol avg/run" : "viol sum"}:
-                </span>
-                <FilterInput label="Min…" value={minArtifactTotalViolations} onChange={setMinArtifactTotalViolations} type="number" step="1" />
-                <span className="text-[10px] text-gray-700">–</span>
-                <FilterInput label="Max…" value={maxArtifactTotalViolations} onChange={setMaxArtifactTotalViolations} type="number" step="1" />
-              </div>
-
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">
-                  Agent {agentScoreAgg === "sum" ? "score sum" : "score avg"}:
-                </span>
-                <FilterInput label="Min…" value={minArtifactAgentAvgScore} onChange={setMinArtifactAgentAvgScore} type="number" step="1" />
-                <span className="text-[10px] text-gray-700">–</span>
-                <FilterInput label="Max…" value={maxArtifactAgentAvgScore} onChange={setMaxArtifactAgentAvgScore} type="number" step="1" />
-              </div>
-
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">
-                  Agent {agentViolationAgg === "avg_per_run" ? "viol avg/run" : agentViolationAgg === "avg_per_customer" ? "viol avg/cust" : "viol sum"}:
-                </span>
-                <FilterInput label="Min…" value={minArtifactAgentTotalViolations} onChange={setMinArtifactAgentTotalViolations} type="number" step="1" />
-                <span className="text-[10px] text-gray-700">–</span>
-                <FilterInput label="Max…" value={maxArtifactAgentTotalViolations} onChange={setMaxArtifactAgentTotalViolations} type="number" step="1" />
-              </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Pair agg:</span>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={pairScoreAgg}
+                onChange={e => setPairScoreAgg(e.target.value as ScoreAggregateMode)}
+              >
+                <option value="avg">Score avg</option>
+                <option value="sum">Score sum</option>
+              </select>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={pairViolationAgg}
+                onChange={e => setPairViolationAgg(e.target.value as PairViolationAggregateMode)}
+              >
+                <option value="sum">Violations sum</option>
+                <option value="avg_per_run">Violations avg/run</option>
+              </select>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Score section ({artifactSectionScope}):</span>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={artifactScoreSection}
-                  onChange={e => setArtifactScoreSection(e.target.value)}
-                >
-                  <option value="all">All</option>
-                  {scoreSections.map(s => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
-                <FilterInput
-                  label={`Min ${sectionScoreLabel}…`}
-                  value={minArtifactScoreSectionValue}
-                  onChange={setMinArtifactScoreSectionValue}
-                  type="number"
-                  step="1"
-                />
-              </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Agent agg:</span>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={agentScoreAgg}
+                onChange={e => setAgentScoreAgg(e.target.value as ScoreAggregateMode)}
+              >
+                <option value="avg">Score avg</option>
+                <option value="sum">Score sum</option>
+              </select>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={agentViolationAgg}
+                onChange={e => setAgentViolationAgg(e.target.value as AgentViolationAggregateMode)}
+              >
+                <option value="sum">Violations sum</option>
+                <option value="avg_per_run">Violations avg/run</option>
+                <option value="avg_per_customer">Violations avg/customer</option>
+              </select>
+            </div>
 
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Violation type ({artifactSectionScope}):</span>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={artifactViolationType}
-                  onChange={e => setArtifactViolationType(e.target.value)}
-                >
-                  <option value="all">All</option>
-                  {violationTypes.map(v => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </select>
-                <FilterInput
-                  label={`Min ${sectionViolationLabel}…`}
-                  value={minArtifactViolationTypeValue}
-                  onChange={setMinArtifactViolationTypeValue}
-                  type="number"
-                  step="1"
-                />
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 whitespace-nowrap">Artifact sort:</span>
-                <select
-                  className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
-                  value={`${sortKey}:${sortDir}`}
-                  onChange={(e) => {
-                    const [k, d] = e.target.value.split(":");
-                    setSortKey(k as SortKey);
-                    setSortDir(d as SortDir);
-                  }}
-                >
-                  <option value={`${sortKey}:${sortDir}`}>Keep current</option>
-                  <option value="artifact_pair_avg_score:desc">Pair avg score (high → low)</option>
-                  <option value="artifact_pair_avg_score:asc">Pair avg score (low → high)</option>
-                  <option value="artifact_pair_total_violations:desc">Pair violations (high → low)</option>
-                  <option value="artifact_pair_total_violations:asc">Pair violations (low → high)</option>
-                  <option value="artifact_agent_avg_score:desc">Agent avg score (high → low)</option>
-                  <option value="artifact_agent_avg_score:asc">Agent avg score (low → high)</option>
-                  <option value="artifact_agent_total_violations:desc">Agent violations (high → low)</option>
-                  <option value="artifact_agent_total_violations:asc">Agent violations (low → high)</option>
-                </select>
-              </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Sections:</span>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={artifactSectionScope}
+                onChange={e => setArtifactSectionScope(e.target.value as ArtifactSectionScope)}
+              >
+                <option value="pair">Section cols by pair</option>
+                <option value="agent">Section cols by agent avg</option>
+              </select>
             </div>
           </div>
-        )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                Pair {pairScoreAgg === "sum" ? "score sum" : "score avg"}:
+              </span>
+              <FilterInput label="Min…" value={minArtifactAvgScore} onChange={setMinArtifactAvgScore} type="number" step="1" />
+              <span className="text-[10px] text-gray-700">–</span>
+              <FilterInput label="Max…" value={maxArtifactAvgScore} onChange={setMaxArtifactAvgScore} type="number" step="1" />
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                Pair {pairViolationAgg === "avg_per_run" ? "viol avg/run" : "viol sum"}:
+              </span>
+              <FilterInput label="Min…" value={minArtifactTotalViolations} onChange={setMinArtifactTotalViolations} type="number" step="1" />
+              <span className="text-[10px] text-gray-700">–</span>
+              <FilterInput label="Max…" value={maxArtifactTotalViolations} onChange={setMaxArtifactTotalViolations} type="number" step="1" />
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                Agent {agentScoreAgg === "sum" ? "score sum" : "score avg"}:
+              </span>
+              <FilterInput label="Min…" value={minArtifactAgentAvgScore} onChange={setMinArtifactAgentAvgScore} type="number" step="1" />
+              <span className="text-[10px] text-gray-700">–</span>
+              <FilterInput label="Max…" value={maxArtifactAgentAvgScore} onChange={setMaxArtifactAgentAvgScore} type="number" step="1" />
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">
+                Agent {agentViolationAgg === "avg_per_run" ? "viol avg/run" : agentViolationAgg === "avg_per_customer" ? "viol avg/cust" : "viol sum"}:
+              </span>
+              <FilterInput label="Min…" value={minArtifactAgentTotalViolations} onChange={setMinArtifactAgentTotalViolations} type="number" step="1" />
+              <span className="text-[10px] text-gray-700">–</span>
+              <FilterInput label="Max…" value={maxArtifactAgentTotalViolations} onChange={setMaxArtifactAgentTotalViolations} type="number" step="1" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Score section ({artifactSectionScope}):</span>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={artifactScoreSection}
+                onChange={e => setArtifactScoreSection(e.target.value)}
+              >
+                <option value="all">All</option>
+                {scoreSections.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <FilterInput
+                label={`Min ${sectionScoreLabel}…`}
+                value={minArtifactScoreSectionValue}
+                onChange={setMinArtifactScoreSectionValue}
+                type="number"
+                step="1"
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Violation type ({artifactSectionScope}):</span>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={artifactViolationType}
+                onChange={e => setArtifactViolationType(e.target.value)}
+              >
+                <option value="all">All</option>
+                {violationTypes.map(v => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+              <FilterInput
+                label={`Min ${sectionViolationLabel}…`}
+                value={minArtifactViolationTypeValue}
+                onChange={setMinArtifactViolationTypeValue}
+                type="number"
+                step="1"
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">Artifact sort:</span>
+              <select
+                className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300"
+                value={`${sortKey}:${sortDir}`}
+                onChange={(e) => {
+                  const [k, d] = e.target.value.split(":");
+                  setSortKey(k as SortKey);
+                  setSortDir(d as SortDir);
+                }}
+              >
+                <option value={`${sortKey}:${sortDir}`}>Keep current</option>
+                <option value="artifact_pair_avg_score:desc">Pair avg score (high → low)</option>
+                <option value="artifact_pair_avg_score:asc">Pair avg score (low → high)</option>
+                <option value="artifact_pair_total_violations:desc">Pair violations (high → low)</option>
+                <option value="artifact_pair_total_violations:asc">Pair violations (low → high)</option>
+                <option value="artifact_agent_avg_score:desc">Agent avg score (high → low)</option>
+                <option value="artifact_agent_avg_score:asc">Agent avg score (low → high)</option>
+                <option value="artifact_agent_total_violations:desc">Agent violations (high → low)</option>
+                <option value="artifact_agent_total_violations:asc">Agent violations (low → high)</option>
+              </select>
+            </div>
+          </div>
+        </div>
       </div>
       )}
 
@@ -1039,18 +1009,12 @@ export default function CRMBrowserPage({
           <span className="text-gray-500">
             Pipeline metrics: {artifactIndex?.pipeline_name || "selected pipeline"} · runs {artifactIndex?.run_count ?? 0}
           </span>
-          <button
-            onClick={() => setExpandScoreColumns(v => !v)}
-            className="px-2 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
-          >
-            {expandScoreColumns ? "Hide" : "Show"} Score Sections ({scoreSections.length})
-          </button>
-          <button
-            onClick={() => setExpandViolationColumns(v => !v)}
-            className="px-2 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 transition-colors"
-          >
-            {expandViolationColumns ? "Hide" : "Show"} Compliance Violations ({violationTypes.length})
-          </button>
+          <span className="px-2 py-1 rounded border border-gray-700 text-gray-300">
+            Score sections: {scoreSections.length}
+          </span>
+          <span className="px-2 py-1 rounded border border-gray-700 text-gray-300">
+            Compliance sections: {violationTypes.length}
+          </span>
           <span className="px-2 py-1 rounded border border-gray-700 text-gray-300">
             Section columns: {artifactSectionScope === "agent" ? "Agent aggregate" : "Pair aggregate"}
           </span>
@@ -1063,6 +1027,30 @@ export default function CRMBrowserPage({
           <div className="overflow-auto flex-1">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-gray-900 z-10">
+                {showArtifactColumns && (
+                  <tr className="border-b border-gray-800/70">
+                    <th colSpan={10} className="px-3 py-2 text-left font-medium text-[11px] text-gray-500 uppercase tracking-wide">
+                      CRM Core
+                    </th>
+                    <th colSpan={2} className="px-3 py-2 text-right font-medium text-[11px] text-indigo-300 uppercase tracking-wide">
+                      Pair Aggregates
+                    </th>
+                    {showArtifactScoreColumns && (
+                      <th colSpan={scoreSections.length} className="px-3 py-2 text-right font-medium text-[11px] text-emerald-300 uppercase tracking-wide">
+                        Score Artifact Sections
+                      </th>
+                    )}
+                    {showArtifactViolationColumns && (
+                      <th colSpan={violationTypes.length} className="px-3 py-2 text-right font-medium text-[11px] text-amber-300 uppercase tracking-wide">
+                        Compliance Artifact Sections
+                      </th>
+                    )}
+                    <th colSpan={2} className="px-3 py-2 text-right font-medium text-[11px] text-indigo-300 uppercase tracking-wide">
+                      Agent Aggregates
+                    </th>
+                    <th colSpan={1} />
+                  </tr>
+                )}
                 <tr className="border-b border-gray-800">
                   {/* Select-all checkbox */}
                   <th className="w-8 px-3 py-3">
