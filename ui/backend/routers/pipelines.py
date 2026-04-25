@@ -1705,7 +1705,8 @@ def get_pipeline_results(
 
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
-    filter_by_call_id = call_id is not None and call_id != ""
+    call_id_norm = (call_id or "").strip().lower()
+    filter_by_call_id = call_id is not None and call_id_norm != ""
     has_pipeline_cols = _agent_result_supports_pipeline_cache(db)
 
     def _to_iso(v: Any) -> Optional[str]:
@@ -1746,7 +1747,10 @@ def get_pipeline_results(
         )
         # For pipeline_run fallback, respect explicit call_id including empty string.
         if call_id is not None:
-            run_stmt = run_stmt.where(PR.call_id == call_id)
+            if filter_by_call_id:
+                run_stmt = run_stmt.where(_sql_func.lower(_sql_func.trim(PR.call_id)) == call_id_norm)
+            else:
+                run_stmt = run_stmt.where(PR.call_id == "")
         run_stmt = run_stmt.order_by(PR.started_at.desc()).limit(40)
         run_rows = db.exec(run_stmt).all()
         for run_row in run_rows:
@@ -1796,8 +1800,8 @@ def get_pipeline_results(
                 "step_idx": idx,
             }
             if filter_by_call_id:
-                sql += "AND call_id = :call_id "
-                params["call_id"] = call_id or ""
+                sql += "AND LOWER(TRIM(call_id)) = :call_id_norm "
+                params["call_id_norm"] = call_id_norm
             sql += "ORDER BY created_at DESC LIMIT 1"
             try:
                 cached_row = db.execute(_sql_text(sql), params).first()
@@ -1818,8 +1822,8 @@ def get_pipeline_results(
                 "customer": customer,
             }
             if filter_by_call_id:
-                sql2 += "AND call_id = :call_id "
-                params2["call_id"] = call_id or ""
+                sql2 += "AND LOWER(TRIM(call_id)) = :call_id_norm "
+                params2["call_id_norm"] = call_id_norm
             sql2 += "ORDER BY created_at DESC LIMIT 1"
             try:
                 cached_row = db.execute(_sql_text(sql2), params2).first()

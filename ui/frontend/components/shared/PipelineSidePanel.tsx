@@ -62,6 +62,10 @@ interface CallResult {
   runStatus: CallRunStatus;
 }
 
+function normalizeCallId(raw: string | null | undefined): string {
+  return String(raw || "").trim().toLowerCase();
+}
+
 function initStepsFor(pipeline: Pipeline, agents: UniversalAgent[]): StepState[] {
   return pipeline.steps.map(s => {
     const a = agents.find(x => x.id === s.agent_id);
@@ -383,10 +387,21 @@ export function PipelineSidePanel({
     ? `/api/crm/call-dates?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
     : null;
   const { data: callDates } = useSWR<Record<string, { date: string; has_audio: boolean }>>(callDatesUrl, fetcher);
+  const callDatesByNorm = useMemo(() => {
+    const out: Record<string, { id: string; date: string; has_audio: boolean }> = {};
+    Object.entries(callDates ?? {}).forEach(([cid, v]) => {
+      const n = normalizeCallId(cid);
+      if (!n || out[n]) return;
+      out[n] = { id: cid, date: v?.date ?? "", has_audio: !!v?.has_audio };
+    });
+    return out;
+  }, [callDates]);
 
   // Reset on context change
   const selKey = selectedCallIds?.slice().sort().join(",") ?? "";
-  const contextKey = `${activePipelineId}:${salesAgent}:${customer}:${callId}:${selKey}`;
+  // In per_call mode, changing focused call must NOT reset loaded call statuses.
+  // Reset only on pipeline/context/selection changes.
+  const contextKey = `${activePipelineId}:${salesAgent}:${customer}:${isPerCall ? "per_call" : `per_pair:${callId}`}:${selKey}`;
   const prevContextKey = useRef("");
   useEffect(() => {
     if (contextKey === prevContextKey.current) return;
@@ -553,7 +568,7 @@ export function PipelineSidePanel({
     if (!hasSelection && !callDates) return;
 
     const sorted: [string, string][] = hasSelection
-      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""] as [string, string])
+      ? selectedCallIds!.map(cid => [cid, callDatesByNorm[normalizeCallId(cid)]?.date ?? ""] as [string, string])
       : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
 
     // Keep callsLoaded=false when no calls are available yet, so preload can retry
@@ -599,9 +614,9 @@ export function PipelineSidePanel({
         }
       }));
       if (cancelled) return;
-      const byCallId = new Map(loaded.filter(Boolean).map((x: any) => [x.callId, x]));
+      const byCallId = new Map(loaded.filter(Boolean).map((x: any) => [normalizeCallId(x.callId), x]));
       setCallResults(prev => prev.map(cr => {
-        const next = byCallId.get(cr.callId);
+        const next = byCallId.get(normalizeCallId(cr.callId));
         if (!next) return cr;
         return {
           ...cr,
@@ -619,7 +634,7 @@ export function PipelineSidePanel({
       }
     })();
     return () => { cancelled = true; };
-  }, [callDates, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer, selectedCallIds]);
+  }, [callDates, callDatesByNorm, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer, selectedCallIds]);
 
   // ── flow computed values ─────────────────────────────────────────────────────
 
@@ -671,7 +686,8 @@ export function PipelineSidePanel({
   const effectiveFocusedCallId = focusedCallId || callId || selectedCallIds?.[0] || "";
   const focusedCallResultIdx = useMemo(() => {
     if (!isPerCall || !effectiveFocusedCallId) return -1;
-    return callResults.findIndex(cr => cr.callId === effectiveFocusedCallId);
+    const focusedNorm = normalizeCallId(effectiveFocusedCallId);
+    return callResults.findIndex(cr => normalizeCallId(cr.callId) === focusedNorm);
   }, [isPerCall, callResults, effectiveFocusedCallId]);
   useEffect(() => {
     if (!isPerCall || focusedCallResultIdx < 0) return;
@@ -690,6 +706,7 @@ export function PipelineSidePanel({
     if (!isPerCall || callsRunning || !pipeline || !agents || !activePipelineId) return;
     const cid = effectiveFocusedCallId;
     if (!cid) return;
+    const cidNorm = normalizeCallId(cid);
     let cancelled = false;
     (async () => {
       try {
@@ -708,9 +725,9 @@ export function PipelineSidePanel({
           };
         });
         const allCached = stepStates.length > 0 && stepStates.every(s => s.status === "cached");
-        const focusedDate = callDates?.[cid]?.date ?? "";
+        const focusedDate = callDatesByNorm[cidNorm]?.date ?? callDates?.[cid]?.date ?? "";
         setCallResults(prev => {
-          const hasRow = prev.some(cr => cr.callId === cid);
+          const hasRow = prev.some(cr => normalizeCallId(cr.callId) === cidNorm);
           if (!hasRow) {
             return [
               ...prev,
@@ -725,7 +742,7 @@ export function PipelineSidePanel({
               },
             ];
           }
-          return prev.map(cr => cr.callId === cid ? {
+          return prev.map(cr => normalizeCallId(cr.callId) === cidNorm ? {
             ...cr,
             date: focusedDate || cr.date,
             steps: stepStates,
@@ -749,6 +766,7 @@ export function PipelineSidePanel({
     customer,
     effectiveFocusedCallId,
     callDates,
+    callDatesByNorm,
   ]);
 
   // Cached display steps — built from cachedResults (AgentResult table), never overwrites run state
@@ -1154,7 +1172,7 @@ export function PipelineSidePanel({
     const hasSelection = selectedCallIds && selectedCallIds.length > 0;
     if (!hasSelection && !callDates) return;
     const sorted: [string, string][] = hasSelection
-      ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""] as [string, string])
+      ? selectedCallIds!.map(cid => [cid, callDatesByNorm[normalizeCallId(cid)]?.date ?? ""] as [string, string])
       : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
     if (sorted.length === 0) { setCallsRunError("No calls found for this pair"); return; }
 
@@ -1912,7 +1930,7 @@ export function PipelineSidePanel({
                 {focusedStepCall.runStatus === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
                 {focusedStepCall.runStatus === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
               </div>
-              {effectiveFocusedCallId && focusedStepCall.callId !== effectiveFocusedCallId && (
+              {effectiveFocusedCallId && normalizeCallId(focusedStepCall.callId) !== normalizeCallId(effectiveFocusedCallId) && (
                 <div className="px-3 py-1 border-t border-gray-800 text-[10px] text-amber-400/80">
                   Selected call is outside current call selection; showing {focusedStepCall.callId}.
                 </div>
