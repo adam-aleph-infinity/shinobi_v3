@@ -684,6 +684,73 @@ export function PipelineSidePanel({
     ? (focusedCallResultIdx >= 0 ? callResults[focusedCallResultIdx] : callResults[safeFlowCallIdx] || callResults[0])
     : null;
 
+  // Per-call focused cache hydration: always refresh the currently focused call
+  // so users see cached/missing steps without needing to press "Cached".
+  useEffect(() => {
+    if (!isPerCall || callsRunning || !pipeline || !agents || !activePipelineId) return;
+    const cid = effectiveFocusedCallId;
+    if (!cid) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const url = `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(cid)}`;
+        const cached: CachedStepResult[] = await fetch(url).then(r => r.ok ? r.json() : []);
+        if (cancelled) return;
+        const stepStates = pipeline.steps.map((s, i) => {
+          const a = agents.find(x => x.id === s.agent_id);
+          const cr = cached[i];
+          return {
+            agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
+            status: (cr?.result ? "cached" : "pending") as StepStatus,
+            content: cr?.result?.content ?? "",
+            stream: "",
+            expanded: false,
+          };
+        });
+        const allCached = stepStates.length > 0 && stepStates.every(s => s.status === "cached");
+        const focusedDate = callDates?.[cid]?.date ?? "";
+        setCallResults(prev => {
+          const hasRow = prev.some(cr => cr.callId === cid);
+          if (!hasRow) {
+            return [
+              ...prev,
+              {
+                callId: cid,
+                date: focusedDate,
+                steps: stepStates,
+                expanded: false,
+                done: allCached,
+                error: "",
+                runStatus: allCached ? "cached" : "queued",
+              },
+            ];
+          }
+          return prev.map(cr => cr.callId === cid ? {
+            ...cr,
+            date: focusedDate || cr.date,
+            steps: stepStates,
+            done: allCached,
+            error: "",
+            runStatus: allCached ? "cached" : "queued",
+          } : cr);
+        });
+      } catch {
+        // keep previous UI state on transient cache-read failures
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [
+    isPerCall,
+    callsRunning,
+    pipeline,
+    agents,
+    activePipelineId,
+    salesAgent,
+    customer,
+    effectiveFocusedCallId,
+    callDates,
+  ]);
+
   // Cached display steps — built from cachedResults (AgentResult table), never overwrites run state
   const cachedDisplaySteps: StepState[] = useMemo(() => {
     if (!pipeline || !agents || !cachedResults) return [];
