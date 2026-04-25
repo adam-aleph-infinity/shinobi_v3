@@ -724,12 +724,18 @@ export default function CallsPage() {
               call.tx?.has_pipeline_final
             );
             const callPipeline = pipelineCallMapByNorm[normalizeCallId(call.call_id)] ?? pipelineCallMap[call.call_id];
+            const callHasArtifacts = ((callPipeline?.artifact_types ?? []).length > 0) || ((callPipeline?.artifact_count ?? 0) > 0);
+            const pairHasArtifacts = ((pairPipeline?.artifact_types ?? []).length > 0) || ((pairPipeline?.artifact_count ?? 0) > 0);
+            // For merged/per-pair pipeline runs, artifacts are stored at pair scope.
+            // Show those badges on transcripted calls when no call-scoped artifact exists.
+            const usePairArtifactFallback = !callHasArtifacts && pairHasArtifacts && hasTranscriptOut;
+            const effectiveArtifactState = usePairArtifactFallback ? pairPipeline : callPipeline;
             const artifactTypes = Array.from(
-              new Set((callPipeline?.artifact_types ?? []).map(normalizeArtifactType).filter(Boolean)),
+              new Set((effectiveArtifactState?.artifact_types ?? []).map(normalizeArtifactType).filter(Boolean)),
             );
             const artifactBadgeTypes = artifactTypes.length > 0
               ? artifactTypes
-              : ((callPipeline?.artifact_count ?? 0) > 0 ? ["unknown"] : []);
+              : ((effectiveArtifactState?.artifact_count ?? 0) > 0 ? ["unknown"] : []);
             const isSelected = selectedCallId === call.call_id;
             const isChecked = checkedCallIds.has(call.call_id);
             return (
@@ -776,7 +782,11 @@ export default function CallsPage() {
                         return (
                           <span
                             key={`${call.call_id}-artifact-${type}-${idx}`}
-                            title={`${meta.label} cached for selected pipeline`}
+                            title={
+                              usePairArtifactFallback
+                                ? `${meta.label} cached for selected pipeline (merged run)`
+                                : `${meta.label} cached for selected pipeline`
+                            }
                             className={cn(
                               "inline-flex h-5 w-5 items-center justify-center rounded-md border",
                               meta.className,
