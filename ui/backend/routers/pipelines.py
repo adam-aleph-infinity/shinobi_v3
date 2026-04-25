@@ -2010,7 +2010,8 @@ def get_pipeline_artifact_status(
 
     # Compatibility merge for older cache rows and any contexts where pipeline_artifact
     # was not backfilled for previously completed steps.
-    if _agent_result_supports_pipeline_cache(db):
+    supports_pipeline_cache = _agent_result_supports_pipeline_cache(db)
+    if supports_pipeline_cache:
         try:
             rows = db.execute(
                 _sql_text(
@@ -2030,6 +2031,50 @@ def get_pipeline_artifact_status(
             _merge_grouped_rows(rows, "call_id", "pipeline_step_index", "last_at")
         except Exception:
             pass
+    else:
+        # Legacy schema (no pipeline_id / pipeline_step_index in agent_result):
+        # infer cached step coverage by matching pipeline step agent_ids to per-call
+        # agent_result rows for this pair. This mirrors /results fallback behavior.
+        step_idxs_by_agent: dict[str, list[int]] = {}
+        for i, step in enumerate(pipeline_def.get("steps") or []):
+            if not isinstance(step, dict):
+                continue
+            aid = str(step.get("agent_id") or "").strip()
+            if not aid:
+                continue
+            step_idxs_by_agent.setdefault(aid, []).append(i)
+        if step_idxs_by_agent:
+            try:
+                rows = db.execute(
+                    _sql_text(
+                        "SELECT call_id, agent_id, MAX(created_at) AS last_at "
+                        "FROM agent_result "
+                        "WHERE LOWER(sales_agent) = LOWER(:sales_agent) "
+                        "AND LOWER(customer) = LOWER(:customer) "
+                        "GROUP BY call_id, agent_id"
+                    ),
+                    {
+                        "sales_agent": sales_agent,
+                        "customer": customer,
+                    },
+                ).all()
+                for r in rows:
+                    m = getattr(r, "_mapping", r)
+                    cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                    cid = _norm_call_id(cid_raw)
+                    aid = str(m.get("agent_id", "") if hasattr(m, "get") else (r[1] if len(r) > 1 else ""))
+                    last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
+                    step_idxs = step_idxs_by_agent.get(aid, [])
+                    if not step_idxs:
+                        continue
+                    for step_idx in step_idxs:
+                        grouped_step_ids.setdefault(cid, set()).add(step_idx)
+                    grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
+                    cid_clean = str(cid_raw).strip()
+                    if cid and cid_clean and cid not in grouped_raw_call_id:
+                        grouped_raw_call_id[cid] = cid_clean
+            except Exception:
+                pass
 
     calls_out: dict[str, dict[str, Any]] = {}
     source_call_ids = sorted(list(requested_set)) if requested_set else sorted([cid for cid in grouped_step_ids.keys() if cid])
