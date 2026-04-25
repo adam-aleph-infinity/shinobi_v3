@@ -1857,6 +1857,56 @@ def get_pipeline_artifact_status(
     requested_call_ids = [c.strip() for c in (call_ids or "").split(",") if c.strip()]
     requested_set = set(requested_call_ids)
 
+    def _extract_artifact_types_by_step() -> dict[int, set[str]]:
+        out: dict[int, set[str]] = {}
+        canvas = pipeline_def.get("canvas") or {}
+        nodes = canvas.get("nodes") or []
+        edges = canvas.get("edges") or []
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return out
+
+        proc_nodes_all = sorted(
+            [n for n in nodes if isinstance(n, dict) and n.get("type") == "processing"],
+            key=lambda n: (
+                (n.get("data", {}) or {}).get("stageIndex", 0),
+                (n.get("position", {}) or {}).get("x", 0),
+            ),
+        )
+        proc_nodes_with_agent = [n for n in proc_nodes_all if ((n.get("data", {}) or {}).get("agentId"))]
+        proc_nodes = proc_nodes_with_agent if len(proc_nodes_with_agent) >= total_steps else proc_nodes_all
+        proc_node_to_step: dict[str, int] = {}
+        for i, n in enumerate(proc_nodes):
+            if i >= total_steps:
+                break
+            nid = str(n.get("id") or "")
+            if nid:
+                proc_node_to_step[nid] = i
+
+        output_data_by_id: dict[str, dict[str, Any]] = {}
+        for n in nodes:
+            if not isinstance(n, dict) or n.get("type") != "output":
+                continue
+            nid = str(n.get("id") or "")
+            if not nid:
+                continue
+            output_data_by_id[nid] = dict(n.get("data", {}) or {})
+
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            src = str(e.get("source") or "")
+            tgt = str(e.get("target") or "")
+            step_idx = proc_node_to_step.get(src)
+            od = output_data_by_id.get(tgt)
+            if step_idx is None or not od:
+                continue
+            raw = str(od.get("subType") or "").strip().lower() or str(od.get("label") or "").strip().lower()
+            if not raw:
+                continue
+            clean = raw.replace("artifact_", "").replace(" ", "_")
+            out.setdefault(step_idx, set()).add(clean)
+        return out
+
     def _to_iso(v: Any) -> Optional[str]:
         if v is None:
             return None
@@ -1864,18 +1914,45 @@ def get_pipeline_artifact_status(
             return v.isoformat()
         return str(v)
 
-    def _state(step_count: int, last_at: Optional[str]) -> dict[str, Any]:
+    def _max_iso(a: Optional[str], b: Optional[str]) -> Optional[str]:
+        if not a:
+            return b
+        if not b:
+            return a
+        return b if b > a else a
+
+    artifact_types_by_step = _extract_artifact_types_by_step()
+    artifact_step_ids = set(artifact_types_by_step.keys())
+    artifact_total = len(artifact_step_ids)
+
+    def _state(step_ids: set[int], last_at: Optional[str]) -> dict[str, Any]:
+        valid_step_ids = {s for s in step_ids if 0 <= s < total_steps}
+        step_count = len(valid_step_ids)
+        agent_step_count = step_count
         processed = step_count > 0
         complete = bool(total_steps > 0 and step_count >= total_steps)
+        artifact_step_count = len([s for s in valid_step_ids if s in artifact_step_ids])
+        artifact_types = sorted({
+            t
+            for s in valid_step_ids
+            for t in artifact_types_by_step.get(s, set())
+        })
+        artifact_complete = bool(artifact_total > 0 and artifact_step_count >= artifact_total)
         return {
             "processed": processed,
             "complete": complete,
             "step_count": step_count,
+            "agent_step_count": agent_step_count,
             "total_steps": total_steps,
+            "artifact_count": artifact_step_count,
+            "artifact_total": artifact_total,
+            "artifact_complete": artifact_complete,
+            "artifact_types": artifact_types,
             "last_at": last_at,
         }
 
-    grouped: dict[str, dict[str, Any]] = {}
+    grouped_step_ids: dict[str, set[int]] = {}
+    grouped_last_at: dict[str, Optional[str]] = {}
 
     has_artifact_cols = {"id", "pipeline_id", "sales_agent", "customer", "call_id", "pipeline_step_index"}.issubset(
         _get_table_columns(db, "pipeline_artifact")
@@ -1884,12 +1961,12 @@ def get_pipeline_artifact_status(
         try:
             rows = db.exec(
                 _sql_text(
-                    "SELECT call_id, COUNT(DISTINCT pipeline_step_index) AS step_count, MAX(updated_at) AS last_at "
+                    "SELECT call_id, pipeline_step_index, MAX(updated_at) AS last_at "
                     "FROM pipeline_artifact "
                     "WHERE pipeline_id = :pipeline_id "
                     "AND LOWER(sales_agent) = LOWER(:sales_agent) "
                     "AND LOWER(customer) = LOWER(:customer) "
-                    "GROUP BY call_id"
+                    "GROUP BY call_id, pipeline_step_index"
                 ),
                 {
                     "pipeline_id": pipeline_id,
@@ -1900,23 +1977,25 @@ def get_pipeline_artifact_status(
             for r in rows:
                 m = getattr(r, "_mapping", r)
                 cid = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
-                step_count = int(m.get("step_count", 0) if hasattr(m, "get") else (r[1] if len(r) > 1 else 0))
+                step_idx = int(m.get("pipeline_step_index", -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
                 last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
-                grouped[cid] = {"step_count": step_count, "last_at": last_at}
+                grouped_step_ids.setdefault(cid, set()).add(step_idx)
+                grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
         except Exception:
-            grouped = {}
+            grouped_step_ids = {}
+            grouped_last_at = {}
 
     # Compatibility fallback for older data before pipeline_artifact table.
-    if not grouped and _agent_result_supports_pipeline_cache(db):
+    if not grouped_step_ids and _agent_result_supports_pipeline_cache(db):
         try:
             rows = db.exec(
                 _sql_text(
-                    "SELECT call_id, COUNT(DISTINCT pipeline_step_index) AS step_count, MAX(created_at) AS last_at "
+                    "SELECT call_id, pipeline_step_index, MAX(created_at) AS last_at "
                     "FROM agent_result "
                     "WHERE pipeline_id = :pipeline_id "
                     "AND LOWER(sales_agent) = LOWER(:sales_agent) "
                     "AND LOWER(customer) = LOWER(:customer) "
-                    "GROUP BY call_id"
+                    "GROUP BY call_id, pipeline_step_index"
                 ),
                 {
                     "pipeline_id": pipeline_id,
@@ -1927,31 +2006,30 @@ def get_pipeline_artifact_status(
             for r in rows:
                 m = getattr(r, "_mapping", r)
                 cid = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
-                step_count = int(m.get("step_count", 0) if hasattr(m, "get") else (r[1] if len(r) > 1 else 0))
+                step_idx = int(m.get("pipeline_step_index", -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
                 last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
-                grouped[cid] = {"step_count": step_count, "last_at": last_at}
+                grouped_step_ids.setdefault(cid, set()).add(step_idx)
+                grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
         except Exception:
             pass
 
-    pair_data = grouped.get("", {"step_count": 0, "last_at": None})
     calls_out: dict[str, dict[str, Any]] = {}
-    source_call_ids = requested_call_ids if requested_call_ids else sorted([cid for cid in grouped.keys() if cid])
+    source_call_ids = requested_call_ids if requested_call_ids else sorted([cid for cid in grouped_step_ids.keys() if cid])
     for cid in source_call_ids:
-        d = grouped.get(cid, {"step_count": 0, "last_at": None})
-        calls_out[cid] = _state(int(d.get("step_count", 0) or 0), d.get("last_at"))
+        calls_out[cid] = _state(grouped_step_ids.get(cid, set()), grouped_last_at.get(cid))
 
     # Include discovered calls too when caller did not pass explicit call_ids.
     if not requested_set:
-        for cid, d in grouped.items():
+        for cid in grouped_step_ids.keys():
             if not cid or cid in calls_out:
                 continue
-            calls_out[cid] = _state(int(d.get("step_count", 0) or 0), d.get("last_at"))
+            calls_out[cid] = _state(grouped_step_ids.get(cid, set()), grouped_last_at.get(cid))
 
     return {
         "pipeline_id": pipeline_id,
         "sales_agent": sales_agent,
         "customer": customer,
-        "pair": _state(int(pair_data.get("step_count", 0) or 0), pair_data.get("last_at")),
+        "pair": _state(grouped_step_ids.get("", set()), grouped_last_at.get("")),
         "calls": calls_out,
         "generated_at": datetime.utcnow().isoformat(),
     }

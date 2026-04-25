@@ -222,7 +222,12 @@ interface PipelineArtifactState {
   processed: boolean;
   complete: boolean;
   step_count: number;
+  agent_step_count?: number;
   total_steps: number;
+  artifact_count?: number;
+  artifact_total?: number;
+  artifact_complete?: boolean;
+  artifact_types?: string[];
   last_at?: string | null;
 }
 interface PipelineArtifactStatus {
@@ -232,6 +237,24 @@ interface PipelineArtifactStatus {
   pair: PipelineArtifactState;
   calls: Record<string, PipelineArtifactState>;
   generated_at: string;
+}
+
+const ARTIFACT_TYPE_LABELS: Record<string, string> = {
+  persona: "Persona",
+  persona_score: "Score",
+  notes: "Notes",
+  notes_compliance: "Compliance",
+};
+
+function formatArtifactTypeShort(raw: string): string {
+  const key = String(raw || "").trim().toLowerCase();
+  const label = ARTIFACT_TYPE_LABELS[key] ?? key.replace(/_/g, " ");
+  return label.length > 10 ? `${label.slice(0, 9)}…` : label;
+}
+
+function formatArtifactTypeList(types: string[]): string {
+  if (!types.length) return "none";
+  return types.map(t => ARTIFACT_TYPE_LABELS[String(t).trim().toLowerCase()] ?? t).join(", ");
 }
 
 export default function CallsPage() {
@@ -670,6 +693,13 @@ export default function CallsPage() {
             const hasTranscript = call.tx?.has_llm_smoothed || call.tx?.has_llm_voted || call.tx?.has_pipeline_final;
             const hasNotes = notesCallIds.has(call.call_id);
             const callPipeline = pipelineCallMap[call.call_id];
+            const artifactTypes = callPipeline?.artifact_types ?? [];
+            const artifactBadgeText = artifactTypes.length === 0
+              ? "Ar"
+              : artifactTypes.length === 1
+                ? `Ar:${formatArtifactTypeShort(artifactTypes[0])}`
+                : `Ar:${formatArtifactTypeShort(artifactTypes[0])}+${artifactTypes.length - 1}`;
+            const agentSteps = callPipeline?.agent_step_count ?? callPipeline?.step_count ?? 0;
             const isSelected = selectedCallId === call.call_id;
             const isChecked = checkedCallIds.has(call.call_id);
             return (
@@ -725,23 +755,42 @@ export default function CallsPage() {
                         Mg
                       </span>
                       {ctx.activePipelineId && (
-                        <span
-                          title={
-                            callPipeline?.processed
-                              ? `${callPipeline.step_count}/${callPipeline.total_steps} steps cached for selected pipeline`
-                              : "Selected pipeline not processed for this call yet"
-                          }
-                          className={cn(
-                            "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
-                            callPipeline?.complete
-                              ? "bg-emerald-900/40 text-emerald-300 border-emerald-700/50"
-                              : callPipeline?.processed
-                                ? "bg-amber-900/40 text-amber-300 border-amber-700/50"
-                                : "bg-gray-800 text-gray-500 border-gray-700/50",
-                          )}
-                        >
-                          P
-                        </span>
+                        <>
+                          <span
+                            title={
+                              callPipeline?.processed
+                                ? `Agent outputs: ${agentSteps}/${callPipeline.total_steps} steps for selected pipeline`
+                                : "No agent-step outputs yet for selected pipeline on this call"
+                            }
+                            className={cn(
+                              "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
+                              callPipeline?.complete
+                                ? "bg-emerald-900/40 text-emerald-300 border-emerald-700/50"
+                                : callPipeline?.processed
+                                  ? "bg-amber-900/40 text-amber-300 border-amber-700/50"
+                                  : "bg-gray-800 text-gray-500 border-gray-700/50",
+                            )}
+                          >
+                            Ag
+                          </span>
+                          <span
+                            title={
+                              callPipeline?.artifact_count
+                                ? `Artifact outputs: ${callPipeline.artifact_count}/${callPipeline.artifact_total ?? 0} · types: ${formatArtifactTypeList(artifactTypes)}`
+                                : "No artifact output yet for selected pipeline on this call"
+                            }
+                            className={cn(
+                              "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
+                              callPipeline?.artifact_complete
+                                ? "bg-blue-900/40 text-blue-300 border-blue-700/50"
+                                : (callPipeline?.artifact_count ?? 0) > 0
+                                  ? "bg-sky-900/40 text-sky-300 border-sky-700/50"
+                                  : "bg-gray-800 text-gray-500 border-gray-700/50",
+                            )}
+                          >
+                            {artifactBadgeText}
+                          </span>
+                        </>
                       )}
                       {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
                     </span>

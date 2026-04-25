@@ -176,8 +176,12 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
                 <span>Merged transcript (pair)</span>
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-emerald-900/40 text-emerald-300 border-emerald-700/50">P</span>
-                <span>Selected pipeline status</span>
+                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-emerald-900/40 text-emerald-300 border-emerald-700/50">Ag</span>
+                <span>Agent output steps (pipeline)</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-blue-900/40 text-blue-300 border-blue-700/50">Ar</span>
+                <span>Artifact output type(s)</span>
               </div>
             </div>
           </div>
