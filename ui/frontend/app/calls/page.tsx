@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import {
   Loader2, FileText,
-  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot,
+  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot, User, Users,
   EyeOff, Eye, X,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
@@ -269,7 +269,7 @@ function formatArtifactTypeCode(raw: string): string {
 }
 
 function buildArtifactTypeRobotLabel(types: string[]): string {
-  if (!types.length) return "";
+  if (!types.length) return "ART";
   if (types.length === 1) return formatArtifactTypeCode(types[0]);
   return `${formatArtifactTypeCode(types[0])}+${types.length - 1}`;
 }
@@ -711,6 +711,7 @@ export default function CallsPage() {
             const hasNotes = notesCallIds.has(call.call_id);
             const callPipeline = pipelineCallMap[call.call_id];
             const artifactTypes = callPipeline?.artifact_types ?? [];
+            const hasArtifact = (callPipeline?.artifact_count ?? 0) > 0 || artifactTypes.length > 0;
             const artifactTypeRobotLabel = buildArtifactTypeRobotLabel(artifactTypes);
             const agentSteps = callPipeline?.agent_step_count ?? callPipeline?.step_count ?? 0;
             const isSelected = selectedCallId === call.call_id;
@@ -745,76 +746,42 @@ export default function CallsPage() {
                     <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
                     <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
                     <span className="ml-auto flex items-center gap-1 shrink-0">
-                      <span
-                        title={hasTranscript ? "Transcript available for this call" : "No transcript yet"}
-                        className={cn(
-                          "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
-                          hasTranscript
-                            ? "bg-teal-900/40 text-teal-300 border-teal-700/50"
-                            : "bg-gray-800 text-gray-500 border-gray-700/50",
-                        )}
-                      >
-                        Tx
-                      </span>
-                      <span
-                        title={hasMergedTranscript ? "Merged transcript available for this pair" : "Merged transcript not ready"}
-                        className={cn(
-                          "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
-                          hasMergedTranscript
-                            ? "bg-cyan-900/40 text-cyan-300 border-cyan-700/50"
-                            : "bg-gray-800 text-gray-500 border-gray-700/50",
-                        )}
-                      >
-                        Mg
-                      </span>
-                      {ctx.activePipelineId && (
-                        <>
-                          <span
-                            title={
-                              callPipeline?.processed
-                                ? `Agent outputs: ${agentSteps}/${callPipeline.total_steps} steps for selected pipeline`
-                                : "No agent-step outputs yet for selected pipeline on this call"
-                            }
-                            className={cn(
-                              "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
-                              callPipeline?.complete
-                                ? "bg-emerald-900/40 text-emerald-300 border-emerald-700/50"
-                                : callPipeline?.processed
-                                  ? "bg-amber-900/40 text-amber-300 border-amber-700/50"
-                                  : "bg-gray-800 text-gray-500 border-gray-700/50",
-                            )}
-                          >
-                            Ag
-                          </span>
-                          <span
-                            title={
-                              callPipeline?.artifact_count
-                                ? `Artifact outputs: ${callPipeline.artifact_count}/${callPipeline.artifact_total ?? 0}`
-                                : "No artifact output yet for selected pipeline on this call"
-                            }
-                            className={cn(
-                              "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
-                              callPipeline?.artifact_complete
-                                ? "bg-blue-900/40 text-blue-300 border-blue-700/50"
-                                : (callPipeline?.artifact_count ?? 0) > 0
-                                  ? "bg-sky-900/40 text-sky-300 border-sky-700/50"
-                                  : "bg-gray-800 text-gray-500 border-gray-700/50",
-                            )}
-                          >
-                            Ar
-                          </span>
-                          {artifactTypes.length > 0 && (
-                            <span
-                              title={`Artifact type(s): ${formatArtifactTypeList(artifactTypes)}`}
-                              className="relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border border-violet-700/50 bg-violet-900/35 px-1"
-                            >
-                              <Bot className="absolute h-4 w-4 text-violet-300/55" />
-                              <span className="relative z-10 text-[8px] font-semibold leading-none tracking-wide text-violet-100">
-                                {artifactTypeRobotLabel}
-                              </span>
-                            </span>
+                      {hasTranscript && (
+                        <span
+                          title="Single call transcript available"
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
+                        >
+                          <User className="h-3 w-3" />
+                        </span>
+                      )}
+                      {hasTranscript && hasMergedTranscript && (
+                        <span
+                          title="Merged transcript available for this pair"
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-cyan-700/60 bg-cyan-900/35 text-cyan-300"
+                        >
+                          <Users className="h-3 w-3" />
+                        </span>
+                      )}
+                      {ctx.activePipelineId && hasArtifact && (
+                        <span
+                          title={
+                            `Artifact type(s): ${formatArtifactTypeList(artifactTypes)} · outputs ${callPipeline?.artifact_count ?? 0}/${callPipeline?.artifact_total ?? 0}` +
+                            (callPipeline?.processed
+                              ? ` · agent steps ${agentSteps}/${callPipeline.total_steps}`
+                              : "")
+                          }
+                          className={cn(
+                            "relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border px-1",
+                            callPipeline?.artifact_complete
+                              ? "border-violet-600/70 bg-violet-900/50"
+                              : "border-violet-700/50 bg-violet-900/35",
                           )}
-                        </>
+                        >
+                          <Bot className="absolute h-4 w-4 text-violet-300/55" />
+                          <span className="relative z-10 text-[8px] font-semibold leading-none tracking-wide text-violet-100">
+                            {artifactTypeRobotLabel}
+                          </span>
+                        </span>
                       )}
                       {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
                     </span>

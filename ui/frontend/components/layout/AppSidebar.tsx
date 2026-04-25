@@ -8,6 +8,7 @@ import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
   FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
+  User,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -168,20 +169,16 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
             <p className="text-[9px] font-semibold text-gray-600 uppercase tracking-widest mb-1">Calls badge map</p>
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-teal-900/40 text-teal-300 border-teal-700/50">Tx</span>
-                <span>Transcript (per call)</span>
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300">
+                  <User className="h-3 w-3" />
+                </span>
+                <span>Single call transcript</span>
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-cyan-900/40 text-cyan-300 border-cyan-700/50">Mg</span>
-                <span>Merged transcript (pair)</span>
-              </div>
-              <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-emerald-900/40 text-emerald-300 border-emerald-700/50">Ag</span>
-                <span>Agent output steps (pipeline)</span>
-              </div>
-              <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-blue-900/40 text-blue-300 border-blue-700/50">Ar</span>
-                <span>Artifact output status (pipeline)</span>
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-cyan-700/60 bg-cyan-900/35 text-cyan-300">
+                  <Users className="h-3 w-3" />
+                </span>
+                <span>Merged pair transcript</span>
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
                 <span className="relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border border-violet-700/50 bg-violet-900/35 px-1">
