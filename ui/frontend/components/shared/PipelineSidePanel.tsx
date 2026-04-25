@@ -551,13 +551,15 @@ export function PipelineSidePanel({
     if (!isPerCall || callsLoaded || callsRunning || !pipeline || !agents) return;
     const hasSelection = selectedCallIds && selectedCallIds.length > 0;
     if (!hasSelection && !callDates) return;
-    setCallsLoaded(true);
 
     const sorted: [string, string][] = hasSelection
       ? selectedCallIds!.map(cid => [cid, callDates?.[cid]?.date ?? ""] as [string, string])
       : Object.entries(callDates!).map(([cid, v]) => [cid, v.date] as [string, string]).sort((a, b) => a[1].localeCompare(b[1]));
 
+    // Keep callsLoaded=false when no calls are available yet, so preload can retry
+    // automatically once call dates arrive.
     if (sorted.length === 0) return;
+    setCallsLoaded(true);
 
     setCallResults(sorted.map(([cid, date]) => ({
       callId: cid, date,
@@ -567,9 +569,7 @@ export function PipelineSidePanel({
 
     let cancelled = false;
     (async () => {
-      for (let idx = 0; idx < sorted.length; idx++) {
-        if (cancelled) break;
-        const [cid] = sorted[idx];
+      const loaded = await Promise.all(sorted.map(async ([cid, date], idx) => {
         try {
           const url = `/api/pipelines/${activePipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(cid)}`;
           const cached: CachedStepResult[] = await fetch(url).then(r => r.ok ? r.json() : []);
@@ -580,18 +580,46 @@ export function PipelineSidePanel({
               agentName: cr?.result?.agent_name ?? a?.name ?? s.agent_id,
               status: (cr?.result ? "cached" : "pending") as StepStatus,
               content: cr?.result?.content ?? "",
-              stream: "", expanded: false,
+              stream: "",
+              expanded: false,
             };
           });
           const allCached = stepStates.length > 0 && stepStates.every(s => s.status === "cached");
-          if (!cancelled) setCallResults(p => p.map((cr, i) => i === idx
-            ? { ...cr, steps: stepStates, done: allCached, runStatus: allCached ? "cached" : "queued" }
-            : cr));
-        } catch { /* leave as queued */ }
+          return {
+            idx,
+            callId: cid,
+            date,
+            steps: stepStates,
+            done: allCached,
+            runStatus: (allCached ? "cached" : "queued") as CallRunStatus,
+            error: "",
+          };
+        } catch {
+          return null;
+        }
+      }));
+      if (cancelled) return;
+      const byCallId = new Map(loaded.filter(Boolean).map((x: any) => [x.callId, x]));
+      setCallResults(prev => prev.map(cr => {
+        const next = byCallId.get(cr.callId);
+        if (!next) return cr;
+        return {
+          ...cr,
+          date: next.date || cr.date,
+          steps: next.steps,
+          done: next.done,
+          runStatus: next.runStatus,
+          error: next.error || "",
+        };
+      }));
+      // If no rows were hydrated at all (e.g. transient fetch issue), allow auto-retry.
+      const hydratedAny = loaded.some(Boolean);
+      if (!hydratedAny) {
+        setCallsLoaded(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [callDates, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer]);
+  }, [callDates, pipeline, agents, callsRunning, callsLoaded, isPerCall, activePipelineId, salesAgent, customer, selectedCallIds]);
 
   // ── flow computed values ─────────────────────────────────────────────────────
 
