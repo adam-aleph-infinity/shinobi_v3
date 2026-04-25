@@ -1,5 +1,6 @@
 """Pipelines — ordered chains of universal agents."""
 import asyncio
+import math
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import re as _re
 import threading
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, Optional
@@ -1845,6 +1847,402 @@ def get_pipeline_results(
             "result": cached,
         })
     return out
+
+
+def _split_text_sections(raw: str) -> list[dict[str, str]]:
+    text = str(raw or "")
+    if not text.strip():
+        return []
+
+    sections: list[dict[str, str]] = []
+    current_title = "Full Output"
+    buf: list[str] = []
+    for line in text.splitlines():
+        md_h = _re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+        num_h = _re.match(r"^\s*\d+\.\s+(.+?)\s*$", line)
+        total_h = _re.match(r"^\s*Total\s+Violations.*:\s*$", line, _re.IGNORECASE)
+        if md_h or num_h or total_h:
+            body = "\n".join(buf).strip()
+            if body:
+                sections.append({"title": current_title.strip(), "content": body})
+            current_title = (
+                (md_h.group(1) if md_h else (num_h.group(1) if num_h else line))
+                .strip()
+            )
+            buf = []
+        else:
+            buf.append(line)
+    body = "\n".join(buf).strip()
+    if body:
+        sections.append({"title": current_title.strip(), "content": body})
+
+    if not sections:
+        return [{"title": "Full Output", "content": text.strip()}]
+    return sections
+
+
+def _split_merged_calls(merged_text: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    current_call_id = ""
+    buf: list[str] = []
+    for line in str(merged_text or "").splitlines():
+        m = _re.match(r"^\s*CALL\s+([^\s|]+)", line.strip(), _re.IGNORECASE)
+        if m:
+            if current_call_id and buf:
+                out.append((current_call_id, "\n".join(buf).strip()))
+            current_call_id = str(m.group(1) or "").strip()
+            buf = []
+            continue
+        if current_call_id:
+            buf.append(line)
+    if current_call_id and buf:
+        out.append((current_call_id, "\n".join(buf).strip()))
+    return out
+
+
+def _tokenize_match_text(text: str) -> list[str]:
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "have", "has", "had", "was", "were", "are", "is",
+        "you", "your", "they", "their", "them", "our", "ours", "his", "her", "she", "him", "its", "who", "what",
+        "when", "where", "why", "how", "into", "over", "under", "about", "after", "before", "than", "then", "also",
+        "call", "calls", "summary", "process", "flow", "stage", "steps", "actions", "company", "procedures",
+        "compliant", "violation", "violations", "total", "score", "scores", "customer", "agent",
+    }
+    toks = _re.findall(r"[a-z0-9]{3,}", str(text or "").lower())
+    return [t for t in toks if t not in stop and not t.isdigit()]
+
+
+def _is_global_section_title(title: str) -> bool:
+    low = str(title or "").strip().lower()
+    return (
+        low.startswith("total violations")
+        or low.startswith("global compliance")
+        or low.startswith("overall")
+        or low.startswith("global")
+    )
+
+
+@router.get("/{pipeline_id}/call-artifacts")
+def get_pipeline_call_artifacts(
+    pipeline_id: str,
+    sales_agent: str = "",
+    customer: str = "",
+    call_id: str = Query(""),
+    min_confidence: float = Query(0.28),
+    db: Session = Depends(get_session),
+):
+    """Return call-scoped artifacts.
+
+    - per_call pipelines: exact call_id results
+    - per_pair (merged) pipelines: best-effort section isolation against merged transcript call blocks
+    """
+    call_id_raw = str(call_id or "").strip()
+    call_id_norm = call_id_raw.lower()
+    if not call_id_norm:
+        raise HTTPException(400, "call_id is required")
+
+    _, pipeline_def = _find_file(pipeline_id)
+    pipeline_scope = str(pipeline_def.get("scope") or "per_pair")
+    steps = pipeline_def.get("steps") or []
+    has_pipeline_cols = _agent_result_supports_pipeline_cache(db)
+
+    # Step → output artifact meta from canvas wiring.
+    def _step_artifact_meta() -> dict[int, dict[str, str]]:
+        out: dict[int, dict[str, str]] = {}
+        canvas = pipeline_def.get("canvas") or {}
+        nodes = canvas.get("nodes") or []
+        edges = canvas.get("edges") or []
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return out
+
+        proc_nodes_all = sorted(
+            [n for n in nodes if isinstance(n, dict) and n.get("type") == "processing"],
+            key=lambda n: (
+                (n.get("data", {}) or {}).get("stageIndex", 0),
+                (n.get("position", {}) or {}).get("x", 0),
+            ),
+        )
+        proc_nodes_with_agent = [n for n in proc_nodes_all if ((n.get("data", {}) or {}).get("agentId"))]
+        proc_nodes = proc_nodes_with_agent if len(proc_nodes_with_agent) >= len(steps) else proc_nodes_all
+        proc_node_to_step: dict[str, int] = {}
+        for i, n in enumerate(proc_nodes):
+            if i >= len(steps):
+                break
+            nid = str(n.get("id") or "")
+            if nid:
+                proc_node_to_step[nid] = i
+
+        output_data_by_id: dict[str, dict[str, Any]] = {}
+        for n in nodes:
+            if not isinstance(n, dict) or n.get("type") != "output":
+                continue
+            nid = str(n.get("id") or "")
+            if not nid:
+                continue
+            output_data_by_id[nid] = dict(n.get("data", {}) or {})
+
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            src = str(e.get("source") or "")
+            tgt = str(e.get("target") or "")
+            step_idx = proc_node_to_step.get(src)
+            od = output_data_by_id.get(tgt)
+            if step_idx is None or od is None:
+                continue
+            sub = str(od.get("subType") or "").strip().lower()
+            if not sub:
+                sub = str(od.get("label") or "").strip().lower().replace(" ", "_")
+            if not sub:
+                sub = "unknown"
+            out.setdefault(step_idx, {"sub_type": sub, "label": str(od.get("label") or sub)})
+        return out
+
+    step_meta = _step_artifact_meta()
+
+    def _fetch_latest_result(step_idx: int, agent_id: str, target_call_id: str) -> Optional[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "agent_id": agent_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+        }
+        if has_pipeline_cols:
+            sql = (
+                "SELECT id, content, model, agent_name, created_at "
+                "FROM agent_result "
+                "WHERE agent_id = :agent_id "
+                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                "AND LOWER(customer) = LOWER(:customer) "
+                "AND pipeline_id = :pipeline_id "
+                "AND pipeline_step_index = :step_idx "
+            )
+            params.update({"pipeline_id": pipeline_id, "step_idx": step_idx})
+        else:
+            sql = (
+                "SELECT id, content, model, agent_name, created_at "
+                "FROM agent_result "
+                "WHERE agent_id = :agent_id "
+                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                "AND LOWER(customer) = LOWER(:customer) "
+            )
+
+        if target_call_id:
+            sql += "AND LOWER(TRIM(call_id)) = :call_id_norm "
+            params["call_id_norm"] = target_call_id.strip().lower()
+        else:
+            sql += "AND TRIM(call_id) = '' "
+
+        sql += "ORDER BY created_at DESC LIMIT 1"
+        try:
+            row = db.execute(_sql_text(sql), params).first()
+        except Exception:
+            return None
+        if not row:
+            return None
+        m = getattr(row, "_mapping", row)
+        if not hasattr(m, "get"):
+            return None
+        created = m.get("created_at")
+        created_at = created.isoformat() if hasattr(created, "isoformat") else (str(created) if created else "")
+        return {
+            "id": str(m.get("id") or ""),
+            "content": str(m.get("content") or ""),
+            "model": str(m.get("model") or ""),
+            "agent_name": str(m.get("agent_name") or ""),
+            "created_at": created_at,
+        }
+
+    merged_calls: list[tuple[str, str]] = []
+    merged_call_tokens: dict[str, list[str]] = {}
+    idf: dict[str, float] = {}
+
+    if pipeline_scope != "per_call":
+        merged_path = settings.agents_dir / sales_agent / customer / "merged_transcript.txt"
+        if not merged_path.exists():
+            try:
+                from ui.backend.routers.agent_comparison import _build_and_save_merged_transcript
+                _build_and_save_merged_transcript(sales_agent, customer, force=True)
+            except Exception:
+                pass
+        merged_text = ""
+        if merged_path.exists():
+            try:
+                merged_text = merged_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                merged_text = ""
+        merged_calls = _split_merged_calls(merged_text)
+        merged_call_tokens = {
+            str(cid).strip().lower(): _tokenize_match_text(txt)
+            for cid, txt in merged_calls
+            if str(cid).strip()
+        }
+        if merged_call_tokens:
+            df: dict[str, int] = {}
+            n_docs = len(merged_call_tokens)
+            for toks in merged_call_tokens.values():
+                for t in set(toks):
+                    df[t] = df.get(t, 0) + 1
+            idf = {
+                t: math.log((n_docs + 1) / (v + 1)) + 1.0
+                for t, v in df.items()
+            }
+
+    artifacts_out: list[dict[str, Any]] = []
+    unassigned_out: list[dict[str, Any]] = []
+
+    for step_idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        agent_id = str(step.get("agent_id") or "")
+        if not agent_id:
+            continue
+
+        m = step_meta.get(step_idx, {})
+        artifact_type = str(m.get("sub_type") or "unknown")
+        artifact_label = str(m.get("label") or artifact_type)
+
+        exact = _fetch_latest_result(step_idx, agent_id, call_id_raw)
+        if exact:
+            artifacts_out.append({
+                "step_index": step_idx,
+                "agent_id": agent_id,
+                "agent_name": exact.get("agent_name") or agent_id,
+                "artifact_type": artifact_type,
+                "artifact_label": artifact_label,
+                "scope": "call",
+                "association": "exact",
+                "confidence": 1.0,
+                "result_id": exact.get("id") or "",
+                "created_at": exact.get("created_at") or "",
+                "model": exact.get("model") or "",
+                "content": exact.get("content") or "",
+                "sections": [],
+            })
+            continue
+
+        if pipeline_scope == "per_call":
+            unassigned_out.append({
+                "step_index": step_idx,
+                "agent_id": agent_id,
+                "artifact_type": artifact_type,
+                "reason": "no exact call artifact cached",
+            })
+            continue
+
+        pair_row = _fetch_latest_result(step_idx, agent_id, "")
+        if not pair_row:
+            unassigned_out.append({
+                "step_index": step_idx,
+                "agent_id": agent_id,
+                "artifact_type": artifact_type,
+                "reason": "no pair artifact cached",
+            })
+            continue
+
+        if call_id_norm not in merged_call_tokens:
+            unassigned_out.append({
+                "step_index": step_idx,
+                "agent_id": agent_id,
+                "artifact_type": artifact_type,
+                "reason": "selected call not found in merged transcript",
+            })
+            continue
+
+        sections = _split_text_sections(pair_row.get("content") or "")
+        selected_sections: list[dict[str, Any]] = []
+
+        for sec in sections:
+            title = str(sec.get("title") or "").strip() or "Section"
+            content = str(sec.get("content") or "")
+            if _is_global_section_title(title):
+                continue
+            if len(content.strip()) < 120:
+                continue
+
+            sec_tokens = _tokenize_match_text(content)
+            if not sec_tokens:
+                continue
+            sec_ctr = Counter(sec_tokens)
+            denom = sum(sec_ctr[t] * idf.get(t, 1.0) for t in sec_ctr) or 1.0
+
+            ranked: list[tuple[float, str]] = []
+            for cid_norm, call_toks in merged_call_tokens.items():
+                token_set = set(call_toks)
+                score = sum(sec_ctr[t] * idf.get(t, 1.0) for t in sec_ctr if t in token_set) / denom
+                ranked.append((score, cid_norm))
+            ranked.sort(reverse=True)
+            if not ranked:
+                continue
+
+            top_score, top_call = ranked[0]
+            second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+            selected_score = 0.0
+            for sc, cid_norm in ranked:
+                if cid_norm == call_id_norm:
+                    selected_score = sc
+                    break
+            relative = selected_score / top_score if top_score > 0 else 0.0
+            gap = top_score - selected_score
+            accepted = (
+                selected_score >= float(min_confidence)
+                and relative >= 0.72
+                and gap <= 0.18
+            )
+            if not accepted:
+                continue
+
+            selected_sections.append({
+                "title": title,
+                "content": content,
+                "score": round(float(selected_score), 4),
+                "top_call_id": top_call,
+                "top_score": round(float(top_score), 4),
+                "second_score": round(float(second_score), 4),
+                "relative": round(float(relative), 4),
+            })
+
+        if not selected_sections:
+            unassigned_out.append({
+                "step_index": step_idx,
+                "agent_id": agent_id,
+                "artifact_type": artifact_type,
+                "reason": "no section passed merged-call isolation thresholds",
+            })
+            continue
+
+        merged_content = "\n\n".join(
+            [f"## {s['title']}\n\n{s['content']}" for s in selected_sections]
+        )
+        conf = max(float(s.get("score") or 0.0) for s in selected_sections)
+        artifacts_out.append({
+            "step_index": step_idx,
+            "agent_id": agent_id,
+            "agent_name": pair_row.get("agent_name") or agent_id,
+            "artifact_type": artifact_type,
+            "artifact_label": artifact_label,
+            "scope": "pair",
+            "association": "isolated_merged",
+            "confidence": round(conf, 4),
+            "result_id": pair_row.get("id") or "",
+            "created_at": pair_row.get("created_at") or "",
+            "model": pair_row.get("model") or "",
+            "content": merged_content,
+            "sections": selected_sections,
+        })
+
+    artifacts_out.sort(key=lambda x: int(x.get("step_index", 0)))
+    unassigned_out.sort(key=lambda x: int(x.get("step_index", 0)))
+    return {
+        "pipeline_id": pipeline_id,
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "call_id": call_id_raw,
+        "pipeline_scope": pipeline_scope,
+        "mode": "exact" if pipeline_scope == "per_call" else "exact_or_isolated_merged",
+        "artifacts": artifacts_out,
+        "unassigned": unassigned_out,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
 
 
 @router.get("/{pipeline_id}/artifact-status")

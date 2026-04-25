@@ -29,6 +29,44 @@ interface AgentResult {
   content: string; model: string; created_at: string;
 }
 
+interface CallArtifactSection {
+  title: string;
+  content: string;
+  score: number;
+  top_call_id: string;
+  top_score: number;
+  second_score: number;
+  relative: number;
+}
+
+interface CallArtifactItem {
+  step_index: number;
+  agent_id: string;
+  agent_name: string;
+  artifact_type: string;
+  artifact_label: string;
+  scope: "call" | "pair";
+  association: "exact" | "isolated_merged";
+  confidence: number;
+  result_id: string;
+  created_at: string;
+  model: string;
+  content: string;
+  sections: CallArtifactSection[];
+}
+
+interface CallArtifactResponse {
+  pipeline_id: string;
+  sales_agent: string;
+  customer: string;
+  call_id: string;
+  pipeline_scope: string;
+  mode: string;
+  artifacts: CallArtifactItem[];
+  unassigned: { step_index: number; agent_id: string; artifact_type: string; reason: string }[];
+  generated_at: string;
+}
+
 // ── Source / output metadata ──────────────────────────────────────────────────
 
 const SOURCE_META: Record<string, { label: string; badge: string }> = {
@@ -50,6 +88,14 @@ const FORMAT_META: Record<string, { label: string; badge: string }> = {
 
 function sourceMeta(s: string) { return SOURCE_META[s] ?? { label: s, badge: "bg-gray-700/60 text-gray-300 border-gray-600/50" }; }
 function formatMeta(f: string) { return FORMAT_META[f] ?? FORMAT_META.text; }
+function artifactBadge(type: string) {
+  const t = String(type || "").toLowerCase().trim();
+  if (t === "persona") return { label: "Persona", badge: "bg-fuchsia-900/60 text-fuchsia-300 border-fuchsia-700/50" };
+  if (t === "persona_score") return { label: "Score", badge: "bg-amber-900/60 text-amber-300 border-amber-700/50" };
+  if (t === "notes") return { label: "Notes", badge: "bg-indigo-900/60 text-indigo-300 border-indigo-700/50" };
+  if (t === "notes_compliance") return { label: "Compliance", badge: "bg-emerald-900/60 text-emerald-300 border-emerald-700/50" };
+  return { label: type || "Artifact", badge: "bg-violet-900/60 text-violet-300 border-violet-700/50" };
+}
 
 // ── Context helpers ───────────────────────────────────────────────────────────
 
@@ -217,7 +263,11 @@ export function AgentSidePanel({
   focusedCallId,
   preferCallScope = false,
 }: AgentSidePanelProps = {}) {
-  const { salesAgent, customer, callId, activeAgentId, activeAgentName, setActiveAgent } = useAppCtx();
+  const {
+    salesAgent, customer, callId,
+    activeAgentId, activeAgentName, setActiveAgent,
+    activePipelineId, activePipelineName,
+  } = useAppCtx();
 
   const { data: agentDef, error: agentDefError } = useSWR<AgentDef>(
     activeAgentId ? `/api/universal-agents/${activeAgentId}` : null,
@@ -256,6 +306,14 @@ export function AgentSidePanel({
 
   const { data: results, mutate: mutateResults } = useSWR<AgentResult[]>(
     resultsUrl, fetcher, { refreshInterval: 15000 },
+  );
+
+  const callArtifactsUrl =
+    activePipelineId && hasPair && effectiveCallId
+      ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/call-artifacts?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(effectiveCallId)}`
+      : null;
+  const { data: callArtifacts, isLoading: callArtifactsLoading, mutate: mutateCallArtifacts } = useSWR<CallArtifactResponse>(
+    callArtifactsUrl, fetcher, { refreshInterval: 15000 },
   );
 
   // Run
@@ -374,6 +432,52 @@ export function AgentSidePanel({
           <span className="font-mono text-gray-400 truncate">{effectiveCallId}</span>
           {selectedCallIds && selectedCallIds.length > 1 && (
             <span className="ml-auto text-gray-600">{selectedCallIds.length} checked</span>
+          )}
+        </div>
+      )}
+
+      {/* Selected-call artifacts from active pipeline */}
+      {!!(effectiveCallId && activePipelineId) && (
+        <div className="px-3 py-2 border-b border-gray-800 shrink-0 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-gray-600 uppercase tracking-wide">Call Artifacts</span>
+            <span className="text-[10px] text-gray-500 truncate">{activePipelineName || activePipelineId}</span>
+            <button onClick={() => mutateCallArtifacts()} className="ml-auto text-gray-600 hover:text-gray-400 transition-colors" title="Refresh call artifacts">
+              <RefreshCw className="w-3 h-3" />
+            </button>
+          </div>
+          {callArtifactsLoading && (
+            <div className="flex items-center gap-2 text-[11px] text-gray-600">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Loading call-linked artifacts…
+            </div>
+          )}
+          {!callArtifactsLoading && callArtifacts && callArtifacts.artifacts.length === 0 && (
+            <p className="text-[11px] text-gray-600">
+              No artifacts confidently linked to this call for the selected pipeline.
+            </p>
+          )}
+          {!callArtifactsLoading && callArtifacts && callArtifacts.artifacts.length > 0 && (
+            <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1">
+              {callArtifacts.artifacts.map((a) => {
+                const meta = artifactBadge(a.artifact_type);
+                return (
+                  <div key={`${a.step_index}-${a.result_id}`} className="rounded-lg border border-gray-700/60 bg-gray-950/70 overflow-hidden">
+                    <div className="px-2 py-1.5 border-b border-gray-800 flex items-center gap-1.5 text-[10px]">
+                      <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded border font-medium", meta.badge)}>{meta.label}</span>
+                      <span className="text-gray-500">step {a.step_index + 1}</span>
+                      <span className="text-gray-600 truncate">{a.agent_name || a.agent_id}</span>
+                      {a.association === "isolated_merged" && (
+                        <span className="ml-auto text-gray-500">iso {Math.round((a.confidence || 0) * 100)}%</span>
+                      )}
+                    </div>
+                    <div className="px-2 py-2">
+                      <SectionContent content={a.content} format="markdown" />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       )}
