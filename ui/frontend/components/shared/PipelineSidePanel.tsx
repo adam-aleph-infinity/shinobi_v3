@@ -328,10 +328,12 @@ export function PipelineSidePanel({
   showTranscript,
   onToggleTranscript,
   selectedCallIds,
+  focusedCallId,
 }: {
   showTranscript?: boolean;
   onToggleTranscript?: () => void;
   selectedCallIds?: string[];
+  focusedCallId?: string;
 } = {}) {
   const { salesAgent, customer, callId, activePipelineId, activePipelineName, setActivePipeline } = useAppCtx();
 
@@ -638,9 +640,21 @@ export function PipelineSidePanel({
   }, [pipeline, agents]);
 
   // Active call for the flow view (in per_call mode)
+  const effectiveFocusedCallId = focusedCallId || callId || selectedCallIds?.[0] || "";
+  const focusedCallResultIdx = useMemo(() => {
+    if (!isPerCall || !effectiveFocusedCallId) return -1;
+    return callResults.findIndex(cr => cr.callId === effectiveFocusedCallId);
+  }, [isPerCall, callResults, effectiveFocusedCallId]);
+  useEffect(() => {
+    if (!isPerCall || focusedCallResultIdx < 0) return;
+    setFlowCallIdx(prev => (prev === focusedCallResultIdx ? prev : focusedCallResultIdx));
+  }, [isPerCall, focusedCallResultIdx]);
   const safeFlowCallIdx = Math.min(flowCallIdx, Math.max(0, callResults.length - 1));
   const flowCall  = isPerCall && callResults.length > 0 ? callResults[safeFlowCallIdx] : null;
   const flowCallId = flowCall ? flowCall.callId : callId;
+  const focusedStepCall = isPerCall && callResults.length > 0
+    ? (focusedCallResultIdx >= 0 ? callResults[focusedCallResultIdx] : callResults[safeFlowCallIdx] || callResults[0])
+    : null;
 
   // Cached display steps — built from cachedResults (AgentResult table), never overwrites run state
   const cachedDisplaySteps: StepState[] = useMemo(() => {
@@ -1773,42 +1787,52 @@ export function PipelineSidePanel({
               </p>
             </div>
           )}
-          {callResults.map((cr, ci) => (
-            <div key={cr.callId} className={cn(
+          {callResults.length > 0 && !focusedStepCall && (
+            <div className="flex flex-col items-center justify-center gap-2 py-8 text-gray-600">
+              <Workflow className="w-8 h-8 opacity-20" />
+              <p className="text-xs text-center">Select a call to view per-call step output</p>
+            </div>
+          )}
+          {focusedStepCall && (
+            <div className={cn(
               "border rounded-xl overflow-hidden transition-colors",
-              cr.runStatus === "running" ? "border-teal-700/60" : "border-gray-700/50",
+              focusedStepCall.runStatus === "running" ? "border-teal-700/60" : "border-gray-700/50",
             )}>
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-left"
-                onClick={() => setCallResults(p => p.map((r, i) => i === ci ? { ...r, expanded: !r.expanded } : r))}
-              >
-                {cr.runStatus === "queued"  && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
-                {cr.runStatus === "running" && <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />}
-                {cr.runStatus === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
-                {cr.runStatus === "cached"  && <Zap className="w-3 h-3 text-amber-400 shrink-0" />}
-                {cr.runStatus === "error"   && <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />}
-                <span className="text-[10px] font-mono text-gray-400 truncate flex-1 min-w-0">{cr.callId}</span>
-                <span className="text-[9px] text-gray-600 shrink-0 tabular-nums">{cr.date.slice(0, 10)}</span>
-                {cr.runStatus === "queued"  && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">queued</span>}
-                {cr.runStatus === "running" && <span className="text-[9px] px-1 py-0.5 rounded bg-teal-900/40 text-teal-400 border border-teal-700/40 shrink-0">running</span>}
-                {cr.runStatus === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
-                {cr.runStatus === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
-                {cr.runStatus === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
-                {cr.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />}
-              </button>
-              {cr.expanded && (
-                <div className="p-2 space-y-1 bg-gray-950/40 border-t border-gray-800">
-                  {cr.steps.map((st, i) => (
-                    <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
-                      onToggle={() => setCallResults(p => p.map((r, ri) => ri === ci
-                        ? { ...r, steps: r.steps.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s) }
-                        : r))} />
-                  ))}
-                  {cr.error && <p className="text-[11px] text-red-400 px-2 pt-1">{cr.error}</p>}
+              <div className="w-full flex items-center gap-2 px-3 py-2 bg-gray-900 text-left">
+                {focusedStepCall.runStatus === "queued"  && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
+                {focusedStepCall.runStatus === "running" && <Loader2 className="w-3 h-3 animate-spin text-teal-400 shrink-0" />}
+                {focusedStepCall.runStatus === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
+                {focusedStepCall.runStatus === "cached"  && <Zap className="w-3 h-3 text-amber-400 shrink-0" />}
+                {focusedStepCall.runStatus === "error"   && <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />}
+                <span className="text-[10px] font-mono text-gray-400 truncate flex-1 min-w-0">{focusedStepCall.callId}</span>
+                <span className="text-[9px] text-gray-600 shrink-0 tabular-nums">{focusedStepCall.date.slice(0, 10)}</span>
+                {callResults.length > 1 && (
+                  <span className="text-[9px] text-gray-600 shrink-0">
+                    {(focusedCallResultIdx >= 0 ? focusedCallResultIdx + 1 : safeFlowCallIdx + 1)} / {callResults.length}
+                  </span>
+                )}
+                {focusedStepCall.runStatus === "queued"  && <span className="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-600 border border-gray-700/40 shrink-0">queued</span>}
+                {focusedStepCall.runStatus === "running" && <span className="text-[9px] px-1 py-0.5 rounded bg-teal-900/40 text-teal-400 border border-teal-700/40 shrink-0">running</span>}
+                {focusedStepCall.runStatus === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
+                {focusedStepCall.runStatus === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
+                {focusedStepCall.runStatus === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+              </div>
+              {effectiveFocusedCallId && focusedStepCall.callId !== effectiveFocusedCallId && (
+                <div className="px-3 py-1 border-t border-gray-800 text-[10px] text-amber-400/80">
+                  Selected call is outside current call selection; showing {focusedStepCall.callId}.
                 </div>
               )}
+              <div className="p-2 space-y-1 bg-gray-950/40 border-t border-gray-800">
+                {focusedStepCall.steps.map((st, i) => (
+                  <StepRow key={i} st={st} index={i} streamEndRef={streamEndRef}
+                    onToggle={() => setCallResults(p => p.map(r => r.callId === focusedStepCall.callId
+                      ? { ...r, steps: r.steps.map((s, j) => j === i ? { ...s, expanded: !s.expanded } : s) }
+                      : r))} />
+                ))}
+                {focusedStepCall.error && <p className="text-[11px] text-red-400 px-2 pt-1">{focusedStepCall.error}</p>}
+              </div>
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>

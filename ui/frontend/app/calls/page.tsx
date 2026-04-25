@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import {
   Loader2, FileText, CheckCircle2,
@@ -360,6 +360,17 @@ export default function CallsPage() {
       tx,
     })),
   ];
+
+  const checkedCallIdsOrdered = useMemo(
+    () => calls.filter(c => checkedCallIds.has(c.call_id)).map(c => c.call_id),
+    [calls, checkedCallIds],
+  );
+  const sidePanelFocusedCallId = useMemo(() => {
+    if (selectedCallId && (checkedCallIdsOrdered.length === 0 || checkedCallIdsOrdered.includes(selectedCallId))) {
+      return selectedCallId;
+    }
+    return checkedCallIdsOrdered[0] ?? selectedCallId ?? "";
+  }, [selectedCallId, checkedCallIdsOrdered]);
 
   const selectedCallData = calls.find(c => c.call_id === selectedCallId) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
@@ -781,9 +792,14 @@ export default function CallsPage() {
                 ? <PipelineSidePanel
                     showTranscript={showTranscript}
                     onToggleTranscript={() => setShowTranscript(s => !s)}
-                    selectedCallIds={checkedCallIds.size > 0 ? [...checkedCallIds] : undefined}
+                    selectedCallIds={checkedCallIdsOrdered.length > 0 ? checkedCallIdsOrdered : undefined}
+                    focusedCallId={sidePanelFocusedCallId}
                   />
-                : <AgentSidePanel />}
+                : <AgentSidePanel
+                    selectedCallIds={checkedCallIdsOrdered.length > 0 ? checkedCallIdsOrdered : undefined}
+                    focusedCallId={sidePanelFocusedCallId}
+                    preferCallScope
+                  />}
             </div>
           </>
         </div>

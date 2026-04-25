@@ -206,7 +206,17 @@ function ResultCard({ result, format }: { result: AgentResult; format: string })
 
 // ── AgentSidePanel ─────────────────────────────────────────────────────────────
 
-export function AgentSidePanel() {
+interface AgentSidePanelProps {
+  selectedCallIds?: string[];
+  focusedCallId?: string;
+  preferCallScope?: boolean;
+}
+
+export function AgentSidePanel({
+  selectedCallIds,
+  focusedCallId,
+  preferCallScope = false,
+}: AgentSidePanelProps = {}) {
   const { salesAgent, customer, callId, activeAgentId, activeAgentName, setActiveAgent } = useAppCtx();
 
   const { data: agentDef, error: agentDefError } = useSWR<AgentDef>(
@@ -216,22 +226,31 @@ export function AgentSidePanel() {
 
   // Scope toggle — only for agents with merged inputs when a call is selected
   const agentInputs = agentDef?.inputs ?? [];
-  const canScopeDown = !!(agentDef && hasMergedInputs(agentInputs) && callId);
-  const [scope, setScope] = useState<"call" | "pair">("pair");
-  const scopedCallId = canScopeDown && scope === "call" ? callId : "";
+  const selectedFallbackCallId = selectedCallIds?.[0] ?? "";
+  const effectiveCallId = focusedCallId || callId || selectedFallbackCallId;
+  const canScopeDown = !!(agentDef && hasMergedInputs(agentInputs) && effectiveCallId);
+  const [scope, setScope] = useState<"call" | "pair">(preferCallScope ? "call" : "pair");
+  const scopedCallId = canScopeDown && scope === "call" ? effectiveCallId : "";
+  useEffect(() => {
+    setScope(preferCallScope ? "call" : "pair");
+  }, [activeAgentId, preferCallScope]);
 
   // Context sufficiency
   const requires = agentDef ? agentRequires(agentInputs) : "none";
   const hasPair = !!(salesAgent && customer);
-  const hasCall = !!(hasPair && callId);
+  const hasCall = !!(hasPair && effectiveCallId);
   const contextOk = requires === "none" ? true : requires === "pair" ? hasPair : hasCall;
+  const forceFocusedCall = preferCallScope && !!effectiveCallId;
+  const includeCallFilter = !!(effectiveCallId && (
+    requires === "call" || (canScopeDown && scope === "call") || forceFocusedCall
+  ));
 
   // Results query
   const resultsUrl = activeAgentId && contextOk
     ? `/api/universal-agents/${activeAgentId}/results?${new URLSearchParams({
         sales_agent: salesAgent,
         customer,
-        ...(requires === "call" || (canScopeDown && scope === "call") ? { call_id: callId } : {}),
+        ...(includeCallFilter ? { call_id: effectiveCallId } : {}),
       })}`
     : null;
 
@@ -253,6 +272,7 @@ export function AgentSidePanel() {
     if (!activeAgentId || !contextOk) return;
     setRunning(true); setRunError(""); setRunProgress("Starting…"); setRunThinking(""); setShowThinking(false); setRunStream("");
     abortRef.current = new AbortController();
+    const runCallId = scopedCallId || effectiveCallId || callId;
 
     const sourceOverrides: Record<string, string> = {};
     if (scopedCallId && agentInputs.length > 0) {
@@ -267,7 +287,7 @@ export function AgentSidePanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortRef.current.signal,
-        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: callId, manual_inputs: {}, source_overrides: sourceOverrides }),
+        body: JSON.stringify({ sales_agent: salesAgent, customer, call_id: runCallId, manual_inputs: {}, source_overrides: sourceOverrides }),
       });
       if (!res.body) throw new Error("No response body");
       const reader = res.body.getReader();
@@ -348,6 +368,15 @@ export function AgentSidePanel() {
           <RefreshCw className="w-3 h-3" />
         </button>
       </div>
+      {!!effectiveCallId && (
+        <div className="px-3 py-1.5 border-b border-gray-800 shrink-0 flex items-center gap-1.5 text-[10px]">
+          <span className="text-gray-500">Call context</span>
+          <span className="font-mono text-gray-400 truncate">{effectiveCallId}</span>
+          {selectedCallIds && selectedCallIds.length > 1 && (
+            <span className="ml-auto text-gray-600">{selectedCallIds.length} checked</span>
+          )}
+        </div>
+      )}
 
       {/* Input + output badges */}
       {agentDef && agentDef.inputs.length > 0 && (
@@ -358,7 +387,7 @@ export function AgentSidePanel() {
               inp={inp}
               salesAgent={salesAgent}
               customer={customer}
-              callId={callId}
+              callId={effectiveCallId || callId}
               scopedCallId={scopedCallId}
             />
           ))}
