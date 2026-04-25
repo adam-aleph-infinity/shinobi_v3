@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import {
-  Loader2, FileText, CheckCircle2,
+  Loader2, FileText,
   Circle, ChevronRight, Mic2, StickyNote, Trash2, Play,
   EyeOff, Eye, X,
 } from "lucide-react";
@@ -212,6 +212,27 @@ interface TxCall   {
   smoothed_path: string | null; voted_path: string | null;
   duration_s: number | null; started_at: string | null;
 }
+interface MergedTranscriptInfo {
+  available: boolean;
+  calls: number;
+  transcripts: number;
+  chars: number;
+}
+interface PipelineArtifactState {
+  processed: boolean;
+  complete: boolean;
+  step_count: number;
+  total_steps: number;
+  last_at?: string | null;
+}
+interface PipelineArtifactStatus {
+  pipeline_id: string;
+  sales_agent: string;
+  customer: string;
+  pair: PipelineArtifactState;
+  calls: Record<string, PipelineArtifactState>;
+  generated_at: string;
+}
 
 export default function CallsPage() {
   const ctx = useAppCtx();
@@ -331,6 +352,20 @@ export default function CallsPage() {
       : null,
     fetcher
   );
+  const { data: mergedInfo } = useSWR<MergedTranscriptInfo>(
+    selectedAgent && selectedCustomerName
+      ? `/api/full-persona-agent/transcript-info?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
+      : null,
+    fetcher,
+    { refreshInterval: 15000 },
+  );
+  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
+    selectedAgent && selectedCustomerName && ctx.activePipelineId
+      ? `/api/pipelines/${encodeURIComponent(ctx.activePipelineId)}/artifact-status?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
+      : null,
+    fetcher,
+    { refreshInterval: 10000 },
+  );
 
   // Fetch all notes for this agent/customer pair to know which calls have notes
   const { data: pairNotes } = useSWR<{ call_id: string }[]>(
@@ -374,6 +409,9 @@ export default function CallsPage() {
 
   const selectedCallData = calls.find(c => c.call_id === selectedCallId) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
+  const hasMergedTranscript = !!mergedInfo?.available;
+  const pipelineCallMap = pipelineArtifactStatus?.calls ?? {};
+  const pairPipeline = pipelineArtifactStatus?.pair;
 
   // Calls with transcripts in chronological order — matches the "Call N" numbering in merged transcripts
   const transcribedCallsInOrder = calls
@@ -552,6 +590,12 @@ export default function CallsPage() {
               {calls.length} calls · {calls.filter(c => c.tx?.has_llm_smoothed || c.tx?.has_llm_voted).length} transcribed
             </p>
           )}
+          {ctx.activePipelineId && (
+            <p className="text-[10px] text-gray-600 truncate">
+              {(ctx.activePipelineName || "Pipeline")} ·{" "}
+              {pairPipeline?.complete ? "pair complete" : pairPipeline?.processed ? "pair partial" : "pair not processed"}
+            </p>
+          )}
           {calls.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
               <button
@@ -625,6 +669,7 @@ export default function CallsPage() {
           {hasPairContext && calls.map(call => {
             const hasTranscript = call.tx?.has_llm_smoothed || call.tx?.has_llm_voted || call.tx?.has_pipeline_final;
             const hasNotes = notesCallIds.has(call.call_id);
+            const callPipeline = pipelineCallMap[call.call_id];
             const isSelected = selectedCallId === call.call_id;
             const isChecked = checkedCallIds.has(call.call_id);
             return (
@@ -657,10 +702,48 @@ export default function CallsPage() {
                     <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
                     <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
                     <span className="ml-auto flex items-center gap-1 shrink-0">
+                      <span
+                        title={hasTranscript ? "Transcript available for this call" : "No transcript yet"}
+                        className={cn(
+                          "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
+                          hasTranscript
+                            ? "bg-teal-900/40 text-teal-300 border-teal-700/50"
+                            : "bg-gray-800 text-gray-500 border-gray-700/50",
+                        )}
+                      >
+                        Tx
+                      </span>
+                      <span
+                        title={hasMergedTranscript ? "Merged transcript available for this pair" : "Merged transcript not ready"}
+                        className={cn(
+                          "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
+                          hasMergedTranscript
+                            ? "bg-cyan-900/40 text-cyan-300 border-cyan-700/50"
+                            : "bg-gray-800 text-gray-500 border-gray-700/50",
+                        )}
+                      >
+                        Mg
+                      </span>
+                      {ctx.activePipelineId && (
+                        <span
+                          title={
+                            callPipeline?.processed
+                              ? `${callPipeline.step_count}/${callPipeline.total_steps} steps cached for selected pipeline`
+                              : "Selected pipeline not processed for this call yet"
+                          }
+                          className={cn(
+                            "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
+                            callPipeline?.complete
+                              ? "bg-emerald-900/40 text-emerald-300 border-emerald-700/50"
+                              : callPipeline?.processed
+                                ? "bg-amber-900/40 text-amber-300 border-amber-700/50"
+                                : "bg-gray-800 text-gray-500 border-gray-700/50",
+                          )}
+                        >
+                          P
+                        </span>
+                      )}
                       {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
-                      {hasTranscript
-                        ? <CheckCircle2 className="w-3 h-3 text-teal-400" />
-                        : <Circle className="w-3 h-3 text-gray-700" />}
                     </span>
                   </div>
                   <div className="pl-[18px] flex items-center gap-2 text-[10px] text-gray-500">

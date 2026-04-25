@@ -1843,6 +1843,120 @@ def get_pipeline_results(
     return out
 
 
+@router.get("/{pipeline_id}/artifact-status")
+def get_pipeline_artifact_status(
+    pipeline_id: str,
+    sales_agent: str = "",
+    customer: str = "",
+    call_ids: str = Query(""),
+    db: Session = Depends(get_session),
+):
+    """Pipeline artifact coverage by call/pair for badge rendering in Calls UI."""
+    _, pipeline_def = _find_file(pipeline_id)
+    total_steps = len(pipeline_def.get("steps", []) or [])
+    requested_call_ids = [c.strip() for c in (call_ids or "").split(",") if c.strip()]
+    requested_set = set(requested_call_ids)
+
+    def _to_iso(v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v)
+
+    def _state(step_count: int, last_at: Optional[str]) -> dict[str, Any]:
+        processed = step_count > 0
+        complete = bool(total_steps > 0 and step_count >= total_steps)
+        return {
+            "processed": processed,
+            "complete": complete,
+            "step_count": step_count,
+            "total_steps": total_steps,
+            "last_at": last_at,
+        }
+
+    grouped: dict[str, dict[str, Any]] = {}
+
+    has_artifact_cols = {"id", "pipeline_id", "sales_agent", "customer", "call_id", "pipeline_step_index"}.issubset(
+        _get_table_columns(db, "pipeline_artifact")
+    )
+    if has_artifact_cols:
+        try:
+            rows = db.exec(
+                _sql_text(
+                    "SELECT call_id, COUNT(DISTINCT pipeline_step_index) AS step_count, MAX(updated_at) AS last_at "
+                    "FROM pipeline_artifact "
+                    "WHERE pipeline_id = :pipeline_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                    "GROUP BY call_id"
+                ),
+                {
+                    "pipeline_id": pipeline_id,
+                    "sales_agent": sales_agent,
+                    "customer": customer,
+                },
+            ).all()
+            for r in rows:
+                m = getattr(r, "_mapping", r)
+                cid = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                step_count = int(m.get("step_count", 0) if hasattr(m, "get") else (r[1] if len(r) > 1 else 0))
+                last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
+                grouped[cid] = {"step_count": step_count, "last_at": last_at}
+        except Exception:
+            grouped = {}
+
+    # Compatibility fallback for older data before pipeline_artifact table.
+    if not grouped and _agent_result_supports_pipeline_cache(db):
+        try:
+            rows = db.exec(
+                _sql_text(
+                    "SELECT call_id, COUNT(DISTINCT pipeline_step_index) AS step_count, MAX(created_at) AS last_at "
+                    "FROM agent_result "
+                    "WHERE pipeline_id = :pipeline_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                    "GROUP BY call_id"
+                ),
+                {
+                    "pipeline_id": pipeline_id,
+                    "sales_agent": sales_agent,
+                    "customer": customer,
+                },
+            ).all()
+            for r in rows:
+                m = getattr(r, "_mapping", r)
+                cid = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                step_count = int(m.get("step_count", 0) if hasattr(m, "get") else (r[1] if len(r) > 1 else 0))
+                last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
+                grouped[cid] = {"step_count": step_count, "last_at": last_at}
+        except Exception:
+            pass
+
+    pair_data = grouped.get("", {"step_count": 0, "last_at": None})
+    calls_out: dict[str, dict[str, Any]] = {}
+    source_call_ids = requested_call_ids if requested_call_ids else sorted([cid for cid in grouped.keys() if cid])
+    for cid in source_call_ids:
+        d = grouped.get(cid, {"step_count": 0, "last_at": None})
+        calls_out[cid] = _state(int(d.get("step_count", 0) or 0), d.get("last_at"))
+
+    # Include discovered calls too when caller did not pass explicit call_ids.
+    if not requested_set:
+        for cid, d in grouped.items():
+            if not cid or cid in calls_out:
+                continue
+            calls_out[cid] = _state(int(d.get("step_count", 0) or 0), d.get("last_at"))
+
+    return {
+        "pipeline_id": pipeline_id,
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "pair": _state(int(pair_data.get("step_count", 0) or 0), pair_data.get("last_at")),
+        "calls": calls_out,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
 @router.post("/{pipeline_id}/stop")
 async def stop_pipeline(
     pipeline_id: str,
@@ -2553,6 +2667,7 @@ async def run_pipeline(
     """Execute a pipeline step-by-step, streaming SSE events."""
     from ui.backend.models.agent_result import AgentResult as AR
     from ui.backend.models.note import Note
+    from ui.backend.models.pipeline_artifact import PipelineArtifact as PA
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.persona import Persona
     from ui.backend.routers.universal_agents import (
@@ -3175,6 +3290,57 @@ async def run_pipeline(
                     f"Failed to persist AgentResult in {mode} schema mode: {exc}"
                 ) from exc
 
+        def _touch_pipeline_artifact(
+            _step_idx: int,
+            _agent_id: str,
+            _agent_name: str,
+            _model: str,
+            _result_id: str,
+            _input_fingerprint: str = "",
+            _source: str = "done",
+        ) -> None:
+            """Upsert stable pipeline artifact metadata for per-call/per-pair cache visibility."""
+            _raw = (
+                f"{pipeline_id}::{(req.sales_agent or '').strip().lower()}::"
+                f"{(req.customer or '').strip().lower()}::{req.call_id or ''}::{_step_idx}"
+            )
+            _id = hashlib.sha1(_raw.encode("utf-8")).hexdigest()
+            _now = datetime.utcnow()
+            try:
+                with Session(_db_engine) as _s:
+                    _existing = _s.get(PA, _id)
+                    if _existing:
+                        _existing.agent_id = _agent_id
+                        _existing.agent_name = _agent_name
+                        _existing.result_id = _result_id or _existing.result_id
+                        _existing.input_fingerprint = _input_fingerprint or _existing.input_fingerprint
+                        _existing.model = _model
+                        _existing.source = _source
+                        _existing.updated_at = _now
+                        _s.add(_existing)
+                    else:
+                        _s.add(PA(
+                            id=_id,
+                            pipeline_id=pipeline_id,
+                            sales_agent=req.sales_agent,
+                            customer=req.customer,
+                            call_id=req.call_id or "",
+                            pipeline_step_index=_step_idx,
+                            agent_id=_agent_id,
+                            agent_name=_agent_name,
+                            result_id=_result_id or "",
+                            input_fingerprint=_input_fingerprint or "",
+                            model=_model,
+                            source=_source,
+                            created_at=_now,
+                            updated_at=_now,
+                        ))
+                    _s.commit()
+            except Exception as _e:
+                log_buffer.emit(
+                    f"[PIPELINE] ⚠ artifact index update failed (step {_step_idx + 1}): {_e}"
+                )
+
         # ── Build stage groups from canvas ───────────────────────────────────
         # Processing nodes sorted by (stageIndex, x) give the pipeline step order.
         # Steps with the same stageIndex belong to the same parallel stage.
@@ -3556,6 +3722,15 @@ async def run_pipeline(
                                 "content": _resume_cached.content,
                                 "cache_mode": "resume_partial",
                             })
+                            _touch_pipeline_artifact(
+                                _step_idx=step_idx,
+                                _agent_id=agent_id,
+                                _agent_name=agent_name,
+                                _model=model,
+                                _result_id=str(_resume_cached.id or ""),
+                                _input_fingerprint="",
+                                _source="cached_resume",
+                            )
                             continue
 
                     # ── Resolve inputs ───────────────────────────────────────
@@ -3679,6 +3854,15 @@ async def run_pipeline(
                                 "result_id": cached.id, "content": cached.content,
                                 "cache_mode": "resume_partial" if cached_via_resume_partial else "exact",
                             })
+                            _touch_pipeline_artifact(
+                                _step_idx=step_idx,
+                                _agent_id=agent_id,
+                                _agent_name=agent_name,
+                                _model=model,
+                                _result_id=str(cached.id or ""),
+                                _input_fingerprint=input_fingerprint,
+                                _source="cached_resume" if cached_via_resume_partial else "cached_exact",
+                            )
                             continue  # advance to next canvas stage
 
                     # Inputs resolved — notify frontend so input nodes can turn green
@@ -3822,6 +4006,15 @@ async def run_pipeline(
                         _model=model,
                         _agent_name=agent_name,
                         _input_fingerprint=input_fingerprint,
+                    )
+                    _touch_pipeline_artifact(
+                        _step_idx=step_idx,
+                        _agent_id=agent_id,
+                        _agent_name=agent_name,
+                        _model=model,
+                        _result_id=result_id,
+                        _input_fingerprint=input_fingerprint,
+                        _source="done",
                     )
 
                     prev_content = content
@@ -4143,6 +4336,15 @@ async def run_pipeline(
                             yield _sse("step_cached", {"step": _ri, "agent_name": _rn,
                                                         "result_id": _res.get("result_id", ""), "content": _res["content"],
                                                         "cache_mode": _res.get("cache_mode", "exact")})
+                            _touch_pipeline_artifact(
+                                _step_idx=_ri,
+                                _agent_id=steps[_ri].get("agent_id", ""),
+                                _agent_name=_rn,
+                                _model=_rm,
+                                _result_id=str(_res.get("result_id", "") or ""),
+                                _input_fingerprint=_res.get("input_fingerprint", ""),
+                                _source="cached_resume" if _res.get("cache_mode") == "resume_partial" else "cached_exact",
+                            )
                         elif _rst == "done":
                             _rc  = _res["content"]
                             _ret = _res["exec_time_s"]
@@ -4179,6 +4381,15 @@ async def run_pipeline(
                                 "input_token_est":  _res["input_tok"],
                                 "output_token_est": _res["output_tok"],
                             })
+                            _touch_pipeline_artifact(
+                                _step_idx=_ri,
+                                _agent_id=steps[_ri].get("agent_id", ""),
+                                _agent_name=_rn,
+                                _model=_rm,
+                                _result_id=str(_res.get("result_id", "") or ""),
+                                _input_fingerprint=_res.get("input_fingerprint", ""),
+                                _source="done",
+                            )
                         else:  # error
                             _remsg = _res.get("error_msg", "Unknown error")
                             run_steps[_ri].update({
