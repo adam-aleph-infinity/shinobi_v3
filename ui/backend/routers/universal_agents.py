@@ -632,6 +632,131 @@ def _make_file_header(source: str, sales_agent: str, customer: str, call_id: str
     return "[File context: " + " | ".join(parts) + "]\n\n"
 
 
+def _fmt_call_datetime(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        norm = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(norm)
+        return dt.strftime("%d %b %Y  %H:%M")
+    except Exception:
+        return raw[:19]
+
+
+def _fmt_duration(value: Any) -> str:
+    try:
+        d = int(float(value))
+    except Exception:
+        return ""
+    if d < 0:
+        return ""
+    return f"{d // 60}m{d % 60:02d}s"
+
+
+def _single_call_header(
+    sales_agent: str,
+    customer: str,
+    call_id: str,
+    db: Session,
+) -> str:
+    """Build a merged-style heading block for a single-call transcript."""
+    ui_data = settings.ui_data_dir
+    pair_dir = ui_data / "agents" / sales_agent / customer
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    calls_path = pair_dir / "calls.json"
+    if calls_path.exists():
+        try:
+            raw = json.loads(calls_path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                for c in raw:
+                    cid = str((c or {}).get("call_id", "") or "").strip()
+                    if not cid or cid in seen:
+                        continue
+                    seen.add(cid)
+                    rows.append({
+                        "call_id": cid,
+                        "started_at": (c or {}).get("started_at") or (c or {}).get("date"),
+                        "duration_s": (c or {}).get("duration_s") or (c or {}).get("audio_duration_s"),
+                    })
+        except Exception:
+            pass
+
+    if pair_dir.exists():
+        try:
+            call_dirs = sorted([
+                d for d in pair_dir.iterdir()
+                if d.is_dir() and not d.name.startswith("_") and not d.name.startswith(".")
+            ], key=lambda d: d.name.lower())
+            for d in call_dirs:
+                cid = str(d.name or "").strip()
+                if not cid or cid in seen:
+                    continue
+                seen.add(cid)
+                rows.append({"call_id": cid, "started_at": "", "duration_s": None})
+        except Exception:
+            pass
+
+    call_number = 0
+    total_calls = len(rows)
+    started_at: Any = ""
+    duration_s: Any = None
+
+    for i, row in enumerate(rows):
+        if str(row.get("call_id", "")).strip() != call_id:
+            continue
+        call_number = i + 1
+        started_at = row.get("started_at") or started_at
+        duration_s = row.get("duration_s") if row.get("duration_s") is not None else duration_s
+        break
+
+    # DB fallback for started_at / duration where calls.json is incomplete.
+    if not started_at or duration_s is None:
+        try:
+            from ui.backend.models.crm import CRMCall
+            stmt = select(CRMCall).where(CRMCall.call_id == call_id)
+            if sales_agent:
+                stmt = stmt.where(CRMCall.agent == sales_agent)
+            if customer:
+                stmt = stmt.where(CRMCall.customer == customer)
+            crm_rows = db.exec(stmt).all()
+            for r in crm_rows:
+                if not started_at and getattr(r, "started_at", None):
+                    started_at = r.started_at
+                if duration_s is None and getattr(r, "duration_s", None) is not None:
+                    duration_s = r.duration_s
+                if started_at and duration_s is not None:
+                    break
+        except Exception:
+            pass
+
+    number_label = f"{call_number}/{total_calls}" if call_number and total_calls else "unknown"
+    date_label = _fmt_call_datetime(started_at) or "unknown"
+    dur_label = _fmt_duration(duration_s) or "unknown"
+
+    call_line = f"CALL {call_id}"
+    if date_label != "unknown":
+        call_line += f"  |  {date_label}"
+    if dur_label != "unknown":
+        call_line += f"  |  {dur_label}"
+
+    return (
+        f"{'═' * 60}\n"
+        f"SINGLE CALL TRANSCRIPT\n"
+        f"Agent:      {sales_agent or '—'}\n"
+        f"Customer:   {customer or '—'}\n"
+        f"Call No.:   {number_label}\n"
+        f"Call ID:    {call_id}\n"
+        f"{'═' * 60}\n"
+        f"{'─' * 60}\n"
+        f"{call_line}\n"
+        f"{'─' * 60}\n\n"
+    )
+
+
 # ── Per-provider file upload helpers (with DB dedup) ─────────────────────────
 
 def _get_or_upload_gemini(
@@ -1352,7 +1477,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
                     path = voted
             if not path.exists():
                 raise RuntimeError(f"Transcript not found for call {call_id}")
-            return path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8").strip()
+            if not content:
+                return content
+            try:
+                header = _single_call_header(sales_agent, customer, call_id, db)
+                if header:
+                    return header + content
+            except Exception:
+                pass
+            return content
 
     if source == "merged_transcript":
         from ui.backend.routers.agent_comparison import _build_and_save_merged_transcript
