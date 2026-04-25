@@ -108,6 +108,7 @@ function SidebarClock() {
 
 export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
   const pathname = usePathname();
+  const isCallsPage = pathname === "/calls";
 
   const isActive = (href: string) => {
     // Exact match for paths that share a prefix with others
@@ -162,6 +163,25 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
 
       {/* Footer */}
       <div className="p-3 border-t border-gray-800 shrink-0 space-y-2">
+        {isCallsPage && (
+          <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-2 py-2">
+            <p className="text-[9px] font-semibold text-gray-600 uppercase tracking-widest mb-1">Calls badge map</p>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-teal-900/40 text-teal-300 border-teal-700/50">Tx</span>
+                <span>Transcript (per call)</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-cyan-900/40 text-cyan-300 border-cyan-700/50">Mg</span>
+                <span>Merged transcript (pair)</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-emerald-900/40 text-emerald-300 border-emerald-700/50">P</span>
+                <span>Selected pipeline status</span>
+              </div>
+            </div>
+          </div>
+        )}
         <BackendStatus />
         <SidebarClock />
         <SyncButton />
