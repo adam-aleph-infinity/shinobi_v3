@@ -184,8 +184,11 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
                 <span>Artifact output status (pipeline)</span>
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-violet-900/40 text-violet-300 border-violet-700/50">Ty</span>
-                <span>Artifact type(s), for example Score/Notes</span>
+                <span className="relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border border-violet-700/50 bg-violet-900/35 px-1">
+                  <Bot className="absolute h-4 w-4 text-violet-300/55" />
+                  <span className="relative z-10 text-[8px] font-semibold leading-none tracking-wide text-violet-100">SCR</span>
+                </span>
+                <span>Artifact type (robot badge)</span>
               </div>
             </div>
           </div>

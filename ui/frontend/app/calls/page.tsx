@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import {
   Loader2, FileText,
-  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play,
+  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot,
   EyeOff, Eye, X,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
@@ -246,21 +246,32 @@ const ARTIFACT_TYPE_LABELS: Record<string, string> = {
   notes_compliance: "Compliance",
 };
 
-function formatArtifactTypeShort(raw: string): string {
-  const key = String(raw || "").trim().toLowerCase();
-  const label = ARTIFACT_TYPE_LABELS[key] ?? key.replace(/_/g, " ");
-  return label.length > 10 ? `${label.slice(0, 9)}…` : label;
-}
+const ARTIFACT_TYPE_CODES: Record<string, string> = {
+  persona: "PRS",
+  persona_score: "SCR",
+  notes: "NTS",
+  notes_compliance: "CMP",
+};
 
 function formatArtifactTypeList(types: string[]): string {
   if (!types.length) return "none";
   return types.map(t => ARTIFACT_TYPE_LABELS[String(t).trim().toLowerCase()] ?? t).join(", ");
 }
 
-function buildArtifactTypeBadgeText(types: string[]): string {
-  if (!types.length) return "Ty:none";
-  if (types.length === 1) return `Ty:${formatArtifactTypeShort(types[0])}`;
-  return `Ty:${formatArtifactTypeShort(types[0])}+${types.length - 1}`;
+function formatArtifactTypeCode(raw: string): string {
+  const key = String(raw || "").trim().toLowerCase();
+  const mapped = ARTIFACT_TYPE_CODES[key];
+  if (mapped) return mapped;
+  const parts = key.split(/[_\s-]+/).filter(Boolean);
+  if (parts.length >= 2) return parts.slice(0, 3).map(p => (p[0] || "").toUpperCase()).join("");
+  const compact = key.replace(/[^a-z0-9]/gi, "").slice(0, 3).toUpperCase();
+  return compact || "ART";
+}
+
+function buildArtifactTypeRobotLabel(types: string[]): string {
+  if (!types.length) return "";
+  if (types.length === 1) return formatArtifactTypeCode(types[0]);
+  return `${formatArtifactTypeCode(types[0])}+${types.length - 1}`;
 }
 
 export default function CallsPage() {
@@ -700,7 +711,7 @@ export default function CallsPage() {
             const hasNotes = notesCallIds.has(call.call_id);
             const callPipeline = pipelineCallMap[call.call_id];
             const artifactTypes = callPipeline?.artifact_types ?? [];
-            const artifactTypeBadgeText = buildArtifactTypeBadgeText(artifactTypes);
+            const artifactTypeRobotLabel = buildArtifactTypeRobotLabel(artifactTypes);
             const agentSteps = callPipeline?.agent_step_count ?? callPipeline?.step_count ?? 0;
             const isSelected = selectedCallId === call.call_id;
             const isChecked = checkedCallIds.has(call.call_id);
@@ -792,17 +803,17 @@ export default function CallsPage() {
                           >
                             Ar
                           </span>
-                          <span
-                            title={`Artifact type(s): ${formatArtifactTypeList(artifactTypes)}`}
-                            className={cn(
-                              "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
-                              artifactTypes.length > 0
-                                ? "bg-violet-900/40 text-violet-300 border-violet-700/50"
-                                : "bg-gray-800 text-gray-500 border-gray-700/50",
-                            )}
-                          >
-                            {artifactTypeBadgeText}
-                          </span>
+                          {artifactTypes.length > 0 && (
+                            <span
+                              title={`Artifact type(s): ${formatArtifactTypeList(artifactTypes)}`}
+                              className="relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border border-violet-700/50 bg-violet-900/35 px-1"
+                            >
+                              <Bot className="absolute h-4 w-4 text-violet-300/55" />
+                              <span className="relative z-10 text-[8px] font-semibold leading-none tracking-wide text-violet-100">
+                                {artifactTypeRobotLabel}
+                              </span>
+                            </span>
+                          )}
                         </>
                       )}
                       {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
