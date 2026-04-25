@@ -1800,7 +1800,7 @@ def get_pipeline_results(
                 params["call_id"] = call_id or ""
             sql += "ORDER BY created_at DESC LIMIT 1"
             try:
-                cached_row = db.exec(_sql_text(sql), params).first()
+                cached_row = db.execute(_sql_text(sql), params).first()
             except Exception:
                 cached_row = None
 
@@ -1822,7 +1822,7 @@ def get_pipeline_results(
                 params2["call_id"] = call_id or ""
             sql2 += "ORDER BY created_at DESC LIMIT 1"
             try:
-                cached_row = db.exec(_sql_text(sql2), params2).first()
+                cached_row = db.execute(_sql_text(sql2), params2).first()
             except Exception:
                 cached_row = None
 
@@ -1972,7 +1972,7 @@ def get_pipeline_artifact_status(
     )
     if has_artifact_cols:
         try:
-            rows = db.exec(
+            rows = db.execute(
                 _sql_text(
                     "SELECT call_id, pipeline_step_index, MAX(updated_at) AS last_at "
                     "FROM pipeline_artifact "
@@ -2005,7 +2005,7 @@ def get_pipeline_artifact_status(
     # Compatibility fallback for older data before pipeline_artifact table.
     if not grouped_step_ids and _agent_result_supports_pipeline_cache(db):
         try:
-            rows = db.exec(
+            rows = db.execute(
                 _sql_text(
                     "SELECT call_id, pipeline_step_index, MAX(created_at) AS last_at "
                     "FROM agent_result "
