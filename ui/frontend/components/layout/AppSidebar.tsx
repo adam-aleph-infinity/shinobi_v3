@@ -181,7 +181,11 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
                 <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-blue-900/40 text-blue-300 border-blue-700/50">Ar</span>
-                <span>Artifact output type(s)</span>
+                <span>Artifact output status (pipeline)</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none bg-violet-900/40 text-violet-300 border-violet-700/50">Ty</span>
+                <span>Artifact type(s), for example Score/Notes</span>
               </div>
             </div>
           </div>

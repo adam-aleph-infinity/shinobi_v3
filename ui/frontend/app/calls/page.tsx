@@ -257,6 +257,12 @@ function formatArtifactTypeList(types: string[]): string {
   return types.map(t => ARTIFACT_TYPE_LABELS[String(t).trim().toLowerCase()] ?? t).join(", ");
 }
 
+function buildArtifactTypeBadgeText(types: string[]): string {
+  if (!types.length) return "Ty:none";
+  if (types.length === 1) return `Ty:${formatArtifactTypeShort(types[0])}`;
+  return `Ty:${formatArtifactTypeShort(types[0])}+${types.length - 1}`;
+}
+
 export default function CallsPage() {
   const ctx = useAppCtx();
   const [sidePanel, setSidePanel] = useState<"agent" | "pipeline">("agent");
@@ -694,11 +700,7 @@ export default function CallsPage() {
             const hasNotes = notesCallIds.has(call.call_id);
             const callPipeline = pipelineCallMap[call.call_id];
             const artifactTypes = callPipeline?.artifact_types ?? [];
-            const artifactBadgeText = artifactTypes.length === 0
-              ? "Ar"
-              : artifactTypes.length === 1
-                ? `Ar:${formatArtifactTypeShort(artifactTypes[0])}`
-                : `Ar:${formatArtifactTypeShort(artifactTypes[0])}+${artifactTypes.length - 1}`;
+            const artifactTypeBadgeText = buildArtifactTypeBadgeText(artifactTypes);
             const agentSteps = callPipeline?.agent_step_count ?? callPipeline?.step_count ?? 0;
             const isSelected = selectedCallId === call.call_id;
             const isChecked = checkedCallIds.has(call.call_id);
@@ -776,7 +778,7 @@ export default function CallsPage() {
                           <span
                             title={
                               callPipeline?.artifact_count
-                                ? `Artifact outputs: ${callPipeline.artifact_count}/${callPipeline.artifact_total ?? 0} · types: ${formatArtifactTypeList(artifactTypes)}`
+                                ? `Artifact outputs: ${callPipeline.artifact_count}/${callPipeline.artifact_total ?? 0}`
                                 : "No artifact output yet for selected pipeline on this call"
                             }
                             className={cn(
@@ -788,7 +790,18 @@ export default function CallsPage() {
                                   : "bg-gray-800 text-gray-500 border-gray-700/50",
                             )}
                           >
-                            {artifactBadgeText}
+                            Ar
+                          </span>
+                          <span
+                            title={`Artifact type(s): ${formatArtifactTypeList(artifactTypes)}`}
+                            className={cn(
+                              "inline-flex items-center px-1 py-0.5 rounded border text-[9px] font-semibold leading-none",
+                              artifactTypes.length > 0
+                                ? "bg-violet-900/40 text-violet-300 border-violet-700/50"
+                                : "bg-gray-800 text-gray-500 border-gray-700/50",
+                            )}
+                          >
+                            {artifactTypeBadgeText}
                           </span>
                         </>
                       )}
