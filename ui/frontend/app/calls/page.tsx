@@ -233,6 +233,10 @@ interface PipelineArtifactStatus {
   generated_at: string;
 }
 
+function normalizeCallId(raw: string | null | undefined): string {
+  return String(raw || "").trim().toLowerCase();
+}
+
 const ARTIFACT_TYPE_LABELS: Record<string, string> = {
   persona: "Persona",
   persona_score: "Score",
@@ -383,24 +387,47 @@ export default function CallsPage() {
       : null,
     fetcher
   );
-  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
+  const statusCallIds = useMemo(() => {
+    const byNorm = new Map<string, string>();
+    for (const c of rawCrmCalls) {
+      const raw = String(c?.call_id || "").trim();
+      const norm = normalizeCallId(raw);
+      if (!norm) continue;
+      if (!byNorm.has(norm)) byNorm.set(norm, raw);
+    }
+    for (const t of txCalls ?? []) {
+      const raw = String(t?.call_id || "").trim();
+      const norm = normalizeCallId(raw);
+      if (!norm) continue;
+      if (!byNorm.has(norm)) byNorm.set(norm, raw);
+    }
+    return Array.from(byNorm.values()).join(",");
+  }, [rawCrmCalls, txCalls]);
+
+  const artifactStatusKey =
     selectedAgent && selectedCustomerName && ctx.activePipelineId
-      ? `/api/pipelines/${encodeURIComponent(ctx.activePipelineId)}/artifact-status?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
-      : null,
+      ? `/api/pipelines/${encodeURIComponent(ctx.activePipelineId)}/artifact-status?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}${statusCallIds ? `&call_ids=${encodeURIComponent(statusCallIds)}` : ""}`
+      : null;
+  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
+    artifactStatusKey,
     fetcher,
     { refreshInterval: 10000 },
   );
 
   // Build transcription status map: call_id → TxCall
   const txMap = new Map<string, TxCall>();
-  txCalls?.forEach(t => txMap.set(t.call_id, t));
+  txCalls?.forEach(t => {
+    const norm = normalizeCallId(t.call_id);
+    if (!norm || txMap.has(norm)) return;
+    txMap.set(norm, t);
+  });
 
   // Merge: rawCrmCalls + any tx-only calls not in the CRM list
-  const crmCallSet = new Set(rawCrmCalls.map(c => c.call_id));
-  const txOnlyCalls = (txCalls ?? []).filter(tx => !crmCallSet.has(tx.call_id));
+  const crmCallSet = new Set(rawCrmCalls.map(c => normalizeCallId(c.call_id)).filter(Boolean));
+  const txOnlyCalls = (txCalls ?? []).filter(tx => !crmCallSet.has(normalizeCallId(tx.call_id)));
 
   const calls = [
-    ...rawCrmCalls.map(c => ({ ...c, tx: txMap.get(c.call_id) ?? null })),
+    ...rawCrmCalls.map(c => ({ ...c, tx: txMap.get(normalizeCallId(c.call_id)) ?? null })),
     ...txOnlyCalls.map(tx => ({
       call_id:     tx.call_id,
       date:        tx.started_at ?? "",
@@ -421,9 +448,18 @@ export default function CallsPage() {
     return checkedCallIdsOrdered[0] ?? selectedCallId ?? "";
   }, [selectedCallId, checkedCallIdsOrdered]);
 
-  const selectedCallData = calls.find(c => c.call_id === selectedCallId) ?? null;
+  const selectedCallData = calls.find(c => normalizeCallId(c.call_id) === normalizeCallId(selectedCallId)) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
   const pipelineCallMap = pipelineArtifactStatus?.calls ?? {};
+  const pipelineCallMapByNorm = useMemo(() => {
+    const out: Record<string, PipelineArtifactState> = {};
+    Object.entries(pipelineCallMap).forEach(([k, v]) => {
+      const norm = normalizeCallId(k);
+      if (!norm || out[norm]) return;
+      out[norm] = v;
+    });
+    return out;
+  }, [pipelineCallMap]);
   const pairPipeline = pipelineArtifactStatus?.pair;
 
   // Calls with transcripts in chronological order — matches the "Call N" numbering in merged transcripts
@@ -687,7 +723,7 @@ export default function CallsPage() {
               call.tx?.has_llm_voted ||
               call.tx?.has_pipeline_final
             );
-            const callPipeline = pipelineCallMap[call.call_id];
+            const callPipeline = pipelineCallMapByNorm[normalizeCallId(call.call_id)] ?? pipelineCallMap[call.call_id];
             const artifactTypes = Array.from(
               new Set((callPipeline?.artifact_types ?? []).map(normalizeArtifactType).filter(Boolean)),
             );

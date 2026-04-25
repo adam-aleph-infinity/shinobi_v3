@@ -1854,8 +1854,20 @@ def get_pipeline_artifact_status(
     """Pipeline artifact coverage by call/pair for badge rendering in Calls UI."""
     _, pipeline_def = _find_file(pipeline_id)
     total_steps = len(pipeline_def.get("steps", []) or [])
+
+    def _norm_call_id(v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        return s.lower()
+
     requested_call_ids = [c.strip() for c in (call_ids or "").split(",") if c.strip()]
-    requested_set = set(requested_call_ids)
+    requested_norm_to_raw: dict[str, str] = {}
+    for cid in requested_call_ids:
+        n = _norm_call_id(cid)
+        if n and n not in requested_norm_to_raw:
+            requested_norm_to_raw[n] = cid
+    requested_set = set(requested_norm_to_raw.keys())
 
     def _extract_artifact_types_by_step() -> dict[int, set[str]]:
         out: dict[int, set[str]] = {}
@@ -1953,6 +1965,7 @@ def get_pipeline_artifact_status(
 
     grouped_step_ids: dict[str, set[int]] = {}
     grouped_last_at: dict[str, Optional[str]] = {}
+    grouped_raw_call_id: dict[str, str] = {}
 
     has_artifact_cols = {"id", "pipeline_id", "sales_agent", "customer", "call_id", "pipeline_step_index"}.issubset(
         _get_table_columns(db, "pipeline_artifact")
@@ -1976,14 +1989,18 @@ def get_pipeline_artifact_status(
             ).all()
             for r in rows:
                 m = getattr(r, "_mapping", r)
-                cid = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                cid = _norm_call_id(cid_raw)
                 step_idx = int(m.get("pipeline_step_index", -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
                 last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
                 grouped_step_ids.setdefault(cid, set()).add(step_idx)
                 grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
+                if cid and cid not in grouped_raw_call_id:
+                    grouped_raw_call_id[cid] = str(cid_raw).strip()
         except Exception:
             grouped_step_ids = {}
             grouped_last_at = {}
+            grouped_raw_call_id = {}
 
     # Compatibility fallback for older data before pipeline_artifact table.
     if not grouped_step_ids and _agent_result_supports_pipeline_cache(db):
@@ -2005,25 +2022,32 @@ def get_pipeline_artifact_status(
             ).all()
             for r in rows:
                 m = getattr(r, "_mapping", r)
-                cid = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                cid = _norm_call_id(cid_raw)
                 step_idx = int(m.get("pipeline_step_index", -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
                 last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
                 grouped_step_ids.setdefault(cid, set()).add(step_idx)
                 grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
+                if cid and cid not in grouped_raw_call_id:
+                    grouped_raw_call_id[cid] = str(cid_raw).strip()
         except Exception:
             pass
 
     calls_out: dict[str, dict[str, Any]] = {}
-    source_call_ids = requested_call_ids if requested_call_ids else sorted([cid for cid in grouped_step_ids.keys() if cid])
-    for cid in source_call_ids:
-        calls_out[cid] = _state(grouped_step_ids.get(cid, set()), grouped_last_at.get(cid))
+    source_call_ids = sorted(list(requested_set)) if requested_set else sorted([cid for cid in grouped_step_ids.keys() if cid])
+    for norm_cid in source_call_ids:
+        out_key = requested_norm_to_raw.get(norm_cid) or grouped_raw_call_id.get(norm_cid) or norm_cid
+        calls_out[out_key] = _state(grouped_step_ids.get(norm_cid, set()), grouped_last_at.get(norm_cid))
 
     # Include discovered calls too when caller did not pass explicit call_ids.
     if not requested_set:
-        for cid in grouped_step_ids.keys():
-            if not cid or cid in calls_out:
+        for norm_cid in grouped_step_ids.keys():
+            if not norm_cid:
                 continue
-            calls_out[cid] = _state(grouped_step_ids.get(cid, set()), grouped_last_at.get(cid))
+            out_key = grouped_raw_call_id.get(norm_cid) or norm_cid
+            if out_key in calls_out:
+                continue
+            calls_out[out_key] = _state(grouped_step_ids.get(norm_cid, set()), grouped_last_at.get(norm_cid))
 
     return {
         "pipeline_id": pipeline_id,
