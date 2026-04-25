@@ -46,7 +46,7 @@ interface CallArtifactItem {
   artifact_type: string;
   artifact_label: string;
   scope: "call" | "pair";
-  association: "exact" | "isolated_merged";
+  association: "exact" | "exact_anchor" | "isolated_merged";
   confidence: number;
   result_id: string;
   created_at: string;
@@ -467,6 +467,9 @@ export function AgentSidePanel({
                       <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded border font-medium", meta.badge)}>{meta.label}</span>
                       <span className="text-gray-500">step {a.step_index + 1}</span>
                       <span className="text-gray-600 truncate">{a.agent_name || a.agent_id}</span>
+                      {a.association === "exact_anchor" && (
+                        <span className="ml-auto text-emerald-400">anchored</span>
+                      )}
                       {a.association === "isolated_merged" && (
                         <span className="ml-auto text-gray-500">iso {Math.round((a.confidence || 0) * 100)}%</span>
                       )}

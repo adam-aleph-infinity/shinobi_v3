@@ -1,3 +1,3 @@
 """Backend app version."""
 
-APP_VERSION = "6.2.28"
+APP_VERSION = "6.2.29"

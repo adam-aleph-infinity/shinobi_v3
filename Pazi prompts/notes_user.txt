@@ -1,3 +1,16 @@
+INPUT METADATA CONTRACT (MANDATORY)
+
+For each analyzed call, include this metadata in the input context:
+
+CALL_ID: <id>
+CALL_NUMBER: <number or UNKNOWN>
+AGENT: <name or UNKNOWN>
+CUSTOMER: <name or UNKNOWN>
+CALL_DATE: <date/time or UNKNOWN>
+
+If analyzing merged content, keep each call block clearly separated and preserve its exact CALL_ID.
+
+
 GLOBAL COMPLIANCE SUMMARY
 
  

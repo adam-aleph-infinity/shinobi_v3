@@ -1,5 +1,27 @@
 ADDITIONAL OUTPUT – SYSTEM NOTES (CALL-LEVEL TRACKING)
 
+OUTPUT ANCHOR CONTRACT (MANDATORY)
+
+For EACH call section, print this exact block immediately before "System Note – Call X":
+
+[CALL_ANCHOR_START]
+CALL_ID: <exact call id from input>
+CALL_NUMBER: <number or UNKNOWN>
+AGENT: <agent name or UNKNOWN>
+CUSTOMER: <customer name or UNKNOWN>
+CALL_DATE: <date/time or UNKNOWN>
+[CALL_ANCHOR_END]
+
+Rules:
+
+• CALL_ID must be exact for that call
+
+• This anchor is metadata only and must not change the analysis results
+
+• Keep all existing scoring and notes logic exactly the same
+
+• If CALL_ID is missing from input, use CALL_ID: UNKNOWN
+
  
 
 This section must be generated ONLY AFTER all scores, final score, and final output have been fully completed.
@@ -231,4 +253,3 @@ Do NOT introduce any actions that are not derived from Stage 1.
 Be explicit and actionable.
 
  
-

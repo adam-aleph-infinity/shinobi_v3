@@ -1900,6 +1900,47 @@ def _split_merged_calls(merged_text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _parse_call_anchor_metadata(meta_text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in str(meta_text or "").splitlines():
+        m = _re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", line)
+        if not m:
+            continue
+        k = str(m.group(1) or "").strip().lower()
+        v = str(m.group(2) or "").strip()
+        if k:
+            out[k] = v
+    return out
+
+
+def _extract_call_anchor_segments(raw: str) -> list[dict[str, Any]]:
+    text = str(raw or "")
+    if not text.strip():
+        return []
+    pat = _re.compile(
+        r"\[\s*CALL_ANCHOR_START\s*\](.*?)\[\s*CALL_ANCHOR_END\s*\]",
+        _re.IGNORECASE | _re.DOTALL,
+    )
+    matches = list(pat.finditer(text))
+    if not matches:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for i, m in enumerate(matches):
+        meta = _parse_call_anchor_metadata(m.group(1) or "")
+        call_id = str(meta.get("call_id") or "").strip()
+        next_start = matches[i + 1].start() if (i + 1) < len(matches) else len(text)
+        content = text[m.end() : next_start].strip()
+        if not (call_id or content):
+            continue
+        out.append({
+            "call_id": call_id,
+            "meta": meta,
+            "content": content,
+        })
+    return out
+
+
 def _tokenize_match_text(text: str) -> list[str]:
     stop = {
         "the", "and", "for", "with", "that", "this", "from", "have", "has", "had", "was", "were", "are", "is",
@@ -2138,6 +2179,54 @@ def get_pipeline_call_artifacts(
                 "reason": "no pair artifact cached",
             })
             continue
+
+        anchored_segments = _extract_call_anchor_segments(pair_row.get("content") or "")
+        if anchored_segments:
+            matched_segments = [
+                s for s in anchored_segments
+                if str(s.get("call_id") or "").strip().lower() == call_id_norm
+            ]
+            if matched_segments:
+                selected_sections: list[dict[str, Any]] = []
+                for idx, seg in enumerate(matched_segments):
+                    seg_content = str(seg.get("content") or "").strip()
+                    if not seg_content:
+                        continue
+                    meta = seg.get("meta") or {}
+                    seg_title = (
+                        str(meta.get("section") or "").strip()
+                        or str(meta.get("title") or "").strip()
+                        or f"CALL_ID {call_id_raw} Section {idx + 1}"
+                    )
+                    selected_sections.append({
+                        "title": seg_title,
+                        "content": seg_content,
+                        "score": 1.0,
+                        "top_call_id": call_id_norm,
+                        "top_score": 1.0,
+                        "second_score": 0.0,
+                        "relative": 1.0,
+                    })
+                if selected_sections:
+                    merged_content = "\n\n".join(
+                        [f"## {s['title']}\n\n{s['content']}" for s in selected_sections]
+                    )
+                    artifacts_out.append({
+                        "step_index": step_idx,
+                        "agent_id": agent_id,
+                        "agent_name": pair_row.get("agent_name") or agent_id,
+                        "artifact_type": artifact_type,
+                        "artifact_label": artifact_label,
+                        "scope": "pair",
+                        "association": "exact_anchor",
+                        "confidence": 1.0,
+                        "result_id": pair_row.get("id") or "",
+                        "created_at": pair_row.get("created_at") or "",
+                        "model": pair_row.get("model") or "",
+                        "content": merged_content,
+                        "sections": selected_sections,
+                    })
+                    continue
 
         if call_id_norm not in merged_call_tokens:
             unassigned_out.append({
