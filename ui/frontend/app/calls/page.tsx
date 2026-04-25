@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import {
   Loader2, FileText,
-  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot, User, Users,
+  Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot, User, BarChart3, ShieldCheck,
   EyeOff, Eye, X,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
@@ -212,12 +212,6 @@ interface TxCall   {
   smoothed_path: string | null; voted_path: string | null;
   duration_s: number | null; started_at: string | null;
 }
-interface MergedTranscriptInfo {
-  available: boolean;
-  calls: number;
-  transcripts: number;
-  chars: number;
-}
 interface PipelineArtifactState {
   processed: boolean;
   complete: boolean;
@@ -246,32 +240,29 @@ const ARTIFACT_TYPE_LABELS: Record<string, string> = {
   notes_compliance: "Compliance",
 };
 
-const ARTIFACT_TYPE_CODES: Record<string, string> = {
-  persona: "PRS",
-  persona_score: "SCR",
-  notes: "NTS",
-  notes_compliance: "CMP",
-};
-
-function formatArtifactTypeList(types: string[]): string {
-  if (!types.length) return "none";
-  return types.map(t => ARTIFACT_TYPE_LABELS[String(t).trim().toLowerCase()] ?? t).join(", ");
+function normalizeArtifactType(raw: string): string {
+  return String(raw || "").trim().toLowerCase();
 }
 
-function formatArtifactTypeCode(raw: string): string {
-  const key = String(raw || "").trim().toLowerCase();
-  const mapped = ARTIFACT_TYPE_CODES[key];
-  if (mapped) return mapped;
-  const parts = key.split(/[_\s-]+/).filter(Boolean);
-  if (parts.length >= 2) return parts.slice(0, 3).map(p => (p[0] || "").toUpperCase()).join("");
-  const compact = key.replace(/[^a-z0-9]/gi, "").slice(0, 3).toUpperCase();
-  return compact || "ART";
-}
-
-function buildArtifactTypeRobotLabel(types: string[]): string {
-  if (!types.length) return "ART";
-  if (types.length === 1) return formatArtifactTypeCode(types[0]);
-  return `${formatArtifactTypeCode(types[0])}+${types.length - 1}`;
+function getArtifactIconMeta(type: string): {
+  label: string;
+  icon: any;
+  className: string;
+} {
+  const key = normalizeArtifactType(type);
+  if (key === "persona") {
+    return { label: "Persona artifact", icon: User, className: "border-fuchsia-700/60 bg-fuchsia-900/35 text-fuchsia-300" };
+  }
+  if (key === "persona_score") {
+    return { label: "Score artifact", icon: BarChart3, className: "border-amber-700/60 bg-amber-900/35 text-amber-300" };
+  }
+  if (key === "notes") {
+    return { label: "Notes artifact", icon: StickyNote, className: "border-indigo-700/60 bg-indigo-900/35 text-indigo-300" };
+  }
+  if (key === "notes_compliance") {
+    return { label: "Compliance artifact", icon: ShieldCheck, className: "border-emerald-700/60 bg-emerald-900/35 text-emerald-300" };
+  }
+  return { label: "Artifact", icon: Bot, className: "border-violet-700/60 bg-violet-900/35 text-violet-300" };
 }
 
 export default function CallsPage() {
@@ -392,13 +383,6 @@ export default function CallsPage() {
       : null,
     fetcher
   );
-  const { data: mergedInfo } = useSWR<MergedTranscriptInfo>(
-    selectedAgent && selectedCustomerName
-      ? `/api/full-persona-agent/transcript-info?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
-      : null,
-    fetcher,
-    { refreshInterval: 15000 },
-  );
   const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
     selectedAgent && selectedCustomerName && ctx.activePipelineId
       ? `/api/pipelines/${encodeURIComponent(ctx.activePipelineId)}/artifact-status?sales_agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
@@ -406,16 +390,6 @@ export default function CallsPage() {
     fetcher,
     { refreshInterval: 10000 },
   );
-
-  // Fetch all notes for this agent/customer pair to know which calls have notes
-  const { data: pairNotes } = useSWR<{ call_id: string }[]>(
-    selectedAgent && selectedCustomerName
-      ? `/api/notes?agent=${encodeURIComponent(selectedAgent)}&customer=${encodeURIComponent(selectedCustomerName)}`
-      : null,
-    fetcher,
-    { refreshInterval: 15000 }
-  );
-  const notesCallIds = new Set((pairNotes ?? []).map(n => n.call_id));
 
   // Build transcription status map: call_id → TxCall
   const txMap = new Map<string, TxCall>();
@@ -449,7 +423,6 @@ export default function CallsPage() {
 
   const selectedCallData = calls.find(c => c.call_id === selectedCallId) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
-  const hasMergedTranscript = !!mergedInfo?.available;
   const pipelineCallMap = pipelineArtifactStatus?.calls ?? {};
   const pairPipeline = pipelineArtifactStatus?.pair;
 
@@ -707,13 +680,20 @@ export default function CallsPage() {
             </div>
           )}
           {hasPairContext && calls.map(call => {
-            const hasTranscript = call.tx?.has_llm_smoothed || call.tx?.has_llm_voted || call.tx?.has_pipeline_final;
-            const hasNotes = notesCallIds.has(call.call_id);
+            const hasTranscriptOut = !!(
+              call.tx?.smoothed_path ||
+              call.tx?.voted_path ||
+              call.tx?.has_llm_smoothed ||
+              call.tx?.has_llm_voted ||
+              call.tx?.has_pipeline_final
+            );
             const callPipeline = pipelineCallMap[call.call_id];
-            const artifactTypes = callPipeline?.artifact_types ?? [];
-            const hasArtifact = (callPipeline?.artifact_count ?? 0) > 0 || artifactTypes.length > 0;
-            const artifactTypeRobotLabel = buildArtifactTypeRobotLabel(artifactTypes);
-            const agentSteps = callPipeline?.agent_step_count ?? callPipeline?.step_count ?? 0;
+            const artifactTypes = Array.from(
+              new Set((callPipeline?.artifact_types ?? []).map(normalizeArtifactType).filter(Boolean)),
+            );
+            const artifactBadgeTypes = artifactTypes.length > 0
+              ? artifactTypes
+              : ((callPipeline?.artifact_count ?? 0) > 0 ? ["unknown"] : []);
             const isSelected = selectedCallId === call.call_id;
             const isChecked = checkedCallIds.has(call.call_id);
             return (
@@ -746,44 +726,30 @@ export default function CallsPage() {
                     <ChevronRight className={cn("w-3 h-3 shrink-0", isSelected ? "text-teal-400" : "text-gray-700")} />
                     <span className="text-xs font-mono font-medium text-gray-200 truncate">{call.call_id}</span>
                     <span className="ml-auto flex items-center gap-1 shrink-0">
-                      {hasTranscript && (
+                      {hasTranscriptOut && (
                         <span
-                          title="Single call transcript available"
+                          title="Transcript output available"
                           className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
                         >
-                          <User className="h-3 w-3" />
+                          <FileText className="h-3 w-3" />
                         </span>
                       )}
-                      {hasTranscript && hasMergedTranscript && (
-                        <span
-                          title="Merged transcript available for this pair"
-                          className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-cyan-700/60 bg-cyan-900/35 text-cyan-300"
-                        >
-                          <Users className="h-3 w-3" />
-                        </span>
-                      )}
-                      {ctx.activePipelineId && hasArtifact && (
-                        <span
-                          title={
-                            `Artifact type(s): ${formatArtifactTypeList(artifactTypes)} · outputs ${callPipeline?.artifact_count ?? 0}/${callPipeline?.artifact_total ?? 0}` +
-                            (callPipeline?.processed
-                              ? ` · agent steps ${agentSteps}/${callPipeline.total_steps}`
-                              : "")
-                          }
-                          className={cn(
-                            "relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border px-1",
-                            callPipeline?.artifact_complete
-                              ? "border-violet-600/70 bg-violet-900/50"
-                              : "border-violet-700/50 bg-violet-900/35",
-                          )}
-                        >
-                          <Bot className="absolute h-4 w-4 text-violet-300/55" />
-                          <span className="relative z-10 text-[8px] font-semibold leading-none tracking-wide text-violet-100">
-                            {artifactTypeRobotLabel}
+                      {ctx.activePipelineId && artifactBadgeTypes.map((type, idx) => {
+                        const meta = getArtifactIconMeta(type);
+                        const Icon = meta.icon;
+                        return (
+                          <span
+                            key={`${call.call_id}-artifact-${type}-${idx}`}
+                            title={`${meta.label} cached for selected pipeline`}
+                            className={cn(
+                              "inline-flex h-5 w-5 items-center justify-center rounded-md border",
+                              meta.className,
+                            )}
+                          >
+                            <Icon className="h-3 w-3" />
                           </span>
-                        </span>
-                      )}
-                      {hasNotes && <StickyNote className="w-3 h-3 text-indigo-400" />}
+                        );
+                      })}
                     </span>
                   </div>
                   <div className="pl-[18px] flex items-center gap-2 text-[10px] text-gray-500">

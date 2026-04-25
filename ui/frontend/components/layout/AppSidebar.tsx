@@ -8,7 +8,7 @@ import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
   FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
-  User,
+  User, ShieldCheck,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -170,22 +170,39 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
                 <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300">
+                  <FileText className="h-3 w-3" />
+                </span>
+                <span>Transcript output</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-fuchsia-700/60 bg-fuchsia-900/35 text-fuchsia-300">
                   <User className="h-3 w-3" />
                 </span>
-                <span>Single call transcript</span>
+                <span>Persona artifact</span>
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-cyan-700/60 bg-cyan-900/35 text-cyan-300">
-                  <Users className="h-3 w-3" />
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-amber-700/60 bg-amber-900/35 text-amber-300">
+                  <BarChart3 className="h-3 w-3" />
                 </span>
-                <span>Merged pair transcript</span>
+                <span>Score artifact</span>
               </div>
               <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                <span className="relative inline-flex h-5 min-w-8 items-center justify-center rounded-md border border-violet-700/50 bg-violet-900/35 px-1">
-                  <Bot className="absolute h-4 w-4 text-violet-300/55" />
-                  <span className="relative z-10 text-[8px] font-semibold leading-none tracking-wide text-violet-100">SCR</span>
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-indigo-700/60 bg-indigo-900/35 text-indigo-300">
+                  <StickyNote className="h-3 w-3" />
                 </span>
-                <span>Artifact type (robot badge)</span>
+                <span>Notes artifact</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-emerald-700/60 bg-emerald-900/35 text-emerald-300">
+                  <ShieldCheck className="h-3 w-3" />
+                </span>
+                <span>Compliance artifact</span>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-violet-700/60 bg-violet-900/35 text-violet-300">
+                  <Bot className="h-3 w-3" />
+                </span>
+                <span>Other artifact</span>
               </div>
             </div>
           </div>
