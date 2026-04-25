@@ -1971,6 +1971,19 @@ def get_pipeline_artifact_status(
     grouped_last_at: dict[str, Optional[str]] = {}
     grouped_raw_call_id: dict[str, str] = {}
 
+    def _merge_grouped_rows(rows: list[Any], call_key: str, step_key: str, last_key: str) -> None:
+        for r in rows:
+            m = getattr(r, "_mapping", r)
+            cid_raw = str(m.get(call_key, "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+            cid = _norm_call_id(cid_raw)
+            step_idx = int(m.get(step_key, -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
+            last_at = _to_iso(m.get(last_key) if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
+            grouped_step_ids.setdefault(cid, set()).add(step_idx)
+            grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
+            cid_clean = str(cid_raw).strip()
+            if cid and cid_clean and cid not in grouped_raw_call_id:
+                grouped_raw_call_id[cid] = cid_clean
+
     has_artifact_cols = {"id", "pipeline_id", "sales_agent", "customer", "call_id", "pipeline_step_index"}.issubset(
         _get_table_columns(db, "pipeline_artifact")
     )
@@ -1991,23 +2004,13 @@ def get_pipeline_artifact_status(
                     "customer": customer,
                 },
             ).all()
-            for r in rows:
-                m = getattr(r, "_mapping", r)
-                cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
-                cid = _norm_call_id(cid_raw)
-                step_idx = int(m.get("pipeline_step_index", -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
-                last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
-                grouped_step_ids.setdefault(cid, set()).add(step_idx)
-                grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
-                if cid and cid not in grouped_raw_call_id:
-                    grouped_raw_call_id[cid] = str(cid_raw).strip()
+            _merge_grouped_rows(rows, "call_id", "pipeline_step_index", "last_at")
         except Exception:
-            grouped_step_ids = {}
-            grouped_last_at = {}
-            grouped_raw_call_id = {}
+            pass
 
-    # Compatibility fallback for older data before pipeline_artifact table.
-    if not grouped_step_ids and _agent_result_supports_pipeline_cache(db):
+    # Compatibility merge for older cache rows and any contexts where pipeline_artifact
+    # was not backfilled for previously completed steps.
+    if _agent_result_supports_pipeline_cache(db):
         try:
             rows = db.execute(
                 _sql_text(
@@ -2024,16 +2027,7 @@ def get_pipeline_artifact_status(
                     "customer": customer,
                 },
             ).all()
-            for r in rows:
-                m = getattr(r, "_mapping", r)
-                cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
-                cid = _norm_call_id(cid_raw)
-                step_idx = int(m.get("pipeline_step_index", -1) if hasattr(m, "get") else (r[1] if len(r) > 1 else -1))
-                last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[2] if len(r) > 2 else None))
-                grouped_step_ids.setdefault(cid, set()).add(step_idx)
-                grouped_last_at[cid] = _max_iso(grouped_last_at.get(cid), last_at)
-                if cid and cid not in grouped_raw_call_id:
-                    grouped_raw_call_id[cid] = str(cid_raw).strip()
+            _merge_grouped_rows(rows, "call_id", "pipeline_step_index", "last_at")
         except Exception:
             pass
 
