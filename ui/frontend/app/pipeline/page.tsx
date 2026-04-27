@@ -83,11 +83,17 @@ interface AgentInput { key: string; source: string; agent_id?: string; }
 interface StepOutputContractOverride {
   artifact_type?: string;
   artifact_class?: string;
+  artifact_name?: string;
   output_format?: string;
   output_schema?: string;
   output_taxonomy?: string[];
   output_contract_mode?: "off" | "soft" | "strict";
   output_fit_strategy?: "structured" | "raw";
+  output_response_mode?: "wrap" | "transform" | "custom_format";
+  output_target_type?: "raw_text" | "markdown" | "json";
+  output_template?: string;
+  output_placeholder?: string;
+  output_previous_placeholder?: string;
 }
 
 interface PipelineStepDef {
@@ -102,10 +108,16 @@ interface UniversalAgent {
   inputs: AgentInput[]; output_format: string; tags: string[];
   artifact_type?: string;
   artifact_class?: string;
+  artifact_name?: string;
   output_schema?: string;
   output_taxonomy?: string[];
   output_contract_mode?: "off" | "soft" | "strict";
   output_fit_strategy?: "structured" | "raw";
+  output_response_mode?: "wrap" | "transform" | "custom_format";
+  output_target_type?: "raw_text" | "markdown" | "json";
+  output_template?: string;
+  output_placeholder?: string;
+  output_previous_placeholder?: string;
   is_default: boolean; created_at: string;
 }
 
@@ -177,11 +189,17 @@ interface OutputProfile {
   name: string;
   artifact_type: string;
   artifact_class: string;
+  artifact_name: string;
   output_format: string;
   output_schema: string;
   output_taxonomy: string[];
   output_contract_mode: "off" | "soft" | "strict";
   output_fit_strategy: "structured" | "raw";
+  output_response_mode: "wrap" | "transform" | "custom_format";
+  output_target_type: "raw_text" | "markdown" | "json";
+  output_template: string;
+  output_placeholder: string;
+  output_previous_placeholder: string;
 }
 
 // ── Agent sub-components ──────────────────────────────────────────────────────
@@ -939,13 +957,16 @@ function PipelineCanvas() {
   const outputProfiles = useMemo<OutputProfile[]>(() => {
     const out: OutputProfile[] = [];
     for (const a of allAgents) {
+      const artifact_type = String(a.artifact_type || "").trim();
+      const artifact_name = String(a.artifact_name || "").trim();
       const output_schema = String(a.output_schema || "").trim();
-      if (!output_schema) continue;
+      if (!artifact_type && !artifact_name && !output_schema) continue;
       out.push({
         id: String(a.id || ""),
-        name: String(a.name || "Profile"),
-        artifact_type: String(a.artifact_type || "").trim(),
+        name: artifact_name || String(a.name || "Profile"),
+        artifact_type,
         artifact_class: String(a.artifact_class || "").trim(),
+        artifact_name,
         output_format: String(a.output_format || "markdown").trim().toLowerCase(),
         output_schema,
         output_taxonomy: Array.isArray(a.output_taxonomy)
@@ -957,6 +978,15 @@ function PipelineCanvas() {
         output_fit_strategy: (["structured", "raw"].includes(String(a.output_fit_strategy || "").toLowerCase())
           ? String(a.output_fit_strategy).toLowerCase()
           : "structured") as "structured" | "raw",
+        output_response_mode: (["wrap", "transform", "custom_format"].includes(String(a.output_response_mode || "").toLowerCase())
+          ? String(a.output_response_mode).toLowerCase()
+          : "wrap") as "wrap" | "transform" | "custom_format",
+        output_target_type: (["raw_text", "markdown", "json"].includes(String(a.output_target_type || "").toLowerCase())
+          ? String(a.output_target_type).toLowerCase()
+          : "raw_text") as "raw_text" | "markdown" | "json",
+        output_template: String(a.output_template || ""),
+        output_placeholder: String(a.output_placeholder || "response"),
+        output_previous_placeholder: String(a.output_previous_placeholder || "previous_response"),
       });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -1532,11 +1562,17 @@ function PipelineCanvas() {
     if (!ov) return "";
     const candidateProfiles = outputProfiles.filter(p => profileMatchesArtifactSubType(p, subType));
     for (const p of candidateProfiles) {
-      const sameType = String(ov.artifact_type || "") === p.artifact_type;
-      const sameClass = String(ov.artifact_class || "") === p.artifact_class;
-      const sameSchema = String(ov.output_schema || "") === p.output_schema;
-      const sameFormat = String(ov.output_format || "").toLowerCase() === String(p.output_format || "").toLowerCase();
-      if (sameType && sameClass && sameSchema && sameFormat) return p.id;
+      const sameType = !("artifact_type" in ov) || String(ov.artifact_type || "") === p.artifact_type;
+      const sameClass = !("artifact_class" in ov) || String(ov.artifact_class || "") === p.artifact_class;
+      const sameName = !("artifact_name" in ov) || String(ov.artifact_name || "") === p.artifact_name;
+      const sameSchema = !("output_schema" in ov) || String(ov.output_schema || "") === p.output_schema;
+      const sameFormat = !("output_format" in ov) || String(ov.output_format || "").toLowerCase() === String(p.output_format || "").toLowerCase();
+      const sameMode = !("output_response_mode" in ov) || String(ov.output_response_mode || "").toLowerCase() === String(p.output_response_mode || "").toLowerCase();
+      const sameTarget = !("output_target_type" in ov) || String(ov.output_target_type || "").toLowerCase() === String(p.output_target_type || "").toLowerCase();
+      const sameTemplate = !("output_template" in ov) || String(ov.output_template || "") === String(p.output_template || "");
+      const samePlaceholder = !("output_placeholder" in ov) || String(ov.output_placeholder || "") === String(p.output_placeholder || "");
+      const samePrevPlaceholder = !("output_previous_placeholder" in ov) || String(ov.output_previous_placeholder || "") === String(p.output_previous_placeholder || "");
+      if (sameType && sameClass && sameName && sameSchema && sameFormat && sameMode && sameTarget && sameTemplate && samePlaceholder && samePrevPlaceholder) return p.id;
     }
     return "";
   }
@@ -1844,11 +1880,17 @@ function PipelineCanvas() {
               output_contract_override = {
                 artifact_type: profile.artifact_type,
                 artifact_class: profile.artifact_class,
+                artifact_name: profile.artifact_name,
                 output_format: profile.output_format,
                 output_schema: profile.output_schema,
                 output_taxonomy: profile.output_taxonomy,
                 output_contract_mode: profile.output_contract_mode,
                 output_fit_strategy: profile.output_fit_strategy,
+                output_response_mode: profile.output_response_mode,
+                output_target_type: profile.output_target_type,
+                output_template: profile.output_template,
+                output_placeholder: profile.output_placeholder,
+                output_previous_placeholder: profile.output_previous_placeholder,
               };
             }
           }
@@ -2467,6 +2509,9 @@ function PipelineCanvas() {
                       <p className="text-[10px] text-indigo-300 font-medium">{selectedProfile.name}</p>
                       <p className="text-[10px] text-gray-500">
                         type: {selectedProfile.artifact_type || "—"} · class: {selectedProfile.artifact_class || "—"} · format: {selectedProfile.output_format}
+                      </p>
+                      <p className="text-[10px] text-gray-500">
+                        mode: {selectedProfile.output_response_mode} · target: {selectedProfile.output_target_type}
                       </p>
                     </div>
                   );

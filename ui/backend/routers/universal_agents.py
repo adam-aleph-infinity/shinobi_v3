@@ -53,6 +53,8 @@ INPUT_SOURCES = [
 _MERGED_SCOPE_VALUES = {"auto", "all", "upto_call"}
 _OUTPUT_CONTRACT_MODES = {"off", "soft", "strict"}
 _OUTPUT_FIT_STRATEGIES = {"structured", "raw"}
+_OUTPUT_RESPONSE_MODES = {"wrap", "transform", "custom_format"}
+_OUTPUT_TARGET_TYPES = {"raw_text", "markdown", "json"}
 
 
 class AgentInput(BaseModel):
@@ -80,6 +82,12 @@ class UniversalAgentIn(BaseModel):
     output_taxonomy: list[str] = []  # optional canonical sections/labels for output
     output_contract_mode: str = "soft"  # off | soft | strict
     output_fit_strategy: str = "structured"  # structured | raw
+    artifact_name: str = ""          # named artifact profile (e.g., notes_json)
+    output_response_mode: str = "wrap"      # wrap | transform | custom_format
+    output_target_type: str = "raw_text"    # raw_text | markdown | json
+    output_template: str = ""        # template used for custom_format mode
+    output_placeholder: str = "response"  # placeholder token (without braces)
+    output_previous_placeholder: str = "previous_response"  # optional previous output token
     tags: list[str] = []
     is_default: bool = False
     folder: str = ""
@@ -194,6 +202,25 @@ def _normalize_output_fit_strategy(value: Any) -> str:
     return v if v in _OUTPUT_FIT_STRATEGIES else "structured"
 
 
+def _normalize_output_response_mode(value: Any) -> str:
+    v = str(value or "").strip().lower() or "wrap"
+    return v if v in _OUTPUT_RESPONSE_MODES else "wrap"
+
+
+def _normalize_output_target_type(value: Any) -> str:
+    v = str(value or "").strip().lower() or "raw_text"
+    return v if v in _OUTPUT_TARGET_TYPES else "raw_text"
+
+
+def _normalize_placeholder_name(value: Any, default: str) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith("{") and raw.endswith("}") and len(raw) > 2:
+        raw = raw[1:-1].strip()
+    raw = raw.replace(" ", "_")
+    raw = _re.sub(r"[^a-zA-Z0-9_]", "_", raw).strip("_")
+    return raw or default
+
+
 def _normalize_input_def(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -228,12 +255,24 @@ def _normalize_agent_record(data: dict[str, Any]) -> dict[str, Any]:
     ]
     out["artifact_type"] = str(out.get("artifact_type") or "").strip()
     out["artifact_class"] = str(out.get("artifact_class") or "").strip()
+    out["artifact_name"] = str(out.get("artifact_name") or "").strip()
     out["output_schema"] = str(out.get("output_schema") or "").strip()
     raw_tax = out.get("output_taxonomy")
     tax = [str(x or "").strip() for x in raw_tax] if isinstance(raw_tax, list) else []
     out["output_taxonomy"] = [x for x in tax if x]
     out["output_contract_mode"] = _normalize_output_contract_mode(out.get("output_contract_mode"))
     out["output_fit_strategy"] = _normalize_output_fit_strategy(out.get("output_fit_strategy"))
+    out["output_response_mode"] = _normalize_output_response_mode(out.get("output_response_mode"))
+    out["output_target_type"] = _normalize_output_target_type(out.get("output_target_type"))
+    out["output_template"] = str(out.get("output_template") or "")
+    out["output_placeholder"] = _normalize_placeholder_name(
+        out.get("output_placeholder"),
+        "response",
+    )
+    out["output_previous_placeholder"] = _normalize_placeholder_name(
+        out.get("output_previous_placeholder"),
+        "previous_response",
+    )
     return out
 
 

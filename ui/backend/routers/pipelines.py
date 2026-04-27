@@ -113,6 +113,8 @@ def _apply_call_id_contract(
 
 _OUTPUT_CONTRACT_MODES = {"off", "soft", "strict"}
 _OUTPUT_FIT_STRATEGIES = {"structured", "raw"}
+_OUTPUT_RESPONSE_MODES = {"wrap", "transform", "custom_format"}
+_OUTPUT_TARGET_TYPES = {"raw_text", "markdown", "json"}
 
 
 def _normalize_output_contract_mode(value: Any) -> str:
@@ -125,14 +127,47 @@ def _normalize_output_fit_strategy(value: Any) -> str:
     return v if v in _OUTPUT_FIT_STRATEGIES else "structured"
 
 
+def _normalize_output_response_mode(value: Any) -> str:
+    v = str(value or "").strip().lower() or "wrap"
+    return v if v in _OUTPUT_RESPONSE_MODES else "wrap"
+
+
+def _normalize_output_target_type(value: Any) -> str:
+    v = str(value or "").strip().lower() or "raw_text"
+    return v if v in _OUTPUT_TARGET_TYPES else "raw_text"
+
+
+def _normalize_placeholder_name(value: Any, default: str) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith("{") and raw.endswith("}") and len(raw) > 2:
+        raw = raw[1:-1].strip()
+    raw = raw.replace(" ", "_")
+    raw = _re.sub(r"[^a-zA-Z0-9_]", "_", raw).strip("_")
+    return raw or default
+
+
 def _normalize_output_contract_override(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     out: dict[str, Any] = {}
     artifact_type = str(value.get("artifact_type") or "").strip()
     artifact_class = str(value.get("artifact_class") or "").strip()
+    artifact_name = str(value.get("artifact_name") or "").strip()
     output_format = str(value.get("output_format") or "").strip().lower()
     output_schema = str(value.get("output_schema") or "").strip()
+    output_response_mode = _normalize_output_response_mode(value.get("output_response_mode"))
+    output_target_type = _normalize_output_target_type(value.get("output_target_type"))
+    output_template = str(value.get("output_template") or "")
+    output_placeholder = _normalize_placeholder_name(value.get("output_placeholder"), "response")
+    output_previous_placeholder = _normalize_placeholder_name(
+        value.get("output_previous_placeholder"),
+        "previous_response",
+    )
+    has_response_mode = "output_response_mode" in value
+    has_target_type = "output_target_type" in value
+    has_template = "output_template" in value
+    has_placeholder = "output_placeholder" in value
+    has_prev_placeholder = "output_previous_placeholder" in value
     has_mode = "output_contract_mode" in value
     has_fit = "output_fit_strategy" in value
     output_contract_mode = _normalize_output_contract_mode(value.get("output_contract_mode"))
@@ -145,12 +180,24 @@ def _normalize_output_contract_override(value: Any) -> dict[str, Any]:
         out["artifact_type"] = artifact_type
     if artifact_class:
         out["artifact_class"] = artifact_class
+    if artifact_name:
+        out["artifact_name"] = artifact_name
     if output_format in {"markdown", "json", "text"}:
         out["output_format"] = output_format
     if output_schema:
         out["output_schema"] = output_schema
     if output_taxonomy:
         out["output_taxonomy"] = output_taxonomy
+    if has_response_mode:
+        out["output_response_mode"] = output_response_mode
+    if has_target_type:
+        out["output_target_type"] = output_target_type
+    if has_template:
+        out["output_template"] = output_template
+    if has_placeholder:
+        out["output_placeholder"] = output_placeholder
+    if has_prev_placeholder:
+        out["output_previous_placeholder"] = output_previous_placeholder
     if has_mode:
         out["output_contract_mode"] = output_contract_mode
     if has_fit:
@@ -209,6 +256,49 @@ def _apply_output_contract_to_prompts(
                 "STRICT OUTPUT REQUIREMENT:\n- Follow the OUTPUT CONTRACT exactly.\n- Return only the final formatted output.",
             )
     return sys, usr
+
+
+def _wrap_agent_output(raw_output: str, target_type: str) -> str:
+    raw = str(raw_output or "")
+    target = _normalize_output_target_type(target_type)
+    if target == "raw_text":
+        return raw
+    if target == "markdown":
+        body = raw.strip()
+        if not body:
+            return "## Response\n\n"
+        return f"## Response\n\n{body}"
+    # json
+    return json.dumps({"response": raw}, ensure_ascii=False, indent=2)
+
+
+def _apply_custom_output_template(
+    *,
+    template: str,
+    response: str,
+    previous_response: str,
+    placeholder: str,
+    previous_placeholder: str,
+) -> str:
+    raw_template = str(template or "")
+    if not raw_template.strip():
+        return str(response or "")
+    response_name = _normalize_placeholder_name(placeholder, "response")
+    prev_name = _normalize_placeholder_name(previous_placeholder, "previous_response")
+
+    response_token = "{" + response_name + "}"
+    previous_token = "{" + prev_name + "}"
+
+    out = raw_template
+    if response_token not in out and "{response}" in out:
+        out = out.replace("{response}", str(response or ""))
+    else:
+        out = out.replace(response_token, str(response or ""))
+    if previous_token not in out and "{previous_response}" in out:
+        out = out.replace("{previous_response}", str(previous_response or ""))
+    else:
+        out = out.replace(previous_token, str(previous_response or ""))
+    return out
 
 
 def _default_internal_prompt_templates() -> dict[str, Any]:
@@ -456,7 +546,9 @@ def _build_input_fingerprint(
     user_template: str,
     overrides: dict[str, str],
     resolved_inputs: dict[str, str],
+    output_profile: Optional[dict[str, Any]] = None,
 ) -> str:
+    profile = output_profile or {}
     payload = {
         "pipeline_id": pipeline_id,
         "step_idx": step_idx,
@@ -467,6 +559,24 @@ def _build_input_fingerprint(
         "user_prompt_hash": _hash_text(user_template),
         "overrides": overrides,
         "resolved_hashes": {k: _hash_text(v) for k, v in sorted(resolved_inputs.items())},
+        "output_profile": {
+            "artifact_type": str(profile.get("artifact_type") or ""),
+            "artifact_class": str(profile.get("artifact_class") or ""),
+            "artifact_name": str(profile.get("artifact_name") or ""),
+            "output_format": str(profile.get("output_format") or ""),
+            "output_schema_hash": _hash_text(str(profile.get("output_schema") or "")),
+            "output_taxonomy": [str(x or "").strip() for x in (profile.get("output_taxonomy") or []) if str(x or "").strip()],
+            "output_contract_mode": _normalize_output_contract_mode(profile.get("output_contract_mode")),
+            "output_fit_strategy": _normalize_output_fit_strategy(profile.get("output_fit_strategy")),
+            "output_response_mode": _normalize_output_response_mode(profile.get("output_response_mode")),
+            "output_target_type": _normalize_output_target_type(profile.get("output_target_type")),
+            "output_template_hash": _hash_text(str(profile.get("output_template") or "")),
+            "output_placeholder": _normalize_placeholder_name(profile.get("output_placeholder"), "response"),
+            "output_previous_placeholder": _normalize_placeholder_name(
+                profile.get("output_previous_placeholder"),
+                "previous_response",
+            ),
+        },
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -3591,6 +3701,83 @@ async def run_pipeline(
     client_local_time = request.headers.get("x-client-local-time", "")
     client_timezone = request.headers.get("x-client-timezone", "")
 
+    def _apply_output_postprocess(
+        *,
+        raw_output: str,
+        agent_def: dict[str, Any],
+        step_model: str,
+        previous_content: str,
+        db_session: Optional[Session] = None,
+    ) -> str:
+        content = str(raw_output or "")
+        mode = _normalize_output_response_mode(agent_def.get("output_response_mode"))
+        target = _normalize_output_target_type(agent_def.get("output_target_type"))
+        if mode == "wrap":
+            return _wrap_agent_output(content, target)
+        if mode == "custom_format":
+            return _apply_custom_output_template(
+                template=str(agent_def.get("output_template") or ""),
+                response=content,
+                previous_response=str(previous_content or ""),
+                placeholder=str(agent_def.get("output_placeholder") or "response"),
+                previous_placeholder=str(agent_def.get("output_previous_placeholder") or "previous_response"),
+            )
+        if mode != "transform" or target == "raw_text":
+            return content
+
+        transform_system = (
+            "You convert raw AI output into a requested final format.\n"
+            "Rules:\n"
+            "- Preserve meaning and facts.\n"
+            "- Do not invent data.\n"
+            "- Return only the final transformed output.\n"
+        )
+        target_rule = {
+            "json": "Return valid JSON only.",
+            "markdown": "Return clean Markdown with clear headings and sections.",
+        }.get(target, "Return plain text.")
+        transform_user = (
+            "TARGET_TYPE: {target_type}\n"
+            "RULE: {target_rule}\n\n"
+            "RAW_OUTPUT:\n{raw_output}\n\n"
+            "Transform now."
+        )
+
+        own_session = False
+        _db = db_session
+        if _db is None:
+            _db = Session(_db_engine)
+            own_session = True
+        try:
+            transformed, _ = _llm_call_with_files(
+                transform_system,
+                transform_user,
+                {},
+                {
+                    "target_type": target,
+                    "target_rule": target_rule,
+                    "raw_output": content,
+                },
+                step_model or "gpt-5.4",
+                0.0,
+                _db,
+            )
+            out = str(transformed or "").strip()
+            if not out:
+                return _wrap_agent_output(content, target)
+            if target == "json":
+                try:
+                    parsed = json.loads(out)
+                    return json.dumps(parsed, ensure_ascii=False, indent=2)
+                except Exception:
+                    return _wrap_agent_output(content, "json")
+            return out
+        except Exception:
+            return _wrap_agent_output(content, target)
+        finally:
+            if own_session and _db is not None:
+                _db.close()
+
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
         cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
@@ -4727,6 +4914,7 @@ async def run_pipeline(
                         user_template=user_template,
                         overrides=overrides,
                         resolved_inputs=resolved,
+                        output_profile=runtime_agent_def,
                     )
                     run_steps[step_idx]["input_fingerprint"] = input_fingerprint
 
@@ -4910,6 +5098,12 @@ async def run_pipeline(
                     if llm_err:
                         break
 
+                    content = _apply_output_postprocess(
+                        raw_output=content,
+                        agent_def=runtime_agent_def,
+                        step_model=model,
+                        previous_content=prev_content,
+                    )
                     exec_time_s    = round(time.time() - step_start_t, 1)
                     output_tok_est = len(content) // 4
 
@@ -5125,6 +5319,7 @@ async def run_pipeline(
                                     user_template=_par_ut,
                                     overrides=_par_ov,
                                     resolved_inputs=_par_resolved,
+                                    output_profile=_par_rdef,
                                 )
 
                                 if not req.force and par_idx not in req.force_step_indices:
@@ -5168,6 +5363,13 @@ async def run_pipeline(
                                 _par_t0 = time.time()
                                 _par_content, _par_thinking = _llm_call_with_files(
                                     _par_sysp, _par_ut, _par_fi, _par_ii, _par_model, _par_temp, _par_db,
+                                )
+                                _par_content = _apply_output_postprocess(
+                                    raw_output=_par_content,
+                                    agent_def=_par_rdef,
+                                    step_model=_par_model,
+                                    previous_content=_sp,
+                                    db_session=_par_db,
                                 )
                                 _par_exec = round(time.time() - _par_t0, 1)
 

@@ -157,10 +157,16 @@ interface UniversalAgent {
   inputs: AgentInput[]; output_format: string; tags: string[];
   artifact_type?: string;
   artifact_class?: string;
+  artifact_name?: string;
   output_schema?: string;
   output_taxonomy?: string[];
   output_contract_mode?: "off" | "soft" | "strict";
   output_fit_strategy?: "structured" | "raw";
+  output_response_mode?: "wrap" | "transform" | "custom_format";
+  output_target_type?: "raw_text" | "markdown" | "json";
+  output_template?: string;
+  output_placeholder?: string;
+  output_previous_placeholder?: string;
   is_default: boolean; created_at: string;
   updated_at?: string;
   folder?: string;
@@ -178,11 +184,17 @@ interface PipelineDef {
     output_contract_override?: {
       artifact_type?: string;
       artifact_class?: string;
+      artifact_name?: string;
       output_format?: string;
       output_schema?: string;
       output_taxonomy?: string[];
       output_contract_mode?: "off" | "soft" | "strict";
       output_fit_strategy?: "structured" | "raw";
+      output_response_mode?: "wrap" | "transform" | "custom_format";
+      output_target_type?: "raw_text" | "markdown" | "json";
+      output_template?: string;
+      output_placeholder?: string;
+      output_previous_placeholder?: string;
     };
   }[];
   canvas?: { nodes: any[]; edges: any[]; stages: string[] };
@@ -196,10 +208,16 @@ const BLANK_AGENT = {
   output_format: "markdown", tags: [], is_default: false, folder: "",
   artifact_type: "",
   artifact_class: "",
+  artifact_name: "",
   output_schema: "",
   output_taxonomy: [] as string[],
   output_contract_mode: "soft" as "off" | "soft" | "strict",
   output_fit_strategy: "structured" as "structured" | "raw",
+  output_response_mode: "wrap" as "wrap" | "transform" | "custom_format",
+  output_target_type: "raw_text" as "raw_text" | "markdown" | "json",
+  output_template: "",
+  output_placeholder: "response",
+  output_previous_placeholder: "previous_response",
 };
 
 const MERGED_SCOPE_OPTIONS: { value: MergedScope; label: string; hint: string }[] = [
@@ -219,6 +237,18 @@ const OUTPUT_FIT_STRATEGIES = [
   { value: "raw", label: "Raw first" },
 ] as const;
 
+const OUTPUT_RESPONSE_MODES = [
+  { value: "wrap", label: "Wrap response" },
+  { value: "transform", label: "Transform response" },
+  { value: "custom_format", label: "User defined format" },
+] as const;
+
+const OUTPUT_TARGET_TYPES = [
+  { value: "raw_text", label: "Raw text" },
+  { value: "markdown", label: "Markdown" },
+  { value: "json", label: "JSON" },
+] as const;
+
 function normalizeAgentInput(inp: AgentInput): AgentInput {
   const mergedScope = (inp.merged_scope ?? "auto") as MergedScope;
   return {
@@ -234,10 +264,16 @@ function normalizeAgent(a: UniversalAgent): UniversalAgent {
     inputs: (a.inputs ?? []).map(normalizeAgentInput),
     artifact_type: a.artifact_type ?? "",
     artifact_class: a.artifact_class ?? "",
+    artifact_name: a.artifact_name ?? "",
     output_schema: a.output_schema ?? "",
     output_taxonomy: a.output_taxonomy ?? [],
     output_contract_mode: (a.output_contract_mode ?? "soft"),
     output_fit_strategy: (a.output_fit_strategy ?? "structured"),
+    output_response_mode: (a.output_response_mode ?? "wrap"),
+    output_target_type: (a.output_target_type ?? "raw_text"),
+    output_template: a.output_template ?? "",
+    output_placeholder: a.output_placeholder ?? "response",
+    output_previous_placeholder: a.output_previous_placeholder ?? "previous_response",
   };
 }
 
@@ -261,10 +297,16 @@ function AgentEditor({
     output_format: agent.output_format ?? "markdown",
     artifact_type: agent.artifact_type ?? "",
     artifact_class: agent.artifact_class ?? "",
+    artifact_name: agent.artifact_name ?? "",
     output_schema: agent.output_schema ?? "",
     output_taxonomy: agent.output_taxonomy ?? [],
     output_contract_mode: agent.output_contract_mode ?? "soft",
     output_fit_strategy: agent.output_fit_strategy ?? "structured",
+    output_response_mode: agent.output_response_mode ?? "wrap",
+    output_target_type: agent.output_target_type ?? "raw_text",
+    output_template: agent.output_template ?? "",
+    output_placeholder: agent.output_placeholder ?? "response",
+    output_previous_placeholder: agent.output_previous_placeholder ?? "previous_response",
     tags: agent.tags ?? [], is_default: agent.is_default ?? false,
     folder: agent.folder ?? "",
   });
@@ -281,10 +323,16 @@ function AgentEditor({
       output_format: agent.output_format ?? "markdown",
       artifact_type: agent.artifact_type ?? "",
       artifact_class: agent.artifact_class ?? "",
+      artifact_name: agent.artifact_name ?? "",
       output_schema: agent.output_schema ?? "",
       output_taxonomy: agent.output_taxonomy ?? [],
       output_contract_mode: agent.output_contract_mode ?? "soft",
       output_fit_strategy: agent.output_fit_strategy ?? "structured",
+      output_response_mode: agent.output_response_mode ?? "wrap",
+      output_target_type: agent.output_target_type ?? "raw_text",
+      output_template: agent.output_template ?? "",
+      output_placeholder: agent.output_placeholder ?? "response",
+      output_previous_placeholder: agent.output_previous_placeholder ?? "previous_response",
       tags: agent.tags ?? [], is_default: agent.is_default ?? false,
       folder: agent.folder ?? "",
     });
@@ -681,10 +729,16 @@ function InputContractsPanel({
         output_format: agent.output_format ?? "markdown",
         artifact_type: agent.artifact_type ?? "",
         artifact_class: agent.artifact_class ?? "",
+        artifact_name: agent.artifact_name ?? "",
         output_schema: agent.output_schema ?? "",
         output_taxonomy: agent.output_taxonomy ?? [],
         output_contract_mode: agent.output_contract_mode ?? "soft",
         output_fit_strategy: agent.output_fit_strategy ?? "structured",
+        output_response_mode: agent.output_response_mode ?? "wrap",
+        output_target_type: agent.output_target_type ?? "raw_text",
+        output_template: agent.output_template ?? "",
+        output_placeholder: agent.output_placeholder ?? "response",
+        output_previous_placeholder: agent.output_previous_placeholder ?? "previous_response",
         tags: agent.tags ?? [],
         is_default: agent.is_default ?? false,
         folder: agent.folder ?? "",
@@ -821,10 +875,16 @@ function OutputContractsPanel({
 }) {
   const [artifactType, setArtifactType] = useState(agent.artifact_type ?? "");
   const [artifactClass, setArtifactClass] = useState(agent.artifact_class ?? "");
+  const [artifactName, setArtifactName] = useState(agent.artifact_name ?? "");
   const [schema, setSchema] = useState(agent.output_schema ?? "");
   const [taxonomyText, setTaxonomyText] = useState((agent.output_taxonomy ?? []).join("\n"));
   const [contractMode, setContractMode] = useState<"off" | "soft" | "strict">(agent.output_contract_mode ?? "soft");
   const [fitStrategy, setFitStrategy] = useState<"structured" | "raw">(agent.output_fit_strategy ?? "structured");
+  const [responseMode, setResponseMode] = useState<"wrap" | "transform" | "custom_format">(agent.output_response_mode ?? "wrap");
+  const [targetType, setTargetType] = useState<"raw_text" | "markdown" | "json">(agent.output_target_type ?? "raw_text");
+  const [customTemplate, setCustomTemplate] = useState(agent.output_template ?? "");
+  const [responsePlaceholder, setResponsePlaceholder] = useState(agent.output_placeholder ?? "response");
+  const [previousPlaceholder, setPreviousPlaceholder] = useState(agent.output_previous_placeholder ?? "previous_response");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [schemaLoading, setSchemaLoading] = useState(false);
@@ -854,13 +914,34 @@ function OutputContractsPanel({
   useEffect(() => {
     setArtifactType(agent.artifact_type ?? "");
     setArtifactClass(agent.artifact_class ?? "");
+    setArtifactName(agent.artifact_name ?? "");
     setSchema(agent.output_schema ?? "");
     setTaxonomyText((agent.output_taxonomy ?? []).join("\n"));
     setContractMode(agent.output_contract_mode ?? "soft");
     setFitStrategy(agent.output_fit_strategy ?? "structured");
+    setResponseMode(agent.output_response_mode ?? "wrap");
+    setTargetType(agent.output_target_type ?? "raw_text");
+    setCustomTemplate(agent.output_template ?? "");
+    setResponsePlaceholder(agent.output_placeholder ?? "response");
+    setPreviousPlaceholder(agent.output_previous_placeholder ?? "previous_response");
     setFitResult(null);
     setFitError("");
-  }, [agent.id, agent.updated_at, agent.artifact_type, agent.artifact_class, agent.output_schema, agent.output_taxonomy, agent.output_contract_mode, agent.output_fit_strategy]);
+  }, [
+    agent.id,
+    agent.updated_at,
+    agent.artifact_type,
+    agent.artifact_class,
+    agent.artifact_name,
+    agent.output_schema,
+    agent.output_taxonomy,
+    agent.output_contract_mode,
+    agent.output_fit_strategy,
+    agent.output_response_mode,
+    agent.output_target_type,
+    agent.output_template,
+    agent.output_placeholder,
+    agent.output_previous_placeholder,
+  ]);
 
   function taxonomyList() {
     return taxonomyText
@@ -935,10 +1016,16 @@ function OutputContractsPanel({
         output_format: agent.output_format ?? "markdown",
         artifact_type: artifactType.trim(),
         artifact_class: artifactClass.trim(),
+        artifact_name: artifactName.trim(),
         output_schema: schema,
         output_taxonomy: taxonomyList(),
         output_contract_mode: contractMode,
         output_fit_strategy: fitStrategy,
+        output_response_mode: responseMode,
+        output_target_type: targetType,
+        output_template: customTemplate,
+        output_placeholder: responsePlaceholder,
+        output_previous_placeholder: previousPlaceholder,
         tags: agent.tags ?? [],
         is_default: agent.is_default ?? false,
         folder: agent.folder ?? "",
@@ -953,23 +1040,56 @@ function OutputContractsPanel({
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       <div className="px-4 py-3 border-b border-gray-800 shrink-0">
-        <p className="text-xs font-semibold text-white">Output Artifact Contract</p>
-        <p className="text-[10px] text-gray-500 mt-0.5">Define artifact type/class, schema, taxonomy, and fit behavior for this agent output.</p>
+        <p className="text-xs font-semibold text-white">Output Artifacts</p>
+        <p className="text-[10px] text-gray-500 mt-0.5">Pick artifact type, artifact name, and how the agent response should be wrapped/transformed/formatted.</p>
       </div>
       <div className="flex-1 p-4 space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Artifact Type</label>
-            <input
+            <select
               value={artifactType}
               onChange={e => setArtifactType(e.target.value)}
-              list="agents-artifacts-output-types"
-              placeholder="notes / persona / compliance / custom"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            >
+              <option value="">Select type</option>
+              {artifactTypeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Artifact Name</label>
+            <input
+              value={artifactName}
+              onChange={e => setArtifactName(e.target.value)}
+              placeholder="notes_json"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
             />
           </div>
           <div>
-            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Artifact Class</label>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Output Type</label>
+            <select
+              value={targetType}
+              onChange={e => setTargetType(e.target.value as "raw_text" | "markdown" | "json")}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            >
+              {OUTPUT_TARGET_TYPES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Response Mode</label>
+            <select
+              value={responseMode}
+              onChange={e => setResponseMode(e.target.value as "wrap" | "transform" | "custom_format")}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            >
+              {OUTPUT_RESPONSE_MODES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Artifact Class (Optional)</label>
             <input
               value={artifactClass}
               onChange={e => setArtifactClass(e.target.value)}
@@ -979,33 +1099,81 @@ function OutputContractsPanel({
             />
           </div>
         </div>
-        <datalist id="agents-artifacts-output-types">
-          {artifactTypeOptions.map(t => <option key={t} value={t} />)}
-        </datalist>
         <datalist id="agents-artifacts-output-classes">
           {artifactClassOptions.map(t => <option key={t} value={t} />)}
         </datalist>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Contract Mode</label>
-            <select
-              value={contractMode}
-              onChange={e => setContractMode(e.target.value as "off" | "soft" | "strict")}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
-            >
-              {OUTPUT_CONTRACT_MODES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+        {responseMode === "wrap" && (
+          <p className="text-[10px] text-gray-500 rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-2">
+            Wrap mode will keep the original agent response and wrap it as {targetType === "raw_text" ? "raw text" : targetType.toUpperCase()}.
+          </p>
+        )}
+
+        {responseMode === "transform" && (
+          <p className="text-[10px] text-gray-500 rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-2">
+            Transform mode will use an LLM pass to restructure the response into {targetType === "raw_text" ? "raw text" : targetType.toUpperCase()}.
+          </p>
+        )}
+
+        {responseMode === "custom_format" && (
+          <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
+            <p className="text-[10px] text-gray-400 font-semibold uppercase tracking-wide">User Defined Format</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Response Placeholder</label>
+                <input
+                  value={responsePlaceholder}
+                  onChange={e => setResponsePlaceholder(e.target.value)}
+                  placeholder="response"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white font-mono outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Previous Response Placeholder</label>
+                <input
+                  value={previousPlaceholder}
+                  onChange={e => setPreviousPlaceholder(e.target.value)}
+                  placeholder="previous_response"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white font-mono outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+            <textarea
+              value={customTemplate}
+              onChange={e => setCustomTemplate(e.target.value)}
+              rows={8}
+              placeholder={"{\n  \"results\": \"{response}\",\n  \"previous\": \"{previous_response}\"\n}"}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+            />
+            <p className="text-[10px] text-gray-500">
+              Use placeholders inside braces, for example <span className="font-mono text-gray-300">{`{${responsePlaceholder || "response"}}`}</span>.
+            </p>
           </div>
-          <div>
-            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Fit Preference</label>
-            <select
-              value={fitStrategy}
-              onChange={e => setFitStrategy(e.target.value as "structured" | "raw")}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
-            >
-              {OUTPUT_FIT_STRATEGIES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+        )}
+
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
+          <p className="text-[10px] text-gray-400 font-semibold uppercase tracking-wide">Advanced Output Contract (Optional)</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Contract Mode</label>
+              <select
+                value={contractMode}
+                onChange={e => setContractMode(e.target.value as "off" | "soft" | "strict")}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+              >
+                {OUTPUT_CONTRACT_MODES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Fit Preference</label>
+              <select
+                value={fitStrategy}
+                onChange={e => setFitStrategy(e.target.value as "structured" | "raw")}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+              >
+                {OUTPUT_FIT_STRATEGIES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -1782,10 +1950,16 @@ export default function AgentsPage() {
       output_format: current.output_format ?? "markdown",
       artifact_type: current.artifact_type ?? "",
       artifact_class: current.artifact_class ?? "",
+      artifact_name: current.artifact_name ?? "",
       output_schema: current.output_schema ?? "",
       output_taxonomy: current.output_taxonomy ?? [],
       output_contract_mode: current.output_contract_mode ?? "soft",
       output_fit_strategy: current.output_fit_strategy ?? "structured",
+      output_response_mode: current.output_response_mode ?? "wrap",
+      output_target_type: current.output_target_type ?? "raw_text",
+      output_template: current.output_template ?? "",
+      output_placeholder: current.output_placeholder ?? "response",
+      output_previous_placeholder: current.output_previous_placeholder ?? "previous_response",
       tags: current.tags ?? [],
       is_default: current.is_default ?? false,
       folder: current.folder ?? "",
@@ -1798,8 +1972,14 @@ export default function AgentsPage() {
       output_taxonomy: draft.output_taxonomy ?? [],
       output_contract_mode: draft.output_contract_mode ?? "soft",
       output_fit_strategy: draft.output_fit_strategy ?? "structured",
+      output_response_mode: draft.output_response_mode ?? "wrap",
+      output_target_type: draft.output_target_type ?? "raw_text",
+      output_template: draft.output_template ?? "",
+      output_placeholder: draft.output_placeholder ?? "response",
+      output_previous_placeholder: draft.output_previous_placeholder ?? "previous_response",
       artifact_type: draft.artifact_type ?? "",
       artifact_class: draft.artifact_class ?? "",
+      artifact_name: draft.artifact_name ?? "",
       output_schema: draft.output_schema ?? "",
     };
     if (JSON.stringify(currentCmp) === JSON.stringify(nextCmp)) return;
