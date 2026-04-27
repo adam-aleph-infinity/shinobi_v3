@@ -2,7 +2,7 @@
 import { useAppCtx } from "@/lib/app-context";
 import useSWR from "swr";
 import { User, ChevronRight, X, ChevronDown, Bot, Workflow } from "lucide-react";
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useMemo } from "react";
 import { cn } from "@/lib/utils";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
@@ -30,6 +30,8 @@ interface NavCustomerOption {
   customer: string;
   call_count: number;
 }
+
+type CallDatesMap = Record<string, { date: string; has_audio: boolean }>;
 
 // ── Universal Agent Picker ─────────────────────────────────────────────────────
 function AgentPicker({
@@ -257,6 +259,12 @@ export function ContextBar() {
     salesAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(salesAgent)}` : null,
     fetcher,
   );
+  const { data: callDates } = useSWR<CallDatesMap>(
+    salesAgent && customer
+      ? `/api/crm/call-dates?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
 
   // Auto-clear stale IDs once lists have loaded and the stored ID is missing
   useEffect(() => {
@@ -278,6 +286,12 @@ export function ContextBar() {
 
   const selectedAgentKnown = !salesAgent || !!(navAgents ?? []).find(a => a.agent === salesAgent);
   const selectedCustomerKnown = !customer || !!(navCustomers ?? []).find(c => c.customer === customer);
+  const callOptions = useMemo(() => {
+    const entries = Object.entries(callDates ?? {});
+    entries.sort((a, b) => String(b[1]?.date || "").localeCompare(String(a[1]?.date || "")));
+    return entries;
+  }, [callDates]);
+  const selectedCallKnown = !callId || callOptions.some(([cid]) => cid === callId);
 
   return (
     <div className="border-b border-gray-800 bg-gray-900/90 px-4 flex items-center gap-2 text-xs shrink-0 h-9">
@@ -345,13 +359,36 @@ export function ContextBar() {
         )}
       </span>
 
-      {customer && callId && <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />}
-      {callId && (
-        <span className="flex items-center gap-1.5 text-gray-500 min-w-0">
-          <span className="font-mono truncate max-w-[100px]">{callId}</span>
-          <button onClick={() => setCallId("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
-            <X className="w-3 h-3" />
-          </button>
+      {customer && <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />}
+      {customer && (
+        <span className="flex items-center gap-1.5 min-w-0">
+          <select
+            value={callId}
+            onChange={e => setCallId(e.target.value)}
+            className={cn(
+              "h-6 rounded border px-2 text-[11px] outline-none bg-gray-800/70 min-w-[160px] max-w-[210px] truncate",
+              selectedCallKnown
+                ? "text-gray-300 border-gray-700/70 focus:border-indigo-500"
+                : "text-red-300 border-red-800/70 focus:border-red-500",
+            )}
+          >
+            <option value="">
+              {callDates === undefined ? "Call (loading…)" : "Call…"}
+            </option>
+            {!selectedCallKnown && callId && (
+              <option value={callId}>{callId} (not found)</option>
+            )}
+            {callOptions.map(([cid, meta]) => (
+              <option key={cid} value={cid}>
+                {(meta?.date ? String(meta.date).slice(0, 10) : "unknown")} · {cid}
+              </option>
+            ))}
+          </select>
+          {callId && (
+            <button onClick={() => setCallId("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
+              <X className="w-3 h-3" />
+            </button>
+          )}
         </span>
       )}
 

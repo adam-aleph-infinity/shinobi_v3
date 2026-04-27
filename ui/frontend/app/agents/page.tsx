@@ -572,16 +572,28 @@ function AgentEditor({
 
 function InputContractsPanel({
   agent,
+  allAgents,
   onSave,
 }: {
   agent: UniversalAgent;
+  allAgents: UniversalAgent[];
   onSave: (draft: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
 }) {
   const { salesAgent, customer, callId } = useAppCtx();
   const [inputs, setInputs] = useState<AgentInput[]>((agent.inputs ?? []).map(normalizeAgentInput));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [previews, setPreviews] = useState<Record<string, { loading: boolean; chars: number; snippet: string; err?: string }>>({});
+  const [previews, setPreviews] = useState<Record<string, { loading: boolean; chars: number; content: string; err?: string }>>({});
+  const inputKeyOptions = useMemo(() => {
+    const out = new Set<string>();
+    for (const a of allAgents) {
+      for (const inp of (a.inputs ?? [])) {
+        const k = String(inp?.key || "").trim();
+        if (k) out.add(k);
+      }
+    }
+    return Array.from(out).sort((a, b) => a.localeCompare(b));
+  }, [allAgents]);
 
   useEffect(() => {
     setInputs((agent.inputs ?? []).map(normalizeAgentInput));
@@ -610,7 +622,7 @@ function InputContractsPanel({
   async function previewInput(inp: AgentInput) {
     if (!salesAgent || !customer) return;
     const previewKey = inp.key || String(Math.random());
-    setPreviews(prev => ({ ...prev, [previewKey]: { loading: true, chars: 0, snippet: "" } }));
+    setPreviews(prev => ({ ...prev, [previewKey]: { loading: true, chars: 0, content: "" } }));
     try {
       const params = new URLSearchParams({
         source: inp.source,
@@ -632,12 +644,12 @@ function InputContractsPanel({
       const content = String(data.content || "");
       setPreviews(prev => ({
         ...prev,
-        [previewKey]: { loading: false, chars: content.length, snippet: content.slice(0, 320) },
+        [previewKey]: { loading: false, chars: content.length, content },
       }));
     } catch (e: any) {
       setPreviews(prev => ({
         ...prev,
-        [previewKey]: { loading: false, chars: 0, snippet: "", err: String(e?.message || e || "failed") },
+        [previewKey]: { loading: false, chars: 0, content: "", err: String(e?.message || e || "failed") },
       }));
     }
   }
@@ -699,6 +711,7 @@ function InputContractsPanel({
                   value={inp.key}
                   onChange={e => updateInput(i, { key: e.target.value })}
                   placeholder="input key"
+                  list="agents-artifacts-input-keys"
                   className="w-36 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-amber-300 font-mono outline-none focus:border-indigo-500"
                 />
                 <select
@@ -756,7 +769,7 @@ function InputContractsPanel({
                   ) : (
                     <>
                       <p className="text-[9px] text-emerald-400">Loaded {pv.chars.toLocaleString()} chars</p>
-                      <pre className="mt-1 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-28 overflow-y-auto">{pv.snippet}{pv.chars > 320 ? "\n…" : ""}</pre>
+                      <pre className="mt-1 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-80 overflow-y-auto">{pv.content}</pre>
                     </>
                   )}
                 </div>
@@ -764,6 +777,9 @@ function InputContractsPanel({
             </div>
           );
         })}
+        <datalist id="agents-artifacts-input-keys">
+          {inputKeyOptions.map(k => <option key={k} value={k} />)}
+        </datalist>
 
         {inputs.length === 0 && (
           <p className="text-[10px] text-gray-700 italic">No inputs defined.</p>
@@ -784,9 +800,11 @@ function InputContractsPanel({
 
 function OutputContractsPanel({
   agent,
+  allAgents,
   onSave,
 }: {
   agent: UniversalAgent;
+  allAgents: UniversalAgent[];
   onSave: (draft: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
 }) {
   const [artifactType, setArtifactType] = useState(agent.artifact_type ?? "");
@@ -802,6 +820,24 @@ function OutputContractsPanel({
   const [fitLoading, setFitLoading] = useState(false);
   const [fitResult, setFitResult] = useState<any>(null);
   const [fitError, setFitError] = useState("");
+  const artifactTypeOptions = useMemo(() => {
+    const defaults = ["notes", "persona", "persona_score", "notes_compliance", "compliance", "summary"];
+    const out = new Set<string>(defaults);
+    for (const a of allAgents) {
+      const t = String(a.artifact_type || "").trim();
+      if (t) out.add(t);
+    }
+    return Array.from(out).sort((a, b) => a.localeCompare(b));
+  }, [allAgents]);
+  const artifactClassOptions = useMemo(() => {
+    const defaults = ["call_level_tracking", "summary", "score", "compliance", "json_schema"];
+    const out = new Set<string>(defaults);
+    for (const a of allAgents) {
+      const t = String(a.artifact_class || "").trim();
+      if (t) out.add(t);
+    }
+    return Array.from(out).sort((a, b) => a.localeCompare(b));
+  }, [allAgents]);
 
   useEffect(() => {
     setArtifactType(agent.artifact_type ?? "");
@@ -915,6 +951,7 @@ function OutputContractsPanel({
             <input
               value={artifactType}
               onChange={e => setArtifactType(e.target.value)}
+              list="agents-artifacts-output-types"
               placeholder="notes / persona / compliance / custom"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
             />
@@ -924,11 +961,18 @@ function OutputContractsPanel({
             <input
               value={artifactClass}
               onChange={e => setArtifactClass(e.target.value)}
+              list="agents-artifacts-output-classes"
               placeholder="call_level_tracking / summary / score / custom"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
             />
           </div>
         </div>
+        <datalist id="agents-artifacts-output-types">
+          {artifactTypeOptions.map(t => <option key={t} value={t} />)}
+        </datalist>
+        <datalist id="agents-artifacts-output-classes">
+          {artifactClassOptions.map(t => <option key={t} value={t} />)}
+        </datalist>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
@@ -2072,9 +2116,9 @@ export default function AgentsPage() {
               onToggleExpand={() => setPanelMode(prev => prev === "editor" ? "split" : "editor")}
             />
           ) : workspaceSection === "inputs" ? (
-            <InputContractsPanel key={`${selected.id}-inputs`} agent={selected} onSave={saveAgent} />
+            <InputContractsPanel key={`${selected.id}-inputs`} agent={selected} allAgents={allAgents} onSave={saveAgent} />
           ) : (
-            <OutputContractsPanel key={`${selected.id}-outputs`} agent={selected} onSave={saveAgent} />
+            <OutputContractsPanel key={`${selected.id}-outputs`} agent={selected} allAgents={allAgents} onSave={saveAgent} />
           )
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-700">
