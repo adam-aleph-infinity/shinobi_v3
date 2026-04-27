@@ -100,6 +100,12 @@ interface UniversalAgent {
   id: string; name: string; description: string; agent_class: string;
   model: string; temperature: number; system_prompt: string; user_prompt: string;
   inputs: AgentInput[]; output_format: string; tags: string[];
+  artifact_type?: string;
+  artifact_class?: string;
+  output_schema?: string;
+  output_taxonomy?: string[];
+  output_contract_mode?: "off" | "soft" | "strict";
+  output_fit_strategy?: "structured" | "raw";
   is_default: boolean; created_at: string;
 }
 
@@ -144,9 +150,6 @@ const OUTPUT_FMT: Record<string, {
   text:     { label: "Text",     desc: "Plain unformatted", icon: AlignLeft, bg: "bg-gray-700/50",   text: "text-gray-300",   border: "border-gray-600/40"   },
 };
 
-const OUTPUT_CONTRACT_MODES = ["off", "soft", "strict"] as const;
-const OUTPUT_FIT_STRATEGIES = ["structured", "raw"] as const;
-
 const CLASS_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
   persona: User, scorer: Star, notes: StickyNote, compliance: Shield, general: Zap,
 };
@@ -167,6 +170,18 @@ const CLASS_REQUIRES_PREV: Record<string, string> = { scorer: "persona", complia
 function classMeta(cls: string) {
   const s = (cls ?? "").toLowerCase();
   return CLASS_META[s] ?? { label: cls || "Agent", textColor: "text-gray-400", borderColor: "border-gray-700/40" };
+}
+
+interface OutputProfile {
+  id: string;
+  name: string;
+  artifact_type: string;
+  artifact_class: string;
+  output_format: string;
+  output_schema: string;
+  output_taxonomy: string[];
+  output_contract_mode: "off" | "soft" | "strict";
+  output_fit_strategy: "structured" | "raw";
 }
 
 // ── Agent sub-components ──────────────────────────────────────────────────────
@@ -273,15 +288,8 @@ interface PipelineNodeData extends Record<string, unknown> {
   agentName:  string;
   // input node — data source type
   inputSource: string;
-  // output node — optional pipeline-only output contract override
-  outputContractEnabled?: boolean;
-  outputArtifactType?: string;
-  outputArtifactClass?: string;
-  outputFormat?: string;
-  outputSchema?: string;
-  outputTaxonomyText?: string;
-  outputContractMode?: "off" | "soft" | "strict";
-  outputFitStrategy?: "structured" | "raw";
+  // output node — selected reusable output profile id ("" => default)
+  outputProfileId?: string;
 }
 
 interface ArtifactPromptTemplate {
@@ -928,6 +936,44 @@ function PipelineCanvas() {
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
 
+  const outputProfiles = useMemo<OutputProfile[]>(() => {
+    const out: OutputProfile[] = [];
+    for (const a of allAgents) {
+      const output_schema = String(a.output_schema || "").trim();
+      if (!output_schema) continue;
+      out.push({
+        id: String(a.id || ""),
+        name: String(a.name || "Profile"),
+        artifact_type: String(a.artifact_type || "").trim(),
+        artifact_class: String(a.artifact_class || "").trim(),
+        output_format: String(a.output_format || "markdown").trim().toLowerCase(),
+        output_schema,
+        output_taxonomy: Array.isArray(a.output_taxonomy)
+          ? a.output_taxonomy.map(x => String(x || "").trim()).filter(Boolean)
+          : [],
+        output_contract_mode: (["off", "soft", "strict"].includes(String(a.output_contract_mode || "").toLowerCase())
+          ? String(a.output_contract_mode).toLowerCase()
+          : "soft") as "off" | "soft" | "strict",
+        output_fit_strategy: (["structured", "raw"].includes(String(a.output_fit_strategy || "").toLowerCase())
+          ? String(a.output_fit_strategy).toLowerCase()
+          : "structured") as "structured" | "raw",
+      });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }, [allAgents]);
+
+  function profileMatchesArtifactSubType(profile: OutputProfile, subType: string): boolean {
+    const st = String(subType || "").toLowerCase();
+    const t = String(profile.artifact_type || "").toLowerCase();
+    const c = String(profile.artifact_class || "").toLowerCase();
+    const n = String(profile.name || "").toLowerCase();
+    if (st === "notes") return /note/.test(t) || /note/.test(c) || /note/.test(n);
+    if (st === "notes_compliance") return /compliance|violation/.test(t) || /compliance|violation/.test(c) || /compliance|violation/.test(n);
+    if (st === "persona") return /persona/.test(t) || /persona/.test(c) || /persona/.test(n);
+    if (st === "persona_score") return /score|persona_score/.test(t) || /score|persona_score/.test(c) || /score|persona_score/.test(n);
+    return true;
+  }
+
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const INIT_STAGES: NodeKind[] = ["input", "processing", "output"];
@@ -1300,14 +1346,7 @@ function PipelineCanvas() {
         agentClass:  "",
         agentName:   "",
         inputSource: "",
-        outputContractEnabled: false,
-        outputArtifactType: "",
-        outputArtifactClass: "",
-        outputFormat: "markdown",
-        outputSchema: "",
-        outputTaxonomyText: "",
-        outputContractMode: "soft",
-        outputFitStrategy: "structured",
+        outputProfileId: "",
       } satisfies PipelineNodeData,
     };
 
@@ -1485,6 +1524,23 @@ function PipelineCanvas() {
     } catch { showToast("Network error — could not duplicate pipeline", false); }
   }
 
+  function findProfileIdFromStepOverride(
+    step: PipelineStepDef | undefined,
+    subType: string,
+  ): string {
+    const ov = step?.output_contract_override;
+    if (!ov) return "";
+    const candidateProfiles = outputProfiles.filter(p => profileMatchesArtifactSubType(p, subType));
+    for (const p of candidateProfiles) {
+      const sameType = String(ov.artifact_type || "") === p.artifact_type;
+      const sameClass = String(ov.artifact_class || "") === p.artifact_class;
+      const sameSchema = String(ov.output_schema || "") === p.output_schema;
+      const sameFormat = String(ov.output_format || "").toLowerCase() === String(p.output_format || "").toLowerCase();
+      if (sameType && sameClass && sameSchema && sameFormat) return p.id;
+    }
+    return "";
+  }
+
   function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; folder?: string; steps: PipelineStepDef[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }) {
     const pl = override ?? allPipelines.find(p => p.id === pid);
     if (!pl) return;
@@ -1502,6 +1558,25 @@ function PipelineCanvas() {
       const restoredNodes: Node[] = cv.nodes.map((n: any) => {
         const nodeData = (n.data as PipelineNodeData) || ({} as PipelineNodeData);
         const migratedSource = nodeData.inputSource === "chain_previous" ? "artifact_output" : nodeData.inputSource;
+        let outputProfileId = String((nodeData as any).outputProfileId || "");
+        if (!outputProfileId && n.type === "output") {
+          const oldType = String((nodeData as any).outputArtifactType || "").trim();
+          const oldClass = String((nodeData as any).outputArtifactClass || "").trim();
+          const oldSchema = String((nodeData as any).outputSchema || "").trim();
+          const oldFormat = String((nodeData as any).outputFormat || "").trim().toLowerCase();
+          if (oldType || oldClass || oldSchema) {
+            const subType = String(nodeData.subType || "");
+            const candidates = outputProfiles.filter(p => profileMatchesArtifactSubType(p, subType));
+            const matched = candidates.find(p => {
+              const sameType = !oldType || p.artifact_type === oldType;
+              const sameClass = !oldClass || p.artifact_class === oldClass;
+              const sameSchema = !oldSchema || p.output_schema === oldSchema;
+              const sameFormat = !oldFormat || p.output_format === oldFormat;
+              return sameType && sameClass && sameSchema && sameFormat;
+            });
+            outputProfileId = matched?.id || "";
+          }
+        }
         return {
           id: n.id,
           type: n.type,
@@ -1509,7 +1584,7 @@ function PipelineCanvas() {
           sourcePosition: Position.Bottom,
           targetPosition: Position.Top,
           style: { background: "transparent", padding: 0, border: "none", boxShadow: "none" },
-          data: { ...nodeData, inputSource: migratedSource } as PipelineNodeData,
+          data: { ...nodeData, inputSource: migratedSource, outputProfileId } as PipelineNodeData,
         };
       });
 
@@ -1628,8 +1703,7 @@ function PipelineCanvas() {
       });
 
       const outId = nextId();
-      const stepOut = step.output_contract_override ?? {};
-      const hasStepOut = Object.keys(stepOut).length > 0;
+      const outputProfileId = findProfileIdFromStepOverride(step, "notes");
       newNodes.push({
         id: outId, type: "output",
         position: { x: X_SLOTS[0], y: laneY(outStage) + SLEEVE_INNER },
@@ -1638,22 +1712,7 @@ function PipelineCanvas() {
         data: {
           label: `${agent?.name ?? "Step " + (i + 1)} Output`, subType: "notes", prompt: "", stageIndex: outStage,
           agentId: "", agentClass: "", agentName: "", inputSource: "",
-          outputContractEnabled: hasStepOut,
-          outputArtifactType: String(stepOut.artifact_type ?? ""),
-          outputArtifactClass: String(stepOut.artifact_class ?? ""),
-          outputFormat: String(stepOut.output_format ?? "markdown"),
-          outputSchema: String(stepOut.output_schema ?? ""),
-          outputTaxonomyText: Array.isArray(stepOut.output_taxonomy) ? stepOut.output_taxonomy.map((x: any) => String(x ?? "")).join("\n") : "",
-          outputContractMode: (
-            OUTPUT_CONTRACT_MODES.includes(String(stepOut.output_contract_mode ?? "soft") as any)
-              ? (String(stepOut.output_contract_mode) as "off" | "soft" | "strict")
-              : "soft"
-          ),
-          outputFitStrategy: (
-            OUTPUT_FIT_STRATEGIES.includes(String(stepOut.output_fit_strategy ?? "structured") as any)
-              ? (String(stepOut.output_fit_strategy) as "structured" | "raw")
-              : "structured"
-          ),
+          outputProfileId,
         } satisfies PipelineNodeData,
       });
       newEdges.push(makeEdge(procId, outId));
@@ -1778,31 +1837,20 @@ function PipelineCanvas() {
         let output_contract_override: StepOutputContractOverride | undefined;
         if (primaryOutput) {
           const od = primaryOutput.data as PipelineNodeData;
-          if (od.outputContractEnabled) {
-            const override: StepOutputContractOverride = {};
-            const artifactType = String(od.outputArtifactType || "").trim();
-            const artifactClass = String(od.outputArtifactClass || "").trim();
-            const outputFormat = String(od.outputFormat || "").trim().toLowerCase();
-            const outputSchema = String(od.outputSchema || "").trim();
-            const outputTaxonomy = String(od.outputTaxonomyText || "")
-              .split("\n")
-              .map(s => s.trim())
-              .filter(Boolean);
-            const outputContractMode = String(od.outputContractMode || "soft").trim().toLowerCase();
-            const outputFitStrategy = String(od.outputFitStrategy || "structured").trim().toLowerCase();
-
-            if (artifactType) override.artifact_type = artifactType;
-            if (artifactClass) override.artifact_class = artifactClass;
-            if (["markdown", "json", "text"].includes(outputFormat)) override.output_format = outputFormat;
-            if (outputSchema) override.output_schema = outputSchema;
-            if (outputTaxonomy.length > 0) override.output_taxonomy = outputTaxonomy;
-            if (["off", "soft", "strict"].includes(outputContractMode)) {
-              override.output_contract_mode = outputContractMode as "off" | "soft" | "strict";
+          const profileId = String(od.outputProfileId || "").trim();
+          if (profileId) {
+            const profile = outputProfiles.find(p => p.id === profileId);
+            if (profile) {
+              output_contract_override = {
+                artifact_type: profile.artifact_type,
+                artifact_class: profile.artifact_class,
+                output_format: profile.output_format,
+                output_schema: profile.output_schema,
+                output_taxonomy: profile.output_taxonomy,
+                output_contract_mode: profile.output_contract_mode,
+                output_fit_strategy: profile.output_fit_strategy,
+              };
             }
-            if (["structured", "raw"].includes(outputFitStrategy)) {
-              override.output_fit_strategy = outputFitStrategy as "structured" | "raw";
-            }
-            if (Object.keys(override).length > 0) output_contract_override = override;
           }
         }
         return output_contract_override
@@ -2014,6 +2062,11 @@ function PipelineCanvas() {
     });
     return `/api/pipelines/artifact-template?${qp.toString()}`;
   }, [selKind, selData?.subType, selectedOutputProducer?.agent_id]);
+
+  const selectableOutputProfiles = useMemo(() => {
+    if (selKind !== "output" || !selData?.subType) return [];
+    return outputProfiles.filter(p => profileMatchesArtifactSubType(p, String(selData.subType)));
+  }, [selKind, selData?.subType, outputProfiles]);
 
   const {
     data: artifactTemplate,
@@ -2388,129 +2441,40 @@ function PipelineCanvas() {
         )}
 
         {selKind === "output" && (
-          <PropertiesSection title="Pipeline-Only Output Contract" defaultOpen={false}>
-            <div className="space-y-2.5">
-              <button
-                onClick={() =>
-                  updateNodeData(selectedNode.id, { outputContractEnabled: !selData.outputContractEnabled })
-                }
-                className={`w-full text-left px-2.5 py-2 rounded-lg border text-[11px] transition-colors ${
-                  selData.outputContractEnabled
-                    ? "border-emerald-700 bg-emerald-900/20 text-emerald-300"
-                    : "border-gray-700 bg-gray-800/40 text-gray-400 hover:bg-gray-800"
-                }`}
+          <PropertiesSection title="Output Profile" defaultOpen={false}>
+            <div className="space-y-2">
+              <label className="block text-[9px] text-gray-500 mb-1">
+                Select saved output profile from Agents & Artifacts
+              </label>
+              <select
+                value={String(selData.outputProfileId || "")}
+                onChange={e => updateNodeData(selectedNode.id, { outputProfileId: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
               >
-                {selData.outputContractEnabled ? "Enabled for this pipeline step" : "Enable pipeline-only contract override"}
-              </button>
-
-              {selData.outputContractEnabled && (
-                <>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[9px] text-gray-500 mb-1">Artifact Type</label>
-                      <input
-                        value={String(selData.outputArtifactType || "")}
-                        onChange={e => updateNodeData(selectedNode.id, { outputArtifactType: e.target.value })}
-                        placeholder="note_json"
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
-                      />
+                <option value="">Default {selMeta.label}</option>
+                {selectableOutputProfiles.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.artifact_type || "artifact"})
+                  </option>
+                ))}
+              </select>
+              {String(selData.outputProfileId || "") ? (
+                (() => {
+                  const selectedProfile = selectableOutputProfiles.find(p => p.id === String(selData.outputProfileId || ""));
+                  if (!selectedProfile) return null;
+                  return (
+                    <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-2 space-y-1">
+                      <p className="text-[10px] text-indigo-300 font-medium">{selectedProfile.name}</p>
+                      <p className="text-[10px] text-gray-500">
+                        type: {selectedProfile.artifact_type || "—"} · class: {selectedProfile.artifact_class || "—"} · format: {selectedProfile.output_format}
+                      </p>
                     </div>
-                    <div>
-                      <label className="block text-[9px] text-gray-500 mb-1">Artifact Class</label>
-                      <input
-                        value={String(selData.outputArtifactClass || "")}
-                        onChange={e => updateNodeData(selectedNode.id, { outputArtifactClass: e.target.value })}
-                        placeholder="json_schema"
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[9px] text-gray-500 mb-1">Output Format</label>
-                      <select
-                        value={String(selData.outputFormat || "markdown")}
-                        onChange={e => updateNodeData(selectedNode.id, { outputFormat: e.target.value })}
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
-                      >
-                        <option value="markdown">markdown</option>
-                        <option value="json">json</option>
-                        <option value="text">text</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[9px] text-gray-500 mb-1">Contract Mode</label>
-                      <select
-                        value={String(selData.outputContractMode || "soft")}
-                        onChange={e => updateNodeData(selectedNode.id, { outputContractMode: e.target.value as "off" | "soft" | "strict" })}
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
-                      >
-                        {OUTPUT_CONTRACT_MODES.map(mode => (
-                          <option key={mode} value={mode}>{mode}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[9px] text-gray-500 mb-1">Fit Strategy</label>
-                      <select
-                        value={String(selData.outputFitStrategy || "structured")}
-                        onChange={e => updateNodeData(selectedNode.id, { outputFitStrategy: e.target.value as "structured" | "raw" })}
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
-                      >
-                        {OUTPUT_FIT_STRATEGIES.map(mode => (
-                          <option key={mode} value={mode}>{mode}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[9px] text-gray-500 mb-1">Required Output Schema</label>
-                    <textarea
-                      value={String(selData.outputSchema || "")}
-                      onChange={e => updateNodeData(selectedNode.id, { outputSchema: e.target.value })}
-                      rows={8}
-                      placeholder={`{\n  "results": {\n    "agent_response_md": "<FULL_AGENT_RESPONSE_HERE>"\n  }\n}`}
-                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[9px] text-gray-500 mb-1">Output Taxonomy (one per line)</label>
-                    <textarea
-                      value={String(selData.outputTaxonomyText || "")}
-                      onChange={e => updateNodeData(selectedNode.id, { outputTaxonomyText: e.target.value })}
-                      rows={3}
-                      placeholder={"results\nagent_response_md"}
-                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  {selData.subType === "notes" && (
-                    <button
-                      onClick={() =>
-                        updateNodeData(selectedNode.id, {
-                          outputContractEnabled: true,
-                          outputArtifactType: "note_json",
-                          outputArtifactClass: "json_schema",
-                          outputFormat: "json",
-                          outputContractMode: "strict",
-                          outputFitStrategy: "structured",
-                          outputTaxonomyText: "results\nagent_response_md",
-                          outputSchema: "{\n  \"results\": {\n    \"agent_response_md\": \"<FULL_AGENT_RESPONSE_HERE>\"\n  }\n}",
-                        })
-                      }
-                      className="w-full px-2.5 py-2 rounded-lg border border-indigo-700 text-indigo-300 hover:bg-indigo-900/30 text-[11px] transition-colors"
-                    >
-                      Apply `note_json` preset
-                    </button>
-                  )}
-
-                  <p className="text-[10px] text-emerald-300/90">
-                    This override affects only this pipeline step and does not modify the base agent.
-                  </p>
-                </>
+                  );
+                })()
+              ) : (
+                <p className="text-[10px] text-gray-500">
+                  Using default artifact behavior.
+                </p>
               )}
             </div>
           </PropertiesSection>
