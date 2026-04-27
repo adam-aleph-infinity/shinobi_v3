@@ -110,6 +110,17 @@ function SidebarClock() {
 export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
   const pathname = usePathname();
   const isCallsPage = pathname === "/calls";
+  const [isDevelopmentHost, setIsDevelopmentHost] = useState(false);
+
+  useEffect(() => {
+    const host = window.location.hostname.toLowerCase();
+    const devHosts = new Set([
+      "shinobi.aleph-infinity.com",
+      "localhost",
+      "127.0.0.1",
+    ]);
+    setIsDevelopmentHost(devHosts.has(host));
+  }, []);
 
   const isActive = (href: string) => {
     // Exact match for paths that share a prefix with others
@@ -132,6 +143,11 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
             </button>
           )}
         </div>
+        {isDevelopmentHost && (
+          <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">
+            Development
+          </p>
+        )}
       </div>
 
       {/* Nav groups */}

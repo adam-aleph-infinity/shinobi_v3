@@ -72,6 +72,34 @@ Production remains isolated on:
 
 ---
 
+## Promote agents/pipelines config between envs
+
+Sync only configuration (no CRM data / no call results):
+
+- `ui/data/_universal_agents`
+- `ui/data/_pipelines`
+- `ui/data/_notes_agents`
+- `ui/data/_persona_agents`
+- `ui/data/_pipelines_folders.json`
+
+Commands:
+
+```bash
+# Production -> Development
+bash deploy/sync-configs.sh prod-to-dev --restart
+
+# Development -> Production
+bash deploy/sync-configs.sh dev-to-prod --restart
+```
+
+Safety built in:
+
+- destination backup tarball created before apply: `~/shinobi_v3/backups/config-sync/...`
+- JSON validation before finishing
+- optional service restart via `--restart`
+
+---
+
 ## Add IAP SSH access for a new user
 
 ```bash
