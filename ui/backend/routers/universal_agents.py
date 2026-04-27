@@ -14,6 +14,7 @@ import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import inspect as _sa_inspect
 from sqlalchemy import text as _sql_text
 from sqlmodel import Session, select
 
@@ -209,6 +210,15 @@ def _sync_ai_registry_agents() -> None:
         )
     except Exception:
         pass
+
+
+def _get_table_columns(db_or_bind: Any, table_name: str) -> set[str]:
+    """Best-effort table column introspection (SQLite/Postgres-safe)."""
+    try:
+        bind = db_or_bind.get_bind() if hasattr(db_or_bind, "get_bind") else db_or_bind
+        return {str(c.get("name")) for c in _sa_inspect(bind).get_columns(table_name) if c.get("name")}
+    except Exception:
+        return set()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -1796,26 +1806,42 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
 
             # Save result (thinking not persisted — it's ephemeral reasoning)
             result_id = str(uuid.uuid4())
-            db.execute(
-                _sql_text(
-                    "INSERT INTO agent_result ("
-                    "id, agent_id, agent_name, sales_agent, customer, call_id, content, model, created_at"
-                    ") VALUES ("
-                    ":id, :agent_id, :agent_name, :sales_agent, :customer, :call_id, :content, :model, :created_at"
-                    ")"
-                ),
-                {
-                    "id": result_id,
-                    "agent_id": agent_id,
-                    "agent_name": agent_def.get("name", ""),
-                    "sales_agent": req.sales_agent,
-                    "customer": req.customer,
-                    "call_id": req.call_id,
-                    "content": content,
-                    "model": model,
-                    "created_at": datetime.utcnow(),
-                },
-            )
+            cols = _get_table_columns(db, "agent_result")
+            insert_cols = [
+                "id",
+                "agent_id",
+                "agent_name",
+                "sales_agent",
+                "customer",
+                "call_id",
+                "content",
+                "model",
+                "created_at",
+            ]
+            params: dict[str, Any] = {
+                "id": result_id,
+                "agent_id": agent_id,
+                "agent_name": agent_def.get("name", ""),
+                "sales_agent": req.sales_agent,
+                "customer": req.customer,
+                "call_id": req.call_id,
+                "content": content,
+                "model": model,
+                "created_at": datetime.utcnow(),
+            }
+            optional_defaults: dict[str, Any] = {
+                "pipeline_id": "",
+                "pipeline_step_index": -1,
+                "input_fingerprint": "",
+            }
+            for opt_col, default_val in optional_defaults.items():
+                if opt_col in cols:
+                    insert_cols.append(opt_col)
+                    params[opt_col] = default_val
+
+            col_csv = ", ".join(insert_cols)
+            val_csv = ", ".join(f":{c}" for c in insert_cols)
+            db.execute(_sql_text(f"INSERT INTO agent_result ({col_csv}) VALUES ({val_csv})"), params)
             db.commit()
 
             log_buffer.emit(f"[LLM] {model} — done ({len(content):,} chars)")
