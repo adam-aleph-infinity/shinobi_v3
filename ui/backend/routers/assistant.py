@@ -5,6 +5,7 @@ but cannot modify application source code.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -2252,7 +2253,8 @@ async def chat_session(session_id: str, req: ChatRequest):
 
                         try:
                             parsed_args = _parse_json_args(args_raw)
-                            tool_result = _execute_tool(
+                            tool_result = await asyncio.to_thread(
+                                _execute_tool,
                                 name,
                                 parsed_args,
                                 ctx={
