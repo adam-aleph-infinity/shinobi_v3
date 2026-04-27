@@ -43,6 +43,14 @@ type ModelOption = {
   supports_tools?: boolean;
 };
 
+const FALLBACK_MODELS: ModelOption[] = [
+  { id: "gpt-5.4", label: "OpenAI Best (gpt-5.4)", provider: "openai", supports_tools: true },
+  { id: "claude-opus-4-7", label: "Anthropic Best (Claude Opus 4.7)", provider: "anthropic", supports_tools: true },
+  { id: "claude-sonnet-4-7", label: "Claude Sonnet 4.7 (compat alias)", provider: "anthropic", supports_tools: true },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (stable)", provider: "anthropic", supports_tools: true },
+  { id: "gpt-5.3-codex", label: "OpenAI Codex Fast (fallback)", provider: "openai", supports_tools: true },
+];
+
 function fmtTime(iso: string): string {
   if (!iso) return "";
   try {
@@ -137,22 +145,35 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
   }
 
   async function fetchModels() {
-    try {
-      const res = await fetch("/api/assistant/models");
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as ModelOption[];
-      const rows = Array.isArray(data) ? data.filter((m) => !!m?.id) : [];
+    const applyRows = (rowsIn: ModelOption[]) => {
+      const rows = rowsIn.filter((m) => !!m?.id);
       setModels(rows);
-
       const local = typeof window !== "undefined" ? localStorage.getItem("copilot-model") || "" : "";
       const preferred = local && rows.some((m) => m.id === local) ? local : "";
-      const fallback = rows.find((m) => m.ready)?.id || rows[0]?.id || "gpt-5.4";
+      const fallback = rows.find((m) => m.ready !== false)?.id || rows[0]?.id || "gpt-5.4";
       const next = preferred || fallback;
       setSelectedModel(next);
       if (typeof window !== "undefined") localStorage.setItem("copilot-model", next);
-    } catch {
-      // Keep existing default silently.
+    };
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const res = await fetch("/api/assistant/models", { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as ModelOption[];
+        const rows = Array.isArray(data) ? data.filter((m) => !!m?.id) : [];
+        applyRows(rows.length ? rows : FALLBACK_MODELS);
+        return;
+      } catch {
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+          continue;
+        }
+      }
     }
+
+    applyRows(FALLBACK_MODELS);
+    setError((prev) => prev || "Models list unavailable right now. Using fallback options.");
   }
 
   useEffect(() => {
@@ -272,7 +293,7 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
             className="max-w-[148px] bg-gray-800 border border-gray-700 text-gray-200 text-[10px] rounded px-1.5 py-1 outline-none focus:border-indigo-500"
             title="Copilot model/provider"
           >
-            {(models.length ? models : [{ id: "gpt-5.4", label: "OpenAI Codex", provider: "openai" }]).map((m) => (
+            {(models.length ? models : FALLBACK_MODELS).map((m) => (
               <option key={m.id} value={m.id} disabled={m.ready === false}>
                 {m.label}{m.ready === false ? " (missing key)" : ""}
               </option>

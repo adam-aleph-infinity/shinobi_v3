@@ -2097,10 +2097,15 @@ async def chat_session(session_id: str, req: ChatRequest):
 
     async def stream():
         tools = _tool_specs()
-        familiarity_boot = assistant_knowledge.familiarize_with_live_app(tool_specs=tools, force=False)
-        distill_boot = assistant_knowledge.distill_skills_from_successful_runs(limit=120, force=False)
-        assistant_knowledge.ensure_app_map(tools, force=False)
-        dynamic_system_prompt = _build_dynamic_system_prompt(user_message, tools)
+
+        def _prepare_context() -> tuple[dict[str, Any], dict[str, Any], str]:
+            familiarity = assistant_knowledge.familiarize_with_live_app(tool_specs=tools, force=False)
+            distill = assistant_knowledge.distill_skills_from_successful_runs(limit=120, force=False)
+            assistant_knowledge.ensure_app_map(tools, force=False)
+            dynamic_prompt = _build_dynamic_system_prompt(user_message, tools)
+            return familiarity, distill, dynamic_prompt
+
+        familiarity_boot, distill_boot, dynamic_system_prompt = await asyncio.to_thread(_prepare_context)
         client = LLMClient(provider=provider, api_key=api_key)
 
         try:
@@ -2143,7 +2148,8 @@ async def chat_session(session_id: str, req: ChatRequest):
 
             if not supports_tools:
                 messages = [{"role": "system", "content": dynamic_system_prompt}] + list(session.get("model_messages") or [])
-                resp = client.chat_completion(
+                resp = await asyncio.to_thread(
+                    client.chat_completion,
                     model=model,
                     messages=messages,
                     temperature=0,
@@ -2155,7 +2161,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                     draft_text = "I couldn't produce a response. Please try again with more detail."
                 yield _sse("progress", {"msg": "Running planner + critic quality pass…"})
                 try:
-                    final_text, reviewer_meta = _planner_critic_refine(
+                    final_text, reviewer_meta = await asyncio.to_thread(
+                        _planner_critic_refine,
                         client=client,
                         model=model,
                         user_message=user_message,
@@ -2211,7 +2218,8 @@ async def chat_session(session_id: str, req: ChatRequest):
 
             for round_idx in range(req.max_tool_rounds):
                 messages = [{"role": "system", "content": dynamic_system_prompt}] + list(session.get("model_messages") or [])
-                resp = client.chat_completion(
+                resp = await asyncio.to_thread(
+                    client.chat_completion,
                     model=model,
                     messages=messages,
                     temperature=0,
@@ -2317,7 +2325,8 @@ async def chat_session(session_id: str, req: ChatRequest):
                     draft_text = "I couldn't produce a response. Please try again with more detail."
                 yield _sse("progress", {"msg": "Running planner + critic quality pass…"})
                 try:
-                    final_text, reviewer_meta = _planner_critic_refine(
+                    final_text, reviewer_meta = await asyncio.to_thread(
+                        _planner_critic_refine,
                         client=client,
                         model=model,
                         user_message=user_message,
