@@ -383,13 +383,22 @@ def _candidate_crm_push_endpoints(config_endpoint: str, crm_url: str, api_userna
         endpoint = endpoint.replace("{api_username}", api_username)
         endpoint = endpoint.replace("{crm_base}", base)
         endpoint = endpoint.replace("{crm_host}", urlparse(base).netloc if base else "")
-        out.append(endpoint)
-        if "-incoming" in endpoint:
-            out.append(endpoint.replace("-incoming", ""))
+        # If misconfigured to /accounts/<user>, force incoming path.
+        if "/api/v1/accounts/" in endpoint and "-incoming" not in endpoint:
+            _prefix, _sep, _tail = endpoint.partition("/api/v1/accounts/")
+            endpoint = f"{_prefix}/api/v1/accounts/{api_username}-incoming"
+        # Enforce incoming endpoint; prefer trailing slash first.
+        if endpoint.endswith("/"):
+            out.append(endpoint)
+            out.append(endpoint.rstrip("/"))
+        else:
+            out.append(f"{endpoint}/")
+            out.append(endpoint)
 
     if base and api_username:
-        out.append(f"{base}/api/v1/accounts/{api_username}-incoming")
-        out.append(f"{base}/api/v1/accounts/{api_username}")
+        incoming = f"{base}/api/v1/accounts/{api_username}-incoming/"
+        out.append(incoming)
+        out.append(incoming.rstrip("/"))
 
     deduped: list[str] = []
     seen: set[str] = set()
