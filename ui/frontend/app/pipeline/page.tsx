@@ -3456,6 +3456,16 @@ function PipelineCanvas() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   const isActivePipeline = !!(pipelineId && pipelineId === activePipelineId);
+  const openCrmOverlay = () => {
+    setShowCrmPanel(true);
+    setShowCallsPanel(false);
+    setSelectedNodeId(null);
+  };
+  const openCallsOverlay = () => {
+    setShowCallsPanel(true);
+    setShowCrmPanel(false);
+    setSelectedNodeId(null);
+  };
 
   return (
     <div className="flex flex-col h-full w-full">
@@ -3475,10 +3485,10 @@ function PipelineCanvas() {
           <Users className="w-3 h-3 text-indigo-400 shrink-0" />
           <select
             value={salesAgent}
+            onFocus={openCrmOverlay}
             onChange={e => {
               setSalesAgent(e.target.value);
-              setShowCrmPanel(true);
-              setShowCallsPanel(false);
+              openCrmOverlay();
             }}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px]"
           >
@@ -3493,10 +3503,10 @@ function PipelineCanvas() {
           <User className="w-3 h-3 text-cyan-400 shrink-0" />
           <select
             value={customer}
+            onFocus={openCrmOverlay}
             onChange={e => {
               setCustomer(e.target.value);
-              setShowCrmPanel(true);
-              setShowCallsPanel(false);
+              openCrmOverlay();
             }}
             disabled={!salesAgent}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px] disabled:opacity-50"
@@ -3513,14 +3523,10 @@ function PipelineCanvas() {
           <input
             list="pipeline-call-id-options"
             value={callId}
-            onFocus={() => {
-              setShowCallsPanel(true);
-              setShowCrmPanel(false);
-            }}
+            onFocus={openCallsOverlay}
             onChange={e => {
               setCallId(e.target.value.trim());
-              setShowCallsPanel(true);
-              setShowCrmPanel(false);
+              openCallsOverlay();
             }}
             disabled={!salesAgent || !customer || !runNeedsCall}
             placeholder={!runNeedsCall
@@ -3530,10 +3536,7 @@ function PipelineCanvas() {
           />
           <button
             type="button"
-            onClick={() => {
-              setShowCallsPanel(true);
-              setShowCrmPanel(false);
-            }}
+            onClick={openCallsOverlay}
             disabled={!salesAgent || !customer}
             className="p-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
             title="Open Calls panel"
@@ -3822,7 +3825,7 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div className="absolute inset-0 z-30 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
+            <div className="absolute inset-0 z-40 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
               <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
                 <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
                 <div className="min-w-0 flex-1">
@@ -3906,7 +3909,7 @@ function PipelineCanvas() {
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-30 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
+            <div className="absolute inset-0 z-40 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
               <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
                 <Users className="w-4 h-4 text-indigo-400 shrink-0" />
                 <div className="min-w-0 flex-1">
