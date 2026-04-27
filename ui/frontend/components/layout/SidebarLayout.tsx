@@ -5,6 +5,7 @@ import CopilotDock from "./CopilotDock";
 import { ContextBar } from "./ContextBar";
 import { PanelLeftOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { usePathname } from "next/navigation";
 
 const SIDEBAR_WIDTH = 224;
 const COPILOT_DEFAULT_WIDTH = 304;
@@ -21,6 +22,7 @@ function clampCopilotWidth(raw: number, sidebarCollapsed: boolean): number {
 }
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [copilotCollapsed, setCopilotCollapsed] = useState(false);
   const [copilotWidth, setCopilotWidth] = useState(COPILOT_DEFAULT_WIDTH);
@@ -100,6 +102,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
   const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
   const contentOffset = sidebarOffset + copilotOffset;
+  const showContextBar = pathname !== "/pipeline";
 
   return (
     <>
@@ -156,7 +159,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {/* Main content — always same structure so React doesn't remount children */}
       <div className={cn("transition-[margin] duration-200", resizingCopilot && "transition-none")} style={{ marginLeft: contentOffset }}>
         <div className="sticky top-0 z-30">
-          {mounted && <ContextBar />}
+          {mounted && showContextBar && <ContextBar />}
         </div>
         <main className="min-h-screen p-6">
           {children}
