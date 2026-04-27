@@ -867,17 +867,18 @@ export function PipelineSidePanel({
     setInputPreview({ loading: true, content: "", error: "" });
     try {
       let content = "";
-      if (source === "transcript") {
-        const url = `/api/notes/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(flowCallId)}`;
+      if (source === "transcript" || source === "merged_transcript" || source === "notes" || source === "merged_notes") {
+        const params = new URLSearchParams({
+          source,
+          sales_agent: salesAgent,
+          customer,
+        });
+        if (flowCallId) params.set("call_id", flowCallId);
+        const url = `/api/universal-agents/raw-input?${params.toString()}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        content = data.transcript ?? data.text ?? JSON.stringify(data, null, 2);
-      } else if (source === "merged_transcript") {
-        const url = `/api/full-persona-agent/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        content = await res.text();
+        content = data.content ?? "";
       } else {
         content = `(Source "${source}" is resolved at pipeline execution time)`;
       }

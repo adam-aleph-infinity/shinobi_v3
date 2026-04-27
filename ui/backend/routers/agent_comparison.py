@@ -178,18 +178,27 @@ def _get_crm_pair_data(agent: str, customer: str) -> dict:
 
 
 def _build_and_save_merged_transcript(
-    agent: str, customer: str, force: bool = True,
+    agent: str,
+    customer: str,
+    force: bool = True,
+    upto_call_id: str = "",
 ) -> Optional[str]:
-    """Merge all smoothed.txt files for the pair; save to merged_transcript.txt in the customer folder.
+    """Build merged transcript with call status index and optional cut-off call.
 
-    Includes dates, times and net deposits in the header. Shared by FPA and agent comparison.
-    Uses the cached file when force=False and the file already exists.
+    Shared by FPA and agent comparison.
+    - Default: all calls -> `merged_transcript.txt`
+    - With `upto_call_id`: calls up to that call (inclusive) -> `merged_transcript_upto_<id>.txt`
     """
     pair_dir = settings.agents_dir / agent / customer
     if not pair_dir.exists():
         return None
 
-    merged_path = pair_dir / "merged_transcript.txt"
+    cutoff = str(upto_call_id or "").strip()
+    merged_path = (
+        pair_dir / f"merged_transcript_upto_{re.sub(r'[^A-Za-z0-9_.-]+', '_', cutoff).strip('._') or 'call'}.txt"
+        if cutoff
+        else pair_dir / "merged_transcript.txt"
+    )
 
     # Return cached version unless forced
     if not force and merged_path.exists():
@@ -200,53 +209,28 @@ def _build_and_save_merged_transcript(
         except Exception:
             pass
 
-    calls_meta = _load_calls_meta(pair_dir)
-    call_dirs = sorted([d for d in pair_dir.iterdir() if d.is_dir() and not d.name.startswith("_")])
+    try:
+        from ui.backend.database import engine as _db_engine
+        from ui.backend.routers.universal_agents import _build_merged_transcript_content
 
-    # Pre-collect call dirs that have a transcript
-    valid_calls = [
-        (d, calls_meta.get(d.name, {}))
-        for d in call_dirs
-        if (d / "transcribed" / "llm_final" / "smoothed.txt").exists()
-    ]
-
-    blocks: list[str] = []
-    for idx, (call_dir, meta) in enumerate(valid_calls, 1):
-        try:
-            text = (call_dir / "transcribed" / "llm_final" / "smoothed.txt").read_text(encoding="utf-8").strip()
-            header = _call_header(call_dir.name, meta, idx=idx, total=len(valid_calls))
-            blocks.append(f"{'─' * 60}\n{header}\n{'─' * 60}\n{text}")
-        except Exception:
-            pass
-
-    if not blocks:
+        with Session(_db_engine) as db:
+            content = _build_merged_transcript_content(
+                agent,
+                customer,
+                db,
+                upto_call_id=cutoff,
+            )
+    except Exception as e:
+        print(f"[merge] Build warning: {e}")
         return None
 
-    crm = _get_crm_pair_data(agent, customer)
-    fmt_money = lambda v: f"${v:,.2f}" if v is not None else "—"
-    fmt_date  = lambda v: v[:10] if v else "—"
+    if not (content or "").strip():
+        return None
 
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    doc_header = (
-        f"{'═' * 60}\n"
-        f"MERGED TRANSCRIPTS\n"
-        f"Agent:               {agent}\n"
-        f"Customer:            {customer}\n"
-        f"Calls (transcribed): {len(blocks)}\n"
-        f"CRM Call Count:      {crm.get('call_count') or '—'}\n"
-        f"Total Deposits:      {fmt_money(crm.get('total_deposits'))}\n"
-        f"Total Withdrawals:   {fmt_money(crm.get('total_withdrawals'))}\n"
-        f"Net Deposits:        {fmt_money(crm.get('net_deposits'))}\n"
-        f"First Deposit:       {fmt_date(crm.get('ftd_at'))}\n"
-        f"Generated:           {now}\n"
-        f"{'═' * 60}\n\n"
-    )
-    content = doc_header + "\n\n".join(blocks)
-
-    # Always save to the customer folder on disk
     try:
         merged_path.write_text(content, encoding="utf-8")
-        print(f"[merge] Saved merged_transcript.txt — {agent}/{customer} ({len(blocks)} calls)")
+        scope = f"up to {cutoff}" if cutoff else "all calls"
+        print(f"[merge] Saved {merged_path.name} — {agent}/{customer} ({scope})")
     except Exception as e:
         print(f"[merge] Save warning: {e}")
 

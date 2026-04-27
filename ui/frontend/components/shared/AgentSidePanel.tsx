@@ -46,7 +46,7 @@ interface CallArtifactItem {
   artifact_type: string;
   artifact_label: string;
   scope: "call" | "pair";
-  association: "exact" | "exact_anchor" | "isolated_merged";
+  association: "exact" | "exact_anchor" | "exact_call_id_tag" | "isolated_merged";
   confidence: number;
   result_id: string;
   created_at: string;
@@ -126,18 +126,12 @@ function InputViewer({
 }: {
   inp: AgentInput;
   salesAgent: string; customer: string; callId: string;
-  scopedCallId: string; // non-empty when scope=call override is active
+  scopedCallId: string; // non-empty when scope=call view is active
 }) {
   const [open, setOpen] = useState(false);
 
-  const effectiveSource = scopedCallId
-    ? (inp.source === "merged_transcript" ? "transcript"
-      : inp.source === "merged_notes" ? "notes"
-      : inp.source)
-    : inp.source;
-
   const params = new URLSearchParams({
-    source: effectiveSource,
+    source: inp.source,
     sales_agent: salesAgent,
     customer,
     call_id: scopedCallId || callId,
@@ -333,12 +327,6 @@ export function AgentSidePanel({
     const runCallId = scopedCallId || effectiveCallId || callId;
 
     const sourceOverrides: Record<string, string> = {};
-    if (scopedCallId && agentInputs.length > 0) {
-      for (const inp of agentInputs) {
-        if (inp.source === "merged_transcript") sourceOverrides[inp.key] = "transcript";
-        if (inp.source === "merged_notes")      sourceOverrides[inp.key] = "notes";
-      }
-    }
 
     try {
       const res = await fetch(`/api/universal-agents/${activeAgentId}/run`, {
@@ -469,6 +457,9 @@ export function AgentSidePanel({
                       <span className="text-gray-600 truncate">{a.agent_name || a.agent_id}</span>
                       {a.association === "exact_anchor" && (
                         <span className="ml-auto text-emerald-400">anchored</span>
+                      )}
+                      {a.association === "exact_call_id_tag" && (
+                        <span className="ml-auto text-emerald-400">call id</span>
                       )}
                       {a.association === "isolated_merged" && (
                         <span className="ml-auto text-gray-500">iso {Math.round((a.confidence || 0) * 100)}%</span>

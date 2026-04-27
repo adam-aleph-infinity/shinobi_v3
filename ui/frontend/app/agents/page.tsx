@@ -9,6 +9,7 @@ import {
   X, Download, Mic2, Layers, BookOpen, PenLine, StickyNote,
   User, Star, Shield, Zap, Play, FileText, Braces, AlignLeft, Copy,
   BadgeCheck, ShieldCheck,
+  Boxes, SlidersHorizontal, Sparkles,
   Maximize2, Minimize2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -132,7 +133,14 @@ function ClassIcon({ cls }: { cls: string }) {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface AgentInput { key: string; source: SourceValue; agent_id?: string; }
+type MergedScope = "auto" | "all" | "upto_call";
+interface AgentInput {
+  key: string;
+  source: SourceValue;
+  agent_id?: string;
+  merged_scope?: MergedScope;
+  merged_until_call_id?: string;
+}
 
 interface Persona {
   id: string; type: string; agent: string; customer?: string; label?: string;
@@ -147,6 +155,12 @@ interface UniversalAgent {
   id: string; name: string; description: string; agent_class: string;
   model: string; temperature: number; system_prompt: string; user_prompt: string;
   inputs: AgentInput[]; output_format: string; tags: string[];
+  artifact_type?: string;
+  artifact_class?: string;
+  output_schema?: string;
+  output_taxonomy?: string[];
+  output_contract_mode?: "off" | "soft" | "strict";
+  output_fit_strategy?: "structured" | "raw";
   is_default: boolean; created_at: string;
   updated_at?: string;
   folder?: string;
@@ -166,9 +180,54 @@ const BLANK_AGENT = {
   name: "New Agent", description: "", agent_class: "general",
   model: "gpt-5.4", temperature: 0,
   system_prompt: "", user_prompt: "",
-  inputs: [{ key: "transcript", source: "transcript" as SourceValue }],
+  inputs: [{ key: "transcript", source: "transcript" as SourceValue, merged_scope: "auto" as MergedScope, merged_until_call_id: "" }],
   output_format: "markdown", tags: [], is_default: false, folder: "",
+  artifact_type: "",
+  artifact_class: "",
+  output_schema: "",
+  output_taxonomy: [] as string[],
+  output_contract_mode: "soft" as "off" | "soft" | "strict",
+  output_fit_strategy: "structured" as "structured" | "raw",
 };
+
+const MERGED_SCOPE_OPTIONS: { value: MergedScope; label: string; hint: string }[] = [
+  { value: "auto", label: "Auto", hint: "Use selected call when available" },
+  { value: "all", label: "All Calls", hint: "Always use full merged history" },
+  { value: "upto_call", label: "Up To Call", hint: "Use selected/fixed call cutoff" },
+];
+
+const OUTPUT_CONTRACT_MODES = [
+  { value: "off", label: "Off" },
+  { value: "soft", label: "Soft" },
+  { value: "strict", label: "Strict" },
+] as const;
+
+const OUTPUT_FIT_STRATEGIES = [
+  { value: "structured", label: "Structured first" },
+  { value: "raw", label: "Raw first" },
+] as const;
+
+function normalizeAgentInput(inp: AgentInput): AgentInput {
+  const mergedScope = (inp.merged_scope ?? "auto") as MergedScope;
+  return {
+    ...inp,
+    merged_scope: ["auto", "all", "upto_call"].includes(mergedScope) ? mergedScope : "auto",
+    merged_until_call_id: inp.merged_until_call_id ?? "",
+  };
+}
+
+function normalizeAgent(a: UniversalAgent): UniversalAgent {
+  return {
+    ...a,
+    inputs: (a.inputs ?? []).map(normalizeAgentInput),
+    artifact_type: a.artifact_type ?? "",
+    artifact_class: a.artifact_class ?? "",
+    output_schema: a.output_schema ?? "",
+    output_taxonomy: a.output_taxonomy ?? [],
+    output_contract_mode: (a.output_contract_mode ?? "soft"),
+    output_fit_strategy: (a.output_fit_strategy ?? "structured"),
+  };
+}
 
 // ── AgentEditor ───────────────────────────────────────────────────────────────
 
@@ -186,8 +245,14 @@ function AgentEditor({
     name: agent.name, description: agent.description ?? "",
     agent_class: agent.agent_class, model: agent.model,
     temperature: agent.temperature, system_prompt: agent.system_prompt,
-    user_prompt: agent.user_prompt, inputs: agent.inputs ?? [],
+    user_prompt: agent.user_prompt, inputs: (agent.inputs ?? []).map(normalizeAgentInput),
     output_format: agent.output_format ?? "markdown",
+    artifact_type: agent.artifact_type ?? "",
+    artifact_class: agent.artifact_class ?? "",
+    output_schema: agent.output_schema ?? "",
+    output_taxonomy: agent.output_taxonomy ?? [],
+    output_contract_mode: agent.output_contract_mode ?? "soft",
+    output_fit_strategy: agent.output_fit_strategy ?? "structured",
     tags: agent.tags ?? [], is_default: agent.is_default ?? false,
     folder: agent.folder ?? "",
   });
@@ -200,8 +265,14 @@ function AgentEditor({
       name: agent.name, description: agent.description ?? "",
       agent_class: agent.agent_class, model: agent.model,
       temperature: agent.temperature, system_prompt: agent.system_prompt,
-      user_prompt: agent.user_prompt, inputs: agent.inputs ?? [],
+      user_prompt: agent.user_prompt, inputs: (agent.inputs ?? []).map(normalizeAgentInput),
       output_format: agent.output_format ?? "markdown",
+      artifact_type: agent.artifact_type ?? "",
+      artifact_class: agent.artifact_class ?? "",
+      output_schema: agent.output_schema ?? "",
+      output_taxonomy: agent.output_taxonomy ?? [],
+      output_contract_mode: agent.output_contract_mode ?? "soft",
+      output_fit_strategy: agent.output_fit_strategy ?? "structured",
       tags: agent.tags ?? [], is_default: agent.is_default ?? false,
       folder: agent.folder ?? "",
     });
@@ -224,7 +295,10 @@ function AgentEditor({
 
   function addInput() {
     const newKey = `input_${draft.inputs.length + 1}`;
-    setDraft(f => ({ ...f, inputs: [...f.inputs, { key: newKey, source: "manual" as SourceValue }] }));
+    setDraft(f => ({
+      ...f,
+      inputs: [...f.inputs, { key: newKey, source: "manual" as SourceValue, merged_scope: "auto", merged_until_call_id: "" }],
+    }));
   }
 
   function removeInput(idx: number) {
@@ -369,7 +443,12 @@ function AgentEditor({
                       {(["input", "artifact"] as InputCategory[]).map(c => (
                         <button key={c} onClick={() => {
                           const defaultSrc = INPUT_SOURCES_BY_CAT[c][0].value as SourceValue;
-                          updateInput(i, { source: defaultSrc, agent_id: undefined });
+                          updateInput(i, {
+                            source: defaultSrc,
+                            agent_id: undefined,
+                            merged_scope: "auto",
+                            merged_until_call_id: "",
+                          });
                         }}
                           className={cn(
                             "px-2 py-0.5 transition-colors capitalize",
@@ -391,11 +470,40 @@ function AgentEditor({
                   {/* Row 2: source within category */}
                   <div className="flex items-center gap-1.5 px-2 pb-2">
                     <select value={inp.source}
-                      onChange={e => updateInput(i, { source: e.target.value as SourceValue, agent_id: undefined })}
+                      onChange={e => updateInput(i, {
+                        source: e.target.value as SourceValue,
+                        agent_id: undefined,
+                        merged_scope: inp.merged_scope ?? "auto",
+                        merged_until_call_id: inp.merged_until_call_id ?? "",
+                      })}
                       className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500">
                       {catSources.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
                   </div>
+                  {(inp.source === "merged_transcript" || inp.source === "merged_notes") && (
+                    <div className="px-2 pb-2 space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={inp.merged_scope ?? "auto"}
+                          onChange={e => updateInput(i, { merged_scope: e.target.value as MergedScope })}
+                          className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-indigo-500"
+                        >
+                          {MERGED_SCOPE_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                        <span className="text-[9px] text-gray-600 whitespace-nowrap">Merged scope</span>
+                      </div>
+                      {(inp.merged_scope ?? "auto") === "upto_call" && (
+                        <input
+                          value={inp.merged_until_call_id ?? ""}
+                          onChange={e => updateInput(i, { merged_until_call_id: e.target.value })}
+                          placeholder="Optional fixed call id (else selected call)"
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500"
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -456,6 +564,485 @@ function AgentEditor({
           className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50">
           {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
           {saved ? "Saved" : "Save agent"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InputContractsPanel({
+  agent,
+  onSave,
+}: {
+  agent: UniversalAgent;
+  onSave: (draft: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
+}) {
+  const { salesAgent, customer, callId } = useAppCtx();
+  const [inputs, setInputs] = useState<AgentInput[]>((agent.inputs ?? []).map(normalizeAgentInput));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [previews, setPreviews] = useState<Record<string, { loading: boolean; chars: number; snippet: string; err?: string }>>({});
+
+  useEffect(() => {
+    setInputs((agent.inputs ?? []).map(normalizeAgentInput));
+    setPreviews({});
+  }, [agent.id, agent.updated_at, agent.inputs]);
+
+  function updateInput(idx: number, patch: Partial<AgentInput>) {
+    setInputs(prev => {
+      const next = [...prev];
+      next[idx] = normalizeAgentInput({ ...next[idx], ...patch });
+      return next;
+    });
+  }
+
+  function addInput() {
+    setInputs(prev => [
+      ...prev,
+      { key: `input_${prev.length + 1}`, source: "manual", merged_scope: "auto", merged_until_call_id: "" },
+    ]);
+  }
+
+  function removeInput(idx: number) {
+    setInputs(prev => prev.filter((_, i) => i !== idx));
+  }
+
+  async function previewInput(inp: AgentInput) {
+    if (!salesAgent || !customer) return;
+    const previewKey = inp.key || String(Math.random());
+    setPreviews(prev => ({ ...prev, [previewKey]: { loading: true, chars: 0, snippet: "" } }));
+    try {
+      const params = new URLSearchParams({
+        source: inp.source,
+        sales_agent: salesAgent,
+        customer,
+        call_id: callId || "",
+      });
+      if (inp.agent_id) params.set("agent_id", inp.agent_id);
+      if (inp.source === "merged_transcript" || inp.source === "merged_notes") {
+        params.set("merged_scope", inp.merged_scope ?? "auto");
+        if (inp.merged_until_call_id) params.set("merged_until_call_id", inp.merged_until_call_id);
+      }
+      const res = await fetch(`/api/universal-agents/raw-input?${params.toString()}`);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `${res.status}`);
+      }
+      const data = await res.json();
+      const content = String(data.content || "");
+      setPreviews(prev => ({
+        ...prev,
+        [previewKey]: { loading: false, chars: content.length, snippet: content.slice(0, 320) },
+      }));
+    } catch (e: any) {
+      setPreviews(prev => ({
+        ...prev,
+        [previewKey]: { loading: false, chars: 0, snippet: "", err: String(e?.message || e || "failed") },
+      }));
+    }
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave({
+        name: agent.name,
+        description: agent.description ?? "",
+        agent_class: agent.agent_class ?? "general",
+        model: agent.model ?? "gpt-5.4",
+        temperature: agent.temperature ?? 0,
+        system_prompt: agent.system_prompt ?? "",
+        user_prompt: agent.user_prompt ?? "",
+        inputs,
+        output_format: agent.output_format ?? "markdown",
+        artifact_type: agent.artifact_type ?? "",
+        artifact_class: agent.artifact_class ?? "",
+        output_schema: agent.output_schema ?? "",
+        output_taxonomy: agent.output_taxonomy ?? [],
+        output_contract_mode: agent.output_contract_mode ?? "soft",
+        output_fit_strategy: agent.output_fit_strategy ?? "structured",
+        tags: agent.tags ?? [],
+        is_default: agent.is_default ?? false,
+        folder: agent.folder ?? "",
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto">
+      <div className="px-4 py-3 border-b border-gray-800 shrink-0">
+        <p className="text-xs font-semibold text-white">Input Contracts</p>
+        <p className="text-[10px] text-gray-500 mt-0.5">Define each input and how merged sources resolve (all calls vs up-to-call).</p>
+      </div>
+      <div className="flex-1 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wide">Inputs</p>
+          <button onClick={addInput} className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1">
+            <Plus className="w-3 h-3" /> Add
+          </button>
+        </div>
+
+        {inputs.map((inp, i) => {
+          const cat = srcCategory(inp.source);
+          const catSources = INPUT_SOURCES_BY_CAT[cat];
+          const meta = srcMeta(inp.source);
+          const previewKey = inp.key || `${i}`;
+          const pv = previews[previewKey];
+          return (
+            <div key={`${inp.key}-${i}`} className="rounded-lg border border-gray-700/60 bg-gray-800/40 p-2 space-y-2">
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={inp.key}
+                  onChange={e => updateInput(i, { key: e.target.value })}
+                  placeholder="input key"
+                  className="w-36 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-amber-300 font-mono outline-none focus:border-indigo-500"
+                />
+                <select
+                  value={inp.source}
+                  onChange={e => updateInput(i, { source: e.target.value as SourceValue, agent_id: undefined })}
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-gray-300 outline-none focus:border-indigo-500"
+                >
+                  {catSources.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+                <button onClick={() => removeInput(i)} className="p-1 text-gray-600 hover:text-red-400 transition-colors">
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+
+              {(inp.source === "merged_transcript" || inp.source === "merged_notes") && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[9px] text-gray-500 mb-1">Merged scope</label>
+                    <select
+                      value={inp.merged_scope ?? "auto"}
+                      onChange={e => updateInput(i, { merged_scope: e.target.value as MergedScope })}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-gray-300 outline-none focus:border-indigo-500"
+                    >
+                      {MERGED_SCOPE_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[9px] text-gray-500 mb-1">Fixed cutoff call id (optional)</label>
+                    <input
+                      value={inp.merged_until_call_id ?? ""}
+                      onChange={e => updateInput(i, { merged_until_call_id: e.target.value })}
+                      placeholder="e.g. 66213"
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => previewInput(inp)}
+                  disabled={!salesAgent || !customer}
+                  className="text-[10px] px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 disabled:opacity-40 transition-colors"
+                >
+                  Preview Input
+                </button>
+                <span className="text-[9px] text-gray-600">{meta.label}</span>
+              </div>
+              {pv && (
+                <div className="rounded border border-gray-800 bg-gray-900/60 p-2">
+                  {pv.loading ? (
+                    <p className="text-[9px] text-gray-500 flex items-center gap-1"><Loader2 className="w-2.5 h-2.5 animate-spin" /> Loading preview…</p>
+                  ) : pv.err ? (
+                    <p className="text-[9px] text-amber-400 break-words">{pv.err}</p>
+                  ) : (
+                    <>
+                      <p className="text-[9px] text-emerald-400">Loaded {pv.chars.toLocaleString()} chars</p>
+                      <pre className="mt-1 text-[9px] text-gray-500 font-mono whitespace-pre-wrap break-words max-h-28 overflow-y-auto">{pv.snippet}{pv.chars > 320 ? "\n…" : ""}</pre>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {inputs.length === 0 && (
+          <p className="text-[10px] text-gray-700 italic">No inputs defined.</p>
+        )}
+
+        <button
+          onClick={save}
+          disabled={saving}
+          className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
+          {saved ? "Saved" : "Save input contracts"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function OutputContractsPanel({
+  agent,
+  onSave,
+}: {
+  agent: UniversalAgent;
+  onSave: (draft: Omit<UniversalAgent, "id" | "created_at">) => Promise<void>;
+}) {
+  const [artifactType, setArtifactType] = useState(agent.artifact_type ?? "");
+  const [artifactClass, setArtifactClass] = useState(agent.artifact_class ?? "");
+  const [schema, setSchema] = useState(agent.output_schema ?? "");
+  const [taxonomyText, setTaxonomyText] = useState((agent.output_taxonomy ?? []).join("\n"));
+  const [contractMode, setContractMode] = useState<"off" | "soft" | "strict">(agent.output_contract_mode ?? "soft");
+  const [fitStrategy, setFitStrategy] = useState<"structured" | "raw">(agent.output_fit_strategy ?? "structured");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [rawOutput, setRawOutput] = useState("");
+  const [fitLoading, setFitLoading] = useState(false);
+  const [fitResult, setFitResult] = useState<any>(null);
+  const [fitError, setFitError] = useState("");
+
+  useEffect(() => {
+    setArtifactType(agent.artifact_type ?? "");
+    setArtifactClass(agent.artifact_class ?? "");
+    setSchema(agent.output_schema ?? "");
+    setTaxonomyText((agent.output_taxonomy ?? []).join("\n"));
+    setContractMode(agent.output_contract_mode ?? "soft");
+    setFitStrategy(agent.output_fit_strategy ?? "structured");
+    setFitResult(null);
+    setFitError("");
+  }, [agent.id, agent.updated_at, agent.artifact_type, agent.artifact_class, agent.output_schema, agent.output_taxonomy, agent.output_contract_mode, agent.output_fit_strategy]);
+
+  function taxonomyList() {
+    return taxonomyText
+      .split("\n")
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  function inferArtifactSubType() {
+    const cls = (artifactClass || "").trim().toLowerCase();
+    if (cls) return cls.replace(/\s+/g, "_");
+    const acls = (agent.agent_class || "").toLowerCase();
+    if (acls === "scorer") return "persona_score";
+    if (acls === "notes") return "notes";
+    if (acls === "persona") return "persona";
+    return "output";
+  }
+
+  async function autoInferSchema() {
+    setSchemaLoading(true);
+    try {
+      const subType = inferArtifactSubType();
+      const res = await fetch(`/api/pipelines/artifact-template?agent_id=${encodeURIComponent(agent.id)}&artifact_sub_type=${encodeURIComponent(subType)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSchema(String(data.schema_template || ""));
+      const tax = Array.isArray(data.taxonomy) ? data.taxonomy.map((x: any) => String(x || "").trim()).filter(Boolean) : [];
+      if (tax.length > 0) setTaxonomyText(tax.join("\n"));
+    } catch (e: any) {
+      setFitError(`Schema inference failed: ${String(e?.message || e || "error")}`);
+    } finally {
+      setSchemaLoading(false);
+    }
+  }
+
+  async function runFit(prefer: "structured" | "raw") {
+    if (!rawOutput.trim()) return;
+    setFitLoading(true);
+    setFitError("");
+    try {
+      const res = await fetch(`/api/universal-agents/${agent.id}/test-fit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw_output: rawOutput, prefer }),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setFitResult(data);
+    } catch (e: any) {
+      setFitError(String(e?.message || e || "fit failed"));
+      setFitResult(null);
+    } finally {
+      setFitLoading(false);
+    }
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave({
+        name: agent.name,
+        description: agent.description ?? "",
+        agent_class: agent.agent_class ?? "general",
+        model: agent.model ?? "gpt-5.4",
+        temperature: agent.temperature ?? 0,
+        system_prompt: agent.system_prompt ?? "",
+        user_prompt: agent.user_prompt ?? "",
+        inputs: (agent.inputs ?? []).map(normalizeAgentInput),
+        output_format: agent.output_format ?? "markdown",
+        artifact_type: artifactType.trim(),
+        artifact_class: artifactClass.trim(),
+        output_schema: schema,
+        output_taxonomy: taxonomyList(),
+        output_contract_mode: contractMode,
+        output_fit_strategy: fitStrategy,
+        tags: agent.tags ?? [],
+        is_default: agent.is_default ?? false,
+        folder: agent.folder ?? "",
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto">
+      <div className="px-4 py-3 border-b border-gray-800 shrink-0">
+        <p className="text-xs font-semibold text-white">Output Artifact Contract</p>
+        <p className="text-[10px] text-gray-500 mt-0.5">Define artifact type/class, schema, taxonomy, and fit behavior for this agent output.</p>
+      </div>
+      <div className="flex-1 p-4 space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Artifact Type</label>
+            <input
+              value={artifactType}
+              onChange={e => setArtifactType(e.target.value)}
+              placeholder="notes / persona / compliance / custom"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Artifact Class</label>
+            <input
+              value={artifactClass}
+              onChange={e => setArtifactClass(e.target.value)}
+              placeholder="call_level_tracking / summary / score / custom"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Contract Mode</label>
+            <select
+              value={contractMode}
+              onChange={e => setContractMode(e.target.value as "off" | "soft" | "strict")}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            >
+              {OUTPUT_CONTRACT_MODES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Fit Preference</label>
+            <select
+              value={fitStrategy}
+              onChange={e => setFitStrategy(e.target.value as "structured" | "raw")}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+            >
+              {OUTPUT_FIT_STRATEGIES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-[9px] text-gray-500 uppercase tracking-wide">Required Output Schema</label>
+            <button
+              onClick={autoInferSchema}
+              disabled={schemaLoading}
+              className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-40 flex items-center gap-1"
+            >
+              {schemaLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+              Auto from prompts
+            </button>
+          </div>
+          <textarea
+            value={schema}
+            onChange={e => setSchema(e.target.value)}
+            rows={14}
+            placeholder="Paste the exact output schema you require..."
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+          />
+        </div>
+
+        <div>
+          <label className="block text-[9px] text-gray-500 uppercase tracking-wide mb-1">Output Taxonomy (one per line)</label>
+          <textarea
+            value={taxonomyText}
+            onChange={e => setTaxonomyText(e.target.value)}
+            rows={5}
+            placeholder={"CALL_ANCHOR_START\nCompany Procedures\nCall Summary\nNext Call Actions"}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+          />
+        </div>
+
+        <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-3 space-y-2">
+          <p className="text-[10px] text-gray-400 font-semibold uppercase tracking-wide">Test Fit (Raw vs Required Schema)</p>
+          <textarea
+            value={rawOutput}
+            onChange={e => setRawOutput(e.target.value)}
+            rows={7}
+            placeholder="Paste raw agent output here, then run fit."
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => runFit("structured")}
+              disabled={fitLoading || !rawOutput.trim()}
+              className="text-[10px] px-2.5 py-1 rounded border border-indigo-700 text-indigo-300 hover:bg-indigo-900/30 disabled:opacity-40 transition-colors"
+            >
+              Fit Structured
+            </button>
+            <button
+              onClick={() => runFit("raw")}
+              disabled={fitLoading || !rawOutput.trim()}
+              className="text-[10px] px-2.5 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-40 transition-colors"
+            >
+              Fit Raw-First
+            </button>
+            {fitLoading && <span className="text-[9px] text-gray-500 flex items-center gap-1"><Loader2 className="w-2.5 h-2.5 animate-spin" /> running...</span>}
+          </div>
+
+          {fitError && <p className="text-[10px] text-amber-400 break-words">{fitError}</p>}
+
+          {fitResult && (
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2 text-[10px]">
+                <div className="rounded border border-gray-800 bg-gray-950/70 p-2">
+                  <p className="text-gray-500">Before fit</p>
+                  <p className="text-red-300 font-semibold">{fitResult?.fit_before?.overall ?? 0}%</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/70 p-2">
+                  <p className="text-gray-500">After fit</p>
+                  <p className="text-emerald-300 font-semibold">{fitResult?.fit_after?.overall ?? 0}%</p>
+                </div>
+              </div>
+              <textarea
+                value={String(fitResult?.fitted_output || "")}
+                readOnly
+                rows={10}
+                className="w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300 font-mono"
+              />
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={save}
+          disabled={saving}
+          className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : saved ? <Check className="w-3 h-3" /> : null}
+          {saved ? "Saved" : "Save output contract"}
         </button>
       </div>
     </div>
@@ -631,6 +1218,10 @@ function TestPanel({
     setPreviews(p => ({ ...p, [inp.key]: { status: "loading", chars: 0, snippet: "" } }));
     const params = new URLSearchParams({ source: inp.source, sales_agent: testAgent, customer: testCustomer, call_id: testCallId });
     if (inp.agent_id) params.set("agent_id", inp.agent_id);
+    if (inp.source === "merged_transcript" || inp.source === "merged_notes") {
+      params.set("merged_scope", inp.merged_scope ?? "auto");
+      if (inp.merged_until_call_id) params.set("merged_until_call_id", inp.merged_until_call_id);
+    }
     try {
       const res = await fetch(`/api/universal-agents/raw-input?${params}`);
       if (!res.ok) {
@@ -1020,11 +1611,12 @@ export default function AgentsPage() {
   const { data: agents } = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: foldersData } = useSWR<string[]>("/api/universal-agents/folders", fetcher);
-  const allAgents = agents ?? [];
+  const allAgents = (agents ?? []).map(normalizeAgent);
   const allPipelines = pipelinesData ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(() => activeAgentId || null);
   const [panelMode, setPanelMode] = useState<"split" | "editor">("split");
+  const [workspaceSection, setWorkspaceSection] = useState<"inputs" | "processing" | "outputs">("processing");
   const [testPanelWidth, setTestPanelWidth] = useState(320);
   const [isResizingTestPanel, setIsResizingTestPanel] = useState(false);
   const testPanelResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -1132,6 +1724,12 @@ export default function AgentsPage() {
       user_prompt: current.user_prompt ?? "",
       inputs: current.inputs ?? [],
       output_format: current.output_format ?? "markdown",
+      artifact_type: current.artifact_type ?? "",
+      artifact_class: current.artifact_class ?? "",
+      output_schema: current.output_schema ?? "",
+      output_taxonomy: current.output_taxonomy ?? [],
+      output_contract_mode: current.output_contract_mode ?? "soft",
+      output_fit_strategy: current.output_fit_strategy ?? "structured",
       tags: current.tags ?? [],
       is_default: current.is_default ?? false,
       folder: current.folder ?? "",
@@ -1139,8 +1737,14 @@ export default function AgentsPage() {
     const nextCmp = {
       ...draft,
       folder: draft.folder ?? "",
-      inputs: draft.inputs ?? [],
+      inputs: (draft.inputs ?? []).map(normalizeAgentInput),
       tags: draft.tags ?? [],
+      output_taxonomy: draft.output_taxonomy ?? [],
+      output_contract_mode: draft.output_contract_mode ?? "soft",
+      output_fit_strategy: draft.output_fit_strategy ?? "structured",
+      artifact_type: draft.artifact_type ?? "",
+      artifact_class: draft.artifact_class ?? "",
+      output_schema: draft.output_schema ?? "",
     };
     if (JSON.stringify(currentCmp) === JSON.stringify(nextCmp)) return;
 
@@ -1351,7 +1955,7 @@ export default function AgentsPage() {
       {/* ── Left: agent list ─────────────────────────────────────── */}
       <aside className="w-52 shrink-0 border-r border-gray-800 flex flex-col bg-gray-950">
         <div className="px-3 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
-          <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Agents</p>
+          <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Agents &amp; Artifacts</p>
           <div className="flex items-center gap-1.5">
             <button onClick={importPresets} disabled={importing} title="Import presets"
               className="p-1 text-gray-600 hover:text-indigo-400 transition-colors disabled:opacity-40">
@@ -1430,17 +2034,48 @@ export default function AgentsPage() {
 
       {/* ── Center: editor ───────────────────────────────────────── */}
       <div className="min-w-0 flex-1 flex flex-col bg-gray-900 overflow-hidden">
+        <div className="shrink-0 border-b border-gray-800 px-3 py-2 flex items-center gap-1.5">
+          {[
+            { id: "inputs", label: "Inputs", icon: SlidersHorizontal },
+            { id: "processing", label: "Processing", icon: Boxes },
+            { id: "outputs", label: "Outputs", icon: Sparkles },
+          ].map(tab => {
+            const Icon = tab.icon;
+            const selectedTab = workspaceSection === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setWorkspaceSection(tab.id as "inputs" | "processing" | "outputs")}
+                className={cn(
+                  "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10px] transition-colors",
+                  selectedTab
+                    ? "border-indigo-700/60 bg-indigo-900/30 text-indigo-300"
+                    : "border-gray-800 text-gray-500 hover:text-gray-300 hover:border-gray-700",
+                )}
+              >
+                <Icon className="w-3 h-3" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
         {selected ? (
-          <AgentEditor
-            key={selected.id}
-            agent={selected}
-            allAgents={allAgents}
-            onSave={saveAgent}
-            onDelete={deleteAgent}
-            onCopy={() => copyAgent(selected.id)}
-            isExpanded={panelMode === "editor"}
-            onToggleExpand={() => setPanelMode(prev => prev === "editor" ? "split" : "editor")}
-          />
+          workspaceSection === "processing" ? (
+            <AgentEditor
+              key={selected.id}
+              agent={selected}
+              allAgents={allAgents}
+              onSave={saveAgent}
+              onDelete={deleteAgent}
+              onCopy={() => copyAgent(selected.id)}
+              isExpanded={panelMode === "editor"}
+              onToggleExpand={() => setPanelMode(prev => prev === "editor" ? "split" : "editor")}
+            />
+          ) : workspaceSection === "inputs" ? (
+            <InputContractsPanel key={`${selected.id}-inputs`} agent={selected} onSave={saveAgent} />
+          ) : (
+            <OutputContractsPanel key={`${selected.id}-outputs`} agent={selected} onSave={saveAgent} />
+          )
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-700">
             <Bot className="w-12 h-12 opacity-10" />
@@ -1453,7 +2088,7 @@ export default function AgentsPage() {
         )}
       </div>
 
-      {panelMode !== "editor" && (
+      {panelMode !== "editor" && workspaceSection === "processing" && (
         <div
           onMouseDown={e => startTestPanelResize(e.clientX)}
           className="w-1.5 shrink-0 cursor-col-resize bg-gray-900 hover:bg-indigo-500/40 transition-colors"
@@ -1464,8 +2099,8 @@ export default function AgentsPage() {
       {/* ── Right: test panel ────────────────────────────────────── */}
       <div className={cn(
         "overflow-hidden flex flex-col shrink-0",
-        panelMode === "editor" && "hidden",
-      )} style={panelMode === "editor" ? undefined : { width: `${testPanelWidth}px` }}>
+        (panelMode === "editor" || workspaceSection !== "processing") && "hidden",
+      )} style={(panelMode === "editor" || workspaceSection !== "processing") ? undefined : { width: `${testPanelWidth}px` }}>
         {selected
           ? (
             <TestPanel

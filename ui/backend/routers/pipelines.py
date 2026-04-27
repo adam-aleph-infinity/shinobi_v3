@@ -51,6 +51,66 @@ def _safe_template_format(template: str, values: dict[str, Any]) -> str:
         return str(template or "")
 
 
+_CALL_ID_PRESERVATION_PERSONA = """
+CALL ID PRESERVATION (MANDATORY)
+
+- Preserve original call identifiers from input. Do NOT replace original CALL_ID values with generic labels.
+- You may keep sequential order, but each included call section must carry the exact original CALL_ID.
+- Required call heading format:
+### Call <sequential_index> | CALL_ID: <exact_original_call_id>
+- If exact call id is unavailable, use CALL_ID: UNKNOWN.
+- Do NOT merge different CALL_IDs into one call section.
+"""
+
+
+_CALL_ID_PRESERVATION_NOTES = """
+CALL-LEVEL OUTPUT INTEGRITY (MANDATORY)
+
+- Output one System Note section for each call section provided by Stage 2.
+- Do NOT merge multiple call IDs into one note block.
+- Ensure each note block is explicitly tied to the exact CALL_ID.
+- If exact call id is unavailable, use CALL_ID: UNKNOWN.
+"""
+
+
+def _append_once(base: str, block: str) -> str:
+    _b = str(base or "")
+    _blk = str(block or "").strip()
+    if not _blk:
+        return _b
+    if _blk in _b:
+        return _b
+    if _b.strip():
+        return _b.rstrip() + "\n\n" + _blk + "\n"
+    return _blk + "\n"
+
+
+def _apply_call_id_contract(
+    system_prompt: str,
+    user_template: str,
+    agent_def: dict[str, Any],
+    artifact_sub_type: str,
+) -> tuple[str, str]:
+    """Enforce stable call-id output contract for persona/notes style artifacts."""
+    _sub = str(artifact_sub_type or "").strip().lower()
+    _cls = str((agent_def or {}).get("agent_class") or "").strip().lower()
+    _name = str((agent_def or {}).get("name") or "").strip().lower()
+    _tags = " ".join([str(t or "").strip().lower() for t in ((agent_def or {}).get("tags") or [])])
+    _hints = " ".join([_sub, _cls, _name, _tags])
+
+    _is_persona = ("persona" in _hints) and ("score" not in _hints)
+    _is_notes = ("notes" in _hints) and ("compliance" not in _hints or "notes" in _sub)
+
+    _sys = str(system_prompt or "")
+    _usr = str(user_template or "")
+
+    if _is_persona:
+        _usr = _append_once(_usr, _CALL_ID_PRESERVATION_PERSONA)
+    if _is_notes:
+        _sys = _append_once(_sys, _CALL_ID_PRESERVATION_NOTES)
+    return _sys, _usr
+
+
 def _default_internal_prompt_templates() -> dict[str, Any]:
     return {
         "analytics_rubric": {
@@ -1941,6 +2001,72 @@ def _extract_call_anchor_segments(raw: str) -> list[dict[str, Any]]:
     return out
 
 
+def _extract_call_id_tagged_segments(raw: str) -> list[dict[str, Any]]:
+    """Extract call-scoped segments from outputs that include CALL_ID-tagged headings."""
+    text = str(raw or "")
+    if not text.strip():
+        return []
+
+    out: list[dict[str, Any]] = []
+    current_call_id = ""
+    current_title = ""
+    buf: list[str] = []
+
+    def _flush() -> None:
+        nonlocal current_call_id, current_title, buf
+        if not current_call_id:
+            return
+        content = "\n".join(buf).strip()
+        if content:
+            out.append({
+                "call_id": current_call_id,
+                "meta": {"title": current_title or f"CALL_ID {current_call_id}"},
+                "content": content,
+            })
+        buf = []
+
+    for line in text.splitlines():
+        s = str(line or "").strip()
+        call_id = ""
+        title = ""
+
+        m = _re.match(
+            r"^\s*#{1,6}\s*Call\s+\d+\s*\|\s*CALL_ID\s*:\s*([^\s|)\]]+)\s*$",
+            line,
+            _re.IGNORECASE,
+        )
+        if m:
+            call_id = str(m.group(1) or "").strip()
+            title = _re.sub(r"^\s*#{1,6}\s*", "", s).strip()
+        else:
+            m = _re.match(
+                r"^\s*\*{0,2}\s*System\s+Note\s*[–-]\s*Call\s+[^()]*\(\s*CALL\s+([^\s)]+)\s*\)\s*\*{0,2}\s*$",
+                line,
+                _re.IGNORECASE,
+            )
+            if m:
+                call_id = str(m.group(1) or "").strip()
+                title = s.strip("* ").strip()
+            else:
+                m = _re.match(r"^\s*CALL_ID\s*:\s*([^\s|)\]]+)\s*$", line, _re.IGNORECASE)
+                if m:
+                    call_id = str(m.group(1) or "").strip()
+                    title = f"CALL_ID {call_id}"
+
+        if call_id:
+            _flush()
+            current_call_id = call_id
+            current_title = title or f"CALL_ID {call_id}"
+            buf = []
+            continue
+
+        if current_call_id:
+            buf.append(line)
+
+    _flush()
+    return out
+
+
 def _tokenize_match_text(text: str) -> list[str]:
     stop = {
         "the", "and", "for", "with", "that", "this", "from", "have", "has", "had", "was", "were", "are", "is",
@@ -2219,6 +2345,54 @@ def get_pipeline_call_artifacts(
                         "artifact_label": artifact_label,
                         "scope": "pair",
                         "association": "exact_anchor",
+                        "confidence": 1.0,
+                        "result_id": pair_row.get("id") or "",
+                        "created_at": pair_row.get("created_at") or "",
+                        "model": pair_row.get("model") or "",
+                        "content": merged_content,
+                        "sections": selected_sections,
+                    })
+                    continue
+
+        tagged_segments = _extract_call_id_tagged_segments(pair_row.get("content") or "")
+        if tagged_segments:
+            matched_tagged = [
+                s for s in tagged_segments
+                if str(s.get("call_id") or "").strip().lower() == call_id_norm
+            ]
+            if matched_tagged:
+                selected_sections: list[dict[str, Any]] = []
+                for idx, seg in enumerate(matched_tagged):
+                    seg_content = str(seg.get("content") or "").strip()
+                    if not seg_content:
+                        continue
+                    meta = seg.get("meta") or {}
+                    seg_title = (
+                        str(meta.get("section") or "").strip()
+                        or str(meta.get("title") or "").strip()
+                        or f"CALL_ID {call_id_raw} Section {idx + 1}"
+                    )
+                    selected_sections.append({
+                        "title": seg_title,
+                        "content": seg_content,
+                        "score": 1.0,
+                        "top_call_id": call_id_norm,
+                        "top_score": 1.0,
+                        "second_score": 0.0,
+                        "relative": 1.0,
+                    })
+                if selected_sections:
+                    merged_content = "\n\n".join(
+                        [f"## {s['title']}\n\n{s['content']}" for s in selected_sections]
+                    )
+                    artifacts_out.append({
+                        "step_index": step_idx,
+                        "agent_id": agent_id,
+                        "agent_name": pair_row.get("agent_name") or agent_id,
+                        "artifact_type": artifact_type,
+                        "artifact_label": artifact_label,
+                        "scope": "pair",
+                        "association": "exact_call_id_tag",
                         "confidence": 1.0,
                         "result_id": pair_row.get("id") or "",
                         "created_at": pair_row.get("created_at") or "",
@@ -4369,6 +4543,15 @@ async def run_pipeline(
                     temperature   = float(agent_def.get("temperature", 0.0))
                     system_prompt = agent_def.get("system_prompt", "")
                     user_template = agent_def.get("user_prompt", "")
+                    _step_sub_type = str(
+                        ((_step_output_meta.get(step_idx) or {}).get("sub_type") or "")
+                    ).strip().lower()
+                    system_prompt, user_template = _apply_call_id_contract(
+                        system_prompt=system_prompt,
+                        user_template=user_template,
+                        agent_def=agent_def,
+                        artifact_sub_type=_step_sub_type,
+                    )
                     manual_inputs = {"_chain_previous": prev_content}
                     source_for_key = {
                         inp.get("key", ""): _public_input_source(
@@ -4741,6 +4924,15 @@ async def run_pipeline(
                         _par_temp   = float(_par_adef.get("temperature", 0.0))
                         _par_sysp   = _par_adef.get("system_prompt", "")
                         _par_ut     = _par_adef.get("user_prompt", "")
+                        _par_sub_type = str(
+                            ((_step_output_meta.get(par_idx) or {}).get("sub_type") or "")
+                        ).strip().lower()
+                        _par_sysp, _par_ut = _apply_call_id_contract(
+                            system_prompt=_par_sysp,
+                            user_template=_par_ut,
+                            agent_def=_par_adef,
+                            artifact_sub_type=_par_sub_type,
+                        )
                         _par_mi     = {"_chain_previous": _sp}
                         _par_fp     = ""
                         _par_input_ready = False

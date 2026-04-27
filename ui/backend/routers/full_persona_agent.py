@@ -836,8 +836,13 @@ def transcript_info(agent: str = Query(...), customer: str = Query(...)):
 
 
 @router.get("/transcript")
-def get_transcript(agent: str = Query(...), customer: str = Query(...), force: bool = Query(False)):
-    content = _build_and_save_merged_transcript(agent, customer, force=force)
+def get_transcript(
+    agent: str = Query(...),
+    customer: str = Query(...),
+    force: bool = Query(False),
+    call_id: str = Query(""),
+):
+    content = _build_and_save_merged_transcript(agent, customer, force=force, upto_call_id=call_id)
     if not content:
         raise HTTPException(404, "No transcript data available")
     return PlainTextResponse(content)
