@@ -161,7 +161,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         <div className="sticky top-0 z-30">
           {mounted && showContextBar && <ContextBar />}
         </div>
-        <main className="min-h-screen p-6">
+        <main className={cn("min-h-screen", pathname === "/pipeline" ? "p-0" : "p-6")}>
           {children}
         </main>
       </div>

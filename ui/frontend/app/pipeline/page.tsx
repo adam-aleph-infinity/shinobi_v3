@@ -14,7 +14,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   Bot, User, Star, StickyNote, Shield, Zap, BadgeCheck, ShieldCheck,
-  Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
+  Check, Loader2, TriangleAlert,
   Mic2, Layers, BookOpen, PenLine, FileText, Braces, AlignLeft,
   Plus, Trash2, ChevronRight, X, Download, Workflow, Copy, ClipboardCopy, ClipboardPaste,
   Lock, Play, Square, History, Users, PhoneCall,
@@ -168,6 +168,13 @@ interface PipelineRunRecord {
   finished_at: string | null;
   status: string;
   steps_json: string;
+}
+
+interface BackendLogLine {
+  ts?: string;
+  text?: string;
+  level?: string;
+  job_id?: string;
 }
 
 interface PipelineBundle {
@@ -1155,19 +1162,75 @@ function PipelineCanvas() {
   const [agentSaving,   setAgentSaving]   = useState(false);
   const [agentSaved,    setAgentSaved]    = useState(false);
   const [agentDeleting, setAgentDeleting] = useState(false);
-  const [showModel,     setShowModel]     = useState(false);
   const [canvasViewport, setCanvasViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
   const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [showCallsDrawer, setShowCallsDrawer] = useState(false);
+  const [showRunLogsPanel, setShowRunLogsPanel] = useState(false);
+  const [runLogLines, setRunLogLines] = useState<BackendLogLine[]>([]);
+  const [runLogsConnected, setRunLogsConnected] = useState(false);
+  const [runLogsError, setRunLogsError] = useState("");
+  const runLogsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     return () => {
       runAbortRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!running) {
+      setRunLogsConnected(false);
+      return;
+    }
+    setShowRunLogsPanel(true);
+    setRunLogLines([]);
+    setRunLogsError("");
+    setRunLogsConnected(false);
+
+    const es = new EventSource("/api/logs/stream");
+
+    es.onopen = () => {
+      setRunLogsConnected(true);
+      setRunLogsError("");
+    };
+
+    es.onerror = () => {
+      setRunLogsConnected(false);
+      setRunLogsError((prev) => prev || "Log stream disconnected.");
+    };
+
+    es.onmessage = (e) => {
+      if (!e.data || e.data === "{}") return;
+      try {
+        const data = JSON.parse(e.data);
+        if (data?.heartbeat) return;
+        const text = String(data?.text || "");
+        if (!text.trim()) return;
+        const line: BackendLogLine = {
+          ts: String(data?.ts || ""),
+          text,
+          level: String(data?.level || "info"),
+          job_id: data?.job_id ? String(data.job_id) : undefined,
+        };
+        setRunLogLines((prev) => [...prev.slice(-399), line]);
+      } catch {
+        // ignore malformed log events
+      }
+    };
+
+    return () => {
+      es.close();
+    };
+  }, [running]);
+
+  useEffect(() => {
+    if (!showRunLogsPanel || runLogLines.length === 0) return;
+    runLogsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [runLogLines, showRunLogsPanel]);
 
   const agentUsageByPipeline = useMemo(() => {
     const out: Record<string, { total: number; other: number }> = {};
@@ -1224,6 +1287,16 @@ function PipelineCanvas() {
     entries.sort((a, b) => String(b[1]?.date || "").localeCompare(String(a[1]?.date || "")));
     return entries;
   }, [callDates]);
+
+  const callsDrawerUrl = useMemo(() => {
+    const qp = new URLSearchParams();
+    if (salesAgent) qp.set("agent", salesAgent);
+    if (customer) qp.set("customer", customer);
+    if (callId) qp.set("call_id", callId);
+    qp.set("embedded", "1");
+    const qs = qp.toString();
+    return qs ? `/calls?${qs}` : "/calls";
+  }, [salesAgent, customer, callId]);
 
   useEffect(() => {
     if (!customer || !navCustomers) return;
@@ -2647,232 +2720,304 @@ function PipelineCanvas() {
       const agCls = selData.agentClass as string;
       const cm    = classMeta(agCls);
       const usage = agId ? (agentUsageByPipeline[agId] ?? { total: 0, other: 0 }) : { total: 0, other: 0 };
+      const stepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedNode.id);
+      const runtimeStatus = stepIndex >= 0 ? (stepStatuses[stepIndex] ?? "pending") : "pending";
+      const runtimeMeta = RUNTIME_META[runtimeStatus];
+      const cachedResult = stepIndex >= 0 ? (cachedResults ?? [])[stepIndex]?.result : null;
+      const cachedContent = String(cachedResult?.content || "");
+
+      type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
+      const connectedSources = edges
+        .filter(e => e.target === selectedNode.id)
+        .map((e): CS | null => {
+          const src = nodes.find(n => n.id === e.source);
+          if (!src) return null;
+          const srcData = src.data as PipelineNodeData;
+
+          if (src.type === "input") {
+            const srcMeta = INPUT_SOURCES.find(s => s.value === srcData.inputSource) ?? null;
+            const IconComp = srcMeta?.icon ?? Zap;
+            return {
+              nodeId: src.id,
+              typeLabel: srcMeta?.label ?? "Input",
+              nodeLabel: srcData.label as string,
+              icon: <IconComp className="w-3 h-3 shrink-0" />,
+              badge: srcMeta?.badge ?? "bg-gray-700/50 text-gray-300 border-gray-600/50",
+            };
+          }
+
+          if (src.type === "output") {
+            const am = (ARTIFACT_META as Record<string, Meta>)[srcData.subType as string] ?? GENERIC_ARTIFACT_META;
+            return {
+              nodeId: src.id,
+              typeLabel: am.label,
+              nodeLabel: srcData.label as string,
+              icon: am.icon,
+              badge: `${am.color.replace("-700", "-900/40").replace("-800", "-900/30")} ${am.text} ${am.border}`,
+            };
+          }
+
+          if (src.type === "processing") {
+            return {
+              nodeId: src.id,
+              typeLabel: "Agent Output",
+              nodeLabel: srcData.label as string,
+              icon: <Bot className="w-3 h-3 shrink-0" />,
+              badge: "bg-purple-900/50 text-purple-300 border-purple-700/50",
+            };
+          }
+          return null;
+        })
+        .filter(Boolean) as CS[];
 
       return (
-        <div className="flex flex-col h-full">
-          {/* Header */}
-          <div className="px-3 py-2.5 border-b border-gray-800 flex items-center gap-2 shrink-0">
+        <div className="flex flex-col h-full min-h-0">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
             <AgentClassIcon cls={agCls} size="sm" />
             <div className="flex-1 min-w-0">
               <p className="text-xs font-semibold text-white truncate">
                 {agId ? (selData.agentName as string || "Agent") : "Configure Agent"}
               </p>
-              <p className={`text-[9px] ${cm.textColor}`}>{agId ? cm.label : "No agent selected"}</p>
+              <p className={`text-[10px] ${cm.textColor}`}>{agId ? cm.label : "No agent selected"}</p>
               {agId && usage.total > 0 && (
-                <p className={`text-[9px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
+                <p className={`text-[10px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
                   {usage.other > 0
                     ? `Used in ${usage.total} pipelines (${usage.other} other)`
                     : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
                 </p>
               )}
             </div>
-            <button onClick={() => setSelectedNodeId(null)} className="p-1 text-gray-600 hover:text-white transition-colors shrink-0">
-              <X className="w-4 h-4" />
-            </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
-            <div className="p-3 space-y-2.5">
-              <PropertiesSection title="Select Agent">
-                {allAgents.length === 0 ? (
-                  <p className="text-xs text-gray-600 italic">Loading agents…</p>
-                ) : (
-                  <AgentPickerGrid
-                    value={agId}
-                    allAgents={allAgents}
-                    usageByAgent={agentUsageByPipeline}
-                    onChange={agent => {
-                      updateNodeData(selectedNode.id, {
-                        agentId: agent.id, agentClass: agent.agent_class, agentName: agent.name, label: agent.name,
-                      });
-                      setAgentDraft({
-                        name: agent.name, description: agent.description ?? "",
-                        agent_class: agent.agent_class ?? "", model: agent.model ?? "gpt-5.4",
-                        temperature: agent.temperature ?? 0, system_prompt: agent.system_prompt ?? "",
-                        user_prompt: agent.user_prompt ?? "",
-                        // Preserve the agent's inputs — pipeline executor uses these for source resolution
-                        inputs: agent.inputs ?? [],
-                        output_format: agent.output_format ?? "markdown",
-                        tags: agent.tags ?? [], is_default: agent.is_default ?? false,
-                      });
-                      setAgentSaved(false);
-                    }}
-                  />
-                )}
-                {/* Agent action buttons — New / Detach / Delete */}
-                <div className="flex gap-1.5 mt-2">
-                  <button onClick={handleCreateAgent}
-                    title="Create a new blank agent and attach it to this node"
-                    className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-[10px] transition-colors">
-                    <Plus className="w-3 h-3" /> New
-                  </button>
-                  {agId && (
-                    <>
-                      <button onClick={handleDetachAgent}
-                        title="Remove the agent from this node (agent stays in library)"
-                        className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-amber-400 hover:border-amber-800 text-[10px] transition-colors">
-                        <X className="w-3 h-3" /> Detach
-                      </button>
-                      <button onClick={handleDeleteAgent} disabled={agentDeleting}
-                        title="Permanently delete this agent from the backend"
-                        className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40">
-                        {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                        Delete
-                      </button>
-                    </>
+          <div className="flex-1 min-h-0 p-3">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
+              {/* Left: selector + settings */}
+              <div className="lg:col-span-3 min-h-0 overflow-y-auto pr-1 space-y-2.5">
+                <PropertiesSection title="Select Agent">
+                  {allAgents.length === 0 ? (
+                    <p className="text-xs text-gray-600 italic">Loading agents…</p>
+                  ) : (
+                    <AgentPickerGrid
+                      value={agId}
+                      allAgents={allAgents}
+                      usageByAgent={agentUsageByPipeline}
+                      onChange={agent => {
+                        updateNodeData(selectedNode.id, {
+                          agentId: agent.id, agentClass: agent.agent_class, agentName: agent.name, label: agent.name,
+                        });
+                        setAgentDraft({
+                          name: agent.name,
+                          description: agent.description ?? "",
+                          agent_class: agent.agent_class ?? "",
+                          model: agent.model ?? "gpt-5.4",
+                          temperature: agent.temperature ?? 0,
+                          system_prompt: agent.system_prompt ?? "",
+                          user_prompt: agent.user_prompt ?? "",
+                          inputs: agent.inputs ?? [],
+                          output_format: agent.output_format ?? "markdown",
+                          tags: agent.tags ?? [],
+                          is_default: agent.is_default ?? false,
+                        });
+                        setAgentSaved(false);
+                      }}
+                    />
                   )}
-                </div>
-              </PropertiesSection>
-
-            {/* Connected inputs — auto-derived from canvas connections (input + artifact + agent nodes) */}
-            {(() => {
-              type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
-              const connectedSources = edges
-                .filter(e => e.target === selectedNode.id)
-                .map((e): CS | null => {
-                  const src = nodes.find(n => n.id === e.source);
-                  if (!src) return null;
-                  const srcData = src.data as PipelineNodeData;
-
-                  if (src.type === "input") {
-                    const srcMeta = INPUT_SOURCES.find(s => s.value === srcData.inputSource) ?? null;
-                    const IconComp = srcMeta?.icon ?? Zap;
-                    return {
-                      nodeId: src.id,
-                      typeLabel: srcMeta?.label ?? "Input",
-                      nodeLabel: srcData.label as string,
-                      icon: <IconComp className="w-3 h-3 shrink-0" />,
-                      badge: srcMeta?.badge ?? "bg-gray-700/50 text-gray-300 border-gray-600/50",
-                    };
-                  }
-
-                  if (src.type === "output") {
-                    const am = (ARTIFACT_META as Record<string, Meta>)[srcData.subType as string] ?? GENERIC_ARTIFACT_META;
-                    return {
-                      nodeId: src.id,
-                      typeLabel: am.label,
-                      nodeLabel: srcData.label as string,
-                      icon: am.icon,
-                      badge: `${am.color.replace("-700", "-900/40").replace("-800", "-900/30")} ${am.text} ${am.border}`,
-                    };
-                  }
-
-                  if (src.type === "processing") {
-                    return {
-                      nodeId: src.id,
-                      typeLabel: "Agent Output",
-                      nodeLabel: srcData.label as string,
-                      icon: <Bot className="w-3 h-3 shrink-0" />,
-                      badge: "bg-purple-900/50 text-purple-300 border-purple-700/50",
-                    };
-                  }
-
-                  return null;
-                })
-                .filter(Boolean) as CS[];
-
-              if (connectedSources.length === 0) return null;
-              return (
-                <PropertiesSection title="Connected Inputs" defaultOpen={false}>
-                  <div className="space-y-1">
-                    {connectedSources.map(cs => (
-                      <div key={cs.nodeId} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[10px] ${cs.badge}`}>
-                        {cs.icon}
-                        <span className="font-medium">{cs.typeLabel}</span>
-                        <span className="opacity-60 truncate ml-auto">{cs.nodeLabel}</span>
-                      </div>
-                    ))}
+                  <div className="flex gap-1.5 mt-2">
+                    <button
+                      onClick={handleCreateAgent}
+                      title="Create a new blank agent and attach it to this node"
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-[10px] transition-colors"
+                    >
+                      <Plus className="w-3 h-3" /> New
+                    </button>
+                    {agId && (
+                      <>
+                        <button
+                          onClick={handleDetachAgent}
+                          title="Remove the agent from this node (agent stays in library)"
+                          className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-amber-400 hover:border-amber-800 text-[10px] transition-colors"
+                        >
+                          <X className="w-3 h-3" /> Detach
+                        </button>
+                        <button
+                          onClick={handleDeleteAgent}
+                          disabled={agentDeleting}
+                          title="Permanently delete this agent from the backend"
+                          className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40"
+                        >
+                          {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                          Delete
+                        </button>
+                      </>
+                    )}
                   </div>
                 </PropertiesSection>
-              );
-            })()}
 
-            {/* Prompts + settings — always visible when processing node selected */}
-            {agentDraft && (
-              <PropertiesSection title="Agent Prompt & Settings">
-              <div className="space-y-3">
-                {agId && (
-                  <div>
-                    <label className="block text-[9px] text-gray-500 mb-1">Name</label>
-                    <input value={agentDraft.name}
-                      onChange={e => setAgentDraft(f => f ? { ...f, name: e.target.value } : f)}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
-                  </div>
+                {connectedSources.length > 0 && (
+                  <PropertiesSection title="Connected Inputs" defaultOpen={false}>
+                    <div className="space-y-1">
+                      {connectedSources.map(cs => (
+                        <div key={cs.nodeId} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[10px] ${cs.badge}`}>
+                          {cs.icon}
+                          <span className="font-medium">{cs.typeLabel}</span>
+                          <span className="opacity-60 truncate ml-auto">{cs.nodeLabel}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </PropertiesSection>
                 )}
 
-                <div>
-                  <label className="block text-[9px] text-gray-500 mb-1">System Prompt</label>
-                  <textarea value={agentDraft.system_prompt}
-                    onChange={e => setAgentDraft(f => f ? { ...f, system_prompt: e.target.value } : f)}
-                    rows={5} placeholder="You are a…"
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
-                </div>
-
-                <div>
-                  <label className="block text-[9px] text-gray-500 mb-1">User Prompt</label>
-                  <textarea value={agentDraft.user_prompt}
-                    onChange={e => setAgentDraft(f => f ? { ...f, user_prompt: e.target.value } : f)}
-                    rows={5} placeholder={"Analyse this:\n\n{transcript}"}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y" />
-                </div>
-
-                {/* Model & settings (collapsible) */}
-                <div className="border border-gray-800 rounded-xl overflow-hidden">
-                  <button onClick={() => setShowModel(s => !s)}
-                    className="w-full flex items-center justify-between px-3 py-2 bg-gray-900 hover:bg-gray-800 transition-colors text-xs">
-                    <span className="text-gray-400">Model & settings</span>
-                    {showModel ? <ChevronUp className="w-3.5 h-3.5 text-gray-600" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-600" />}
-                  </button>
-                  {showModel && (
-                    <div className="p-3 space-y-2.5 border-t border-gray-800">
-                      <div>
-                        <label className="block text-[9px] text-gray-500 mb-1">Model</label>
-                        <ModelSelect value={agentDraft.model} onChange={v => setAgentDraft(f => f ? { ...f, model: v } : f)} />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] text-gray-500 mb-1">Temperature</label>
-                        <input type="number" min={0} max={2} step={0.1} value={agentDraft.temperature}
-                          onChange={e => setAgentDraft(f => f ? { ...f, temperature: parseFloat(e.target.value) || 0 } : f)}
-                          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500" />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] text-gray-500 mb-1">Output format</label>
-                        <div className="flex gap-1.5">
-                          {Object.entries(OUTPUT_FMT).map(([k, m]) => {
-                            const FmtIcon = m.icon;
-                            const sel = agentDraft.output_format === k;
-                            return (
-                              <button key={k} onClick={() => setAgentDraft(f => f ? { ...f, output_format: k } : f)}
-                                className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg border text-[9px] transition-all
-                                  ${sel ? `${m.border} ${m.bg}` : "border-gray-800 bg-gray-900 hover:border-gray-700"}`}>
-                                <FmtIcon className={`w-3.5 h-3.5 ${sel ? m.text : "text-gray-600"}`} />
-                                <span className={sel ? m.text : "text-gray-500"}>{m.label}</span>
-                              </button>
-                            );
-                          })}
+                {agentDraft && (
+                  <>
+                    <PropertiesSection title="Model & Settings">
+                      <div className="space-y-2.5">
+                        <div>
+                          <label className="block text-[9px] text-gray-500 mb-1">Model</label>
+                          <ModelSelect value={agentDraft.model} onChange={v => setAgentDraft(f => f ? { ...f, model: v } : f)} />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] text-gray-500 mb-1">Temperature</label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={2}
+                            step={0.1}
+                            value={agentDraft.temperature}
+                            onChange={e => setAgentDraft(f => f ? { ...f, temperature: parseFloat(e.target.value) || 0 } : f)}
+                            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] text-gray-500 mb-1">Output format</label>
+                          <div className="flex gap-1.5">
+                            {Object.entries(OUTPUT_FMT).map(([k, m]) => {
+                              const FmtIcon = m.icon;
+                              const isSelected = agentDraft.output_format === k;
+                              return (
+                                <button
+                                  key={k}
+                                  onClick={() => setAgentDraft(f => f ? { ...f, output_format: k } : f)}
+                                  className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg border text-[9px] transition-all
+                                    ${isSelected ? `${m.border} ${m.bg}` : "border-gray-800 bg-gray-900 hover:border-gray-700"}`}
+                                >
+                                  <FmtIcon className={`w-3.5 h-3.5 ${isSelected ? m.text : "text-gray-600"}`} />
+                                  <span className={isSelected ? m.text : "text-gray-500"}>{m.label}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
-                </div>
+                    </PropertiesSection>
 
-                <button onClick={handleSaveAgent} disabled={!agId || agentSaving || !agentDraft.name.trim()}
-                  className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40">
-                  {agentSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : agentSaved ? <Check className="w-3 h-3" /> : null}
-                  {agentSaved ? "Saved" : agId ? "Save agent" : "Select an agent above to save"}
+                    <button
+                      onClick={handleSaveAgent}
+                      disabled={!agId || agentSaving || !agentDraft.name.trim()}
+                      className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40"
+                    >
+                      {agentSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : agentSaved ? <Check className="w-3 h-3" /> : null}
+                      {agentSaved ? "Saved" : agId ? "Save agent" : "Select an agent above to save"}
+                    </button>
+                  </>
+                )}
+
+                <button
+                  onClick={() => deleteNode(selectedNode.id)}
+                  className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-xs transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Delete node
                 </button>
               </div>
-              </PropertiesSection>
-            )}
-            </div>
-          </div>
 
-          {/* Footer: delete */}
-          <div className="p-3 border-t border-gray-800 shrink-0">
-            <button onClick={() => deleteNode(selectedNode.id)}
-              className="w-full flex items-center justify-center gap-2 py-1.5 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-xs transition-colors">
-              <Trash2 className="w-3.5 h-3.5" /> Delete node
-            </button>
+              {/* Middle: prompts */}
+              <div className="lg:col-span-6 min-h-0 overflow-y-auto pr-1 space-y-2.5">
+                {agentDraft ? (
+                  <>
+                    {agId && (
+                      <PropertiesSection title="Agent Name">
+                        <input
+                          value={agentDraft.name}
+                          onChange={e => setAgentDraft(f => f ? { ...f, name: e.target.value } : f)}
+                          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+                        />
+                      </PropertiesSection>
+                    )}
+
+                    <PropertiesSection title="System Prompt">
+                      <textarea
+                        value={agentDraft.system_prompt}
+                        onChange={e => setAgentDraft(f => f ? { ...f, system_prompt: e.target.value } : f)}
+                        rows={18}
+                        placeholder="You are a…"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                      />
+                    </PropertiesSection>
+
+                    <PropertiesSection title="User Prompt">
+                      <textarea
+                        value={agentDraft.user_prompt}
+                        onChange={e => setAgentDraft(f => f ? { ...f, user_prompt: e.target.value } : f)}
+                        rows={18}
+                        placeholder={"Analyse this:\n\n{transcript}"}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
+                      />
+                    </PropertiesSection>
+                  </>
+                ) : (
+                  <div className="h-full rounded-xl border border-gray-800 bg-gray-900/60 p-4 text-xs text-gray-500">
+                    Select an agent on the left to edit prompts.
+                  </div>
+                )}
+              </div>
+
+              {/* Right: runtime + cache */}
+              <div className="lg:col-span-3 min-h-0 overflow-y-auto space-y-2.5">
+                <PropertiesSection title="Runtime Status">
+                  {stepIndex >= 0 ? (
+                    <div className="space-y-2">
+                      <div className={cn("inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] font-semibold", runtimeMeta.className)}>
+                        <span className={cn("w-1.5 h-1.5 rounded-full", runtimeMeta.dot)} />
+                        {runtimeMeta.label}
+                      </div>
+                      <p className="text-[10px] text-gray-500">Step {stepIndex + 1} in execution order</p>
+                      {running && (
+                        <p className="text-[10px] text-orange-300">Pipeline is running for this context.</p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-500">
+                      This node is not currently part of the runnable processing sequence.
+                    </p>
+                  )}
+                </PropertiesSection>
+
+                {runError && (
+                  <PropertiesSection title="Latest Run Error">
+                    <p className="text-[11px] text-red-300 whitespace-pre-wrap">{runError}</p>
+                  </PropertiesSection>
+                )}
+
+                <PropertiesSection title="Cached Value">
+                  {cachedResult ? (
+                    <div className="space-y-2">
+                      <p className="text-[10px] text-gray-500">
+                        Cached at {cachedResult.created_at ? new Date(cachedResult.created_at).toLocaleString() : "unknown time"}
+                      </p>
+                      <textarea
+                        readOnly
+                        value={cachedContent}
+                        rows={20}
+                        className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono resize-y"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-500">
+                      No cached artifact for this step in the selected context.
+                    </p>
+                  )}
+                </PropertiesSection>
+              </div>
+            </div>
           </div>
         </div>
       );
@@ -3111,23 +3256,38 @@ function PipelineCanvas() {
 
         <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
           <PhoneCall className="w-3 h-3 text-amber-400 shrink-0" />
-          <select
+          <input
+            list="pipeline-call-id-options"
             value={callId}
-            onChange={e => setCallId(e.target.value)}
+            onFocus={() => setShowCallsDrawer(true)}
+            onChange={e => {
+              setCallId(e.target.value.trim());
+              setShowCallsDrawer(true);
+            }}
             disabled={!salesAgent || !customer || !runNeedsCall}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px] disabled:opacity-50"
+            placeholder={!runNeedsCall
+              ? "Per-pair scope"
+              : (salesAgent && customer ? "Call ID…" : "Select agent + customer")}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[170px] disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onClick={() => setShowCallsDrawer(true)}
+            disabled={!salesAgent || !customer}
+            className="p-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
+            title="Open Calls panel"
           >
-            <option value="">
-              {!runNeedsCall
-                ? "Per-pair scope"
-                : (salesAgent && customer ? "Call…" : "Select agent + customer")}
-            </option>
+            <ChevronRight className="w-3 h-3" />
+          </button>
+          <datalist id="pipeline-call-id-options">
             {callOptions.map(([cid, meta]) => (
-              <option key={cid} value={cid}>
-                {cid} · {meta?.date ? new Date(meta.date).toLocaleDateString() : "Unknown date"}
-              </option>
+              <option
+                key={cid}
+                value={cid}
+                label={meta?.date ? new Date(meta.date).toLocaleDateString() : "Unknown date"}
+              />
             ))}
-          </select>
+          </datalist>
         </div>
         <span className="text-[10px] px-2 py-1 rounded-lg border border-gray-800 text-gray-400 bg-gray-950/40 shrink-0">
           Scope: {runNeedsCall ? "per call" : "per pair"}
@@ -3400,6 +3560,88 @@ function PipelineCanvas() {
             </div>
           )}
 
+          {showCallsDrawer && (
+            <div className="absolute inset-y-0 left-0 z-20 w-[min(52%,880px)] min-w-[420px] border-r border-gray-800 bg-gray-950 shadow-2xl flex flex-col">
+              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-white font-semibold truncate">Calls</p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowCallsDrawer(false)}
+                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+                  title="Close Calls panel"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <iframe
+                title="Calls page"
+                src={callsDrawerUrl}
+                className="w-full h-[calc(100%-3rem)] border-0 bg-gray-900"
+              />
+            </div>
+          )}
+
+          {showRunLogsPanel && (
+            <div className="absolute inset-y-0 right-0 z-20 w-[min(35%,760px)] min-w-[340px] border-l border-gray-800 bg-gray-950 shadow-2xl flex flex-col">
+              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <History className="w-4 h-4 text-indigo-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-white font-semibold truncate">Live Run Logs</p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {running
+                      ? (runLogsConnected ? "Streaming logs…" : "Connecting to log stream…")
+                      : "Run finished"}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowRunLogsPanel(false)}
+                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+                  title="Minimize logs"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="h-[calc(100%-3rem)] overflow-y-auto p-2 space-y-1 font-mono text-[10px]">
+                {runLogsError && (
+                  <p className="text-red-300 border border-red-800/50 bg-red-950/40 rounded px-2 py-1 whitespace-pre-wrap">
+                    {runLogsError}
+                  </p>
+                )}
+                {runLogLines.length === 0 ? (
+                  <p className="text-gray-500 italic px-1 py-2">
+                    {running ? "Waiting for logs…" : "No logs captured yet."}
+                  </p>
+                ) : (
+                  runLogLines.map((line, idx) => (
+                    <div key={`${line.ts || "ts"}_${idx}`} className="px-1 py-0.5 rounded hover:bg-gray-900/80">
+                      <span className="text-gray-600 mr-2">{line.ts || "—"}</span>
+                      <span className={cn(
+                        "whitespace-pre-wrap break-words",
+                        line.level === "error"
+                          ? "text-red-300"
+                          : line.level === "warn"
+                            ? "text-amber-300"
+                            : line.level === "llm"
+                              ? "text-indigo-300"
+                              : line.level === "stage"
+                                ? "text-emerald-300"
+                                : "text-gray-300",
+                      )}>
+                        {line.text || ""}
+                      </span>
+                    </div>
+                  ))
+                )}
+                <div ref={runLogsEndRef} />
+              </div>
+            </div>
+          )}
+
           {showBundleImport && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
               <div className="w-full max-w-3xl rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
@@ -3519,7 +3761,7 @@ function PipelineCanvas() {
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto">
+                <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>
                   {renderPanel()}
                 </div>
               </div>
@@ -3594,7 +3836,7 @@ function PipelineCanvas() {
 
 export default function PipelinePage() {
   return (
-    <div className="-m-6 h-[calc(100vh-5rem)]">
+    <div className="h-screen w-full">
       <ReactFlowProvider>
         <PipelineCanvas />
       </ReactFlowProvider>
