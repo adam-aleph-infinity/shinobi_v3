@@ -54,6 +54,22 @@ bash deploy/deploy.sh
 
 Pulls latest `main`, rebuilds frontend, restarts services.
 
+### Development deploy (separate VM/domain)
+
+```bash
+bash deploy/deploy-dev.sh
+```
+
+Deploys/migrates Shinobi V3 to the dev stack:
+
+- VM: `shinobi-vm`
+- Domain: `shinobi.aleph-infinity.com` (IAP protected)
+
+Production remains isolated on:
+
+- VM: `shinobi-v3-vm`
+- Domain: `shinobi.prod.aleph-infinity.com`
+
 ---
 
 ## Add IAP SSH access for a new user
