@@ -214,6 +214,49 @@ function DeleteBtn({ onDelete }: { onDelete: () => Promise<void> }) {
   );
 }
 
+function SendToCrmBtn({ onSend }: { onSend: () => Promise<string> }) {
+  const [sending, setSending] = useState(false);
+  const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  return (
+    <button
+      onClick={async () => {
+        setSending(true);
+        setStatus("idle");
+        setMessage("");
+        try {
+          const msg = await onSend();
+          setStatus("ok");
+          setMessage(msg || "Sent");
+          setTimeout(() => {
+            setStatus("idle");
+            setMessage("");
+          }, 2500);
+        } catch (e: any) {
+          setStatus("error");
+          setMessage(String(e?.message || e || "Send failed"));
+        } finally {
+          setSending(false);
+        }
+      }}
+      title={message || "Send note to CRM (development only)"}
+      className={cn(
+        "flex items-center gap-1 text-[9px] transition-colors shrink-0",
+        status === "ok"
+          ? "text-emerald-400 hover:text-emerald-300"
+          : status === "error"
+          ? "text-red-400 hover:text-red-300"
+          : "text-gray-600 hover:text-gray-300",
+      )}
+      disabled={sending}
+    >
+      {sending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudUpload className="w-3 h-3" />}
+      {sending ? "Sending…" : status === "ok" ? "Sent CRM" : status === "error" ? "Retry CRM" : "Send CRM"}
+    </button>
+  );
+}
+
 // ── Shared renderers ──────────────────────────────────────────────────────────
 
 /** Render a JSON value as a key-value table; fallback to raw string. */
@@ -257,7 +300,15 @@ const RAW_PRE = "text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-w
 
 // ── Content viewer ────────────────────────────────────────────────────────────
 
-function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () => Promise<void> }) {
+function ContentViewer({
+  item,
+  onDelete,
+  onSendToCrm,
+}: {
+  item: ArtifactItem;
+  onDelete?: () => Promise<void>;
+  onSendToCrm?: () => Promise<string>;
+}) {
   // useState must be unconditional (rules of hooks)
   const [rawMode, setRawMode] = useState(false);
   const toggle = () => setRawMode(r => !r);
@@ -388,6 +439,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className="text-sm font-semibold text-white truncate">Call Note · {item.data.call_id.slice(-12)}</p>
             <p className="text-[10px] text-gray-500">{formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
+          {onSendToCrm && <SendToCrmBtn onSend={onSendToCrm} />}
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
@@ -411,6 +463,7 @@ function ContentViewer({ item, onDelete }: { item: ArtifactItem; onDelete?: () =
             <p className="text-sm font-semibold text-white truncate">Compliance Note · {item.data.call_id.slice(-12)}</p>
             <p className="text-[10px] text-gray-500">{formatLocalDateTime(item.date)} · {item.chars.toLocaleString()} chars</p>
           </div>
+          {onSendToCrm && <SendToCrmBtn onSend={onSendToCrm} />}
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={md + (rawText ? "\n\n" + rawText : "")} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
@@ -636,6 +689,7 @@ export default function ArtifactsPage() {
   const [selectedKind,     setSelectedKind]     = useState<ArtifactKind | null>(null);
   const [selectedItem,     setSelectedItem]     = useState<ArtifactItem | null>(null);
   const [compareMode,      setCompareMode]      = useState(false);
+  const [isDevHost, setIsDevHost] = useState(false);
   const [frozenItem,       setFrozenItem]       = useState<{
     item: ArtifactItem;
     agent: string;
@@ -675,6 +729,12 @@ export default function ArtifactsPage() {
   const { data: uploadedFiles, mutate: mutateUploadedFiles } = useSWR<UploadedFile[]>(
     uploadedFilesUrl, fetcher,
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const host = window.location.hostname.toLowerCase();
+    setIsDevHost(host === "shinobi.aleph-infinity.com" || host === "localhost" || host === "127.0.0.1");
+  }, []);
 
   // All core data must load before Panel 3 renders (avoids "No artifacts" flash)
   const isLoadingPair = loadP || loadN || loadR || (!!runsUrl && loadRuns);
@@ -841,6 +901,28 @@ export default function ArtifactsPage() {
       if (!isPipelineItem(prev.item)) return prev;
       return prev.item.data.run_id === runId ? null : prev;
     });
+  }
+
+  async function handleSendToCrm(item: ArtifactItem): Promise<string> {
+    if (!(item.kind === "note" || item.kind === "compliance_note")) {
+      throw new Error("Send to CRM is supported only for note artifacts");
+    }
+    const res = await fetch(`/api/notes/${encodeURIComponent(item.id)}/send-to-crm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const txt = await res.text().catch(() => "");
+    if (!res.ok) {
+      let detail = txt;
+      try { detail = JSON.parse(txt).detail || txt; } catch { /* keep raw */ }
+      throw new Error(detail || `CRM send failed (${res.status})`);
+    }
+    let data: any = {};
+    try { data = JSON.parse(txt || "{}"); } catch { /* ignore */ }
+    return data?.account_id
+      ? `Sent to account ${data.account_id}`
+      : "Sent to CRM";
   }
 
   const allItems = useMemo(
@@ -1167,7 +1249,11 @@ export default function ArtifactsPage() {
                     await handleDelete(frozenItem.item);
                     setFrozenItem(null);
                     setCompareMode(false);
-                  }} />
+                  }} onSendToCrm={
+                    isDevHost && (frozenItem.item.kind === "note" || frozenItem.item.kind === "compliance_note")
+                      ? () => handleSendToCrm(frozenItem.item)
+                      : undefined
+                  } />
                 </div>
               </div>
 
@@ -1180,7 +1266,15 @@ export default function ArtifactsPage() {
                 </div>
                 <div className="flex-1 min-h-0 overflow-hidden">
                   {selectedItem ? (
-                    <ContentViewer item={selectedItem} onDelete={() => handleDelete(selectedItem)} />
+                    <ContentViewer
+                      item={selectedItem}
+                      onDelete={() => handleDelete(selectedItem)}
+                      onSendToCrm={
+                        isDevHost && (selectedItem.kind === "note" || selectedItem.kind === "compliance_note")
+                          ? () => handleSendToCrm(selectedItem)
+                          : undefined
+                      }
+                    />
                   ) : (
                     <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
                       <Archive className="w-10 h-10 opacity-10" />
@@ -1191,7 +1285,15 @@ export default function ArtifactsPage() {
               </div>
             </div>
           ) : selectedItem ? (
-            <ContentViewer item={selectedItem} onDelete={() => handleDelete(selectedItem)} />
+            <ContentViewer
+              item={selectedItem}
+              onDelete={() => handleDelete(selectedItem)}
+              onSendToCrm={
+                isDevHost && (selectedItem.kind === "note" || selectedItem.kind === "compliance_note")
+                  ? () => handleSendToCrm(selectedItem)
+                  : undefined
+              }
+            />
           ) : (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-700">
               <Archive className="w-10 h-10 opacity-10" />

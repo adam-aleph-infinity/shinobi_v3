@@ -4,14 +4,16 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional
+import requests as _requests
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
 from ui.backend.database import get_session
+from ui.backend.models.crm import CRMPair
 from ui.backend.models.note import Note
 from ui.backend.routers.full_persona_agent import _llm_call_temp, _llm_stream_thinking, _sse
 
@@ -226,6 +228,47 @@ def _agent_names_for(agent: str) -> list[str]:
     return [agent] + extras
 
 
+def _is_dev_host(request: Request) -> bool:
+    hosts: list[str] = []
+    for key in ("x-forwarded-host", "host"):
+        raw = str(request.headers.get(key) or "")
+        if raw:
+            hosts.extend([h.strip() for h in raw.split(",") if h.strip()])
+    if request.url and request.url.hostname:
+        hosts.append(str(request.url.hostname))
+    for host in hosts:
+        norm = host.split(":")[0].strip().lower()
+        if not norm:
+            continue
+        if norm in {"localhost", "127.0.0.1"}:
+            return True
+        if norm == "shinobi.aleph-infinity.com":
+            return True
+    return False
+
+
+def _resolve_account_for_note(agent: str, customer: str, db: Session) -> tuple[str, str]:
+    names = _agent_names_for(agent)
+    stmt = select(CRMPair).where(CRMPair.customer == customer)
+    if len(names) == 1:
+        stmt = stmt.where(CRMPair.agent == names[0])
+    else:
+        from sqlalchemy import or_
+        stmt = stmt.where(or_(*[CRMPair.agent == n for n in names]))
+    pairs = db.exec(stmt).all()
+    if not pairs:
+        return "", ""
+    pairs.sort(
+        key=lambda p: (
+            int(getattr(p, "call_count", 0) or 0),
+            float(getattr(p, "net_deposits", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    best = pairs[0]
+    return str(best.account_id or "").strip(), str(best.crm_url or "").strip()
+
+
 @router.get("")
 def list_notes(
     agent: str = Query(""),
@@ -367,6 +410,96 @@ def delete_note(note_id: str, db: Session = Depends(get_session)):
     db.delete(note)
     db.commit()
     return {"ok": True}
+
+
+class NoteSendToCRMRequest(BaseModel):
+    account_id: str = ""
+
+
+@router.post("/{note_id}/send-to-crm")
+def send_note_to_crm(
+    note_id: str,
+    req: NoteSendToCRMRequest,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    if not settings.crm_push_enabled:
+        raise HTTPException(403, "CRM push is disabled. Set CRM_PUSH_ENABLED=true in development env.")
+    if not _is_dev_host(request):
+        raise HTTPException(403, "Send to CRM is available only in development environment.")
+
+    note = db.get(Note, note_id)
+    if not note:
+        raise HTTPException(404, "Note not found")
+
+    endpoint = str(settings.crm_push_endpoint or "").strip()
+    if not endpoint:
+        raise HTTPException(500, "Missing CRM push endpoint configuration")
+
+    missing = []
+    if not settings.crm_push_api_username:
+        missing.append("CRM_PUSH_API_USERNAME")
+    if not settings.crm_push_api_password:
+        missing.append("CRM_PUSH_API_PASSWORD")
+    if not settings.crm_push_api_key:
+        missing.append("CRM_PUSH_API_KEY")
+    if missing:
+        raise HTTPException(500, f"Missing CRM push credentials: {', '.join(missing)}")
+
+    account_id = str(req.account_id or "").strip()
+    crm_url = ""
+    if not account_id:
+        account_id, crm_url = _resolve_account_for_note(note.agent, note.customer, db)
+    if not account_id:
+        raise HTTPException(
+            400,
+            f"Could not resolve CRM account_id for {note.agent} / {note.customer}. Provide account_id explicitly.",
+        )
+
+    data_field = str(settings.crm_push_data_field or "note").strip() or "note"
+    note_payload = {
+        data_field: str(note.content_md or ""),
+        "call_id": str(note.call_id or ""),
+        "agent": str(note.agent or ""),
+        "customer": str(note.customer or ""),
+        "model": str(note.model or ""),
+        "created_at": note.created_at.isoformat() if note.created_at else "",
+    }
+    body = {
+        "api_username": settings.crm_push_api_username,
+        "api_password": settings.crm_push_api_password,
+        "api_key": settings.crm_push_api_key,
+        "account_id": account_id,
+        "data": json.dumps(note_payload, ensure_ascii=False),
+    }
+
+    try:
+        resp = _requests.post(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=max(5, int(settings.crm_push_timeout_s or 20)),
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"CRM request failed: {exc}")
+
+    text = (resp.text or "").strip()
+    if resp.status_code >= 400:
+        raise HTTPException(
+            502,
+            f"CRM push failed ({resp.status_code}): {text[:1000]}",
+        )
+
+    return {
+        "ok": True,
+        "message": "Note sent to CRM",
+        "crm_status": resp.status_code,
+        "crm_response": text[:1000],
+        "endpoint": endpoint,
+        "account_id": account_id,
+        "crm_url": crm_url,
+        "note_id": note.id,
+    }
 
 
 # ── Analyze a single call — SSE stream ───────────────────────────────────────
