@@ -1281,8 +1281,25 @@ function PipelineCanvas() {
   }, [transcriptCalls, callId]);
 
   const crmPanelUrl = useMemo(() => {
-    return "/crm?embedded=1";
+    return "/crm?embedded=1&mode=pick_pair";
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      const payload = event.data as { type?: string; agent?: string; customer?: string } | null;
+      if (!payload || payload.type !== "shinobi:select-pair") return;
+      const nextAgent = String(payload.agent || "").trim();
+      const nextCustomer = String(payload.customer || "").trim();
+      if (!nextAgent || !nextCustomer) return;
+      setSalesAgent(nextAgent);
+      setCustomer(nextCustomer, nextAgent);
+      setShowCrmPanel(false);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [setCustomer, setSalesAgent]);
 
   useEffect(() => {
     if (!customer || !navCustomers) return;
@@ -3909,27 +3926,18 @@ function PipelineCanvas() {
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-40 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
-              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
-                <Users className="w-4 h-4 text-indigo-400 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-white font-semibold truncate">CRM Browser</p>
-                  <p className="text-[10px] text-gray-500 truncate">
-                    {salesAgent || "Agent"} · {customer || "Customer"}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setShowCrmPanel(false)}
-                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                  title="Close CRM panel"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
+            <div className="absolute inset-0 z-40 bg-gray-950 border border-gray-800 shadow-2xl">
+              <button
+                onClick={() => setShowCrmPanel(false)}
+                className="absolute top-2 right-2 z-10 p-1 rounded-md bg-gray-900/80 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+                title="Close CRM panel"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
               <iframe
                 title="CRM Browser"
                 src={crmPanelUrl}
-                className="w-full h-[calc(100%-3rem)] border-0 bg-gray-900"
+                className="w-full h-full border-0 bg-gray-900"
               />
             </div>
           )}

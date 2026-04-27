@@ -128,6 +128,13 @@ export default function CRMBrowserPage({
 }: CRMBrowserPageProps) {
   const ctx = useAppCtx();
   const artifactsEnabled = !!artifactMode;
+  const [pairPickerMode, setPairPickerMode] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams(window.location.search);
+    setPairPickerMode(qs.get("embedded") === "1" && qs.get("mode") === "pick_pair");
+  }, []);
 
   // ── Filters (persisted to sessionStorage) — start from safe defaults; restored post-mount
   const [agentFilter, _setAgentFilter]         = useState("");
@@ -441,6 +448,26 @@ export default function CRMBrowserPage({
     + (showArtifactViolationColumns ? violationTypes.length : 0);
   const tableColSpan = 11 + artifactColumnCount;
 
+  function selectPair(pair: AgentCustomerPair) {
+    setSelectedIds(new Set([pair.id]));
+    ctx.setCustomer(pair.customer, pair.agent);
+    if (!pairPickerMode) return;
+    try {
+      if (typeof window !== "undefined" && window.parent && window.parent !== window) {
+        window.parent.postMessage(
+          {
+            type: "shinobi:select-pair",
+            agent: pair.agent,
+            customer: pair.customer,
+          },
+          window.location.origin,
+        );
+      }
+    } catch {
+      // no-op: keep local context update even if parent postMessage fails
+    }
+  }
+
   function clearFilters() {
     setAgentFilter(""); setCustomerFilter(""); setAccountIdFilter(""); setCrmFilter("");
     setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
@@ -596,6 +623,11 @@ export default function CRMBrowserPage({
   const someSelected = selectedIds.size > 0;
 
   function toggleSelectAll() {
+    if (pairPickerMode) {
+      const firstVisibleId = visibleIds[0];
+      setSelectedIds(firstVisibleId ? new Set([firstVisibleId]) : new Set());
+      return;
+    }
     if (allSelected) {
       setSelectedIds(prev => { const next = new Set(prev); visibleIds.forEach(id => next.delete(id)); return next; });
     } else {
@@ -604,6 +636,10 @@ export default function CRMBrowserPage({
   }
 
   function toggleRow(id: string) {
+    if (pairPickerMode) {
+      setSelectedIds(new Set([id]));
+      return;
+    }
     setSelectedIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
   }
 
@@ -1120,7 +1156,7 @@ export default function CRMBrowserPage({
                   return (
                     <tr
                       key={pair.id}
-                      onClick={() => ctx.setCustomer(pair.customer, pair.agent)}
+                      onClick={() => selectPair(pair)}
                       className={`border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors ${isSelected ? "bg-indigo-900/10" : ""}`}
                     >
                       <td className="px-3 py-3 w-8">
@@ -1219,7 +1255,7 @@ export default function CRMBrowserPage({
                       )}
                       <td className="px-2 py-3 text-center">
                         <button
-                          onClick={(e) => { e.stopPropagation(); ctx.setCustomer(pair.customer, pair.agent); }}
+                          onClick={(e) => { e.stopPropagation(); selectPair(pair); }}
                           title={`Set context: ${pair.agent} / ${pair.customer}`}
                           className={`p-1 rounded transition-colors ${
                             ctx.salesAgent === pair.agent && ctx.customer === pair.customer
