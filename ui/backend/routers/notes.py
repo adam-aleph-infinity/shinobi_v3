@@ -81,13 +81,22 @@ def _build_request_log(endpoint: str, body: dict, encoded_body: str) -> dict:
     form["data_length"] = len(raw_data)
     form["data_preview"] = _clip_text(raw_data, _CRM_DATA_PREVIEW_LIMIT)
     form.pop("data", None)
+    encoded_preview_safe = urlencode(
+        {
+            "api_username": form.get("api_username", ""),
+            "api_password": form.get("api_password", ""),
+            "api_key": form.get("api_key", ""),
+            "account_id": form.get("account_id", ""),
+            "data_length": form.get("data_length", ""),
+        }
+    )
     return {
         "endpoint": endpoint,
         "method": "POST",
         "headers": {"Content-Type": "application/x-www-form-urlencoded"},
         "body_form": form,
         "body_encoded_length": len(encoded_body),
-        "body_encoded_preview": _clip_text(encoded_body, _CRM_DATA_PREVIEW_LIMIT),
+        "body_encoded_preview": _clip_text(encoded_preview_safe, _CRM_DATA_PREVIEW_LIMIT),
     }
 
 
