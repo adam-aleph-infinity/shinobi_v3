@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import inspect as _sa_inspect, text as _sql_text
 from sqlmodel import Session, select
 
 from shared.llm_client import LLMClient
@@ -33,6 +34,16 @@ _SESSION_DIR.mkdir(parents=True, exist_ok=True)
 _LEGACY_SESSION_DIR = settings.ui_data_dir / "_assistant_sessions"
 
 _TEXT_EXTS = {".json", ".txt", ".md", ".log", ".csv", ".srt"}
+_CLEANUP_ARTIFACT_TYPES = {
+    "all",
+    "pipeline_runs",
+    "notes",
+    "personas",
+    "execution_logs",
+    "uploaded_files",
+    "pipeline_artifacts",
+    "agent_results",
+}
 
 _DEFAULT_MODEL = os.environ.get("ASSISTANT_MODEL", "gpt-5.4")
 _DEFAULT_MAX_TOKENS = int(os.environ.get("ASSISTANT_MAX_TOKENS", "32000"))
@@ -131,6 +142,7 @@ SYSTEM_PROMPT = (
     "- Be concise and practical.\n"
     "- For debugging, identify root cause, evidence, and exact next fixes.\n"
     "- For pipeline design, propose concrete steps and assumptions.\n"
+    "- For artifact cleanup requests, run cleanup_artifacts in dry-run first, then execute only after explicit user confirmation.\n"
 )
 
 
@@ -416,6 +428,34 @@ def _tool_specs(include_sub_agent: bool = True) -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {"session_id": {"type": "string"}},
                     "required": ["session_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cleanup_artifacts",
+                "description": (
+                    "Delete old artifacts while keeping the most recent N records. "
+                    "Defaults to dry-run preview. Use confirm='DELETE' with dry_run=false to execute."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_type": {
+                            "type": "string",
+                            "enum": sorted(_CLEANUP_ARTIFACT_TYPES),
+                            "default": "all",
+                        },
+                        "keep_latest": {"type": "integer", "minimum": 0, "maximum": 2000, "default": 10},
+                        "dry_run": {"type": "boolean", "default": True},
+                        "confirm": {"type": "string", "default": ""},
+                        "sales_agent": {"type": "string", "default": ""},
+                        "customer": {"type": "string", "default": ""},
+                        "pipeline_id": {"type": "string", "default": ""},
+                        "call_id": {"type": "string", "default": ""},
+                    },
                     "additionalProperties": False,
                 },
             },
@@ -857,6 +897,431 @@ def _tool_get_execution_log(args: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _cleanup_filters(args: dict[str, Any]) -> dict[str, str]:
+    return {
+        "sales_agent": str(args.get("sales_agent") or "").strip(),
+        "customer": str(args.get("customer") or "").strip(),
+        "pipeline_id": str(args.get("pipeline_id") or "").strip(),
+        "call_id": str(args.get("call_id") or "").strip(),
+    }
+
+
+def _table_columns(table_name: str) -> set[str]:
+    try:
+        return {str(c.get("name") or "") for c in _sa_inspect(engine).get_columns(table_name)}
+    except Exception:
+        return set()
+
+
+def _log_matches_filters(payload: dict[str, Any], filters: dict[str, str]) -> bool:
+    ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+
+    def _pick(*keys: str) -> str:
+        for key in keys:
+            v = ctx.get(key) if isinstance(ctx, dict) else None
+            if v is None:
+                v = payload.get(key)
+            txt = str(v or "").strip()
+            if txt:
+                return txt
+        return ""
+
+    sales_agent = filters.get("sales_agent") or ""
+    customer = filters.get("customer") or ""
+    pipeline_id = filters.get("pipeline_id") or ""
+    call_id = filters.get("call_id") or ""
+
+    if sales_agent:
+        got = _pick("sales_agent", "agent", "salesAgent")
+        if got != sales_agent:
+            return False
+    if customer:
+        got = _pick("customer", "customer_name")
+        if got != customer:
+            return False
+    if pipeline_id:
+        got = _pick("pipeline_id", "pipeline")
+        if got != pipeline_id:
+            return False
+    if call_id:
+        got = _pick("call_id", "call")
+        if got != call_id:
+            return False
+    return True
+
+
+def _collect_cleanup_rows(artifact_type: str, filters: dict[str, str], db: Optional[Session]) -> list[dict[str, Any]]:
+    at = artifact_type
+    sales_agent = filters.get("sales_agent") or ""
+    customer = filters.get("customer") or ""
+    pipeline_id = filters.get("pipeline_id") or ""
+    call_id = filters.get("call_id") or ""
+
+    if at == "pipeline_runs":
+        if not _table_columns("pipeline_run"):
+            return []
+        stmt = select(PipelineRun)
+        if sales_agent:
+            stmt = stmt.where(PipelineRun.sales_agent == sales_agent)
+        if customer:
+            stmt = stmt.where(PipelineRun.customer == customer)
+        if pipeline_id:
+            stmt = stmt.where(PipelineRun.pipeline_id == pipeline_id)
+        if call_id:
+            stmt = stmt.where(PipelineRun.call_id == call_id)
+        stmt = stmt.order_by(PipelineRun.started_at.desc())
+        rows = (db.exec(stmt).all() if db is not None else [])
+        return [
+            {
+                "id": str(r.id),
+                "ts": (r.started_at.isoformat() if r.started_at else ""),
+                "_row": r,
+            }
+            for r in rows
+        ]
+
+    if at == "notes":
+        if not _table_columns("note"):
+            return []
+        from ui.backend.models.note import Note
+
+        stmt = select(Note)
+        if sales_agent:
+            stmt = stmt.where(Note.agent == sales_agent)
+        if customer:
+            stmt = stmt.where(Note.customer == customer)
+        if call_id:
+            stmt = stmt.where(Note.call_id == call_id)
+        stmt = stmt.order_by(Note.created_at.desc())
+        rows = (db.exec(stmt).all() if db is not None else [])
+        return [
+            {
+                "id": str(r.id),
+                "ts": (r.created_at.isoformat() if r.created_at else ""),
+                "_row": r,
+            }
+            for r in rows
+        ]
+
+    if at == "personas":
+        if not _table_columns("persona"):
+            return []
+        from ui.backend.models.persona import Persona
+
+        stmt = select(Persona)
+        if sales_agent:
+            stmt = stmt.where(Persona.agent == sales_agent)
+        if customer:
+            stmt = stmt.where(Persona.customer == customer)
+        stmt = stmt.order_by(Persona.created_at.desc())
+        rows = (db.exec(stmt).all() if db is not None else [])
+        return [
+            {
+                "id": str(r.id),
+                "ts": (r.created_at.isoformat() if r.created_at else ""),
+                "_row": r,
+            }
+            for r in rows
+        ]
+
+    if at == "uploaded_files":
+        if not _table_columns("uploaded_file"):
+            return []
+        from ui.backend.models.uploaded_file import UploadedFile
+
+        stmt = select(UploadedFile)
+        if sales_agent:
+            stmt = stmt.where(UploadedFile.sales_agent == sales_agent)
+        if customer:
+            stmt = stmt.where(UploadedFile.customer == customer)
+        if call_id:
+            stmt = stmt.where(UploadedFile.call_id == call_id)
+        stmt = stmt.order_by(UploadedFile.created_at.desc())
+        rows = (db.exec(stmt).all() if db is not None else [])
+        return [
+            {
+                "id": str(r.id),
+                "ts": (r.created_at.isoformat() if r.created_at else ""),
+                "_row": r,
+            }
+            for r in rows
+        ]
+
+    if at == "pipeline_artifacts":
+        if not _table_columns("pipeline_artifact"):
+            return []
+        from ui.backend.models.pipeline_artifact import PipelineArtifact
+
+        stmt = select(PipelineArtifact)
+        if sales_agent:
+            stmt = stmt.where(PipelineArtifact.sales_agent == sales_agent)
+        if customer:
+            stmt = stmt.where(PipelineArtifact.customer == customer)
+        if pipeline_id:
+            stmt = stmt.where(PipelineArtifact.pipeline_id == pipeline_id)
+        if call_id:
+            stmt = stmt.where(PipelineArtifact.call_id == call_id)
+        stmt = stmt.order_by(PipelineArtifact.updated_at.desc())
+        rows = (db.exec(stmt).all() if db is not None else [])
+        return [
+            {
+                "id": str(r.id),
+                "ts": (r.updated_at.isoformat() if r.updated_at else ""),
+                "_row": r,
+            }
+            for r in rows
+        ]
+
+    if at == "agent_results":
+        if db is None:
+            return []
+        cols = _table_columns("agent_result")
+        if not cols or "id" not in cols:
+            return []
+
+        if pipeline_id and "pipeline_id" not in cols:
+            return []
+        if sales_agent and "sales_agent" not in cols:
+            return []
+        if customer and "customer" not in cols:
+            return []
+        if call_id and "call_id" not in cols:
+            return []
+
+        has_created_at = "created_at" in cols
+        select_cols = "id" + (", created_at" if has_created_at else "")
+        where: list[str] = []
+        params: dict[str, Any] = {}
+        if sales_agent:
+            where.append("sales_agent = :sales_agent")
+            params["sales_agent"] = sales_agent
+        if customer:
+            where.append("customer = :customer")
+            params["customer"] = customer
+        if pipeline_id:
+            where.append("pipeline_id = :pipeline_id")
+            params["pipeline_id"] = pipeline_id
+        if call_id:
+            where.append("call_id = :call_id")
+            params["call_id"] = call_id
+
+        sql = f"SELECT {select_cols} FROM agent_result"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY " + ("created_at DESC" if has_created_at else "id DESC")
+        rows = db.execute(_sql_text(sql), params).all()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                rid = str(getattr(r, "id", None) or r[0] or "")
+            except Exception:
+                rid = str((r.get("id") if isinstance(r, dict) else "") or "")
+            if not rid:
+                continue
+            created = ""
+            if has_created_at:
+                try:
+                    raw_dt = getattr(r, "created_at", None)
+                    if raw_dt is None and hasattr(r, "_mapping"):
+                        raw_dt = r._mapping.get("created_at")
+                    created = str(raw_dt.isoformat() if hasattr(raw_dt, "isoformat") else (raw_dt or ""))
+                except Exception:
+                    created = ""
+            out.append({"id": rid, "ts": created})
+        return out
+
+    if at == "execution_logs":
+        log_dir = settings.ui_data_dir / "execution_logs"
+        out: list[dict[str, Any]] = []
+        if not log_dir.exists():
+            return out
+        for path in sorted(log_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            if not _log_matches_filters(payload, filters):
+                continue
+            out.append(
+                {
+                    "id": str(payload.get("session_id") or path.stem),
+                    "ts": str(payload.get("updated_at_utc") or ""),
+                    "_path": path,
+                }
+            )
+        return out
+
+    raise HTTPException(400, f"Unsupported artifact_type '{artifact_type}'")
+
+
+def _cleanup_one_type(
+    artifact_type: str,
+    *,
+    keep_latest: int,
+    dry_run: bool,
+    filters: dict[str, str],
+) -> dict[str, Any]:
+    at = artifact_type
+    if at == "execution_logs":
+        try:
+            rows = _collect_cleanup_rows(at, filters, None)
+        except Exception as exc:
+            return {
+                "artifact_type": at,
+                "total_matched": 0,
+                "keep_latest": keep_latest,
+                "kept_count": 0,
+                "delete_count": 0,
+                "deleted_count": 0,
+                "dry_run": dry_run,
+                "kept_ids": [],
+                "delete_ids_preview": [],
+                "errors": [str(exc)],
+            }
+        keep = rows[:keep_latest]
+        remove = rows[keep_latest:]
+        deleted_ids: list[str] = []
+        errors: list[str] = []
+        if not dry_run:
+            for item in remove:
+                path = item.get("_path")
+                try:
+                    if isinstance(path, Path) and path.exists():
+                        path.unlink()
+                    deleted_ids.append(str(item.get("id") or ""))
+                except Exception as exc:
+                    errors.append(str(exc))
+        return {
+            "artifact_type": at,
+            "total_matched": len(rows),
+            "keep_latest": keep_latest,
+            "kept_count": len(keep),
+            "delete_count": len(remove),
+            "deleted_count": 0 if dry_run else len(deleted_ids),
+            "dry_run": dry_run,
+            "kept_ids": [str(x.get("id") or "") for x in keep[:25]],
+            "delete_ids_preview": [str(x.get("id") or "") for x in remove[:50]],
+            "errors": errors[:20],
+        }
+
+    with Session(engine) as db:
+        try:
+            rows = _collect_cleanup_rows(at, filters, db)
+        except Exception as exc:
+            return {
+                "artifact_type": at,
+                "total_matched": 0,
+                "keep_latest": keep_latest,
+                "kept_count": 0,
+                "delete_count": 0,
+                "deleted_count": 0,
+                "dry_run": dry_run,
+                "kept_ids": [],
+                "delete_ids_preview": [],
+                "errors": [str(exc)],
+            }
+        keep = rows[:keep_latest]
+        remove = rows[keep_latest:]
+        deleted_ids: list[str] = []
+        errors: list[str] = []
+
+        if not dry_run:
+            if at == "uploaded_files":
+                for item in remove:
+                    rid = str(item.get("id") or "")
+                    if not rid:
+                        continue
+                    try:
+                        universal_agents_router.delete_uploaded_file(rid, db)
+                        deleted_ids.append(rid)
+                    except Exception as exc:
+                        errors.append(str(exc))
+            elif at == "agent_results":
+                for item in remove:
+                    rid = str(item.get("id") or "")
+                    if not rid:
+                        continue
+                    try:
+                        db.execute(_sql_text("DELETE FROM agent_result WHERE id = :id"), {"id": rid})
+                        deleted_ids.append(rid)
+                    except Exception as exc:
+                        errors.append(str(exc))
+                try:
+                    db.commit()
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(str(exc))
+            else:
+                for item in remove:
+                    row = item.get("_row")
+                    rid = str(item.get("id") or "")
+                    try:
+                        if row is not None:
+                            db.delete(row)
+                            if rid:
+                                deleted_ids.append(rid)
+                    except Exception as exc:
+                        errors.append(str(exc))
+                try:
+                    db.commit()
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(str(exc))
+
+        return {
+            "artifact_type": at,
+            "total_matched": len(rows),
+            "keep_latest": keep_latest,
+            "kept_count": len(keep),
+            "delete_count": len(remove),
+            "deleted_count": 0 if dry_run else len(deleted_ids),
+            "dry_run": dry_run,
+            "kept_ids": [str(x.get("id") or "") for x in keep[:25]],
+            "delete_ids_preview": [str(x.get("id") or "") for x in remove[:50]],
+            "errors": errors[:20],
+        }
+
+
+def _tool_cleanup_artifacts(args: dict[str, Any]) -> dict[str, Any]:
+    artifact_type = str(args.get("artifact_type") or "all").strip().lower() or "all"
+    if artifact_type not in _CLEANUP_ARTIFACT_TYPES:
+        raise HTTPException(400, f"artifact_type must be one of: {', '.join(sorted(_CLEANUP_ARTIFACT_TYPES))}")
+    keep_latest = max(0, min(2000, int(args.get("keep_latest", 10) or 10)))
+    dry_run = bool(args.get("dry_run", True))
+    confirm = str(args.get("confirm") or "").strip()
+    if not dry_run and confirm != "DELETE":
+        raise HTTPException(400, "Destructive cleanup requires confirm='DELETE'")
+
+    filters = _cleanup_filters(args)
+    targets = (
+        [x for x in sorted(_CLEANUP_ARTIFACT_TYPES) if x != "all"]
+        if artifact_type == "all"
+        else [artifact_type]
+    )
+    per_type = [
+        _cleanup_one_type(t, keep_latest=keep_latest, dry_run=dry_run, filters=filters)
+        for t in targets
+    ]
+
+    return {
+        "ok": True,
+        "artifact_type": artifact_type,
+        "mode": "dry_run" if dry_run else "delete",
+        "keep_latest": keep_latest,
+        "filters": filters,
+        "per_type": per_type,
+        "summary": {
+            "types": len(per_type),
+            "total_matched": sum(int(r.get("total_matched") or 0) for r in per_type),
+            "total_to_delete": sum(int(r.get("delete_count") or 0) for r in per_type),
+            "total_deleted": sum(int(r.get("deleted_count") or 0) for r in per_type),
+            "error_count": sum(len(r.get("errors") or []) for r in per_type),
+        },
+    }
+
+
 def _safe_workspace_path(rel: str) -> Path:
     candidate = (settings.ui_data_dir / str(rel or "")).resolve()
     root = settings.ui_data_dir.resolve()
@@ -1130,6 +1595,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "analyze_run_failure": _tool_analyze_run_failure,
     "list_execution_logs": _tool_list_execution_logs,
     "get_execution_log": _tool_get_execution_log,
+    "cleanup_artifacts": _tool_cleanup_artifacts,
     "preview_workspace_file": _tool_preview_workspace_file,
 }
 

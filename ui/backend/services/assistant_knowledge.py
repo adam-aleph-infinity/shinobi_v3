@@ -146,7 +146,19 @@ def ensure_app_map(tool_specs: list[dict[str, Any]], force: bool = False) -> dic
         existing = _load_json_dict(_APP_MAP_PATH)
         if existing:
             existing.setdefault("generated_at", now)
-            return existing
+            existing_tools = existing.get("tools") if isinstance(existing.get("tools"), list) else []
+            existing_names = {
+                str((t or {}).get("name") or "").strip()
+                for t in existing_tools
+                if isinstance(t, dict)
+            }
+            current_names = {
+                str(((t or {}).get("function") or {}).get("name") or "").strip()
+                for t in tool_specs
+                if isinstance(t, dict)
+            }
+            if existing_names == current_names:
+                return existing
 
     agents = universal_agents_router._load_all()
     pipelines = pipelines_router._load_all()
