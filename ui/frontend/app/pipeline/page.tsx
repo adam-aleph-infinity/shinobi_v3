@@ -1281,13 +1281,8 @@ function PipelineCanvas() {
   }, [transcriptCalls, callId]);
 
   const crmPanelUrl = useMemo(() => {
-    const qp = new URLSearchParams();
-    if (salesAgent) qp.set("agent", salesAgent);
-    if (customer) qp.set("customer", customer);
-    qp.set("embedded", "1");
-    const qs = qp.toString();
-    return qs ? `/crm?${qs}` : "/crm";
-  }, [salesAgent, customer]);
+    return "/crm?embedded=1";
+  }, []);
 
   useEffect(() => {
     if (!customer || !navCustomers) return;
@@ -3962,7 +3957,7 @@ function PipelineCanvas() {
                 </div>
                 <iframe
                   title="Run Logs"
-                  src="/logs"
+                  src="/logs?embedded=1"
                   className="w-full h-[calc(100%-3rem)] border-0 bg-gray-900"
                 />
               </div>

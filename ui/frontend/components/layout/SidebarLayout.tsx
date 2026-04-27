@@ -23,6 +23,7 @@ function clampCopilotWidth(raw: number, sidebarCollapsed: boolean): number {
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [embeddedMode, setEmbeddedMode] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [copilotCollapsed, setCopilotCollapsed] = useState(false);
   const [copilotWidth, setCopilotWidth] = useState(COPILOT_DEFAULT_WIDTH);
@@ -42,6 +43,12 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const embedded = new URLSearchParams(window.location.search).get("embedded") === "1";
+    setEmbeddedMode(embedded);
+  }, [pathname]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -103,6 +110,14 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
   const contentOffset = sidebarOffset + copilotOffset;
   const showContextBar = pathname !== "/pipeline";
+
+  if (embeddedMode) {
+    return (
+      <main className="h-screen w-screen overflow-hidden bg-gray-950">
+        {children}
+      </main>
+    );
+  }
 
   return (
     <>
