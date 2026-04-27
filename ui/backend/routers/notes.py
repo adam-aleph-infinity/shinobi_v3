@@ -20,6 +20,86 @@ from ui.backend.routers.full_persona_agent import _llm_call_temp, _llm_stream_th
 
 router = APIRouter(prefix="/notes", tags=["notes"])
 
+_CRM_LOG_TEXT_LIMIT = 1800
+_CRM_DATA_PREVIEW_LIMIT = 1200
+
+
+def _clip_text(value: str, limit: int = _CRM_LOG_TEXT_LIMIT) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]} … [truncated {len(text) - limit} chars]"
+
+
+def _mask_secret(value: str, keep: int = 3) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= keep * 2:
+        return "*" * len(text)
+    return f"{text[:keep]}***{text[-keep:]}"
+
+
+def _summarize_json_payload(raw: str) -> dict:
+    txt = str(raw or "").strip()
+    if not txt:
+        return {"is_json": False, "empty": True}
+    try:
+        obj = json.loads(txt)
+    except Exception:
+        return {"is_json": False, "preview": _clip_text(txt)}
+
+    if isinstance(obj, dict):
+        out: dict = {"is_json": True, "type": "object", "keys": list(obj.keys())[:20]}
+        if "success" in obj:
+            out["success"] = obj.get("success")
+        if "error" in obj and isinstance(obj.get("error"), dict):
+            out["error"] = {k: obj["error"].get(k) for k in ("message", "type", "code")}
+        data = obj.get("data")
+        if isinstance(data, list):
+            out["data_items"] = len(data)
+            if data and isinstance(data[0], dict):
+                out["data_item_0_keys"] = list(data[0].keys())[:15]
+        elif isinstance(data, dict):
+            out["data_keys"] = list(data.keys())[:20]
+        return out
+
+    if isinstance(obj, list):
+        out = {"is_json": True, "type": "array", "items": len(obj)}
+        if obj and isinstance(obj[0], dict):
+            out["item_0_keys"] = list(obj[0].keys())[:15]
+        return out
+
+    return {"is_json": True, "type": type(obj).__name__, "value_preview": _clip_text(str(obj))}
+
+
+def _build_request_log(endpoint: str, body: dict, encoded_body: str) -> dict:
+    form = dict(body)
+    raw_data = str(form.get("data") or "")
+    form["api_password"] = _mask_secret(str(form.get("api_password") or ""))
+    form["api_key"] = _mask_secret(str(form.get("api_key") or ""))
+    form["data_length"] = len(raw_data)
+    form["data_preview"] = _clip_text(raw_data, _CRM_DATA_PREVIEW_LIMIT)
+    form.pop("data", None)
+    return {
+        "endpoint": endpoint,
+        "method": "POST",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body_form": form,
+        "body_encoded_length": len(encoded_body),
+        "body_encoded_preview": _clip_text(encoded_body, _CRM_DATA_PREVIEW_LIMIT),
+    }
+
+
+def _build_response_log(resp_status: int, resp_headers: dict, resp_text: str) -> dict:
+    return {
+        "status": int(resp_status),
+        "headers": dict(resp_headers or {}),
+        "body_length": len(str(resp_text or "")),
+        "body_preview": _clip_text(resp_text, _CRM_DATA_PREVIEW_LIMIT),
+        "body_summary": _summarize_json_payload(resp_text),
+    }
+
 # ── Notes Agent preset storage ────────────────────────────────────────────────
 
 NOTES_AGENTS_DIR = settings.ui_data_dir / "_notes_agents"
@@ -527,13 +607,7 @@ def send_note_to_crm(
     endpoint_used = ""
     text = ""
     for endpoint in endpoints:
-        request_log = {
-            "endpoint": endpoint,
-            "method": "POST",
-            "headers": {"Content-Type": "application/x-www-form-urlencoded"},
-            "body_form": body,
-            "body_encoded": encoded_body,
-        }
+        request_log = _build_request_log(endpoint, body, encoded_body)
         try:
             candidate = _requests.post(
                 endpoint,
@@ -549,8 +623,7 @@ def send_note_to_crm(
             attempts.append({
                 "request": request_log,
                 "status": candidate.status_code,
-                "response_headers": dict(candidate.headers),
-                "response_body": candidate_text,
+                "response": _build_response_log(candidate.status_code, dict(candidate.headers), candidate_text),
             })
             continue
         resp = candidate
@@ -569,18 +642,8 @@ def send_note_to_crm(
             },
         )
 
-    response_log = {
-        "status": resp.status_code,
-        "headers": dict(resp.headers),
-        "body": text,
-    }
-    request_log = {
-        "endpoint": endpoint_used,
-        "method": "POST",
-        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
-        "body_form": body,
-        "body_encoded": encoded_body,
-    }
+    response_log = _build_response_log(resp.status_code, dict(resp.headers), text)
+    request_log = _build_request_log(endpoint_used, body, encoded_body)
     print(f"[crm-push] note={note.id} request={json.dumps(request_log, ensure_ascii=False)}")
     print(f"[crm-push] note={note.id} response={json.dumps(response_log, ensure_ascii=False)}")
 
@@ -588,7 +651,9 @@ def send_note_to_crm(
         "ok": True,
         "message": "Note sent to CRM",
         "crm_status": resp.status_code,
-        "crm_response": text,
+        "crm_response": _clip_text(text, _CRM_DATA_PREVIEW_LIMIT),
+        "crm_response_length": len(text),
+        "crm_response_summary": _summarize_json_payload(text),
         "endpoint": endpoint_used,
         "attempts": attempts,
         "crm_request": request_log,

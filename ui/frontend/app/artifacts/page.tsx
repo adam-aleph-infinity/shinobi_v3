@@ -997,6 +997,28 @@ export default function ArtifactsPage() {
     return resolveLinkedNoteId(item) !== "";
   }
 
+  function formatCrmLog(logObj: any): string {
+    const lines: string[] = [];
+    lines.push(`CRM SEND LOG`);
+    lines.push(`Generated: ${new Date().toISOString()}`);
+    lines.push("");
+    lines.push("=== UI API REQUEST ===");
+    lines.push(JSON.stringify(logObj?.ui_api_request ?? {}, null, 2));
+    lines.push("");
+    lines.push("=== UI API RESPONSE ===");
+    lines.push(JSON.stringify(logObj?.ui_api_response ?? {}, null, 2));
+    lines.push("");
+    lines.push("=== CRM REQUEST SENT ===");
+    lines.push(JSON.stringify(logObj?.crm_request_sent ?? {}, null, 2));
+    lines.push("");
+    lines.push("=== CRM RESPONSE RECEIVED ===");
+    lines.push(JSON.stringify(logObj?.crm_response_received ?? {}, null, 2));
+    lines.push("");
+    lines.push("=== CRM ATTEMPTS (FALLBACKS) ===");
+    lines.push(JSON.stringify(logObj?.crm_attempts ?? [], null, 2));
+    return lines.join("\n");
+  }
+
   async function handleSendToCrm(item: ArtifactItem): Promise<CrmSendResult> {
     const noteId = resolveLinkedNoteId(item);
     if (!noteId) {
@@ -1033,7 +1055,7 @@ export default function ArtifactsPage() {
       crm_response_received: (data && data.crm_response_log) || (detailObj && detailObj.crm_response_log) || null,
       crm_attempts: (data && data.attempts) || (detailObj && detailObj.attempts) || null,
     };
-    const log = JSON.stringify(logObj, null, 2);
+    const log = formatCrmLog(logObj);
     if (!res.ok) {
       let detail = "";
       if (typeof detailObj === "string" && detailObj) {
