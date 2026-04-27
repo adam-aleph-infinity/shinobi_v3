@@ -99,6 +99,11 @@ type ArtifactItem =
   | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string; note_id?: string; note_call_id?: string } }
   | { kind: "provider_file";       id: string; date: string; chars: number; label: string; data: UploadedFile };
 
+type CrmSendResult = {
+  summary: string;
+  log: string;
+};
+
 // ── Artifact type config ──────────────────────────────────────────────────────
 
 const ARTIFACT_TYPE_META: Record<ArtifactKind, {
@@ -216,46 +221,90 @@ function DeleteBtn({ onDelete }: { onDelete: () => Promise<void> }) {
   );
 }
 
-function SendToCrmBtn({ onSend }: { onSend: () => Promise<string> }) {
+function SendToCrmBtn({ onSend }: { onSend: () => Promise<CrmSendResult> }) {
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [log, setLog] = useState("");
+  const [open, setOpen] = useState(false);
 
   return (
-    <button
-      onClick={async () => {
-        setSending(true);
-        setStatus("idle");
-        setMessage("");
-        try {
-          const msg = await onSend();
-          setStatus("ok");
-          setMessage(msg || "Sent");
-          setTimeout(() => {
-            setStatus("idle");
-            setMessage("");
-          }, 2500);
-        } catch (e: any) {
-          setStatus("error");
-          setMessage(String(e?.message || e || "Send failed"));
-        } finally {
-          setSending(false);
-        }
-      }}
-      title={message || "Send note to CRM (development only)"}
-      className={cn(
-        "flex items-center gap-1 text-[9px] transition-colors shrink-0",
-        status === "ok"
-          ? "text-emerald-400 hover:text-emerald-300"
-          : status === "error"
-          ? "text-red-400 hover:text-red-300"
-          : "text-gray-600 hover:text-gray-300",
+    <div className="relative flex items-center gap-1 shrink-0">
+      <button
+        onClick={async () => {
+          setSending(true);
+          setStatus("idle");
+          setMessage("");
+          try {
+            const result = await onSend();
+            setStatus("ok");
+            setMessage(result.summary || "Sent");
+            setLog(result.log || "");
+            setOpen(true);
+            setTimeout(() => {
+              setStatus("idle");
+              setMessage("");
+            }, 2500);
+          } catch (e: any) {
+            setStatus("error");
+            setMessage(String(e?.message || e || "Send failed"));
+            if (typeof e?.crmLog === "string" && e.crmLog) {
+              setLog(e.crmLog);
+              setOpen(true);
+            }
+          } finally {
+            setSending(false);
+          }
+        }}
+        title={message || "Send note to CRM (development only)"}
+        className={cn(
+          "flex items-center gap-1 text-[9px] transition-colors shrink-0",
+          status === "ok"
+            ? "text-emerald-400 hover:text-emerald-300"
+            : status === "error"
+            ? "text-red-400 hover:text-red-300"
+            : "text-gray-600 hover:text-gray-300",
+        )}
+        disabled={sending}
+      >
+        {sending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudUpload className="w-3 h-3" />}
+        {sending ? "Sending…" : status === "ok" ? "Sent CRM" : status === "error" ? "Retry CRM" : "Send CRM"}
+      </button>
+      {log && (
+        <button
+          onClick={() => setOpen(v => !v)}
+          className="text-[9px] text-cyan-400 hover:text-cyan-300 transition-colors"
+          title="Show CRM request/response log"
+        >
+          CRM Log
+        </button>
       )}
-      disabled={sending}
-    >
-      {sending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudUpload className="w-3 h-3" />}
-      {sending ? "Sending…" : status === "ok" ? "Sent CRM" : status === "error" ? "Retry CRM" : "Send CRM"}
-    </button>
+      {open && log && (
+        <div className="absolute right-0 top-6 z-50 w-[42rem] max-w-[85vw] max-h-[70vh] border border-cyan-800/60 bg-gray-950 shadow-2xl rounded-lg overflow-hidden">
+          <div className="px-2 py-1.5 border-b border-gray-800 flex items-center justify-between gap-2 bg-gray-900">
+            <p className="text-[9px] uppercase tracking-wider text-cyan-300 font-semibold">CRM Send Log</p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => navigator.clipboard.writeText(log)}
+                className="text-[9px] text-gray-500 hover:text-gray-300"
+                title="Copy log"
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => setOpen(false)}
+                className="text-[9px] text-gray-500 hover:text-gray-300"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+          <pre className="p-3 text-[10px] text-cyan-100/90 font-mono whitespace-pre-wrap break-words overflow-y-auto max-h-[60vh]">
+            {log}
+          </pre>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -309,7 +358,7 @@ function ContentViewer({
 }: {
   item: ArtifactItem;
   onDelete?: () => Promise<void>;
-  onSendToCrm?: () => Promise<string>;
+  onSendToCrm?: () => Promise<CrmSendResult>;
 }) {
   // useState must be unconditional (rules of hooks)
   const [rawMode, setRawMode] = useState(false);
@@ -948,27 +997,62 @@ export default function ArtifactsPage() {
     return resolveLinkedNoteId(item) !== "";
   }
 
-  async function handleSendToCrm(item: ArtifactItem): Promise<string> {
+  async function handleSendToCrm(item: ArtifactItem): Promise<CrmSendResult> {
     const noteId = resolveLinkedNoteId(item);
     if (!noteId) {
       throw new Error("No linked note record found for this artifact. Open the direct note artifact or rerun the pipeline.");
     }
-    const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}/send-to-crm`, {
+    const localRequest = {
+      endpoint: `/api/notes/${encodeURIComponent(noteId)}/send-to-crm`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: {},
+      artifact_context: {
+        kind: item.kind,
+        artifact_id: item.id,
+        resolved_note_id: noteId,
+      },
+    };
+    const res = await fetch(localRequest.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
     const txt = await res.text().catch(() => "");
+    let data: any = null;
+    try { data = JSON.parse(txt || "{}"); } catch { data = null; }
+    const detailObj = data && typeof data === "object" ? (data.detail ?? null) : null;
+    const logObj = {
+      ui_api_request: localRequest,
+      ui_api_response: {
+        status: res.status,
+        ok: res.ok,
+        body: data ?? txt,
+      },
+      crm_request_sent: (data && data.crm_request) || (detailObj && detailObj.crm_request) || null,
+      crm_response_received: (data && data.crm_response_log) || (detailObj && detailObj.crm_response_log) || null,
+      crm_attempts: (data && data.attempts) || (detailObj && detailObj.attempts) || null,
+    };
+    const log = JSON.stringify(logObj, null, 2);
     if (!res.ok) {
-      let detail = txt;
-      try { detail = JSON.parse(txt).detail || txt; } catch { /* keep raw */ }
-      throw new Error(detail || `CRM send failed (${res.status})`);
+      let detail = "";
+      if (typeof detailObj === "string" && detailObj) {
+        detail = detailObj;
+      } else if (detailObj && typeof detailObj === "object" && typeof detailObj.message === "string") {
+        detail = detailObj.message;
+      } else if (typeof txt === "string" && txt.trim()) {
+        detail = txt.trim();
+      }
+      const err: any = new Error(detail || `CRM send failed (${res.status})`);
+      err.crmLog = log;
+      throw err;
     }
-    let data: any = {};
-    try { data = JSON.parse(txt || "{}"); } catch { /* ignore */ }
-    return data?.account_id
-      ? `Sent to account ${data.account_id}`
-      : "Sent to CRM";
+    return {
+      summary: data?.account_id
+        ? `Sent to account ${data.account_id}`
+        : "Sent to CRM",
+      log,
+    };
   }
 
   const allItems = useMemo(

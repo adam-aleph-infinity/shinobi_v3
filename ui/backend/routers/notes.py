@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 import requests as _requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -513,6 +513,7 @@ def send_note_to_crm(
         "account_id": account_id,
         "data": json.dumps(note_payload, ensure_ascii=False),
     }
+    encoded_body = urlencode(body)
     endpoints = _candidate_crm_push_endpoints(
         str(settings.crm_push_endpoint or "").strip(),
         crm_url,
@@ -526,6 +527,13 @@ def send_note_to_crm(
     endpoint_used = ""
     text = ""
     for endpoint in endpoints:
+        request_log = {
+            "endpoint": endpoint,
+            "method": "POST",
+            "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+            "body_form": body,
+            "body_encoded": encoded_body,
+        }
         try:
             candidate = _requests.post(
                 endpoint,
@@ -534,14 +542,15 @@ def send_note_to_crm(
                 timeout=max(5, int(settings.crm_push_timeout_s or 20)),
             )
         except Exception as exc:
-            attempts.append({"endpoint": endpoint, "error": str(exc)})
+            attempts.append({"request": request_log, "error": str(exc)})
             continue
         candidate_text = (candidate.text or "").strip()
         if candidate.status_code >= 400:
             attempts.append({
-                "endpoint": endpoint,
+                "request": request_log,
                 "status": candidate.status_code,
-                "response": candidate_text[:300],
+                "response_headers": dict(candidate.headers),
+                "response_body": candidate_text,
             })
             continue
         resp = candidate
@@ -552,16 +561,38 @@ def send_note_to_crm(
     if resp is None:
         raise HTTPException(
             502,
-            f"CRM push failed on all candidate endpoints: {json.dumps(attempts)[:1200]}",
+            {
+                "message": "CRM push failed on all candidate endpoints",
+                "attempts": attempts,
+                "note_id": note.id,
+                "account_id": account_id,
+            },
         )
+
+    response_log = {
+        "status": resp.status_code,
+        "headers": dict(resp.headers),
+        "body": text,
+    }
+    request_log = {
+        "endpoint": endpoint_used,
+        "method": "POST",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body_form": body,
+        "body_encoded": encoded_body,
+    }
+    print(f"[crm-push] note={note.id} request={json.dumps(request_log, ensure_ascii=False)}")
+    print(f"[crm-push] note={note.id} response={json.dumps(response_log, ensure_ascii=False)}")
 
     return {
         "ok": True,
         "message": "Note sent to CRM",
         "crm_status": resp.status_code,
-        "crm_response": text[:1000],
+        "crm_response": text,
         "endpoint": endpoint_used,
         "attempts": attempts,
+        "crm_request": request_log,
+        "crm_response_log": response_log,
         "account_id": account_id,
         "crm_url": crm_url,
         "note_id": note.id,
