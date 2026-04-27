@@ -50,6 +50,8 @@ interface RunStep {
   state?: string;
   content?: string;
   model?: string;
+  note_id?: string;
+  note_call_id?: string;
 }
 interface UploadedFile {
   id: string; provider: string; provider_file_id: string; provider_file_uri?: string;
@@ -90,11 +92,11 @@ type ArtifactItem =
   | { kind: "notes_rollup";      id: "rollup"; date: string; chars: number; label: string; data: Record<string, unknown> }
   | { kind: "note";              id: string; date: string; chars: number; label: string; data: Note }
   | { kind: "compliance_note";   id: string; date: string; chars: number; label: string; data: Note }
-  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
-  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
-  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
-  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
-  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string } }
+  | { kind: "pipeline_persona";    id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string; note_id?: string; note_call_id?: string } }
+  | { kind: "pipeline_score";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string; note_id?: string; note_call_id?: string } }
+  | { kind: "pipeline_notes";      id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string; note_id?: string; note_call_id?: string } }
+  | { kind: "pipeline_compliance"; id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string; note_id?: string; note_call_id?: string } }
+  | { kind: "pipeline_output";     id: string; date: string; chars: number; label: string; data: { content: string; agent_name: string; pipeline_name: string; model: string; run_id: string; run_started_at?: string; note_id?: string; note_call_id?: string } }
   | { kind: "provider_file";       id: string; date: string; chars: number; label: string; data: UploadedFile };
 
 // ── Artifact type config ──────────────────────────────────────────────────────
@@ -523,6 +525,7 @@ function ContentViewer({
               {item.data.model ? ` · ${item.data.model}` : ""}
             </p>
           </div>
+          {onSendToCrm && <SendToCrmBtn onSend={onSendToCrm} />}
           <RawToggle raw={rawMode} onToggle={toggle} />
           <CopyBtn text={content} />
           {onDelete && <DeleteBtn onDelete={onDelete} />}
@@ -839,6 +842,8 @@ export default function ArtifactsPage() {
             model: step.model ?? "",
             run_id: run.id,
             run_started_at: run.started_at,
+            note_id: step.note_id ?? "",
+            note_call_id: step.note_call_id ?? "",
           },
         } as ArtifactItem);
       });
@@ -903,11 +908,52 @@ export default function ArtifactsPage() {
     });
   }
 
-  async function handleSendToCrm(item: ArtifactItem): Promise<string> {
-    if (!(item.kind === "note" || item.kind === "compliance_note")) {
-      throw new Error("Send to CRM is supported only for note artifacts");
+  function resolveLinkedNoteId(item: ArtifactItem): string {
+    if (item.kind === "note" || item.kind === "compliance_note") {
+      return item.id;
     }
-    const res = await fetch(`/api/notes/${encodeURIComponent(item.id)}/send-to-crm`, {
+    if (item.kind !== "pipeline_notes" && item.kind !== "pipeline_compliance") {
+      return "";
+    }
+
+    const direct = String(item.data.note_id || "").trim();
+    if (direct) return direct;
+
+    const wantCompliance = item.kind === "pipeline_compliance";
+    const content = String(item.data.content || "");
+    const noteCallId = String(item.data.note_call_id || "").trim();
+    const candidates = (notes ?? []).filter(n => (n.score_json != null) === wantCompliance);
+
+    if (noteCallId && content) {
+      const exactByCallAndContent = candidates.find(
+        n => String(n.call_id || "") === noteCallId && String(n.content_md || "") === content,
+      );
+      if (exactByCallAndContent) return exactByCallAndContent.id;
+    }
+
+    if (noteCallId) {
+      const byCall = candidates.find(n => String(n.call_id || "") === noteCallId);
+      if (byCall) return byCall.id;
+    }
+
+    if (content) {
+      const exactByContent = candidates.find(n => String(n.content_md || "") === content);
+      if (exactByContent) return exactByContent.id;
+    }
+
+    return "";
+  }
+
+  function canSendToCrm(item: ArtifactItem): boolean {
+    return resolveLinkedNoteId(item) !== "";
+  }
+
+  async function handleSendToCrm(item: ArtifactItem): Promise<string> {
+    const noteId = resolveLinkedNoteId(item);
+    if (!noteId) {
+      throw new Error("No linked note record found for this artifact. Open the direct note artifact or rerun the pipeline.");
+    }
+    const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}/send-to-crm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -1250,7 +1296,7 @@ export default function ArtifactsPage() {
                     setFrozenItem(null);
                     setCompareMode(false);
                   }} onSendToCrm={
-                    isDevHost && (frozenItem.item.kind === "note" || frozenItem.item.kind === "compliance_note")
+                    isDevHost && canSendToCrm(frozenItem.item)
                       ? () => handleSendToCrm(frozenItem.item)
                       : undefined
                   } />
@@ -1270,7 +1316,7 @@ export default function ArtifactsPage() {
                       item={selectedItem}
                       onDelete={() => handleDelete(selectedItem)}
                       onSendToCrm={
-                        isDevHost && (selectedItem.kind === "note" || selectedItem.kind === "compliance_note")
+                        isDevHost && canSendToCrm(selectedItem)
                           ? () => handleSendToCrm(selectedItem)
                           : undefined
                       }
@@ -1289,7 +1335,7 @@ export default function ArtifactsPage() {
               item={selectedItem}
               onDelete={() => handleDelete(selectedItem)}
               onSendToCrm={
-                isDevHost && (selectedItem.kind === "note" || selectedItem.kind === "compliance_note")
+                isDevHost && canSendToCrm(selectedItem)
                   ? () => handleSendToCrm(selectedItem)
                   : undefined
               }

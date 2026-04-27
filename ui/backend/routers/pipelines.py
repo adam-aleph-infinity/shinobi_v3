@@ -3833,6 +3833,8 @@ async def run_pipeline(
                 "input_fingerprint": "",
                 "input_ready":      False,
                 "cache_mode":       "",
+                "note_id":          "",
+                "note_call_id":     "",
             }
             for s in steps
         ]
@@ -4645,6 +4647,7 @@ async def run_pipeline(
 
                 if _sub_type == "notes":
                     with Session(_db_engine) as _s:
+                        _saved_note = None
                         _existing = _s.exec(
                             select(Note).where(
                                 Note.agent == req.sales_agent,
@@ -4659,6 +4662,7 @@ async def run_pipeline(
                                 _existing.model = _model
                                 _s.add(_existing)
                                 _s.commit()
+                            _saved_note = _existing
                         else:
                             _n = Note(
                                 id=str(uuid.uuid4()),
@@ -4673,12 +4677,17 @@ async def run_pipeline(
                             )
                             _s.add(_n)
                             _s.commit()
+                            _saved_note = _n
+                    if 0 <= _step_idx < len(run_steps) and _saved_note is not None:
+                        run_steps[_step_idx]["note_id"] = str(_saved_note.id or "")
+                        run_steps[_step_idx]["note_call_id"] = str(_call_id or "")
                     _save_notes_rollup_from_pipeline(_step_idx, _sub_type, _content, _model)
                     return
 
                 if _sub_type == "notes_compliance":
                     _score_json = _jsonish_to_str(_content)
                     with Session(_db_engine) as _s:
+                        _saved_note = None
                         _existing = _s.exec(
                             select(Note).where(
                                 Note.agent == req.sales_agent,
@@ -4693,6 +4702,7 @@ async def run_pipeline(
                             _existing.model = _model
                             _s.add(_existing)
                             _s.commit()
+                            _saved_note = _existing
                         else:
                             _n = Note(
                                 id=str(uuid.uuid4()),
@@ -4707,6 +4717,10 @@ async def run_pipeline(
                             )
                             _s.add(_n)
                             _s.commit()
+                            _saved_note = _n
+                    if 0 <= _step_idx < len(run_steps) and _saved_note is not None:
+                        run_steps[_step_idx]["note_id"] = str(_saved_note.id or "")
+                        run_steps[_step_idx]["note_call_id"] = str(_call_id or "")
                     return
             except Exception as _artifact_exc:
                 log_buffer.emit(
