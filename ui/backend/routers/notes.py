@@ -387,18 +387,12 @@ def _candidate_crm_push_endpoints(config_endpoint: str, crm_url: str, api_userna
         if "/api/v1/accounts/" in endpoint and "-incoming" not in endpoint:
             _prefix, _sep, _tail = endpoint.partition("/api/v1/accounts/")
             endpoint = f"{_prefix}/api/v1/accounts/{api_username}-incoming"
-        # Enforce incoming endpoint; prefer trailing slash first.
-        if endpoint.endswith("/"):
-            out.append(endpoint)
-            out.append(endpoint.rstrip("/"))
-        else:
-            out.append(f"{endpoint}/")
-            out.append(endpoint)
+        # Normalize to canonical endpoint (no trailing slash) to avoid 405 on some CRMs.
+        out.append(endpoint.rstrip("/"))
 
     if base and api_username:
-        incoming = f"{base}/api/v1/accounts/{api_username}-incoming/"
+        incoming = f"{base}/api/v1/accounts/{api_username}-incoming"
         out.append(incoming)
-        out.append(incoming.rstrip("/"))
 
     deduped: list[str] = []
     seen: set[str] = set()
