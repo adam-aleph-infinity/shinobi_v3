@@ -171,11 +171,25 @@ interface PipelineRunRecord {
   steps_json: string;
 }
 
-interface BackendLogLine {
-  ts?: string;
-  text?: string;
-  level?: string;
-  job_id?: string;
+interface PipelineRunStep {
+  agent_id?: string;
+  agent_name?: string;
+  model?: string;
+  status?: string;
+  state?: string;
+  content?: string;
+  error_msg?: string;
+}
+
+interface StepCacheDisplay {
+  source: "latest_cache" | "selected_run";
+  runId?: string;
+  createdAt?: string | null;
+  agentName?: string;
+  model?: string;
+  status?: string;
+  errorMsg?: string;
+  content: string;
 }
 
 interface FinalTranscriptCall {
@@ -1185,11 +1199,9 @@ function PipelineCanvas() {
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [showCallsPanel, setShowCallsPanel] = useState(false);
   const [showCrmPanel, setShowCrmPanel] = useState(false);
-  const [showRunLogsPanel, setShowRunLogsPanel] = useState(false);
-  const [runLogLines, setRunLogLines] = useState<BackendLogLine[]>([]);
-  const [runLogsConnected, setRunLogsConnected] = useState(false);
-  const [runLogsError, setRunLogsError] = useState("");
-  const runLogsEndRef = useRef<HTMLDivElement>(null);
+  const [runLogsMounted, setRunLogsMounted] = useState(false);
+  const [runLogsVisible, setRunLogsVisible] = useState(false);
+  const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
   const [callTranscriptText, setCallTranscriptText] = useState("");
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
@@ -1201,55 +1213,10 @@ function PipelineCanvas() {
   }, []);
 
   useEffect(() => {
-    if (!running) {
-      setRunLogsConnected(false);
-      return;
-    }
-    setShowRunLogsPanel(true);
-    setRunLogLines([]);
-    setRunLogsError("");
-    setRunLogsConnected(false);
-
-    const es = new EventSource("/api/logs/stream");
-
-    es.onopen = () => {
-      setRunLogsConnected(true);
-      setRunLogsError("");
-    };
-
-    es.onerror = () => {
-      setRunLogsConnected(false);
-      setRunLogsError((prev) => prev || "Log stream disconnected.");
-    };
-
-    es.onmessage = (e) => {
-      if (!e.data || e.data === "{}") return;
-      try {
-        const data = JSON.parse(e.data);
-        if (data?.heartbeat) return;
-        const text = String(data?.text || "");
-        if (!text.trim()) return;
-        const line: BackendLogLine = {
-          ts: String(data?.ts || ""),
-          text,
-          level: String(data?.level || "info"),
-          job_id: data?.job_id ? String(data.job_id) : undefined,
-        };
-        setRunLogLines((prev) => [...prev.slice(-399), line]);
-      } catch {
-        // ignore malformed log events
-      }
-    };
-
-    return () => {
-      es.close();
-    };
+    if (!running) return;
+    setRunLogsMounted(true);
+    setRunLogsVisible(true);
   }, [running]);
-
-  useEffect(() => {
-    if (!showRunLogsPanel || runLogLines.length === 0) return;
-    runLogsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [runLogLines, showRunLogsPanel]);
 
   const agentUsageByPipeline = useMemo(() => {
     const out: Record<string, { total: number; other: number }> = {};
@@ -1406,6 +1373,43 @@ function PipelineCanvas() {
     return list;
   }, [runsData, runNeedsCall, callId]);
 
+  const cacheRunOptions = useMemo(
+    () =>
+      historyRuns.map((run) => {
+        const at = run.finished_at || run.started_at;
+        const runDateLabel = at ? new Date(at).toLocaleString() : "unknown date";
+        return {
+          id: run.id,
+          label: `${run.id.slice(0, 8)} · ${runDateLabel}`,
+        };
+      }),
+    [historyRuns],
+  );
+
+  const parsedRunStepsById = useMemo(() => {
+    const out = new Map<string, PipelineRunStep[]>();
+    for (const run of historyRuns) {
+      try {
+        const parsed = JSON.parse(run.steps_json || "[]");
+        out.set(run.id, Array.isArray(parsed) ? (parsed as PipelineRunStep[]) : []);
+      } catch {
+        out.set(run.id, []);
+      }
+    }
+    return out;
+  }, [historyRuns]);
+
+  const selectedCacheRun = useMemo(
+    () => historyRuns.find((r) => r.id === selectedCacheRunId) ?? null,
+    [historyRuns, selectedCacheRunId],
+  );
+
+  useEffect(() => {
+    if (!selectedCacheRunId) return;
+    if (historyRuns.some((r) => r.id === selectedCacheRunId)) return;
+    setSelectedCacheRunId("");
+  }, [selectedCacheRunId, historyRuns]);
+
   const cacheUrl = useMemo(() => {
     if (!pipelineId || !salesAgent || !customer) return null;
     const runCallId = runNeedsCall ? callId : "";
@@ -1413,6 +1417,40 @@ function PipelineCanvas() {
     return `/api/pipelines/${pipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(runCallId)}`;
   }, [pipelineId, salesAgent, customer, runNeedsCall, callId]);
   const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
+
+  const getStepCacheDisplay = useCallback(
+    (stepIndex: number): StepCacheDisplay | null => {
+      if (stepIndex < 0) return null;
+
+      if (selectedCacheRun) {
+        const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+        const s = runSteps[stepIndex];
+        if (s) {
+          return {
+            source: "selected_run",
+            runId: selectedCacheRun.id,
+            createdAt: selectedCacheRun.finished_at || selectedCacheRun.started_at,
+            agentName: String(s.agent_name || ""),
+            model: String(s.model || ""),
+            status: String(s.state || s.status || ""),
+            errorMsg: String(s.error_msg || ""),
+            content: String(s.content || ""),
+          };
+        }
+      }
+
+      const latest = (cachedResults ?? [])[stepIndex]?.result;
+      if (!latest) return null;
+      return {
+        source: "latest_cache",
+        createdAt: latest.created_at,
+        agentName: latest.agent_name || "",
+        status: "cached",
+        content: String(latest.content || ""),
+      };
+    },
+    [cachedResults, selectedCacheRun, parsedRunStepsById],
+  );
 
   // Refs for fresh state in callbacks (avoid stale closures)
   const nodesRef  = useRef<Node[]>([]);
@@ -2774,6 +2812,26 @@ function PipelineCanvas() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNodeId, allAgents.length]);
 
+  function renderCacheRunSelector() {
+    return (
+      <div className="space-y-1">
+        <label className="block text-[9px] text-gray-500">Cached Result</label>
+        <select
+          value={selectedCacheRunId}
+          onChange={(e) => setSelectedCacheRunId(e.target.value)}
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+        >
+          <option value="">Latest cache (default)</option>
+          {cacheRunOptions.map((opt) => (
+            <option key={opt.id} value={opt.id}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
   function renderPanel() {
     if (!selectedNode || !selData || !selKind || !selMeta) {
       return (
@@ -2795,8 +2853,7 @@ function PipelineCanvas() {
       const stepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedNode.id);
       const runtimeStatus = stepIndex >= 0 ? (stepStatuses[stepIndex] ?? "pending") : "pending";
       const runtimeMeta = RUNTIME_META[runtimeStatus];
-      const cachedResult = stepIndex >= 0 ? (cachedResults ?? [])[stepIndex]?.result : null;
-      const cachedContent = String(cachedResult?.content || "");
+      const stepCache = getStepCacheDisplay(stepIndex);
 
       type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
       const connectedSources = edges
@@ -3070,23 +3127,38 @@ function PipelineCanvas() {
                 )}
 
                 <PropertiesSection title="Cached Value">
-                  {cachedResult ? (
-                    <div className="space-y-2">
-                      <p className="text-[10px] text-gray-500">
-                        Cached at {cachedResult.created_at ? new Date(cachedResult.created_at).toLocaleString() : "unknown time"}
+                  <div className="space-y-2">
+                    {renderCacheRunSelector()}
+                    {stepCache ? (
+                      <>
+                        <p className="text-[10px] text-gray-500">
+                          {stepCache.source === "selected_run"
+                            ? `From run ${String(stepCache.runId || "").slice(0, 8)}`
+                            : "From latest cache"}
+                          {stepCache.createdAt ? ` · ${new Date(stepCache.createdAt).toLocaleString()}` : ""}
+                        </p>
+                        <p className="text-[10px] text-gray-500">
+                          status: {stepCache.status || "unknown"}
+                          {stepCache.model ? ` · model: ${stepCache.model}` : ""}
+                        </p>
+                        {stepCache.errorMsg && (
+                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">
+                            {stepCache.errorMsg}
+                          </p>
+                        )}
+                        <textarea
+                          readOnly
+                          value={stepCache.content || ""}
+                          rows={20}
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono resize-y"
+                        />
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-gray-500">
+                        No cached artifact for this step in the selected context.
                       </p>
-                      <textarea
-                        readOnly
-                        value={cachedContent}
-                        rows={20}
-                        className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono resize-y"
-                      />
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-gray-500">
-                      No cached artifact for this step in the selected context.
-                    </p>
-                  )}
+                    )}
+                  </div>
                 </PropertiesSection>
               </div>
             </div>
@@ -3096,185 +3168,292 @@ function PipelineCanvas() {
     }
 
     // ── Input / Artifact panel ────────────────────────────────────────────
+    const ioCacheTargets = (() => {
+      const targets: Array<{ key: string; title: string; subtitle: string; stepIndex: number }> = [];
+      if (selKind === "output") {
+        if (!selectedOutputProducer?.node_id) return targets;
+        const outputStepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedOutputProducer.node_id);
+        if (outputStepIndex < 0) return targets;
+        targets.push({
+          key: `output-${selectedOutputProducer.node_id}`,
+          title: selectedOutputProducer.agent_name || "Producer",
+          subtitle: `Step ${outputStepIndex + 1}`,
+          stepIndex: outputStepIndex,
+        });
+        return targets;
+      }
+      if (selKind === "input") {
+        const procIds = runtimeGraph.inputToProcNodeIds[selectedNode.id] ?? [];
+        const seen = new Set<number>();
+        for (const procId of procIds) {
+          const stepIndex = runtimeGraph.stepToProcNodeIds.indexOf(procId);
+          if (stepIndex < 0 || seen.has(stepIndex)) continue;
+          seen.add(stepIndex);
+          const procNode = nodes.find((n) => n.id === procId);
+          const procData = (procNode?.data as PipelineNodeData | undefined);
+          targets.push({
+            key: `input-${procId}`,
+            title: String(procData?.agentName || procData?.label || "Connected step"),
+            subtitle: `Step ${stepIndex + 1}`,
+            stepIndex,
+          });
+        }
+      }
+      return targets;
+    })();
+
+    const ioRuntimeStatus = ((selData.runtimeStatus as RuntimeStatus | undefined) ?? "pending");
+    const ioRuntimeMeta = RUNTIME_META[ioRuntimeStatus];
+
     return (
-      <div className="p-4 space-y-4">
-        <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
-          <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
-          <div className="min-w-0">
-            <p className="text-[10px] text-white/60 uppercase tracking-widest font-bold">
-              {selKind === "output" ? "artifact" : selKind}
-            </p>
-            <p className="text-sm font-bold text-white truncate">{selData.label}</p>
+      <div className="h-full min-h-0 p-3">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
+          <div className="lg:col-span-8 min-h-0 overflow-y-auto pr-1 space-y-4">
+            <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
+              <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
+              <div className="min-w-0">
+                <p className="text-[10px] text-white/60 uppercase tracking-widest font-bold">
+                  {selKind === "output" ? "artifact" : selKind}
+                </p>
+                <p className="text-sm font-bold text-white truncate">{selData.label}</p>
+              </div>
+            </div>
+
+            <PropertiesSection title="Name">
+              <input value={selData.label}
+                onChange={e => updateNodeData(selectedNode.id, { label: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors" />
+            </PropertiesSection>
+
+            {selKind === "output" && (
+              <PropertiesSection title="Locked Producer">
+                {selectedOutputProducer?.agent_id ? (
+                  <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/60">
+                    <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-xs text-white truncate">{selectedOutputProducer.agent_name}</span>
+                  </div>
+                ) : (
+                  <div className="px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/40 text-[11px] text-amber-300">
+                    Connect this artifact to a processing node with an assigned agent to lock its template.
+                  </div>
+                )}
+              </PropertiesSection>
+            )}
+
+            {selKind === "input" && (
+              <PropertiesSection title="Source Type">
+                <div className="grid grid-cols-2 gap-1">
+                  {INPUT_SOURCES.map(s => {
+                    const SrcIcon = s.icon;
+                    const isSel = selData.inputSource === s.value;
+                    return (
+                      <button key={s.value}
+                        onClick={() => updateNodeData(selectedNode.id, { inputSource: s.value })}
+                        className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left transition-colors
+                          ${isSel ? `${s.badge} border` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 text-gray-400"}`}>
+                        <SrcIcon className="w-3 h-3 shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-medium leading-tight truncate">{s.shortLabel}</p>
+                          <p className="text-[9px] opacity-60 leading-tight">{s.desc}</p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </PropertiesSection>
+            )}
+
+            {selKind === "output" && (
+              <PropertiesSection title="Artifact Type">
+                <div className="grid grid-cols-2 gap-1">
+                  {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
+                    const req = ARTIFACT_REQUIRES[k];
+                    const blocked = req != null && !nodes.some(
+                      n => n.type === "output" && n.id !== selectedNode.id && (n.data as PipelineNodeData).subType === req
+                    );
+                    const isSel = selData.subType === k;
+                    if (blocked) {
+                      return (
+                        <div key={k} title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
+                          className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-gray-700/30 bg-gray-800/20 opacity-35 cursor-not-allowed">
+                          <span className={`p-0.5 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-medium text-gray-500 truncate">{m.label}</p>
+                            <p className="text-[9px] text-gray-600 leading-tight">Needs {ARTIFACT_META[req!].label}</p>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <button key={k}
+                        onClick={() => updateNodeData(selectedNode.id, { subType: k, label: m.label })}
+                        className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left transition-colors
+                          ${isSel ? `${m.border} bg-gray-800` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 text-gray-400"}`}>
+                        <span className={`p-0.5 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
+                        <div className="min-w-0 flex-1">
+                          <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : ""}`}>{m.label}</p>
+                        </div>
+                        {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </PropertiesSection>
+            )}
+
+            {selKind === "output" && (
+              <PropertiesSection title="Output Profile" defaultOpen={false}>
+                <div className="space-y-2">
+                  <label className="block text-[9px] text-gray-500 mb-1">
+                    Select saved output profile from Agents & Artifacts
+                  </label>
+                  <select
+                    value={String(selData.outputProfileId || "")}
+                    onChange={e => updateNodeData(selectedNode.id, { outputProfileId: e.target.value })}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+                  >
+                    <option value="">Default {selMeta.label}</option>
+                    {selectableOutputProfiles.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.artifact_type || "artifact"})
+                      </option>
+                    ))}
+                  </select>
+                  {String(selData.outputProfileId || "") ? (
+                    (() => {
+                      const selectedProfile = selectableOutputProfiles.find(p => p.id === String(selData.outputProfileId || ""));
+                      if (!selectedProfile) return null;
+                      return (
+                        <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-2 space-y-1">
+                          <p className="text-[10px] text-indigo-300 font-medium">{selectedProfile.name}</p>
+                          <p className="text-[10px] text-gray-500">
+                            type: {selectedProfile.artifact_type || "—"} · class: {selectedProfile.artifact_class || "—"} · format: {selectedProfile.output_format}
+                          </p>
+                          <p className="text-[10px] text-gray-500">
+                            mode: {selectedProfile.output_response_mode} · target: {selectedProfile.output_target_type}
+                          </p>
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <p className="text-[10px] text-gray-500">
+                      Using default artifact behavior.
+                    </p>
+                  )}
+                </div>
+              </PropertiesSection>
+            )}
+
+            {selKind === "output" && (
+              <PropertiesSection title="Expected Output Template (Auto)" defaultOpen={false}>
+                {!selectedOutputProducer?.agent_id && (
+                  <p className="text-[11px] text-gray-600">
+                    Template appears automatically once this artifact is linked to a producing agent.
+                  </p>
+                )}
+                {selectedOutputProducer?.agent_id && artifactTemplateLoading && (
+                  <div className="flex items-center gap-2 text-[11px] text-gray-500">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Generating schema from agent prompts…
+                  </div>
+                )}
+                {selectedOutputProducer?.agent_id && !artifactTemplateLoading && artifactTemplate && (
+                  <>
+                    <textarea
+                      readOnly
+                      value={artifactTemplate.schema_template || ""}
+                      rows={8}
+                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y"
+                    />
+                    <div className="flex flex-wrap gap-1">
+                      {(artifactTemplate.taxonomy || []).map((tag) => (
+                        <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded border border-indigo-700/50 bg-indigo-900/30 text-indigo-300">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-gray-600">
+                      Locked to producer agent prompt: {selectedOutputProducer.agent_name}
+                    </p>
+                  </>
+                )}
+              </PropertiesSection>
+            )}
+
+            <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
+
+            <button onClick={() => deleteNode(selectedNode.id)}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-sm transition-colors">
+              <Trash2 className="w-3.5 h-3.5" /> Delete node
+            </button>
+          </div>
+
+          <div className="lg:col-span-4 min-h-0 overflow-y-auto space-y-2.5">
+            <PropertiesSection title="Runtime Status">
+              <div className="space-y-2">
+                <div className={cn("inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] font-semibold", ioRuntimeMeta.className)}>
+                  <span className={cn("w-1.5 h-1.5 rounded-full", ioRuntimeMeta.dot)} />
+                  {ioRuntimeMeta.label}
+                </div>
+                {running && (
+                  <p className="text-[10px] text-orange-300">Pipeline is running for this context.</p>
+                )}
+              </div>
+            </PropertiesSection>
+
+            <PropertiesSection title="Cached Values">
+              <div className="space-y-2">
+                {renderCacheRunSelector()}
+                {ioCacheTargets.length === 0 ? (
+                  <p className="text-[11px] text-gray-500">
+                    No connected processing step to resolve cached content for this element.
+                  </p>
+                ) : (
+                  ioCacheTargets.map((target) => {
+                    const cache = getStepCacheDisplay(target.stepIndex);
+                    return (
+                      <div key={target.key} className="rounded-lg border border-gray-800 bg-gray-900/50 p-2 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[11px] text-gray-200 font-medium truncate">{target.title}</p>
+                          <span className="text-[10px] text-gray-500 shrink-0">{target.subtitle}</span>
+                        </div>
+                        {cache ? (
+                          <>
+                            <p className="text-[10px] text-gray-500">
+                              {cache.source === "selected_run"
+                                ? `Run ${String(cache.runId || "").slice(0, 8)}`
+                                : "Latest cache"}
+                              {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
+                            </p>
+                            <p className="text-[10px] text-gray-500">
+                              status: {cache.status || "unknown"}
+                              {cache.model ? ` · model: ${cache.model}` : ""}
+                            </p>
+                            {cache.errorMsg && (
+                              <p className="text-[10px] text-red-300 whitespace-pre-wrap">
+                                {cache.errorMsg}
+                              </p>
+                            )}
+                            <textarea
+                              readOnly
+                              value={cache.content || ""}
+                              rows={10}
+                              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono resize-y"
+                            />
+                          </>
+                        ) : (
+                          <p className="text-[10px] text-gray-500">
+                            No cached content for this step in the selected run/context.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </PropertiesSection>
           </div>
         </div>
-
-        <PropertiesSection title="Name">
-          <input value={selData.label}
-            onChange={e => updateNodeData(selectedNode.id, { label: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors" />
-        </PropertiesSection>
-
-        {selKind === "output" && (
-          <PropertiesSection title="Locked Producer">
-            {selectedOutputProducer?.agent_id ? (
-              <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/60">
-                <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="text-xs text-white truncate">{selectedOutputProducer.agent_name}</span>
-              </div>
-            ) : (
-              <div className="px-2.5 py-2 rounded-lg border border-gray-700 bg-gray-800/40 text-[11px] text-amber-300">
-                Connect this artifact to a processing node with an assigned agent to lock its template.
-              </div>
-            )}
-          </PropertiesSection>
-        )}
-
-        {selKind === "input" && (
-          <PropertiesSection title="Source Type">
-            <div className="grid grid-cols-2 gap-1">
-              {INPUT_SOURCES.map(s => {
-                const SrcIcon = s.icon;
-                const isSel = selData.inputSource === s.value;
-                return (
-                  <button key={s.value}
-                    onClick={() => updateNodeData(selectedNode.id, { inputSource: s.value })}
-                    className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left transition-colors
-                      ${isSel ? `${s.badge} border` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 text-gray-400"}`}>
-                    <SrcIcon className="w-3 h-3 shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] font-medium leading-tight truncate">{s.shortLabel}</p>
-                      <p className="text-[9px] opacity-60 leading-tight">{s.desc}</p>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </PropertiesSection>
-        )}
-
-        {selKind === "output" && (
-          <PropertiesSection title="Artifact Type">
-            <div className="grid grid-cols-2 gap-1">
-              {(Object.entries(ARTIFACT_META) as [ArtifactSubType, Meta][]).map(([k, m]) => {
-                const req = ARTIFACT_REQUIRES[k];
-                const blocked = req != null && !nodes.some(
-                  n => n.type === "output" && n.id !== selectedNode.id && (n.data as PipelineNodeData).subType === req
-                );
-                const isSel = selData.subType === k;
-                if (blocked) {
-                  return (
-                    <div key={k} title={`Requires ${ARTIFACT_META[req!].label} in the pipeline first`}
-                      className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-gray-700/30 bg-gray-800/20 opacity-35 cursor-not-allowed">
-                      <span className={`p-0.5 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
-                      <div className="min-w-0">
-                        <p className="text-[10px] font-medium text-gray-500 truncate">{m.label}</p>
-                        <p className="text-[9px] text-gray-600 leading-tight">Needs {ARTIFACT_META[req!].label}</p>
-                      </div>
-                    </div>
-                  );
-                }
-                return (
-                  <button key={k}
-                    onClick={() => updateNodeData(selectedNode.id, { subType: k, label: m.label })}
-                    className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-left transition-colors
-                      ${isSel ? `${m.border} bg-gray-800` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 text-gray-400"}`}>
-                    <span className={`p-0.5 rounded-md ${m.color} text-white shrink-0`}>{m.icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : ""}`}>{m.label}</p>
-                    </div>
-                    {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
-                  </button>
-                );
-              })}
-            </div>
-          </PropertiesSection>
-        )}
-
-        {selKind === "output" && (
-          <PropertiesSection title="Output Profile" defaultOpen={false}>
-            <div className="space-y-2">
-              <label className="block text-[9px] text-gray-500 mb-1">
-                Select saved output profile from Agents & Artifacts
-              </label>
-              <select
-                value={String(selData.outputProfileId || "")}
-                onChange={e => updateNodeData(selectedNode.id, { outputProfileId: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
-              >
-                <option value="">Default {selMeta.label}</option>
-                {selectableOutputProfiles.map(p => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.artifact_type || "artifact"})
-                  </option>
-                ))}
-              </select>
-              {String(selData.outputProfileId || "") ? (
-                (() => {
-                  const selectedProfile = selectableOutputProfiles.find(p => p.id === String(selData.outputProfileId || ""));
-                  if (!selectedProfile) return null;
-                  return (
-                    <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-2 space-y-1">
-                      <p className="text-[10px] text-indigo-300 font-medium">{selectedProfile.name}</p>
-                      <p className="text-[10px] text-gray-500">
-                        type: {selectedProfile.artifact_type || "—"} · class: {selectedProfile.artifact_class || "—"} · format: {selectedProfile.output_format}
-                      </p>
-                      <p className="text-[10px] text-gray-500">
-                        mode: {selectedProfile.output_response_mode} · target: {selectedProfile.output_target_type}
-                      </p>
-                    </div>
-                  );
-                })()
-              ) : (
-                <p className="text-[10px] text-gray-500">
-                  Using default artifact behavior.
-                </p>
-              )}
-            </div>
-          </PropertiesSection>
-        )}
-
-        {selKind === "output" && (
-          <PropertiesSection title="Expected Output Template (Auto)" defaultOpen={false}>
-            {!selectedOutputProducer?.agent_id && (
-              <p className="text-[11px] text-gray-600">
-                Template appears automatically once this artifact is linked to a producing agent.
-              </p>
-            )}
-            {selectedOutputProducer?.agent_id && artifactTemplateLoading && (
-              <div className="flex items-center gap-2 text-[11px] text-gray-500">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Generating schema from agent prompts…
-              </div>
-            )}
-            {selectedOutputProducer?.agent_id && !artifactTemplateLoading && artifactTemplate && (
-              <>
-                <textarea
-                  readOnly
-                  value={artifactTemplate.schema_template || ""}
-                  rows={8}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y"
-                />
-                <div className="flex flex-wrap gap-1">
-                  {(artifactTemplate.taxonomy || []).map((tag) => (
-                    <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded border border-indigo-700/50 bg-indigo-900/30 text-indigo-300">
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-                <p className="text-[10px] text-gray-600">
-                  Locked to producer agent prompt: {selectedOutputProducer.agent_name}
-                </p>
-              </>
-            )}
-          </PropertiesSection>
-        )}
-
-        <p className="text-[10px] text-gray-600">{selMeta.desc}</p>
-
-        <button onClick={() => deleteNode(selectedNode.id)}
-          className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-sm transition-colors">
-          <Trash2 className="w-3.5 h-3.5" /> Delete node
-        </button>
       </div>
     );
   }
@@ -3757,60 +3936,46 @@ function PipelineCanvas() {
             </div>
           )}
 
-          {showRunLogsPanel && (
-            <div className="absolute inset-y-0 right-0 z-20 w-[min(35%,760px)] min-w-[340px] border-l border-gray-800 bg-gray-950 shadow-2xl flex flex-col">
-              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
-                <History className="w-4 h-4 text-indigo-400 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-white font-semibold truncate">Live Run Logs</p>
-                  <p className="text-[10px] text-gray-500 truncate">
-                    {running
-                      ? (runLogsConnected ? "Streaming logs…" : "Connecting to log stream…")
-                      : "Run finished"}
-                  </p>
+          {runLogsMounted && (
+            <>
+              <div
+                className={cn(
+                  "absolute inset-y-0 right-0 z-20 w-[min(38%,900px)] min-w-[400px] border-l border-gray-800 bg-gray-950 shadow-2xl flex flex-col transition-transform duration-200",
+                  runLogsVisible ? "translate-x-0" : "translate-x-full pointer-events-none",
+                )}
+              >
+                <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                  <History className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-white font-semibold truncate">Run Logs</p>
+                    <p className="text-[10px] text-gray-500 truncate">
+                      Full Logs view (all filters and controls)
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setRunLogsVisible(false)}
+                    className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+                    title="Hide logs"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
+                <iframe
+                  title="Run Logs"
+                  src="/logs"
+                  className="w-full h-[calc(100%-3rem)] border-0 bg-gray-900"
+                />
+              </div>
+              {!runLogsVisible && (
                 <button
-                  onClick={() => setShowRunLogsPanel(false)}
-                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                  title="Minimize logs"
+                  onClick={() => setRunLogsVisible(true)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 z-20 rounded-l-lg rounded-r border border-gray-700 bg-gray-950/95 text-gray-300 hover:text-white hover:bg-gray-900 px-2 py-2 transition-colors"
+                  title="Show logs"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
-              </div>
-              <div className="h-[calc(100%-3rem)] overflow-y-auto p-2 space-y-1 font-mono text-[10px]">
-                {runLogsError && (
-                  <p className="text-red-300 border border-red-800/50 bg-red-950/40 rounded px-2 py-1 whitespace-pre-wrap">
-                    {runLogsError}
-                  </p>
-                )}
-                {runLogLines.length === 0 ? (
-                  <p className="text-gray-500 italic px-1 py-2">
-                    {running ? "Waiting for logs…" : "No logs captured yet."}
-                  </p>
-                ) : (
-                  runLogLines.map((line, idx) => (
-                    <div key={`${line.ts || "ts"}_${idx}`} className="px-1 py-0.5 rounded hover:bg-gray-900/80">
-                      <span className="text-gray-600 mr-2">{line.ts || "—"}</span>
-                      <span className={cn(
-                        "whitespace-pre-wrap break-words",
-                        line.level === "error"
-                          ? "text-red-300"
-                          : line.level === "warn"
-                            ? "text-amber-300"
-                            : line.level === "llm"
-                              ? "text-indigo-300"
-                              : line.level === "stage"
-                                ? "text-emerald-300"
-                                : "text-gray-300",
-                      )}>
-                        {line.text || ""}
-                      </span>
-                    </div>
-                  ))
-                )}
-                <div ref={runLogsEndRef} />
-              </div>
-            </div>
+              )}
+            </>
           )}
 
           {showBundleImport && (
