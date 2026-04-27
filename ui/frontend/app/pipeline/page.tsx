@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
+import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -175,6 +176,14 @@ interface BackendLogLine {
   text?: string;
   level?: string;
   job_id?: string;
+}
+
+interface FinalTranscriptCall {
+  call_id: string;
+  final_path?: string | null;
+  smoothed_path?: string | null;
+  voted_path?: string | null;
+  pipeline_final_files?: Array<{ path?: string; name?: string }>;
 }
 
 interface PipelineBundle {
@@ -1086,6 +1095,12 @@ function PipelineCanvas() {
       : null,
     fetcher,
   );
+  const { data: transcriptCalls } = useSWR<FinalTranscriptCall[]>(
+    salesAgent && customer
+      ? `/api/final-transcript/calls?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
 
@@ -1168,12 +1183,16 @@ function PipelineCanvas() {
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
   const [historyExpanded, setHistoryExpanded] = useState(false);
-  const [showCallsDrawer, setShowCallsDrawer] = useState(false);
+  const [showCallsPanel, setShowCallsPanel] = useState(false);
+  const [showCrmPanel, setShowCrmPanel] = useState(false);
   const [showRunLogsPanel, setShowRunLogsPanel] = useState(false);
   const [runLogLines, setRunLogLines] = useState<BackendLogLine[]>([]);
   const [runLogsConnected, setRunLogsConnected] = useState(false);
   const [runLogsError, setRunLogsError] = useState("");
   const runLogsEndRef = useRef<HTMLDivElement>(null);
+  const [callTranscriptText, setCallTranscriptText] = useState("");
+  const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
+  const [callTranscriptError, setCallTranscriptError] = useState("");
 
   useEffect(() => {
     return () => {
@@ -1288,15 +1307,20 @@ function PipelineCanvas() {
     return entries;
   }, [callDates]);
 
-  const callsDrawerUrl = useMemo(() => {
+  const selectedTranscriptCall = useMemo(() => {
+    const wanted = normalizeCallId(callId);
+    if (!wanted) return null;
+    return (transcriptCalls ?? []).find((c) => normalizeCallId(c.call_id) === wanted) ?? null;
+  }, [transcriptCalls, callId]);
+
+  const crmPanelUrl = useMemo(() => {
     const qp = new URLSearchParams();
     if (salesAgent) qp.set("agent", salesAgent);
     if (customer) qp.set("customer", customer);
-    if (callId) qp.set("call_id", callId);
     qp.set("embedded", "1");
     const qs = qp.toString();
-    return qs ? `/calls?${qs}` : "/calls";
-  }, [salesAgent, customer, callId]);
+    return qs ? `/crm?${qs}` : "/crm";
+  }, [salesAgent, customer]);
 
   useEffect(() => {
     if (!customer || !navCustomers) return;
@@ -1311,6 +1335,54 @@ function PipelineCanvas() {
       setCallId("");
     }
   }, [callId, callOptions, setCallId]);
+
+  useEffect(() => {
+    if (!showCallsPanel) return;
+    if (!salesAgent || !customer || !callId) {
+      setCallTranscriptText("");
+      setCallTranscriptError("");
+      setCallTranscriptLoading(false);
+      return;
+    }
+
+    const preferredPath =
+      selectedTranscriptCall?.final_path
+      || selectedTranscriptCall?.smoothed_path
+      || selectedTranscriptCall?.voted_path
+      || selectedTranscriptCall?.pipeline_final_files?.[0]?.path
+      || "";
+
+    if (!preferredPath) {
+      setCallTranscriptText("");
+      setCallTranscriptError("No transcript found for this call.");
+      setCallTranscriptLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setCallTranscriptLoading(true);
+    setCallTranscriptError("");
+
+    fetch(`/api/final-transcript/content?path=${encodeURIComponent(preferredPath)}`)
+      .then((r) => r.text())
+      .then((txt) => {
+        if (cancelled) return;
+        setCallTranscriptText(String(txt || ""));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCallTranscriptText("");
+        setCallTranscriptError("Error loading transcript.");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setCallTranscriptLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
 
   const runsUrl = useMemo(() => {
     if (!pipelineId) return null;
@@ -3229,7 +3301,11 @@ function PipelineCanvas() {
           <Users className="w-3 h-3 text-indigo-400 shrink-0" />
           <select
             value={salesAgent}
-            onChange={e => setSalesAgent(e.target.value)}
+            onChange={e => {
+              setSalesAgent(e.target.value);
+              setShowCrmPanel(true);
+              setShowCallsPanel(false);
+            }}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px]"
           >
             <option value="">{navAgents ? "Sales agent…" : "Loading agents…"}</option>
@@ -3243,7 +3319,11 @@ function PipelineCanvas() {
           <User className="w-3 h-3 text-cyan-400 shrink-0" />
           <select
             value={customer}
-            onChange={e => setCustomer(e.target.value)}
+            onChange={e => {
+              setCustomer(e.target.value);
+              setShowCrmPanel(true);
+              setShowCallsPanel(false);
+            }}
             disabled={!salesAgent}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px] disabled:opacity-50"
           >
@@ -3259,10 +3339,14 @@ function PipelineCanvas() {
           <input
             list="pipeline-call-id-options"
             value={callId}
-            onFocus={() => setShowCallsDrawer(true)}
+            onFocus={() => {
+              setShowCallsPanel(true);
+              setShowCrmPanel(false);
+            }}
             onChange={e => {
               setCallId(e.target.value.trim());
-              setShowCallsDrawer(true);
+              setShowCallsPanel(true);
+              setShowCrmPanel(false);
             }}
             disabled={!salesAgent || !customer || !runNeedsCall}
             placeholder={!runNeedsCall
@@ -3272,7 +3356,10 @@ function PipelineCanvas() {
           />
           <button
             type="button"
-            onClick={() => setShowCallsDrawer(true)}
+            onClick={() => {
+              setShowCallsPanel(true);
+              setShowCrmPanel(false);
+            }}
             disabled={!salesAgent || !customer}
             className="p-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
             title="Open Calls panel"
@@ -3560,8 +3647,8 @@ function PipelineCanvas() {
             </div>
           )}
 
-          {showCallsDrawer && (
-            <div className="absolute inset-y-0 left-0 z-20 w-[min(52%,880px)] min-w-[420px] border-r border-gray-800 bg-gray-950 shadow-2xl flex flex-col">
+          {showCallsPanel && (
+            <div className="absolute inset-0 z-30 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
               <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
                 <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
                 <div className="min-w-0 flex-1">
@@ -3571,16 +3658,100 @@ function PipelineCanvas() {
                   </p>
                 </div>
                 <button
-                  onClick={() => setShowCallsDrawer(false)}
+                  onClick={() => setShowCallsPanel(false)}
                   className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
                   title="Close Calls panel"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
               </div>
+              <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12">
+                <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Call IDs</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                    {callOptions.length === 0 && (
+                      <p className="text-xs text-gray-500 italic px-1 py-2">
+                        Select sales agent + customer to load calls.
+                      </p>
+                    )}
+                    {callOptions.map(([cid, meta]) => {
+                      const selected = normalizeCallId(cid) === normalizeCallId(callId);
+                      return (
+                        <button
+                          key={cid}
+                          onClick={() => setCallId(cid)}
+                          className={cn(
+                            "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
+                            selected
+                              ? "border-amber-600/70 bg-amber-900/30"
+                              : "border-gray-800 bg-gray-900/60 hover:bg-gray-800/80",
+                          )}
+                        >
+                          <p className="text-xs font-mono text-gray-100 truncate">{cid}</p>
+                          <p className="text-[10px] text-gray-500 truncate">
+                            {meta?.date ? new Date(meta.date).toLocaleString() : "Unknown date"}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+                <section className="lg:col-span-8 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Transcript</p>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    {!callId ? (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        Select a Call ID to view transcript.
+                      </div>
+                    ) : callTranscriptLoading ? (
+                      <div className="h-full flex items-center justify-center gap-2 text-gray-400 text-sm">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Loading transcript…
+                      </div>
+                    ) : callTranscriptError ? (
+                      <div className="h-full flex items-center justify-center text-red-300 text-sm px-4 text-center">
+                        {callTranscriptError}
+                      </div>
+                    ) : callTranscriptText ? (
+                      <div className="h-full p-2">
+                        <TranscriptViewer content={callTranscriptText} format="txt" className="h-full" />
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        No transcript content.
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          )}
+
+          {showCrmPanel && (
+            <div className="absolute inset-0 z-30 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
+              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <Users className="w-4 h-4 text-indigo-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-white font-semibold truncate">CRM Browser</p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {salesAgent || "Agent"} · {customer || "Customer"}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowCrmPanel(false)}
+                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+                  title="Close CRM panel"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
               <iframe
-                title="Calls page"
-                src={callsDrawerUrl}
+                title="CRM Browser"
+                src={crmPanelUrl}
                 className="w-full h-[calc(100%-3rem)] border-0 bg-gray-900"
               />
             </div>
