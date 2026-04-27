@@ -16,7 +16,7 @@ import {
   Bot, User, Star, StickyNote, Shield, Zap, BadgeCheck, ShieldCheck,
   Check, Loader2, ChevronDown, ChevronUp, TriangleAlert,
   Mic2, Layers, BookOpen, PenLine, FileText, Braces, AlignLeft,
-  Plus, Trash2, ChevronRight, X, Download, Workflow, Copy,
+  Plus, Trash2, ChevronRight, X, Download, Workflow, Copy, ClipboardCopy, ClipboardPaste,
   Lock,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
@@ -128,6 +128,31 @@ interface PipelineDef {
   folder?: string;
   steps: PipelineStepDef[];
   canvas?: { nodes: any[]; edges: any[]; stages: string[] };
+}
+
+interface PipelineBundle {
+  bundle_version: number;
+  bundle_id: string;
+  bundle_name: string;
+  created_at: string;
+  source?: {
+    pipeline_id?: string;
+    pipeline_name?: string;
+  };
+  pipeline: PipelineDef;
+  agents: UniversalAgent[];
+  warnings?: {
+    missing_agent_ids?: string[];
+  };
+  snapshot_file?: string;
+}
+
+interface PipelineBundleImportResponse {
+  ok: boolean;
+  folder: string;
+  pipeline: PipelineDef;
+  agents_created: number;
+  snapshot_file?: string;
 }
 
 const MODEL_GROUPS = [
@@ -1010,6 +1035,12 @@ function PipelineCanvas() {
   const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [showBundleImport, setShowBundleImport] = useState(false);
+  const [bundleImportText, setBundleImportText] = useState("");
+  const [bundleImportFolder, setBundleImportFolder] = useState("");
+  const [bundleImporting, setBundleImporting] = useState(false);
+  const [showBundleCopyFallback, setShowBundleCopyFallback] = useState(false);
+  const [bundleCopyText, setBundleCopyText] = useState("");
   // Pipeline save state
   const [pipelineName, setPipelineName]     = useState("");
   const [pipelineId,   setPipelineId]       = useState<string | null>(null);
@@ -1772,6 +1803,91 @@ function PipelineCanvas() {
       mutate("/api/pipelines/folders");
       showToast("Presets imported", true);
     } catch { showToast("Import failed", false); }
+  }
+
+  async function handleCopyPipelineBundle() {
+    if (!pipelineId) {
+      showToast("Select a pipeline first", false);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/pipelines/${pipelineId}/bundle`);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        showToast(`Bundle export failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
+        return;
+      }
+      const bundle = await res.json() as PipelineBundle;
+      const jsonText = JSON.stringify(bundle, null, 2);
+      try {
+        await navigator.clipboard.writeText(jsonText);
+        showToast(`Bundle copied (${bundle.agents?.length ?? 0} agents)`, true);
+      } catch {
+        setBundleCopyText(jsonText);
+        setShowBundleCopyFallback(true);
+        showToast("Clipboard blocked — copy from popup", false);
+      }
+    } catch {
+      showToast("Network error — could not export bundle", false);
+    }
+  }
+
+  async function handleImportPipelineBundle() {
+    const raw = bundleImportText.trim();
+    if (!raw) {
+      showToast("Paste a bundle JSON first", false);
+      return;
+    }
+    let parsed: PipelineBundle | null = null;
+    try {
+      parsed = JSON.parse(raw) as PipelineBundle;
+    } catch {
+      showToast("Invalid JSON format", false);
+      return;
+    }
+    if (!parsed || !parsed.pipeline || !Array.isArray(parsed.agents)) {
+      showToast("Invalid bundle structure", false);
+      return;
+    }
+
+    setBundleImporting(true);
+    try {
+      const res = await fetch("/api/pipelines/bundles/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bundle: parsed,
+          target_folder: bundleImportFolder.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        showToast(`Bundle import failed (${res.status})${txt ? `: ${txt.slice(0, 120)}` : ""}`, false);
+        return;
+      }
+      const out = await res.json() as PipelineBundleImportResponse;
+      mutate("/api/universal-agents");
+      mutate("/api/universal-agents/folders");
+      mutate("/api/pipelines");
+      mutate("/api/pipelines/folders");
+      setShowBundleImport(false);
+      setBundleImportText("");
+      setBundleImportFolder("");
+      if (out?.pipeline?.id) {
+        loadPipelineToCanvas(out.pipeline.id, {
+          id: out.pipeline.id,
+          name: out.pipeline.name,
+          folder: out.pipeline.folder ?? out.folder ?? "",
+          steps: out.pipeline.steps ?? [],
+          canvas: out.pipeline.canvas,
+        });
+      }
+      showToast(`Bundle imported: pipeline + ${out.agents_created} agent(s)`, true);
+    } catch {
+      showToast("Network error — could not import bundle", false);
+    } finally {
+      setBundleImporting(false);
+    }
   }
 
   async function handleSavePipeline() {
@@ -2604,6 +2720,20 @@ function PipelineCanvas() {
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0">
           <Download className="w-3 h-3" /> Presets
         </button>
+        <button
+          onClick={handleCopyPipelineBundle}
+          title="Copy full pipeline bundle (workflow + agents)"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
+        >
+          <ClipboardCopy className="w-3 h-3" /> Copy Bundle
+        </button>
+        <button
+          onClick={() => setShowBundleImport(true)}
+          title="Paste bundle from another environment"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
+        >
+          <ClipboardPaste className="w-3 h-3" /> Paste Bundle
+        </button>
         <button onClick={handleSave}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-emerald-400 hover:border-emerald-800 text-xs transition-colors shrink-0">
           <Check className="w-3 h-3" /> Validate
@@ -2816,6 +2946,95 @@ function PipelineCanvas() {
             <div className="absolute pointer-events-none select-none"
               style={{ left: 240, top: 40 + 52 + 22 }}>
               <p className="text-xs text-gray-700 italic">← click elements from the left panel to add them</p>
+            </div>
+          )}
+
+          {showBundleImport && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
+              <div className="w-full max-w-3xl rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+                  <p className="text-sm font-semibold text-white">Paste Pipeline Bundle</p>
+                  <button
+                    onClick={() => !bundleImporting && setShowBundleImport(false)}
+                    className="text-gray-500 hover:text-gray-300 transition-colors"
+                    disabled={bundleImporting}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <p className="text-xs text-gray-400">
+                    Paste exported bundle JSON. Import will recreate pipeline + agents in a dedicated folder.
+                  </p>
+                  <input
+                    value={bundleImportFolder}
+                    onChange={e => setBundleImportFolder(e.target.value)}
+                    placeholder="Target folder (optional). Example: Imported Bundles / Dev Sync"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    disabled={bundleImporting}
+                  />
+                  <textarea
+                    value={bundleImportText}
+                    onChange={e => setBundleImportText(e.target.value)}
+                    placeholder='{"bundle_version":1,"pipeline":{...},"agents":[...]}'
+                    rows={14}
+                    className="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-[11px] text-gray-200 font-mono resize-y focus:outline-none focus:border-indigo-500"
+                    disabled={bundleImporting}
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => setShowBundleImport(false)}
+                      disabled={bundleImporting}
+                      className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-300 hover:bg-gray-800 transition-colors disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleImportPipelineBundle}
+                      disabled={bundleImporting}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors disabled:opacity-60"
+                    >
+                      {bundleImporting ? <Loader2 className="w-3 h-3 animate-spin" /> : <ClipboardPaste className="w-3 h-3" />}
+                      Import Bundle
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showBundleCopyFallback && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
+              <div className="w-full max-w-3xl rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+                  <p className="text-sm font-semibold text-white">Copy Pipeline Bundle</p>
+                  <button
+                    onClick={() => setShowBundleCopyFallback(false)}
+                    className="text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <p className="text-xs text-gray-400">
+                    Clipboard is blocked in this browser context. Copy this JSON manually.
+                  </p>
+                  <textarea
+                    value={bundleCopyText}
+                    readOnly
+                    rows={14}
+                    className="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-[11px] text-gray-200 font-mono resize-y"
+                  />
+                  <div className="flex items-center justify-end">
+                    <button
+                      onClick={() => setShowBundleCopyFallback(false)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

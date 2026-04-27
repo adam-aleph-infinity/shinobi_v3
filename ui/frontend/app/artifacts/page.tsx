@@ -256,7 +256,7 @@ function SendToCrmBtn({ onSend }: { onSend: () => Promise<CrmSendResult> }) {
             setSending(false);
           }
         }}
-        title={message || "Send note to CRM (development only)"}
+        title={message || "Send note to CRM"}
         className={cn(
           "flex items-center gap-1 text-[9px] transition-colors shrink-0",
           status === "ok"
@@ -741,7 +741,6 @@ export default function ArtifactsPage() {
   const [selectedKind,     setSelectedKind]     = useState<ArtifactKind | null>(null);
   const [selectedItem,     setSelectedItem]     = useState<ArtifactItem | null>(null);
   const [compareMode,      setCompareMode]      = useState(false);
-  const [isDevHost, setIsDevHost] = useState(false);
   const [frozenItem,       setFrozenItem]       = useState<{
     item: ArtifactItem;
     agent: string;
@@ -781,12 +780,6 @@ export default function ArtifactsPage() {
   const { data: uploadedFiles, mutate: mutateUploadedFiles } = useSWR<UploadedFile[]>(
     uploadedFilesUrl, fetcher,
   );
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const host = window.location.hostname.toLowerCase();
-    setIsDevHost(host === "shinobi.aleph-infinity.com" || host === "localhost" || host === "127.0.0.1");
-  }, []);
 
   // All core data must load before Panel 3 renders (avoids "No artifacts" flash)
   const isLoadingPair = loadP || loadN || loadR || (!!runsUrl && loadRuns);
@@ -1402,7 +1395,7 @@ export default function ArtifactsPage() {
                     setFrozenItem(null);
                     setCompareMode(false);
                   }} onSendToCrm={
-                    isDevHost && canSendToCrm(frozenItem.item)
+                    canSendToCrm(frozenItem.item)
                       ? () => handleSendToCrm(frozenItem.item)
                       : undefined
                   } />
@@ -1422,7 +1415,7 @@ export default function ArtifactsPage() {
                       item={selectedItem}
                       onDelete={() => handleDelete(selectedItem)}
                       onSendToCrm={
-                        isDevHost && canSendToCrm(selectedItem)
+                        canSendToCrm(selectedItem)
                           ? () => handleSendToCrm(selectedItem)
                           : undefined
                       }
@@ -1441,7 +1434,7 @@ export default function ArtifactsPage() {
               item={selectedItem}
               onDelete={() => handleDelete(selectedItem)}
               onSendToCrm={
-                isDevHost && canSendToCrm(selectedItem)
+                canSendToCrm(selectedItem)
                   ? () => handleSendToCrm(selectedItem)
                   : undefined
               }

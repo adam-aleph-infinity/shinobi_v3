@@ -30,6 +30,8 @@ _DIR = settings.ui_data_dir / "_pipelines"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 _RUBRIC_DIR = settings.ui_data_dir / "_analytics_rubrics"
 _ARTIFACT_SCHEMA_DIR = settings.ui_data_dir / "_artifact_prompt_schemas"
+_BUNDLE_DIR = settings.ui_data_dir / "_pipeline_bundles"
+_UNIVERSAL_AGENTS_DIR = settings.ui_data_dir / "_universal_agents"
 _AI_REGISTRY_DIR = settings.ui_data_dir / "_ai_registry"
 _AI_PIPELINES_FILE = _AI_REGISTRY_DIR / "pipelines_snapshot.json"
 _AI_INTERNAL_PROMPTS_FILE = _AI_REGISTRY_DIR / "internal_prompt_templates.json"
@@ -528,6 +530,11 @@ class FolderIn(BaseModel):
 
 class FolderMoveIn(BaseModel):
     folder: str = ""
+
+
+class PipelineBundleImportIn(BaseModel):
+    bundle: dict[str, Any]
+    target_folder: str = ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1671,6 +1678,75 @@ def _find_file(pipeline_id: str) -> tuple[Any, dict]:
     raise HTTPException(404, f"Pipeline '{pipeline_id}' not found")
 
 
+def _next_unique_name(base_name: str, existing_names: set[str]) -> str:
+    base = str(base_name or "").strip() or "Untitled"
+    if base.lower() not in existing_names:
+        existing_names.add(base.lower())
+        return base
+    i = 2
+    while True:
+        candidate = f"{base} ({i})"
+        if candidate.lower() not in existing_names:
+            existing_names.add(candidate.lower())
+            return candidate
+        i += 1
+
+
+def _bundle_folder_name(bundle: dict[str, Any], fallback_pipeline_name: str, target_folder: str = "") -> str:
+    explicit = _normalise_folder(target_folder)
+    if explicit:
+        return explicit
+    bundle_name = _normalise_folder(str(bundle.get("bundle_name") or ""))
+    source = bundle.get("source") if isinstance(bundle.get("source"), dict) else {}
+    source_name = _normalise_folder(str(source.get("pipeline_name") or ""))
+    base = bundle_name or source_name or _normalise_folder(fallback_pipeline_name) or "Imported Bundle"
+    return _normalise_folder(f"Imported Bundles / {base}")
+
+
+def _collect_bundle_agents(step_agent_ids: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    from ui.backend.routers import universal_agents as _ua
+
+    queue: list[str] = [str(x or "").strip() for x in step_agent_ids if str(x or "").strip()]
+    seen: set[str] = set()
+    agents: list[dict[str, Any]] = []
+    missing: set[str] = set()
+    while queue:
+        aid = queue.pop(0)
+        if not aid or aid in seen:
+            continue
+        seen.add(aid)
+        try:
+            _, data = _ua._find_file(aid)
+        except Exception:
+            missing.add(aid)
+            continue
+        if not isinstance(data, dict):
+            missing.add(aid)
+            continue
+        agent = _ua._normalize_agent_record(data)
+        agents.append(agent)
+        for inp in (agent.get("inputs") or []):
+            if not isinstance(inp, dict):
+                continue
+            src = str(inp.get("source") or "").strip().lower()
+            dep = str(inp.get("agent_id") or "").strip()
+            if src == "agent_output" and dep and dep not in seen:
+                queue.append(dep)
+    return agents, sorted(missing)
+
+
+def _persist_bundle_snapshot(name_prefix: str, payload: dict[str, Any]) -> str:
+    _BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+    safe_prefix = _re.sub(r"[^a-zA-Z0-9._-]+", "_", str(name_prefix or "bundle")).strip("._-") or "bundle"
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    file_name = f"{stamp}_{safe_prefix}_{uuid.uuid4().hex[:8]}.json"
+    (_BUNDLE_DIR / file_name).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return file_name
+
+
 def _get_table_columns(db_or_bind: Any, table_name: str) -> set[str]:
     try:
         bind = db_or_bind.get_bind() if hasattr(db_or_bind, "get_bind") else db_or_bind
@@ -1907,6 +1983,214 @@ def get_artifact_template(
         "method": method,
         "model": model,
         "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.get("/{pipeline_id}/bundle")
+def export_pipeline_bundle(pipeline_id: str):
+    _, pipeline_def = _find_file(pipeline_id)
+    step_agent_ids = [
+        str((s or {}).get("agent_id") or "").strip()
+        for s in (pipeline_def.get("steps") or [])
+        if isinstance(s, dict)
+    ]
+    step_agent_ids = [x for x in step_agent_ids if x]
+    agents, missing_agent_ids = _collect_bundle_agents(step_agent_ids)
+    bundle_payload = {
+        "bundle_version": 1,
+        "bundle_id": str(uuid.uuid4()),
+        "bundle_name": str(pipeline_def.get("name") or "Pipeline Bundle"),
+        "created_at": datetime.utcnow().isoformat(),
+        "source": {
+            "pipeline_id": str(pipeline_def.get("id") or pipeline_id),
+            "pipeline_name": str(pipeline_def.get("name") or ""),
+        },
+        "pipeline": pipeline_def,
+        "agents": agents,
+        "warnings": {
+            "missing_agent_ids": missing_agent_ids,
+        },
+    }
+    snapshot_name = _persist_bundle_snapshot(
+        name_prefix=f"export_{pipeline_def.get('name') or pipeline_id}",
+        payload=bundle_payload,
+    )
+    return {
+        **bundle_payload,
+        "snapshot_file": snapshot_name,
+    }
+
+
+@router.post("/bundles/import")
+def import_pipeline_bundle(req: PipelineBundleImportIn):
+    payload = req.bundle if isinstance(req.bundle, dict) else {}
+    pipeline_raw = payload.get("pipeline")
+    agents_raw = payload.get("agents")
+    if not isinstance(pipeline_raw, dict):
+        raise HTTPException(400, "Invalid bundle: missing 'pipeline' object")
+    if not isinstance(agents_raw, list):
+        raise HTTPException(400, "Invalid bundle: missing 'agents' array")
+
+    now = datetime.utcnow().isoformat()
+    pipeline_in = dict(pipeline_raw)
+    pipeline_name = str(pipeline_in.get("name") or "Imported Pipeline").strip() or "Imported Pipeline"
+    folder_name = _bundle_folder_name(payload, pipeline_name, req.target_folder)
+
+    existing_pipeline_names = {
+        str((p or {}).get("name") or "").strip().lower()
+        for p in _load_all()
+        if isinstance(p, dict)
+    }
+    unique_pipeline_name = _next_unique_name(pipeline_name, existing_pipeline_names)
+
+    # Build id remap from bundled agents.
+    agent_id_map: dict[str, str] = {}
+    bundled_agents: list[dict[str, Any]] = []
+    for item in agents_raw:
+        if not isinstance(item, dict):
+            continue
+        old_id = str(item.get("id") or "").strip()
+        if not old_id or old_id in agent_id_map:
+            continue
+        agent_id_map[old_id] = str(uuid.uuid4())
+        bundled_agents.append(item)
+
+    step_agent_ids = [
+        str((s or {}).get("agent_id") or "").strip()
+        for s in (pipeline_in.get("steps") or [])
+        if isinstance(s, dict)
+    ]
+    missing_in_bundle = sorted({aid for aid in step_agent_ids if aid and aid not in agent_id_map})
+    if missing_in_bundle:
+        raise HTTPException(
+            400,
+            "Invalid bundle: missing agent definitions for pipeline step ids: "
+            + ", ".join(missing_in_bundle),
+        )
+
+    from ui.backend.routers import universal_agents as _ua
+
+    _UNIVERSAL_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    if folder_name:
+        try:
+            _ua._ensure_folder_exists(folder_name)
+        except Exception:
+            pass
+
+    existing_agent_names = {
+        str((a or {}).get("name") or "").strip().lower()
+        for a in _ua._load_all()
+        if isinstance(a, dict)
+    }
+    imported_agents: list[dict[str, Any]] = []
+    for raw_agent in bundled_agents:
+        old_id = str(raw_agent.get("id") or "").strip()
+        if not old_id:
+            continue
+        new_id = agent_id_map[old_id]
+        agent = _ua._normalize_agent_record(dict(raw_agent))
+        agent["id"] = new_id
+        agent["created_at"] = now
+        agent["updated_at"] = now
+        agent["is_default"] = False
+        agent["folder"] = folder_name
+        agent["name"] = _next_unique_name(str(agent.get("name") or "Imported Agent"), existing_agent_names)
+        next_inputs: list[dict[str, Any]] = []
+        for inp in (agent.get("inputs") or []):
+            if not isinstance(inp, dict):
+                continue
+            c = dict(inp)
+            src = str(c.get("source") or "").strip().lower()
+            dep = str(c.get("agent_id") or "").strip()
+            if src == "agent_output" and dep and dep in agent_id_map:
+                c["agent_id"] = agent_id_map[dep]
+            next_inputs.append(_ua._normalize_input_def(c))
+        agent["inputs"] = next_inputs
+        (_UNIVERSAL_AGENTS_DIR / f"{new_id}.json").write_text(
+            json.dumps(agent, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        imported_agents.append(agent)
+
+    pipeline_out = dict(pipeline_in)
+    pipeline_out["id"] = str(uuid.uuid4())
+    pipeline_out["created_at"] = now
+    pipeline_out["updated_at"] = now
+    pipeline_out["name"] = unique_pipeline_name
+    pipeline_out["folder"] = folder_name
+
+    # Remap pipeline step agent ids.
+    remapped_steps: list[dict[str, Any]] = []
+    for step in (pipeline_in.get("steps") or []):
+        if not isinstance(step, dict):
+            continue
+        s = dict(step)
+        aid = str(s.get("agent_id") or "").strip()
+        if aid in agent_id_map:
+            s["agent_id"] = agent_id_map[aid]
+        remapped_steps.append(s)
+    pipeline_out["steps"] = remapped_steps
+
+    # Remap processing node agent ids in saved canvas.
+    canvas = pipeline_in.get("canvas")
+    if isinstance(canvas, dict):
+        canvas_copy = dict(canvas)
+        nodes = canvas_copy.get("nodes")
+        if isinstance(nodes, list):
+            next_nodes = []
+            for n in nodes:
+                if not isinstance(n, dict):
+                    next_nodes.append(n)
+                    continue
+                c = dict(n)
+                data = c.get("data")
+                if isinstance(data, dict):
+                    d = dict(data)
+                    aid = str(d.get("agentId") or "").strip()
+                    if aid in agent_id_map:
+                        d["agentId"] = agent_id_map[aid]
+                    c["data"] = d
+                next_nodes.append(c)
+            canvas_copy["nodes"] = next_nodes
+        pipeline_out["canvas"] = canvas_copy
+
+    _DIR.mkdir(parents=True, exist_ok=True)
+    if folder_name:
+        _ensure_folder_exists(folder_name)
+    (_DIR / f"{pipeline_out['id']}.json").write_text(
+        json.dumps(pipeline_out, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    import_snapshot = {
+        "bundle_version": 1,
+        "imported_at": now,
+        "source_bundle": payload,
+        "result": {
+            "pipeline_id": pipeline_out["id"],
+            "pipeline_name": pipeline_out["name"],
+            "folder": folder_name,
+            "agent_count": len(imported_agents),
+            "agent_id_map": agent_id_map,
+        },
+    }
+    snapshot_name = _persist_bundle_snapshot(
+        name_prefix=f"import_{pipeline_out['name']}",
+        payload=import_snapshot,
+    )
+
+    _sync_ai_registry_pipelines()
+    try:
+        _ua._sync_ai_registry_agents()
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "folder": folder_name,
+        "pipeline": pipeline_out,
+        "agents_created": len(imported_agents),
+        "snapshot_file": snapshot_name,
     }
 
 
@@ -4647,7 +4931,7 @@ async def run_pipeline(
 
                 if _sub_type == "notes":
                     with Session(_db_engine) as _s:
-                        _saved_note = None
+                        _saved_note_id = ""
                         _existing = _s.exec(
                             select(Note).where(
                                 Note.agent == req.sales_agent,
@@ -4662,7 +4946,7 @@ async def run_pipeline(
                                 _existing.model = _model
                                 _s.add(_existing)
                                 _s.commit()
-                            _saved_note = _existing
+                            _saved_note_id = str(_existing.id or "")
                         else:
                             _n = Note(
                                 id=str(uuid.uuid4()),
@@ -4677,9 +4961,9 @@ async def run_pipeline(
                             )
                             _s.add(_n)
                             _s.commit()
-                            _saved_note = _n
-                    if 0 <= _step_idx < len(run_steps) and _saved_note is not None:
-                        run_steps[_step_idx]["note_id"] = str(_saved_note.id or "")
+                            _saved_note_id = str(_n.id or "")
+                    if 0 <= _step_idx < len(run_steps) and _saved_note_id:
+                        run_steps[_step_idx]["note_id"] = _saved_note_id
                         run_steps[_step_idx]["note_call_id"] = str(_call_id or "")
                     _save_notes_rollup_from_pipeline(_step_idx, _sub_type, _content, _model)
                     return
@@ -4687,7 +4971,7 @@ async def run_pipeline(
                 if _sub_type == "notes_compliance":
                     _score_json = _jsonish_to_str(_content)
                     with Session(_db_engine) as _s:
-                        _saved_note = None
+                        _saved_note_id = ""
                         _existing = _s.exec(
                             select(Note).where(
                                 Note.agent == req.sales_agent,
@@ -4702,7 +4986,7 @@ async def run_pipeline(
                             _existing.model = _model
                             _s.add(_existing)
                             _s.commit()
-                            _saved_note = _existing
+                            _saved_note_id = str(_existing.id or "")
                         else:
                             _n = Note(
                                 id=str(uuid.uuid4()),
@@ -4717,9 +5001,9 @@ async def run_pipeline(
                             )
                             _s.add(_n)
                             _s.commit()
-                            _saved_note = _n
-                    if 0 <= _step_idx < len(run_steps) and _saved_note is not None:
-                        run_steps[_step_idx]["note_id"] = str(_saved_note.id or "")
+                            _saved_note_id = str(_n.id or "")
+                    if 0 <= _step_idx < len(run_steps) and _saved_note_id:
+                        run_steps[_step_idx]["note_id"] = _saved_note_id
                         run_steps[_step_idx]["note_call_id"] = str(_call_id or "")
                     return
             except Exception as _artifact_exc:

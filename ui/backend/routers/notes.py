@@ -567,9 +567,7 @@ def send_note_to_crm(
     db: Session = Depends(get_session),
 ):
     if not settings.crm_push_enabled:
-        raise HTTPException(403, "CRM push is disabled. Set CRM_PUSH_ENABLED=true in development env.")
-    if not _is_dev_host(request):
-        raise HTTPException(403, "Send to CRM is available only in development environment.")
+        raise HTTPException(403, "CRM push is disabled. Set CRM_PUSH_ENABLED=true.")
 
     note = db.get(Note, note_id)
     if not note:
