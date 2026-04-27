@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse
 import requests as _requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -269,6 +270,50 @@ def _resolve_account_for_note(agent: str, customer: str, db: Session) -> tuple[s
     return str(best.account_id or "").strip(), str(best.crm_url or "").strip()
 
 
+def _crm_base_url(raw_url: str) -> str:
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    p = urlparse(raw)
+    if not p.netloc:
+        return ""
+    scheme = p.scheme or "https"
+    return f"{scheme}://{p.netloc}"
+
+
+def _candidate_crm_push_endpoints(config_endpoint: str, crm_url: str, api_username: str) -> list[str]:
+    out: list[str] = []
+    api_username = str(api_username or "").strip()
+    cfg = str(config_endpoint or "").strip()
+    base = _crm_base_url(crm_url)
+
+    if cfg:
+        endpoint = cfg
+        endpoint = endpoint.replace("{api_username}", api_username)
+        endpoint = endpoint.replace("{crm_base}", base)
+        endpoint = endpoint.replace("{crm_host}", urlparse(base).netloc if base else "")
+        out.append(endpoint)
+        if "-incoming" in endpoint:
+            out.append(endpoint.replace("-incoming", ""))
+
+    if base and api_username:
+        out.append(f"{base}/api/v1/accounts/{api_username}-incoming")
+        out.append(f"{base}/api/v1/accounts/{api_username}")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in out:
+        u = str(item or "").strip()
+        if not u:
+            continue
+        if u not in seen:
+            deduped.append(u)
+            seen.add(u)
+    return deduped
+
+
 @router.get("")
 def list_notes(
     agent: str = Query(""),
@@ -432,10 +477,6 @@ def send_note_to_crm(
     if not note:
         raise HTTPException(404, "Note not found")
 
-    endpoint = str(settings.crm_push_endpoint or "").strip()
-    if not endpoint:
-        raise HTTPException(500, "Missing CRM push endpoint configuration")
-
     missing = []
     if not settings.crm_push_api_username:
         missing.append("CRM_PUSH_API_USERNAME")
@@ -472,22 +513,46 @@ def send_note_to_crm(
         "account_id": account_id,
         "data": json.dumps(note_payload, ensure_ascii=False),
     }
+    endpoints = _candidate_crm_push_endpoints(
+        str(settings.crm_push_endpoint or "").strip(),
+        crm_url,
+        str(settings.crm_push_api_username or ""),
+    )
+    if not endpoints:
+        raise HTTPException(500, "Missing CRM push endpoint configuration")
 
-    try:
-        resp = _requests.post(
-            endpoint,
-            data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=max(5, int(settings.crm_push_timeout_s or 20)),
-        )
-    except Exception as exc:
-        raise HTTPException(502, f"CRM request failed: {exc}")
+    attempts: list[dict] = []
+    resp = None
+    endpoint_used = ""
+    text = ""
+    for endpoint in endpoints:
+        try:
+            candidate = _requests.post(
+                endpoint,
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=max(5, int(settings.crm_push_timeout_s or 20)),
+            )
+        except Exception as exc:
+            attempts.append({"endpoint": endpoint, "error": str(exc)})
+            continue
+        candidate_text = (candidate.text or "").strip()
+        if candidate.status_code >= 400:
+            attempts.append({
+                "endpoint": endpoint,
+                "status": candidate.status_code,
+                "response": candidate_text[:300],
+            })
+            continue
+        resp = candidate
+        endpoint_used = endpoint
+        text = candidate_text
+        break
 
-    text = (resp.text or "").strip()
-    if resp.status_code >= 400:
+    if resp is None:
         raise HTTPException(
             502,
-            f"CRM push failed ({resp.status_code}): {text[:1000]}",
+            f"CRM push failed on all candidate endpoints: {json.dumps(attempts)[:1200]}",
         )
 
     return {
@@ -495,7 +560,8 @@ def send_note_to_crm(
         "message": "Note sent to CRM",
         "crm_status": resp.status_code,
         "crm_response": text[:1000],
-        "endpoint": endpoint,
+        "endpoint": endpoint_used,
+        "attempts": attempts,
         "account_id": account_id,
         "crm_url": crm_url,
         "note_id": note.id,

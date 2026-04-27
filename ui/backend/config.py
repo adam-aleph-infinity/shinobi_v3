@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     index_file: Path = Path(__file__).parent.parent / "data" / "index.json"  # ui/data/index.json
     frontend_origin: str = "http://localhost:3000"   # override with FRONTEND_ORIGIN=https://... in .env
     crm_push_enabled: bool = False
-    crm_push_endpoint: str = "https://brtcrm.io/api/v1/accounts/adam-incoming"
+    crm_push_endpoint: str = "https://brtcrm.io/api/v1/accounts/{api_username}-incoming"
     crm_push_api_username: str = ""
     crm_push_api_password: str = ""
     crm_push_api_key: str = ""
