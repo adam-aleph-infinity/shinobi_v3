@@ -111,6 +111,106 @@ def _apply_call_id_contract(
     return _sys, _usr
 
 
+_OUTPUT_CONTRACT_MODES = {"off", "soft", "strict"}
+_OUTPUT_FIT_STRATEGIES = {"structured", "raw"}
+
+
+def _normalize_output_contract_mode(value: Any) -> str:
+    v = str(value or "").strip().lower() or "soft"
+    return v if v in _OUTPUT_CONTRACT_MODES else "soft"
+
+
+def _normalize_output_fit_strategy(value: Any) -> str:
+    v = str(value or "").strip().lower() or "structured"
+    return v if v in _OUTPUT_FIT_STRATEGIES else "structured"
+
+
+def _normalize_output_contract_override(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    artifact_type = str(value.get("artifact_type") or "").strip()
+    artifact_class = str(value.get("artifact_class") or "").strip()
+    output_format = str(value.get("output_format") or "").strip().lower()
+    output_schema = str(value.get("output_schema") or "").strip()
+    has_mode = "output_contract_mode" in value
+    has_fit = "output_fit_strategy" in value
+    output_contract_mode = _normalize_output_contract_mode(value.get("output_contract_mode"))
+    output_fit_strategy = _normalize_output_fit_strategy(value.get("output_fit_strategy"))
+    raw_tax = value.get("output_taxonomy")
+    output_taxonomy = [str(x or "").strip() for x in raw_tax] if isinstance(raw_tax, list) else []
+    output_taxonomy = [x for x in output_taxonomy if x]
+
+    if artifact_type:
+        out["artifact_type"] = artifact_type
+    if artifact_class:
+        out["artifact_class"] = artifact_class
+    if output_format in {"markdown", "json", "text"}:
+        out["output_format"] = output_format
+    if output_schema:
+        out["output_schema"] = output_schema
+    if output_taxonomy:
+        out["output_taxonomy"] = output_taxonomy
+    if has_mode:
+        out["output_contract_mode"] = output_contract_mode
+    if has_fit:
+        out["output_fit_strategy"] = output_fit_strategy
+    return out
+
+
+def _apply_step_output_contract_override(agent_def: dict[str, Any], step_def: dict[str, Any]) -> dict[str, Any]:
+    base = dict(agent_def or {})
+    override = _normalize_output_contract_override((step_def or {}).get("output_contract_override"))
+    if not override:
+        return base
+    base.update(override)
+    return base
+
+
+def _build_output_contract_block(agent_def: dict[str, Any]) -> str:
+    schema = str(agent_def.get("output_schema") or "").strip()
+    if not schema:
+        return ""
+    artifact_type = str(agent_def.get("artifact_type") or "").strip() or "artifact"
+    artifact_class = str(agent_def.get("artifact_class") or "").strip() or "general"
+    taxonomy = [str(x or "").strip() for x in (agent_def.get("output_taxonomy") or []) if str(x or "").strip()]
+    fit_strategy = _normalize_output_fit_strategy(agent_def.get("output_fit_strategy"))
+    lines = [
+        "OUTPUT CONTRACT (MANDATORY)",
+        f"- Artifact Type: {artifact_type}",
+        f"- Artifact Class: {artifact_class}",
+        f"- Fit Strategy: {fit_strategy}",
+        "- Follow the required schema below exactly in structure and ordering.",
+        "- Preserve factual content from inputs. If unknown, use UNKNOWN.",
+    ]
+    if taxonomy:
+        lines.append("- Preferred taxonomy sections:")
+        lines.extend([f"  - {t}" for t in taxonomy])
+    lines.append("")
+    lines.append("REQUIRED OUTPUT SCHEMA:")
+    lines.append(schema)
+    return "\n".join(lines).strip()
+
+
+def _apply_output_contract_to_prompts(
+    system_prompt: str,
+    user_template: str,
+    agent_def: dict[str, Any],
+) -> tuple[str, str]:
+    mode = _normalize_output_contract_mode(agent_def.get("output_contract_mode"))
+    block = _build_output_contract_block(agent_def)
+    sys = str(system_prompt or "")
+    usr = str(user_template or "")
+    if mode != "off" and block:
+        sys = _append_once(sys, block)
+        if mode == "strict":
+            usr = _append_once(
+                usr,
+                "STRICT OUTPUT REQUIREMENT:\n- Follow the OUTPUT CONTRACT exactly.\n- Return only the final formatted output.",
+            )
+    return sys, usr
+
+
 def _default_internal_prompt_templates() -> dict[str, Any]:
     return {
         "analytics_rubric": {
@@ -320,6 +420,7 @@ def _save_state(
 class PipelineStep(BaseModel):
     agent_id: str
     input_overrides: dict[str, str] = {}
+    output_contract_override: dict[str, Any] = {}
 
 
 class PipelineIn(BaseModel):
@@ -4454,12 +4555,13 @@ async def run_pipeline(
                         fatal_error = True
                         break
 
+                    runtime_agent_def = _apply_step_output_contract_override(agent_def, step)
                     overrides = _normalize_overrides_for_step(
-                        step_idx, agent_def, step.get("input_overrides", {})
+                        step_idx, runtime_agent_def, step.get("input_overrides", {})
                     )
 
-                    agent_name = agent_def.get("name", agent_id)
-                    model      = agent_def.get("model", "gpt-5.4")
+                    agent_name = runtime_agent_def.get("name", agent_id)
+                    model      = runtime_agent_def.get("model", "gpt-5.4")
 
                     run_steps[step_idx]["agent_name"] = agent_name
                     run_steps[step_idx]["model"]      = model
@@ -4482,7 +4584,7 @@ async def run_pipeline(
                                 overrides.get(inp.get("key", ""), inp.get("source", "manual"))
                             ),
                         }
-                        for inp in agent_def.get("inputs", [])
+                        for inp in runtime_agent_def.get("inputs", [])
                     ]
 
                     # Resume-partial fast path: reuse latest step cache immediately,
@@ -4540,24 +4642,29 @@ async def run_pipeline(
                             continue
 
                     # ── Resolve inputs ───────────────────────────────────────
-                    temperature   = float(agent_def.get("temperature", 0.0))
-                    system_prompt = agent_def.get("system_prompt", "")
-                    user_template = agent_def.get("user_prompt", "")
+                    temperature   = float(runtime_agent_def.get("temperature", 0.0))
+                    system_prompt = runtime_agent_def.get("system_prompt", "")
+                    user_template = runtime_agent_def.get("user_prompt", "")
                     _step_sub_type = str(
                         ((_step_output_meta.get(step_idx) or {}).get("sub_type") or "")
                     ).strip().lower()
                     system_prompt, user_template = _apply_call_id_contract(
                         system_prompt=system_prompt,
                         user_template=user_template,
-                        agent_def=agent_def,
+                        agent_def=runtime_agent_def,
                         artifact_sub_type=_step_sub_type,
+                    )
+                    system_prompt, user_template = _apply_output_contract_to_prompts(
+                        system_prompt=system_prompt,
+                        user_template=user_template,
+                        agent_def=runtime_agent_def,
                     )
                     manual_inputs = {"_chain_previous": prev_content}
                     source_for_key = {
                         inp.get("key", ""): _public_input_source(
                             overrides.get(inp.get("key", ""), inp.get("source", ""))
                         )
-                        for inp in agent_def.get("inputs", [])
+                        for inp in runtime_agent_def.get("inputs", [])
                     }
 
                     resolved: dict[str, str] = {}
@@ -4573,7 +4680,7 @@ async def run_pipeline(
                                 _source, _ref_id, req.sales_agent, req.customer, req.call_id,
                                 _manual_inputs, _ldb, input_key=_input_key,
                             )
-                    for inp in agent_def.get("inputs", []):
+                    for inp in runtime_agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
                         source = _public_input_source(
                             overrides.get(key, inp.get("source", "manual"))
@@ -4600,7 +4707,7 @@ async def run_pipeline(
 
                     file_keys = {
                         inp.get("key", "")
-                        for inp in agent_def.get("inputs", [])
+                        for inp in runtime_agent_def.get("inputs", [])
                         if _is_file_source(
                             _public_input_source(
                                 overrides.get(inp.get("key", ""), inp.get("source", "manual"))
@@ -4885,11 +4992,12 @@ async def run_pipeline(
                         _s = steps[_sidx]
                         _aid = _s.get("agent_id", "")
                         _adef = agent_map[_aid]
+                        _rdef = _apply_step_output_contract_override(_adef, _s)
                         _ov = _normalize_overrides_for_step(
-                            _sidx, _adef, _s.get("input_overrides", {})
+                            _sidx, _rdef, _s.get("input_overrides", {})
                         )
-                        _aname = _adef.get("name", _aid)
-                        _model = _adef.get("model", "gpt-5.4")
+                        _aname = _rdef.get("name", _aid)
+                        _model = _rdef.get("model", "gpt-5.4")
                         run_steps[_sidx]["agent_name"] = _aname
                         run_steps[_sidx]["model"]      = _model
                         run_steps[_sidx]["input_sources"] = [
@@ -4899,7 +5007,7 @@ async def run_pipeline(
                                     _ov.get(inp.get("key", ""), inp.get("source", "manual"))
                                 ),
                             }
-                            for inp in _adef.get("inputs", [])
+                            for inp in _rdef.get("inputs", [])
                         ]
                         run_steps[_sidx]["state"]      = "running"
                         run_steps[_sidx]["input_ready"] = False
@@ -4919,19 +5027,28 @@ async def run_pipeline(
                         _par_aid    = _par_step.get("agent_id", "")
                         _par_ov     = _par_step.get("input_overrides", {})
                         _par_adef   = agent_map[_par_aid]
-                        _par_aname  = _par_adef.get("name", _par_aid)
-                        _par_model  = _par_adef.get("model", "gpt-5.4")
-                        _par_temp   = float(_par_adef.get("temperature", 0.0))
-                        _par_sysp   = _par_adef.get("system_prompt", "")
-                        _par_ut     = _par_adef.get("user_prompt", "")
+                        _par_rdef   = _apply_step_output_contract_override(_par_adef, _par_step)
+                        _par_ov     = _normalize_overrides_for_step(
+                            par_idx, _par_rdef, _par_ov
+                        )
+                        _par_aname  = _par_rdef.get("name", _par_aid)
+                        _par_model  = _par_rdef.get("model", "gpt-5.4")
+                        _par_temp   = float(_par_rdef.get("temperature", 0.0))
+                        _par_sysp   = _par_rdef.get("system_prompt", "")
+                        _par_ut     = _par_rdef.get("user_prompt", "")
                         _par_sub_type = str(
                             ((_step_output_meta.get(par_idx) or {}).get("sub_type") or "")
                         ).strip().lower()
                         _par_sysp, _par_ut = _apply_call_id_contract(
                             system_prompt=_par_sysp,
                             user_template=_par_ut,
-                            agent_def=_par_adef,
+                            agent_def=_par_rdef,
                             artifact_sub_type=_par_sub_type,
+                        )
+                        _par_sysp, _par_ut = _apply_output_contract_to_prompts(
+                            system_prompt=_par_sysp,
+                            user_template=_par_ut,
+                            agent_def=_par_rdef,
                         )
                         _par_mi     = {"_chain_previous": _sp}
                         _par_fp     = ""
@@ -4942,7 +5059,7 @@ async def run_pipeline(
                                     inp.get("key", ""): _public_input_source(
                                         _par_ov.get(inp.get("key", ""), inp.get("source", ""))
                                     )
-                                    for inp in _par_adef.get("inputs", [])
+                                    for inp in _par_rdef.get("inputs", [])
                                 }
                                 _par_db._agent_run_ctx = {
                                     "sales_agent": req.sales_agent,
@@ -4975,7 +5092,7 @@ async def run_pipeline(
                                         }
 
                                 _par_resolved: dict[str, str] = {}
-                                for _inp in _par_adef.get("inputs", []):
+                                for _inp in _par_rdef.get("inputs", []):
                                     _k   = _inp.get("key", "input")
                                     _src = _public_input_source(
                                         _par_ov.get(_k, _inp.get("source", "manual"))
@@ -4989,7 +5106,7 @@ async def run_pipeline(
 
                                 _par_fkeys = {
                                     _inp.get("key", "")
-                                    for _inp in _par_adef.get("inputs", [])
+                                    for _inp in _par_rdef.get("inputs", [])
                                     if _is_file_source(
                                         _public_input_source(
                                             _par_ov.get(_inp.get("key", ""), _inp.get("source", "manual"))

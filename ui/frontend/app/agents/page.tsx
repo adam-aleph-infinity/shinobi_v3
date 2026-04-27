@@ -172,7 +172,19 @@ interface PipelineDef {
   description?: string;
   folder?: string;
   scope?: string;
-  steps: { agent_id: string; input_overrides: Record<string, string> }[];
+  steps: {
+    agent_id: string;
+    input_overrides: Record<string, string>;
+    output_contract_override?: {
+      artifact_type?: string;
+      artifact_class?: string;
+      output_format?: string;
+      output_schema?: string;
+      output_taxonomy?: string[];
+      output_contract_mode?: "off" | "soft" | "strict";
+      output_fit_strategy?: "structured" | "raw";
+    };
+  }[];
   canvas?: { nodes: any[]; edges: any[]; stages: string[] };
 }
 

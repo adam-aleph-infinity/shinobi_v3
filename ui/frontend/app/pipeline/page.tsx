@@ -80,6 +80,22 @@ function getMeta(kind: NodeKind, subType: string): Meta {
 
 interface AgentInput { key: string; source: string; agent_id?: string; }
 
+interface StepOutputContractOverride {
+  artifact_type?: string;
+  artifact_class?: string;
+  output_format?: string;
+  output_schema?: string;
+  output_taxonomy?: string[];
+  output_contract_mode?: "off" | "soft" | "strict";
+  output_fit_strategy?: "structured" | "raw";
+}
+
+interface PipelineStepDef {
+  agent_id: string;
+  input_overrides: Record<string, string>;
+  output_contract_override?: StepOutputContractOverride;
+}
+
 interface UniversalAgent {
   id: string; name: string; description: string; agent_class: string;
   model: string; temperature: number; system_prompt: string; user_prompt: string;
@@ -92,7 +108,7 @@ interface PipelineDef {
   name: string;
   description: string;
   folder?: string;
-  steps: { agent_id: string; input_overrides: Record<string, string> }[];
+  steps: PipelineStepDef[];
   canvas?: { nodes: any[]; edges: any[]; stages: string[] };
 }
 
@@ -127,6 +143,9 @@ const OUTPUT_FMT: Record<string, {
   json:     { label: "JSON",     desc: "Machine-readable",  icon: Braces,    bg: "bg-yellow-900/50", text: "text-yellow-300", border: "border-yellow-700/40" },
   text:     { label: "Text",     desc: "Plain unformatted", icon: AlignLeft, bg: "bg-gray-700/50",   text: "text-gray-300",   border: "border-gray-600/40"   },
 };
+
+const OUTPUT_CONTRACT_MODES = ["off", "soft", "strict"] as const;
+const OUTPUT_FIT_STRATEGIES = ["structured", "raw"] as const;
 
 const CLASS_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
   persona: User, scorer: Star, notes: StickyNote, compliance: Shield, general: Zap,
@@ -254,6 +273,15 @@ interface PipelineNodeData extends Record<string, unknown> {
   agentName:  string;
   // input node — data source type
   inputSource: string;
+  // output node — optional pipeline-only output contract override
+  outputContractEnabled?: boolean;
+  outputArtifactType?: string;
+  outputArtifactClass?: string;
+  outputFormat?: string;
+  outputSchema?: string;
+  outputTaxonomyText?: string;
+  outputContractMode?: "off" | "soft" | "strict";
+  outputFitStrategy?: "structured" | "raw";
 }
 
 interface ArtifactPromptTemplate {
@@ -1272,6 +1300,14 @@ function PipelineCanvas() {
         agentClass:  "",
         agentName:   "",
         inputSource: "",
+        outputContractEnabled: false,
+        outputArtifactType: "",
+        outputArtifactClass: "",
+        outputFormat: "markdown",
+        outputSchema: "",
+        outputTaxonomyText: "",
+        outputContractMode: "soft",
+        outputFitStrategy: "structured",
       } satisfies PipelineNodeData,
     };
 
@@ -1449,7 +1485,7 @@ function PipelineCanvas() {
     } catch { showToast("Network error — could not duplicate pipeline", false); }
   }
 
-  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; folder?: string; steps: { agent_id: string; input_overrides: Record<string, string> }[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }) {
+  function loadPipelineToCanvas(pid: string, override?: { id: string; name: string; folder?: string; steps: PipelineStepDef[]; canvas?: { nodes: any[]; edges: any[]; stages: string[] } }) {
     const pl = override ?? allPipelines.find(p => p.id === pid);
     if (!pl) return;
 
@@ -1592,6 +1628,8 @@ function PipelineCanvas() {
       });
 
       const outId = nextId();
+      const stepOut = step.output_contract_override ?? {};
+      const hasStepOut = Object.keys(stepOut).length > 0;
       newNodes.push({
         id: outId, type: "output",
         position: { x: X_SLOTS[0], y: laneY(outStage) + SLEEVE_INNER },
@@ -1600,6 +1638,22 @@ function PipelineCanvas() {
         data: {
           label: `${agent?.name ?? "Step " + (i + 1)} Output`, subType: "notes", prompt: "", stageIndex: outStage,
           agentId: "", agentClass: "", agentName: "", inputSource: "",
+          outputContractEnabled: hasStepOut,
+          outputArtifactType: String(stepOut.artifact_type ?? ""),
+          outputArtifactClass: String(stepOut.artifact_class ?? ""),
+          outputFormat: String(stepOut.output_format ?? "markdown"),
+          outputSchema: String(stepOut.output_schema ?? ""),
+          outputTaxonomyText: Array.isArray(stepOut.output_taxonomy) ? stepOut.output_taxonomy.map((x: any) => String(x ?? "")).join("\n") : "",
+          outputContractMode: (
+            OUTPUT_CONTRACT_MODES.includes(String(stepOut.output_contract_mode ?? "soft") as any)
+              ? (String(stepOut.output_contract_mode) as "off" | "soft" | "strict")
+              : "soft"
+          ),
+          outputFitStrategy: (
+            OUTPUT_FIT_STRATEGIES.includes(String(stepOut.output_fit_strategy ?? "structured") as any)
+              ? (String(stepOut.output_fit_strategy) as "structured" | "raw")
+              : "structured"
+          ),
         } satisfies PipelineNodeData,
       });
       newEdges.push(makeEdge(procId, outId));
@@ -1709,7 +1763,51 @@ function PipelineCanvas() {
             }
           });
         }
-        return { agent_id: d.agentId, input_overrides };
+        const connectedOutputNodes = edges
+          .filter(e => e.source === n.id)
+          .map(e => nodes.find(x => x.id === e.target))
+          .filter(dst => dst?.type === "output")
+          .sort((a, b) => {
+            const da = a!.data as PipelineNodeData;
+            const db = b!.data as PipelineNodeData;
+            if (da.stageIndex !== db.stageIndex) return da.stageIndex - db.stageIndex;
+            if (a!.position.x !== b!.position.x) return a!.position.x - b!.position.x;
+            return a!.id.localeCompare(b!.id);
+          });
+        const primaryOutput = connectedOutputNodes[0];
+        let output_contract_override: StepOutputContractOverride | undefined;
+        if (primaryOutput) {
+          const od = primaryOutput.data as PipelineNodeData;
+          if (od.outputContractEnabled) {
+            const override: StepOutputContractOverride = {};
+            const artifactType = String(od.outputArtifactType || "").trim();
+            const artifactClass = String(od.outputArtifactClass || "").trim();
+            const outputFormat = String(od.outputFormat || "").trim().toLowerCase();
+            const outputSchema = String(od.outputSchema || "").trim();
+            const outputTaxonomy = String(od.outputTaxonomyText || "")
+              .split("\n")
+              .map(s => s.trim())
+              .filter(Boolean);
+            const outputContractMode = String(od.outputContractMode || "soft").trim().toLowerCase();
+            const outputFitStrategy = String(od.outputFitStrategy || "structured").trim().toLowerCase();
+
+            if (artifactType) override.artifact_type = artifactType;
+            if (artifactClass) override.artifact_class = artifactClass;
+            if (["markdown", "json", "text"].includes(outputFormat)) override.output_format = outputFormat;
+            if (outputSchema) override.output_schema = outputSchema;
+            if (outputTaxonomy.length > 0) override.output_taxonomy = outputTaxonomy;
+            if (["off", "soft", "strict"].includes(outputContractMode)) {
+              override.output_contract_mode = outputContractMode as "off" | "soft" | "strict";
+            }
+            if (["structured", "raw"].includes(outputFitStrategy)) {
+              override.output_fit_strategy = outputFitStrategy as "structured" | "raw";
+            }
+            if (Object.keys(override).length > 0) output_contract_override = override;
+          }
+        }
+        return output_contract_override
+          ? { agent_id: d.agentId, input_overrides, output_contract_override }
+          : { agent_id: d.agentId, input_overrides };
       });
 
     // Derive scope: if any step reads a merged source → per_pair, else → per_call
@@ -2285,6 +2383,135 @@ function PipelineCanvas() {
                   </button>
                 );
               })}
+            </div>
+          </PropertiesSection>
+        )}
+
+        {selKind === "output" && (
+          <PropertiesSection title="Pipeline-Only Output Contract" defaultOpen={false}>
+            <div className="space-y-2.5">
+              <button
+                onClick={() =>
+                  updateNodeData(selectedNode.id, { outputContractEnabled: !selData.outputContractEnabled })
+                }
+                className={`w-full text-left px-2.5 py-2 rounded-lg border text-[11px] transition-colors ${
+                  selData.outputContractEnabled
+                    ? "border-emerald-700 bg-emerald-900/20 text-emerald-300"
+                    : "border-gray-700 bg-gray-800/40 text-gray-400 hover:bg-gray-800"
+                }`}
+              >
+                {selData.outputContractEnabled ? "Enabled for this pipeline step" : "Enable pipeline-only contract override"}
+              </button>
+
+              {selData.outputContractEnabled && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[9px] text-gray-500 mb-1">Artifact Type</label>
+                      <input
+                        value={String(selData.outputArtifactType || "")}
+                        onChange={e => updateNodeData(selectedNode.id, { outputArtifactType: e.target.value })}
+                        placeholder="note_json"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[9px] text-gray-500 mb-1">Artifact Class</label>
+                      <input
+                        value={String(selData.outputArtifactClass || "")}
+                        onChange={e => updateNodeData(selectedNode.id, { outputArtifactClass: e.target.value })}
+                        placeholder="json_schema"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[9px] text-gray-500 mb-1">Output Format</label>
+                      <select
+                        value={String(selData.outputFormat || "markdown")}
+                        onChange={e => updateNodeData(selectedNode.id, { outputFormat: e.target.value })}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+                      >
+                        <option value="markdown">markdown</option>
+                        <option value="json">json</option>
+                        <option value="text">text</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[9px] text-gray-500 mb-1">Contract Mode</label>
+                      <select
+                        value={String(selData.outputContractMode || "soft")}
+                        onChange={e => updateNodeData(selectedNode.id, { outputContractMode: e.target.value as "off" | "soft" | "strict" })}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+                      >
+                        {OUTPUT_CONTRACT_MODES.map(mode => (
+                          <option key={mode} value={mode}>{mode}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[9px] text-gray-500 mb-1">Fit Strategy</label>
+                      <select
+                        value={String(selData.outputFitStrategy || "structured")}
+                        onChange={e => updateNodeData(selectedNode.id, { outputFitStrategy: e.target.value as "structured" | "raw" })}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
+                      >
+                        {OUTPUT_FIT_STRATEGIES.map(mode => (
+                          <option key={mode} value={mode}>{mode}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[9px] text-gray-500 mb-1">Required Output Schema</label>
+                    <textarea
+                      value={String(selData.outputSchema || "")}
+                      onChange={e => updateNodeData(selectedNode.id, { outputSchema: e.target.value })}
+                      rows={8}
+                      placeholder={`{\n  "results": {\n    "agent_response_md": "<FULL_AGENT_RESPONSE_HERE>"\n  }\n}`}
+                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[9px] text-gray-500 mb-1">Output Taxonomy (one per line)</label>
+                    <textarea
+                      value={String(selData.outputTaxonomyText || "")}
+                      onChange={e => updateNodeData(selectedNode.id, { outputTaxonomyText: e.target.value })}
+                      rows={3}
+                      placeholder={"results\nagent_response_md"}
+                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-[11px] text-gray-300 font-mono resize-y outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  {selData.subType === "notes" && (
+                    <button
+                      onClick={() =>
+                        updateNodeData(selectedNode.id, {
+                          outputContractEnabled: true,
+                          outputArtifactType: "note_json",
+                          outputArtifactClass: "json_schema",
+                          outputFormat: "json",
+                          outputContractMode: "strict",
+                          outputFitStrategy: "structured",
+                          outputTaxonomyText: "results\nagent_response_md",
+                          outputSchema: "{\n  \"results\": {\n    \"agent_response_md\": \"<FULL_AGENT_RESPONSE_HERE>\"\n  }\n}",
+                        })
+                      }
+                      className="w-full px-2.5 py-2 rounded-lg border border-indigo-700 text-indigo-300 hover:bg-indigo-900/30 text-[11px] transition-colors"
+                    >
+                      Apply `note_json` preset
+                    </button>
+                  )}
+
+                  <p className="text-[10px] text-emerald-300/90">
+                    This override affects only this pipeline step and does not modify the base agent.
+                  </p>
+                </>
+              )}
             </div>
           </PropertiesSection>
         )}
