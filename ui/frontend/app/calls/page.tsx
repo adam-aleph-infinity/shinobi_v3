@@ -295,6 +295,13 @@ export default function CallsPage() {
   const selectedCustomerName = ctx.customer;
   const selectedCallId = ctx.callId;
   const [checkedCallIds, setCheckedCallIds]       = useState<Set<string>>(new Set());
+  const [callsPickerMode, setCallsPickerMode] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams(window.location.search);
+    setCallsPickerMode(qs.get("embedded") === "1" && qs.get("mode") === "pick_calls");
+  }, []);
 
   // Auto-switch to pipeline tab when calls are first checked (if pipeline active)
   const prevCheckedSizeRef = useRef(0);
@@ -447,6 +454,25 @@ export default function CallsPage() {
     }
     return checkedCallIdsOrdered[0] ?? selectedCallId ?? "";
   }, [selectedCallId, checkedCallIdsOrdered]);
+
+  useEffect(() => {
+    if (!callsPickerMode) return;
+    if (typeof window === "undefined" || !window.parent || window.parent === window) return;
+    try {
+      window.parent.postMessage(
+        {
+          type: "shinobi:calls-context",
+          agent: selectedAgent || "",
+          customer: selectedCustomerName || "",
+          call_id: selectedCallId || "",
+          selected_call_ids: checkedCallIdsOrdered,
+        },
+        window.location.origin,
+      );
+    } catch {
+      // no-op
+    }
+  }, [callsPickerMode, selectedAgent, selectedCustomerName, selectedCallId, checkedCallIdsOrdered]);
 
   const selectedCallData = calls.find(c => normalizeCallId(c.call_id) === normalizeCallId(selectedCallId)) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
