@@ -384,6 +384,14 @@ const CLASS_META: Record<string, { label: string; textColor: string; borderColor
   "":         { label: "Agent",      textColor: "text-gray-400",   borderColor: "border-gray-700/40"   },
 };
 const CLASS_REQUIRES_PREV: Record<string, string> = { scorer: "persona", compliance: "notes" };
+const AGENT_CLASS_ORDER = ["persona", "notes", "scorer", "compliance", "general"] as const;
+type AgentClassKey = (typeof AGENT_CLASS_ORDER)[number];
+const OUTPUT_SUBTYPE_TO_AGENT_CLASS: Record<string, AgentClassKey> = {
+  persona: "persona",
+  persona_score: "scorer",
+  notes: "notes",
+  notes_compliance: "compliance",
+};
 
 function classMeta(cls: string) {
   const s = (cls ?? "").toLowerCase();
@@ -406,6 +414,60 @@ interface OutputProfile {
   output_template: string;
   output_placeholder: string;
   output_previous_placeholder: string;
+}
+
+function normalizeAgentClass(raw: string): AgentClassKey | "" {
+  const v = String(raw || "").trim().toLowerCase();
+  if (!v) return "";
+  if ((AGENT_CLASS_ORDER as readonly string[]).includes(v)) return v as AgentClassKey;
+  if (v === "persona_score") return "scorer";
+  if (/scor|score/.test(v)) return "scorer";
+  if (/compliance/.test(v)) return "compliance";
+  if (/note/.test(v)) return "notes";
+  if (/persona/.test(v)) return "persona";
+  if (/general|agent/.test(v)) return "general";
+  return "";
+}
+
+function inferAgentClassFromConnectedOutputs(
+  outputNodes: Node[],
+  outputProfiles: OutputProfile[],
+): AgentClassKey | "" {
+  const votes: AgentClassKey[] = [];
+
+  for (const node of outputNodes) {
+    const data = (node.data || {}) as PipelineNodeData;
+    const subType = String(data.subType || "").toLowerCase();
+    const fromSubType = OUTPUT_SUBTYPE_TO_AGENT_CLASS[subType] ?? normalizeAgentClass(subType);
+    if (fromSubType) votes.push(fromSubType);
+
+    const profileId = String(data.outputProfileId || "").trim();
+    if (!profileId) continue;
+    const profile = outputProfiles.find((p) => p.id === profileId);
+    if (!profile) continue;
+
+    const fromProfile =
+      normalizeAgentClass(profile.artifact_class || "") ||
+      normalizeAgentClass(profile.artifact_type || "") ||
+      normalizeAgentClass(profile.artifact_name || "");
+    if (fromProfile) votes.push(fromProfile);
+  }
+
+  if (!votes.length) return "";
+
+  const counts = new Map<AgentClassKey, number>();
+  for (const vote of votes) counts.set(vote, (counts.get(vote) || 0) + 1);
+
+  let best: AgentClassKey = votes[0];
+  let bestCount = counts.get(best) || 0;
+  for (const cls of AGENT_CLASS_ORDER) {
+    const c = counts.get(cls) || 0;
+    if (c > bestCount) {
+      best = cls;
+      bestCount = c;
+    }
+  }
+  return best;
 }
 
 // ── Agent sub-components ──────────────────────────────────────────────────────
@@ -3398,7 +3460,12 @@ function PipelineCanvas() {
       }
       mutate("/api/universal-agents");
       // Keep canvas node header in sync with the (possibly renamed) agent
-      updateNodeData(selectedNodeId, { agentId: targetAgentId, agentName: agentDraft.name, label: agentDraft.name });
+      updateNodeData(selectedNodeId, {
+        agentId: targetAgentId,
+        agentClass: String(agentDraft.agent_class || "").trim() || String(nd.agentClass || ""),
+        agentName: agentDraft.name,
+        label: agentDraft.name,
+      });
       setAgentSaved(true); setTimeout(() => setAgentSaved(false), 2000);
     } finally { setAgentSaving(false); }
   }
@@ -4303,11 +4370,14 @@ function PipelineCanvas() {
       const stepCache = getStepCacheDisplay(stepIndex);
 
       type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
-      const connectedSources = edges
-        .filter(e => e.target === selectedNode.id)
-        .map((e): CS | null => {
-          const src = nodes.find(n => n.id === e.source);
-          if (!src) return null;
+      const incomingSources = edges
+        .filter((e) => e.target === selectedNode.id)
+        .map((e) => nodes.find((n) => n.id === e.source))
+        .filter(Boolean) as Node[];
+      const connectedOutputNodes = incomingSources.filter((n) => n.type === "output");
+      const inferredAgentClass = inferAgentClassFromConnectedOutputs(connectedOutputNodes, outputProfiles);
+      const connectedSources = incomingSources
+        .map((src): CS | null => {
           const srcData = src.data as PipelineNodeData;
 
           if (src.type === "input") {
@@ -4447,6 +4517,63 @@ function PipelineCanvas() {
                   <>
                     <PropertiesSection title="Model & Settings">
                       <div className="space-y-2.5">
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <label className="block text-[9px] text-gray-500">Agent Class</label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!inferredAgentClass) {
+                                  showToast("No connected output artifact found to infer class", false);
+                                  return;
+                                }
+                                setAgentDraft((f) => (f ? { ...f, agent_class: inferredAgentClass } : f));
+                                updateNodeData(selectedNode.id, { agentClass: inferredAgentClass });
+                                setAgentSaved(false);
+                                showToast(`Auto class set to ${classMeta(inferredAgentClass).label}`, true);
+                              }}
+                              className="px-2 py-1 rounded-md border border-gray-700 text-[9px] text-gray-300 hover:bg-gray-800"
+                              title="Detect class from connected output artifact"
+                            >
+                              Auto from output
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {AGENT_CLASS_ORDER.map((cls) => {
+                              const meta = classMeta(cls);
+                              const isSelected = String(agentDraft.agent_class || "").toLowerCase() === cls;
+                              return (
+                                <button
+                                  key={cls}
+                                  type="button"
+                                  onClick={() => {
+                                    setAgentDraft((f) => (f ? { ...f, agent_class: cls } : f));
+                                    updateNodeData(selectedNode.id, { agentClass: cls });
+                                    setAgentSaved(false);
+                                  }}
+                                  className={cn(
+                                    "px-2 py-1.5 rounded-lg border text-[10px] text-left transition-colors",
+                                    isSelected
+                                      ? `${meta.borderColor} bg-gray-800 ${meta.textColor}`
+                                      : "border-gray-700/50 bg-gray-800/30 text-gray-400 hover:bg-gray-800",
+                                  )}
+                                >
+                                  {meta.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {inferredAgentClass ? (
+                            <p className="text-[9px] text-gray-500">
+                              Connected artifact suggests:{" "}
+                              <span className={classMeta(inferredAgentClass).textColor}>
+                                {classMeta(inferredAgentClass).label}
+                              </span>
+                            </p>
+                          ) : (
+                            <p className="text-[9px] text-gray-600">No connected output artifact detected.</p>
+                          )}
+                        </div>
                         <div>
                           <label className="block text-[9px] text-gray-500 mb-1">Model</label>
                           <ModelSelect value={agentDraft.model} onChange={v => setAgentDraft(f => f ? { ...f, model: v } : f)} />
