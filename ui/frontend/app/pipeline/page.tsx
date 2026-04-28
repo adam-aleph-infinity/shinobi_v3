@@ -3822,7 +3822,7 @@ function PipelineCanvas() {
     <div className="flex flex-col h-full w-full">
 
       {/* ── Top toolbar ───────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900 shrink-0">
+      <div className="flex flex-nowrap items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900 shrink-0 overflow-x-auto">
         <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
         <span className="text-sm font-bold text-white shrink-0">Pipeline</span>
         <input
