@@ -147,6 +147,17 @@ interface NavCustomerOption {
 }
 
 type CallDatesMap = Record<string, { date: string; has_audio: boolean }>;
+interface CRMCallLite {
+  call_id: string;
+  date?: string;
+  duration?: number;
+  record_path?: string | null;
+}
+interface CallOptionMeta {
+  date: string;
+  has_audio: boolean;
+  duration_s: number | null;
+}
 
 interface FinalTranscriptCall {
   call_id: string;
@@ -1143,6 +1154,12 @@ function PipelineCanvas() {
       : null,
     fetcher,
   );
+  const { data: pairCalls } = useSWR<CRMCallLite[]>(
+    salesAgent && customer
+      ? `/api/crm/calls-by-pair?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
 
@@ -1300,11 +1317,68 @@ function PipelineCanvas() {
   const runScope = String(selectedPipeline?.scope || "per_call").toLowerCase();
   const runNeedsCall = runScope !== "per_pair";
 
+  const statusPipelineId = pipelineId || activePipelineId;
+  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
+    statusPipelineId && salesAgent && customer
+      ? `/api/pipelines/${encodeURIComponent(statusPipelineId)}/artifact-status?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
+  const pipelineCallMapByNorm = useMemo(() => {
+    const out: Record<string, PipelineArtifactState> = {};
+    const callMap = pipelineArtifactStatus?.calls ?? {};
+    Object.entries(callMap).forEach(([k, v]) => {
+      const norm = normalizeCallId(k);
+      if (!norm || out[norm]) return;
+      out[norm] = v;
+    });
+    return out;
+  }, [pipelineArtifactStatus]);
+
   const callOptions = useMemo(() => {
-    const entries = Object.entries(callDates ?? {});
+    const merged = new Map<string, CallOptionMeta>();
+    (pairCalls ?? []).forEach((c) => {
+      const key = String(c?.call_id || "").trim();
+      if (!key) return;
+      merged.set(key, {
+        date: String(c?.date || ""),
+        has_audio: !!String(c?.record_path || "").trim(),
+        duration_s: Number.isFinite(Number(c?.duration)) ? Number(c?.duration) : null,
+      });
+    });
+    Object.entries(callDates ?? {}).forEach(([cid, meta]) => {
+      const key = String(cid || "").trim();
+      if (!key) return;
+      const prev = merged.get(key);
+      merged.set(key, {
+        date: String(meta?.date || prev?.date || ""),
+        has_audio: !!meta?.has_audio || !!prev?.has_audio,
+        duration_s: prev?.duration_s ?? null,
+      });
+    });
+    (transcriptCalls ?? []).forEach((tx) => {
+      const key = String(tx?.call_id || "").trim();
+      if (!key) return;
+      const prev = merged.get(key);
+      merged.set(key, {
+        date: prev?.date || "",
+        has_audio: !!prev?.has_audio,
+        duration_s: prev?.duration_s ?? null,
+      });
+    });
+    Object.keys(pipelineArtifactStatus?.calls ?? {}).forEach((cid) => {
+      const key = String(cid || "").trim();
+      if (!key) return;
+      if (merged.has(key)) return;
+      merged.set(key, { date: "", has_audio: false, duration_s: null });
+    });
+    if (callId && !merged.has(callId)) {
+      merged.set(callId, { date: "", has_audio: false, duration_s: null });
+    }
+    const entries = Array.from(merged.entries());
     entries.sort((a, b) => String(b[1]?.date || "").localeCompare(String(a[1]?.date || "")));
     return entries;
-  }, [callDates]);
+  }, [pairCalls, callDates, transcriptCalls, pipelineArtifactStatus, callId]);
 
   const selectedTranscriptCall = useMemo(() => {
     const wanted = normalizeCallId(callId);
@@ -1321,28 +1395,6 @@ function PipelineCanvas() {
     }
     return out;
   }, [transcriptCalls]);
-
-  const statusPipelineId = pipelineId || activePipelineId;
-  const statusCallIds = useMemo(
-    () => callOptions.map(([cid]) => cid).join(","),
-    [callOptions],
-  );
-  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
-    statusPipelineId && salesAgent && customer
-      ? `/api/pipelines/${encodeURIComponent(statusPipelineId)}/artifact-status?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}${statusCallIds ? `&call_ids=${encodeURIComponent(statusCallIds)}` : ""}`
-      : null,
-    fetcher,
-  );
-  const pipelineCallMapByNorm = useMemo(() => {
-    const out: Record<string, PipelineArtifactState> = {};
-    const callMap = pipelineArtifactStatus?.calls ?? {};
-    Object.entries(callMap).forEach(([k, v]) => {
-      const norm = normalizeCallId(k);
-      if (!norm || out[norm]) return;
-      out[norm] = v;
-    });
-    return out;
-  }, [pipelineArtifactStatus]);
 
   const crmPanelUrl = useMemo(() => {
     const qp = new URLSearchParams({ embedded: "1", mode: "pick_pair" });
@@ -3141,8 +3193,6 @@ function PipelineCanvas() {
       const cm    = classMeta(agCls);
       const usage = agId ? (agentUsageByPipeline[agId] ?? { total: 0, other: 0 }) : { total: 0, other: 0 };
       const stepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedNode.id);
-      const runtimeStatus = stepIndex >= 0 ? (stepStatuses[stepIndex] ?? "pending") : "pending";
-      const runtimeMeta = RUNTIME_META[runtimeStatus];
       const stepCache = getStepCacheDisplay(stepIndex);
 
       type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
@@ -3389,110 +3439,37 @@ function PipelineCanvas() {
                 )}
               </div>
 
-              {/* Right: runtime + cache */}
+              {/* Right: agent response only */}
               <div className="lg:col-span-3 min-h-0 overflow-y-auto space-y-2.5">
-                <PropertiesSection title="Runtime Status">
-                  {stepIndex >= 0 ? (
-                    <div className="space-y-2">
-                      <div className={cn("inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] font-semibold", runtimeMeta.className)}>
-                        <span className={cn("w-1.5 h-1.5 rounded-full", runtimeMeta.dot)} />
-                        {runtimeMeta.label}
-                      </div>
-                      <p className="text-[10px] text-gray-500">Step {stepIndex + 1} in execution order</p>
-                      {running && (
-                        <p className="text-[10px] text-orange-300">Pipeline is running for this context.</p>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-gray-500">
-                      This node is not currently part of the runnable processing sequence.
-                    </p>
-                  )}
-                </PropertiesSection>
-
-                {runError && (
-                  <PropertiesSection title="Latest Run Error">
-                    <p className="text-[11px] text-red-300 whitespace-pre-wrap">{runError}</p>
-                  </PropertiesSection>
-                )}
-
-                <PropertiesSection title="Effective Inputs">
+                <PropertiesSection title="Agent Response">
                   <div className="space-y-2">
+                    {renderCacheRunSelector()}
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[10px] text-gray-500">
-                        Based on current top-panel context ({salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"})
+                        {stepIndex >= 0 ? `Step ${stepIndex + 1}` : "Not in execution path"}
                       </p>
                       {renderResultViewToggle()}
                     </div>
-                    {Array.from(new Set(
-                      edges
-                        .filter((e) => e.target === selectedNode.id)
-                        .map((e) => nodes.find((n) => n.id === e.source))
-                        .filter((n): n is Node => !!n && n.type === "input")
-                        .map((n) => String((n.data as PipelineNodeData).inputSource || "").trim())
-                        .filter(Boolean),
-                    )).length === 0 ? (
-                      <p className="text-[11px] text-gray-500">No input sources connected to this step.</p>
-                    ) : (
-                      Array.from(new Set(
-                        edges
-                          .filter((e) => e.target === selectedNode.id)
-                          .map((e) => nodes.find((n) => n.id === e.source))
-                          .filter((n): n is Node => !!n && n.type === "input")
-                          .map((n) => String((n.data as PipelineNodeData).inputSource || "").trim())
-                          .filter(Boolean),
-                      )).map((src) => {
-                        const preview = inputPreviewBySource[src];
-                        return (
-                          <div key={src} className="rounded-lg border border-gray-800 bg-gray-900/50 p-2 space-y-1.5">
-                            <p className="text-[10px] text-cyan-300 font-medium">{src}</p>
-                            {preview?.loading ? (
-                              <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                Loading input preview…
-                              </div>
-                            ) : preview?.error ? (
-                              <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>
-                            ) : (
-                              renderResultContent(preview?.content || "", src)
-                            )}
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </PropertiesSection>
-
-                <PropertiesSection title="Processed Result">
-                  <div className="space-y-2">
-                    {renderCacheRunSelector()}
-                    <div className="flex items-center justify-end">{renderResultViewToggle()}</div>
                     {runContextMode !== "historical" ? (
                       <p className="text-[11px] text-gray-500">
-                        New run mode selected. Pick a historical run in the top bar to inspect processed results.
+                        Switch to Historical run to inspect the last processed agent response.
                       </p>
                     ) : stepCache ? (
                       <>
                         <p className="text-[10px] text-gray-500">
                           {stepCache.source === "selected_run"
-                            ? `From run ${String(stepCache.runId || "").slice(0, 8)}`
-                            : "From latest cache"}
+                            ? `Run ${String(stepCache.runId || "").slice(0, 8)}`
+                            : "Latest cache"}
                           {stepCache.createdAt ? ` · ${new Date(stepCache.createdAt).toLocaleString()}` : ""}
                         </p>
-                        <p className="text-[10px] text-gray-500">
-                          status: {stepCache.status || "unknown"}
-                          {stepCache.model ? ` · model: ${stepCache.model}` : ""}
-                        </p>
                         {stepCache.errorMsg && (
-                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">
-                            {stepCache.errorMsg}
-                          </p>
+                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">{stepCache.errorMsg}</p>
                         )}
                         {renderResultContent(stepCache.content || "")}
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">
-                        No processed artifact found for this step in the selected historical run.
+                        No agent response found for this step in the selected run.
                       </p>
                     )}
                   </div>
@@ -3505,42 +3482,17 @@ function PipelineCanvas() {
     }
 
     // ── Input / Artifact panel ────────────────────────────────────────────
-    const ioCacheTargets = (() => {
-      const targets: Array<{ key: string; title: string; subtitle: string; stepIndex: number }> = [];
-      if (selKind === "output") {
-        if (!selectedOutputProducer?.node_id) return targets;
-        const outputStepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedOutputProducer.node_id);
-        if (outputStepIndex < 0) return targets;
-        targets.push({
-          key: `output-${selectedOutputProducer.node_id}`,
-          title: selectedOutputProducer.agent_name || "Producer",
-          subtitle: `Step ${outputStepIndex + 1}`,
-          stepIndex: outputStepIndex,
-        });
-        return targets;
-      }
-      if (selKind === "input") {
-        const procIds = runtimeGraph.inputToProcNodeIds[selectedNode.id] ?? [];
-        const seen = new Set<number>();
-        for (const procId of procIds) {
-          const stepIndex = runtimeGraph.stepToProcNodeIds.indexOf(procId);
-          if (stepIndex < 0 || seen.has(stepIndex)) continue;
-          seen.add(stepIndex);
-          const procNode = nodes.find((n) => n.id === procId);
-          const procData = (procNode?.data as PipelineNodeData | undefined);
-          targets.push({
-            key: `input-${procId}`,
-            title: String(procData?.agentName || procData?.label || "Connected step"),
-            subtitle: `Step ${stepIndex + 1}`,
-            stepIndex,
-          });
-        }
-      }
-      return targets;
+    const ioCacheTarget = (() => {
+      if (selKind !== "output") return null;
+      if (!selectedOutputProducer?.node_id) return null;
+      const outputStepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedOutputProducer.node_id);
+      if (outputStepIndex < 0) return null;
+      return {
+        title: selectedOutputProducer.agent_name || "Producer",
+        subtitle: `Step ${outputStepIndex + 1}`,
+        stepIndex: outputStepIndex,
+      };
     })();
-
-    const ioRuntimeStatus = ((selData.runtimeStatus as RuntimeStatus | undefined) ?? "pending");
-    const ioRuntimeMeta = RUNTIME_META[ioRuntimeStatus];
 
     return (
       <div className="h-full min-h-0 p-3">
@@ -3596,38 +3548,6 @@ function PipelineCanvas() {
                       </button>
                     );
                   })}
-                </div>
-              </PropertiesSection>
-            )}
-
-            {selKind === "input" && (
-              <PropertiesSection title="Effective Input">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[10px] text-gray-500">
-                      Context: {salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"}
-                    </p>
-                    {renderResultViewToggle()}
-                  </div>
-                  {(() => {
-                    const src = String(selData.inputSource || "").trim();
-                    const preview = src ? inputPreviewBySource[src] : null;
-                    if (!src) {
-                      return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
-                    }
-                    if (preview?.loading) {
-                      return (
-                        <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Loading input preview…
-                        </div>
-                      );
-                    }
-                    if (preview?.error) {
-                      return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
-                    }
-                    return renderResultContent(preview?.content || "", src);
-                  })()}
                 </div>
               </PropertiesSection>
             )}
@@ -3758,69 +3678,73 @@ function PipelineCanvas() {
           </div>
 
           <div className="lg:col-span-4 min-h-0 overflow-y-auto space-y-2.5">
-            <PropertiesSection title="Runtime Status">
-              <div className="space-y-2">
-                <div className={cn("inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] font-semibold", ioRuntimeMeta.className)}>
-                  <span className={cn("w-1.5 h-1.5 rounded-full", ioRuntimeMeta.dot)} />
-                  {ioRuntimeMeta.label}
-                </div>
-                {running && (
-                  <p className="text-[10px] text-orange-300">Pipeline is running for this context.</p>
-                )}
-              </div>
-            </PropertiesSection>
-
-            <PropertiesSection title="Processed Results">
-              <div className="space-y-2">
-                {renderCacheRunSelector()}
-                <div className="flex items-center justify-end">{renderResultViewToggle()}</div>
-                {runContextMode !== "historical" ? (
-                  <p className="text-[11px] text-gray-500">
-                    New run mode selected. Pick a historical run in the top bar to inspect processed results.
-                  </p>
-                ) : ioCacheTargets.length === 0 ? (
-                  <p className="text-[11px] text-gray-500">
-                    No connected processing step to resolve run results for this element.
-                  </p>
-                ) : (
-                  ioCacheTargets.map((target) => {
-                    const cache = getStepCacheDisplay(target.stepIndex);
-                    return (
-                      <div key={target.key} className="rounded-lg border border-gray-800 bg-gray-900/50 p-2 space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-[11px] text-gray-200 font-medium truncate">{target.title}</p>
-                          <span className="text-[10px] text-gray-500 shrink-0">{target.subtitle}</span>
+            {selKind === "input" && (
+              <PropertiesSection title="Input Data">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-gray-500">
+                      Context: {salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"}
+                    </p>
+                    {renderResultViewToggle()}
+                  </div>
+                  {(() => {
+                    const src = String(selData.inputSource || "").trim();
+                    const preview = src ? inputPreviewBySource[src] : null;
+                    if (!src) return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
+                    if (preview?.loading) {
+                      return (
+                        <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Loading input preview…
                         </div>
-                        {cache ? (
-                          <>
-                            <p className="text-[10px] text-gray-500">
-                              {cache.source === "selected_run"
-                                ? `Run ${String(cache.runId || "").slice(0, 8)}`
-                                : "Latest cache"}
-                              {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
-                            </p>
-                            <p className="text-[10px] text-gray-500">
-                              status: {cache.status || "unknown"}
-                              {cache.model ? ` · model: ${cache.model}` : ""}
-                            </p>
-                            {cache.errorMsg && (
-                              <p className="text-[10px] text-red-300 whitespace-pre-wrap">
-                                {cache.errorMsg}
-                              </p>
-                            )}
-                            {renderResultContent(cache.content || "")}
-                          </>
-                        ) : (
-                          <p className="text-[10px] text-gray-500">
-                            No processed content for this step in the selected run.
-                          </p>
+                      );
+                    }
+                    if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
+                    return renderResultContent(preview?.content || "", src);
+                  })()}
+                </div>
+              </PropertiesSection>
+            )}
+
+            {selKind === "output" && (
+              <PropertiesSection title="Artifact Result">
+                <div className="space-y-2">
+                  {renderCacheRunSelector()}
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-gray-500">
+                      {ioCacheTarget ? `${ioCacheTarget.title} · ${ioCacheTarget.subtitle}` : "No producer connected"}
+                    </p>
+                    {renderResultViewToggle()}
+                  </div>
+                  {runContextMode !== "historical" ? (
+                    <p className="text-[11px] text-gray-500">
+                      Switch to Historical run to inspect the processed artifact.
+                    </p>
+                  ) : !ioCacheTarget ? (
+                    <p className="text-[11px] text-gray-500">
+                      Connect this artifact to a processing node to resolve its result.
+                    </p>
+                  ) : (() => {
+                    const cache = getStepCacheDisplay(ioCacheTarget.stepIndex);
+                    if (!cache) {
+                      return <p className="text-[10px] text-gray-500">No artifact result for this step in the selected run.</p>;
+                    }
+                    return (
+                      <>
+                        <p className="text-[10px] text-gray-500">
+                          {cache.source === "selected_run" ? `Run ${String(cache.runId || "").slice(0, 8)}` : "Latest cache"}
+                          {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
+                        </p>
+                        {cache.errorMsg && (
+                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">{cache.errorMsg}</p>
                         )}
-                      </div>
+                        {renderResultContent(cache.content || "")}
+                      </>
                     );
-                  })
-                )}
-              </div>
-            </PropertiesSection>
+                  })()}
+                </div>
+              </PropertiesSection>
+            )}
           </div>
         </div>
       </div>
@@ -3884,8 +3808,7 @@ function PipelineCanvas() {
         <button
           type="button"
           onClick={openCallsOverlay}
-          disabled={!runNeedsCall}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[190px] disabled:opacity-50"
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[190px]"
           title="Open calls browser"
         >
           <PhoneCall className="w-3 h-3 text-amber-400 shrink-0" />
@@ -4211,156 +4134,161 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div className="absolute inset-0 z-40 bg-black/55 backdrop-blur-[2px] p-4 flex items-center justify-center">
+            <div className="absolute inset-0 z-40 bg-black/40 backdrop-blur-[1px] p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(92vw,1360px)] h-[min(86vh,820px)] rounded-xl border border-indigo-800/45 bg-gray-950/95 shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-800/45 bg-gray-950/88 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
-              <button
-                onClick={() => setShowCallsPanel(false)}
-                className="absolute -top-5 left-1/2 -translate-x-1/2 z-30 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
-                title="Close Calls panel"
-              >
-                <X className="w-6 h-6" />
-              </button>
-              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
-                <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-white font-semibold truncate">Calls</p>
-                  <p className="text-[10px] text-gray-500 truncate">
-                    {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
-                  </p>
-                </div>
-              </div>
-              <div className="h-[calc(100%-3rem)] min-h-0 grid grid-cols-1 lg:grid-cols-12">
-                <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
-                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
-                    <p className="text-[11px] font-semibold text-gray-200">Call IDs</p>
-                  </div>
-                  <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                    {callOptions.length === 0 && (
-                      <p className="text-xs text-gray-500 italic px-1 py-2">
-                        Select sales agent + customer to load calls.
+                <button
+                  onClick={() => setShowCallsPanel(false)}
+                  className="absolute -top-6 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+                  title="Close Calls panel"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+                <div className="h-full w-full rounded-[inherit] overflow-hidden">
+                  <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                    <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-white font-semibold truncate">Calls</p>
+                      <p className="text-[10px] text-gray-500 truncate">
+                        {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
                       </p>
-                    )}
-                    {callOptions.map(([cid, meta]) => {
-                      const selected = normalizeCallId(cid) === normalizeCallId(callId);
-                      const txCall = transcriptCallMapByNorm.get(normalizeCallId(cid));
-                      const hasTranscript = !!(
-                        txCall?.final_path
-                        || txCall?.smoothed_path
-                        || txCall?.voted_path
-                        || txCall?.pipeline_final_files?.[0]?.path
-                      );
-                      const callArtifacts = pipelineCallMapByNorm[normalizeCallId(cid)];
-                      const artifactTypes = Array.from(new Set((callArtifacts?.artifact_types ?? []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean)));
-                      return (
-                        <button
-                          key={cid}
-                          onClick={() => setCallId(cid)}
-                          className={cn(
-                            "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
-                            selected
-                              ? "border-amber-600/70 bg-amber-900/30"
-                              : "border-gray-800 bg-gray-900/60 hover:bg-gray-800/80",
-                          )}
-                        >
-                          <div className="flex items-center gap-1.5">
-                            <p className="text-xs font-mono text-gray-100 truncate flex-1">{cid}</p>
-                            {hasTranscript && (
-                              <span
-                                title="Transcript available"
-                                className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
-                              >
-                                <FileText className="h-3 w-3" />
-                              </span>
-                            )}
-                            {artifactTypes.map((tp) => {
-                              const isPersona = tp.includes("persona") && !tp.includes("score");
-                              const isScore = tp.includes("score");
-                              const isNotes = tp.includes("note") && !tp.includes("compliance");
-                              const isCompliance = tp.includes("compliance") || tp.includes("violation");
-                              const Icon = isPersona ? User : isScore ? BadgeCheck : isNotes ? StickyNote : isCompliance ? ShieldCheck : Bot;
-                              const classes = isPersona
-                                ? "border-fuchsia-700/60 bg-fuchsia-900/35 text-fuchsia-300"
-                                : isScore
-                                  ? "border-amber-700/60 bg-amber-900/35 text-amber-300"
-                                  : isNotes
-                                    ? "border-indigo-700/60 bg-indigo-900/35 text-indigo-300"
-                                    : isCompliance
-                                      ? "border-emerald-700/60 bg-emerald-900/35 text-emerald-300"
-                                      : "border-violet-700/60 bg-violet-900/35 text-violet-300";
-                              return (
-                                <span
-                                  key={`${cid}-${tp}`}
-                                  title={`Artifact: ${tp}`}
-                                  className={cn("inline-flex h-5 w-5 items-center justify-center rounded-md border", classes)}
-                                >
-                                  <Icon className="h-3 w-3" />
-                                </span>
-                              );
-                            })}
-                          </div>
-                          <p className="text-[10px] text-gray-500 truncate">
-                            {meta?.date ? new Date(meta.date).toLocaleString() : "Unknown date"}
+                    </div>
+                  </div>
+                  <div className="h-[calc(100%-3rem)] min-h-0 grid grid-cols-1 lg:grid-cols-12">
+                    <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
+                      <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                        <p className="text-[11px] font-semibold text-gray-200">Call IDs</p>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                        {callOptions.length === 0 && (
+                          <p className="text-xs text-gray-500 italic px-1 py-2">
+                            Select sales agent + customer to load calls.
                           </p>
-                        </button>
-                      );
-                    })}
+                        )}
+                        {callOptions.map(([cid, meta]) => {
+                          const selected = normalizeCallId(cid) === normalizeCallId(callId);
+                          const txCall = transcriptCallMapByNorm.get(normalizeCallId(cid));
+                          const hasTranscript = !!(
+                            txCall?.final_path
+                            || txCall?.smoothed_path
+                            || txCall?.voted_path
+                            || txCall?.pipeline_final_files?.[0]?.path
+                          );
+                          const callArtifacts = pipelineCallMapByNorm[normalizeCallId(cid)];
+                          const artifactTypes = Array.from(new Set((callArtifacts?.artifact_types ?? []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean)));
+                          return (
+                            <button
+                              key={cid}
+                              onClick={() => setCallId(cid)}
+                              className={cn(
+                                "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
+                                selected
+                                  ? "border-amber-600/70 bg-amber-900/30"
+                                  : "border-gray-800 bg-gray-900/60 hover:bg-gray-800/80",
+                              )}
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <p className="text-xs font-mono text-gray-100 truncate flex-1">{cid}</p>
+                                {hasTranscript && (
+                                  <span
+                                    title="Transcript available"
+                                    className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
+                                  >
+                                    <FileText className="h-3 w-3" />
+                                  </span>
+                                )}
+                                {artifactTypes.map((tp) => {
+                                  const isPersona = tp.includes("persona") && !tp.includes("score");
+                                  const isScore = tp.includes("score");
+                                  const isNotes = tp.includes("note") && !tp.includes("compliance");
+                                  const isCompliance = tp.includes("compliance") || tp.includes("violation");
+                                  const Icon = isPersona ? User : isScore ? BadgeCheck : isNotes ? StickyNote : isCompliance ? ShieldCheck : Bot;
+                                  const classes = isPersona
+                                    ? "border-fuchsia-700/60 bg-fuchsia-900/35 text-fuchsia-300"
+                                    : isScore
+                                      ? "border-amber-700/60 bg-amber-900/35 text-amber-300"
+                                      : isNotes
+                                        ? "border-indigo-700/60 bg-indigo-900/35 text-indigo-300"
+                                        : isCompliance
+                                          ? "border-emerald-700/60 bg-emerald-900/35 text-emerald-300"
+                                          : "border-violet-700/60 bg-violet-900/35 text-violet-300";
+                                  return (
+                                    <span
+                                      key={`${cid}-${tp}`}
+                                      title={`Artifact: ${tp}`}
+                                      className={cn("inline-flex h-5 w-5 items-center justify-center rounded-md border", classes)}
+                                    >
+                                      <Icon className="h-3 w-3" />
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-[10px] text-gray-500 truncate">
+                                {meta?.date ? new Date(meta.date).toLocaleString() : "Unknown date"}
+                                {typeof meta?.duration_s === "number" && Number.isFinite(meta.duration_s) ? ` · ${Math.round(meta.duration_s)}s` : ""}
+                              </p>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+                    <section className="lg:col-span-8 min-h-0 flex flex-col">
+                      <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                        <p className="text-[11px] font-semibold text-gray-200">Transcript</p>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-hidden">
+                        {!callId ? (
+                          <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                            Select a Call ID to preview transcript.
+                          </div>
+                        ) : callTranscriptLoading ? (
+                          <div className="h-full flex items-center justify-center gap-2 text-gray-400 text-sm">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Loading transcript…
+                          </div>
+                        ) : callTranscriptError ? (
+                          <div className="h-full flex items-center justify-center text-red-300 text-sm px-4 text-center">
+                            {callTranscriptError}
+                          </div>
+                        ) : callTranscriptText ? (
+                          <div className="h-full p-2">
+                            <TranscriptViewer content={callTranscriptText} format="txt" className="h-full" />
+                          </div>
+                        ) : (
+                          <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                            No transcript content.
+                          </div>
+                        )}
+                      </div>
+                    </section>
                   </div>
-                </section>
-                <section className="lg:col-span-8 min-h-0 flex flex-col">
-                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
-                    <p className="text-[11px] font-semibold text-gray-200">Transcript</p>
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-hidden">
-                    {!callId ? (
-                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-                        Select a Call ID to preview transcript.
-                      </div>
-                    ) : callTranscriptLoading ? (
-                      <div className="h-full flex items-center justify-center gap-2 text-gray-400 text-sm">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Loading transcript…
-                      </div>
-                    ) : callTranscriptError ? (
-                      <div className="h-full flex items-center justify-center text-red-300 text-sm px-4 text-center">
-                        {callTranscriptError}
-                      </div>
-                    ) : callTranscriptText ? (
-                      <div className="h-full p-2">
-                        <TranscriptViewer content={callTranscriptText} format="txt" className="h-full" />
-                      </div>
-                    ) : (
-                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-                        No transcript content.
-                      </div>
-                    )}
-                  </div>
-                </section>
-              </div>
+                </div>
               </div>
             </div>
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-40 bg-black/55 backdrop-blur-[2px] p-4 flex items-center justify-center">
+            <div className="absolute inset-0 z-40 bg-black/40 backdrop-blur-[1px] p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(92vw,1360px)] h-[min(86vh,820px)] rounded-xl border border-cyan-800/45 bg-gray-950/95 shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-cyan-800/45 bg-gray-950/88 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
-              <button
-                onClick={() => setShowCrmPanel(false)}
-                className="absolute -top-5 left-1/2 -translate-x-1/2 z-30 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
-                title="Close CRM panel"
-              >
-                <X className="w-6 h-6" />
-              </button>
-              <iframe
-                title="CRM Browser"
-                src={crmPanelUrl}
-                className="w-full h-full border-0 bg-gray-900"
-              />
+                <button
+                  onClick={() => setShowCrmPanel(false)}
+                  className="absolute -top-6 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+                  title="Close CRM panel"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+                <div className="h-full w-full rounded-[inherit] overflow-hidden">
+                  <iframe
+                    title="CRM Browser"
+                    src={crmPanelUrl}
+                    className="w-full h-full border-0 bg-gray-900"
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -4514,28 +4442,30 @@ function PipelineCanvas() {
           )}
 
           {selectedNodeId && (
-            <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[2px] p-4 flex items-center justify-center">
+            <div className="absolute inset-0 z-30 bg-black/40 backdrop-blur-[1px] p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(92vw,1420px)] h-[min(88vh,860px)] rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden flex flex-col"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700/45 bg-gray-900/88 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
-              <button
-                onClick={() => setSelectedNodeId(null)}
-                className="absolute -top-5 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
-                title="Close editor"
-              >
-                <X className="w-6 h-6" />
-              </button>
-                <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
-                  <div className="min-w-0">
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Edit Element</p>
-                    <p className="text-sm text-white font-semibold truncate">
-                      {(selectedNode?.data as PipelineNodeData | undefined)?.label || "Element"}
-                    </p>
+                <button
+                  onClick={() => setSelectedNodeId(null)}
+                  className="absolute -top-6 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+                  title="Close editor"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+                <div className="h-full w-full rounded-[inherit] overflow-hidden flex flex-col">
+                  <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
+                    <div className="min-w-0">
+                      <p className="text-xs text-gray-500 uppercase tracking-wide">Edit Element</p>
+                      <p className="text-sm text-white font-semibold truncate">
+                        {(selectedNode?.data as PipelineNodeData | undefined)?.label || "Element"}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>
-                  {renderPanel()}
+                  <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>
+                    {renderPanel()}
+                  </div>
                 </div>
               </div>
             </div>
