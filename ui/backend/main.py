@@ -35,6 +35,7 @@ from ui.backend.routers.universal_agents import router as universal_agents_route
 from ui.backend.routers.pipelines import router as pipelines_router
 from ui.backend.routers.history import router as history_router
 from ui.backend.routers.assistant import router as assistant_router
+from ui.backend.routers.webhooks import router as webhooks_router
 from ui.backend.services import log_buffer
 from ui.backend.version import APP_VERSION
 
@@ -69,6 +70,7 @@ app.include_router(universal_agents_router)
 app.include_router(pipelines_router)
 app.include_router(history_router)
 app.include_router(assistant_router)
+app.include_router(webhooks_router)
 
 
 @app.on_event("startup")

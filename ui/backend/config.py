@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     crm_push_api_key: str = ""
     crm_push_data_field: str = "note"
     crm_push_timeout_s: int = 20
+    crm_webhook_enabled: bool = True
+    crm_webhook_secret: str = ""
+    crm_webhook_require_secret: bool = True
+    crm_webhook_token_header: str = "x-webhook-token"
+    crm_webhook_transcription_timeout_s: int = 900
+    crm_webhook_transcription_poll_interval_s: float = 2.0
 
     model_config = {"env_file": str(Path(__file__).parent.parent.parent / ".env"), "extra": "ignore"}
 
