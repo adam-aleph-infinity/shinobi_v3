@@ -4568,7 +4568,7 @@ function PipelineCanvas() {
 
 export default function PipelinePage() {
   return (
-    <div className="h-screen w-full">
+    <div className="h-full w-full">
       <ReactFlowProvider>
         <PipelineCanvas />
       </ReactFlowProvider>
