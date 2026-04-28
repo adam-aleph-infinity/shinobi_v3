@@ -3758,9 +3758,11 @@ function PipelineCanvas() {
       showToast("A run is already in progress", false);
       return;
     }
-    const preferredRunId = String(
-      (runContextMode === "historical" ? selectedCacheRun?.id : "") || currentRunId || "",
-    ).trim();
+    // New-run input prep should bootstrap a fresh run id so old historical
+    // step states never bleed into current visual status.
+    const preferredRunId = runContextMode === "historical"
+      ? String(selectedCacheRun?.id || "").trim()
+      : "";
     void runPipeline("default", {
       executeStepIndices,
       force: false,
