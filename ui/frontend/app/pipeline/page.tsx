@@ -282,6 +282,7 @@ interface PipelineRunExecOptions {
   forceStepIndices?: number[];
   force?: boolean;
   resumePartial?: boolean;
+  continueRunId?: string;
 }
 
 interface InputPreviewState {
@@ -790,7 +791,7 @@ function NodeCard({
               }}
               disabled={runButtonDisabled || !onRunStep}
               className="h-5 min-w-[24px] rounded border border-indigo-700/60 bg-indigo-900/50 px-1 text-[10px] font-bold text-indigo-200 hover:bg-indigo-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
-              title={`Run required upstream chain to Step ${runStepIndex + 1} (no downstream)`}
+              title={`Run this step only (Step ${runStepIndex + 1})`}
             >
               ▶
             </button>
@@ -2240,24 +2241,15 @@ function PipelineCanvas() {
       procStepIndexByNodeId[nodeId] = idx;
     });
     const outputStepIndexByNodeId: Record<string, number> = {};
-    const inputStepIndexByNodeId: Record<string, number> = {};
     const incomingByNode: Record<string, string[]> = {};
-    const outgoingByNode: Record<string, string[]> = {};
     edges.forEach((e) => {
       (incomingByNode[String(e.target)] ??= []).push(String(e.source));
-      (outgoingByNode[String(e.source)] ??= []).push(String(e.target));
     });
     for (const n of nodes) {
       if (n.type === "output") {
         const incoming = incomingByNode[n.id] || [];
         const srcProc = incoming.find((sid) => procStepIndexByNodeId[sid] != null);
         if (srcProc != null) outputStepIndexByNodeId[n.id] = procStepIndexByNodeId[srcProc];
-      } else if (n.type === "input") {
-        const outgoing = outgoingByNode[n.id] || [];
-        const idxs = outgoing
-          .map((tid) => procStepIndexByNodeId[tid])
-          .filter((idx): idx is number => Number.isFinite(idx));
-        if (idxs.length) inputStepIndexByNodeId[n.id] = Math.min(...idxs);
       }
     }
 
@@ -2270,7 +2262,8 @@ function PipelineCanvas() {
       } else if (n.type === "output") {
         runStepIndex = outputStepIndexByNodeId[n.id] ?? null;
       } else if (n.type === "input") {
-        runStepIndex = inputStepIndexByNodeId[n.id] ?? null;
+        // Inputs are data sources, not executable pipeline steps.
+        runStepIndex = null;
       }
       return {
         ...n,
@@ -3447,6 +3440,10 @@ function PipelineCanvas() {
         .filter((i) => Number.isFinite(i) && i >= 0 && i < stepCount)
         .map((i) => Math.floor(i))));
     }
+    const continueRunId = String(execOpts.continueRunId || "").trim();
+    if (continueRunId) {
+      appendRunLog(`Continuing run id ${continueRunId.slice(0, 8)}`, "pipeline");
+    }
 
     try {
       const res = await fetch(`/api/pipelines/${pipelineId}/run`, {
@@ -3456,6 +3453,7 @@ function PipelineCanvas() {
           sales_agent: salesAgent,
           customer,
           call_id: runNeedsCall ? callId : "",
+          run_id: continueRunId,
           force,
           resume_partial: resumePartial,
           force_step_indices: forceStepIndices,
@@ -3530,18 +3528,6 @@ function PipelineCanvas() {
     }
   }
 
-  function getUpstreamStepClosure(targetStepIndex: number): number[] {
-    const visited = new Set<number>();
-    const walk = (idx: number) => {
-      if (visited.has(idx)) return;
-      visited.add(idx);
-      const parents = runtimeGraph.stepParents[idx] || [];
-      for (const p of parents) walk(p);
-    };
-    walk(targetStepIndex);
-    return Array.from(visited).sort((a, b) => a - b);
-  }
-
   function runNodeStep(targetStepIndex: number) {
     if (!Number.isFinite(targetStepIndex) || targetStepIndex < 0) {
       showToast("Invalid target step", false);
@@ -3551,31 +3537,15 @@ function PipelineCanvas() {
       showToast("A run is already in progress", false);
       return;
     }
-    let executeStepIndices = getUpstreamStepClosure(targetStepIndex);
-    if (runContextMode === "historical" && selectedCacheRun) {
-      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
-      const satisfied = new Set<number>();
-      runSteps.forEach((row, idx) => {
-        const rawState = String(row.state || row.status || "").toLowerCase();
-        if (["done", "completed", "pass", "success", "cached", "cache_hit"].includes(rawState)) {
-          satisfied.add(idx);
-        }
-      });
-      const before = executeStepIndices.length;
-      executeStepIndices = executeStepIndices.filter((idx) => !satisfied.has(idx));
-      const skipped = before - executeStepIndices.length;
-      if (skipped > 0) {
-        appendRunLog(`Step play: skipped ${skipped} already completed/cached step(s) from selected run`, "pipeline");
-      }
-    }
-    if (!executeStepIndices.length) {
-      showToast("All required upstream steps are already completed/cached", true);
-      return;
-    }
+    const preferredRunId = String(
+      (runContextMode === "historical" ? selectedCacheRun?.id : "") || currentRunId || "",
+    ).trim();
     void runPipeline("default", {
-      executeStepIndices,
+      executeStepIndices: [targetStepIndex],
+      forceStepIndices: [targetStepIndex],
       force: false,
       resumePartial: true,
+      continueRunId: preferredRunId,
     });
   }
 

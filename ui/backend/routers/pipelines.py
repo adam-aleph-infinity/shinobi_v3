@@ -2238,6 +2238,7 @@ class PipelineRunRequest(BaseModel):
     sales_agent: str = ""
     customer: str = ""
     call_id: str = ""
+    run_id: str = ""  # continue/append within an existing run id when provided
     force: bool = False
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
     resume_partial: bool = False  # allow per-step cache fallback when exact fingerprint miss
@@ -4071,8 +4072,16 @@ async def run_pipeline(
         recent = log_buffer.get_recent(1)
         start_seq = recent[-1].seq if recent else 0
 
-        run_id = str(uuid.uuid4())
+        requested_run_id = str(req.run_id or "").strip()
+        run_id = requested_run_id or str(uuid.uuid4())
         run_start_dt = datetime.utcnow().isoformat()
+        existing_run_row = None
+        if requested_run_id:
+            try:
+                with Session(_db_engine) as _s:
+                    existing_run_row = _s.get(PR, requested_run_id)
+            except Exception:
+                existing_run_row = None
         execution_session_id = execution_logs.start_session(
             action="pipeline_run",
             source="backend",
@@ -4083,6 +4092,7 @@ async def run_pipeline(
                 "sales_agent": req.sales_agent,
                 "customer": req.customer,
                 "call_id": req.call_id,
+                "requested_run_id": requested_run_id,
                 "force": bool(req.force),
                 "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
                 "resume_partial": bool(req.resume_partial),
@@ -4100,7 +4110,7 @@ async def run_pipeline(
             data={"run_id": run_id, "steps_total": len(steps)},
             client_local_time=client_local_time,
         )
-        run_steps = [
+        _default_run_steps = [
             {
                 "agent_id":         s.get("agent_id", ""),
                 "agent_name":       "",
@@ -4124,18 +4134,52 @@ async def run_pipeline(
             }
             for s in steps
         ]
-        run_record = PR(
-            id=run_id,
-            pipeline_id=pipeline_id,
-            pipeline_name=pipeline_name,
-            sales_agent=req.sales_agent,
-            customer=req.customer,
-            call_id=req.call_id,
-            status="running",
-            canvas_json=json.dumps(pipeline_def.get("canvas", {})),
-        )
+        run_steps = _default_run_steps
+        if existing_run_row and (existing_run_row.steps_json or "").strip():
+            try:
+                _parsed = json.loads(existing_run_row.steps_json or "[]")
+                if isinstance(_parsed, list) and len(_parsed) == len(_default_run_steps):
+                    run_steps = []
+                    for _idx, _base in enumerate(_default_run_steps):
+                        _row = _parsed[_idx] if _idx < len(_parsed) and isinstance(_parsed[_idx], dict) else {}
+                        _merged = dict(_base)
+                        _merged.update(_row or {})
+                        # Keep agent_id aligned to current pipeline step definition.
+                        _merged["agent_id"] = _base.get("agent_id", "")
+                        run_steps.append(_merged)
+            except Exception:
+                run_steps = _default_run_steps
+
         with Session(_db_engine) as _s:
-            _s.add(run_record)
+            if existing_run_row:
+                _row = _s.get(PR, run_id)
+                if _row is None:
+                    existing_run_row = None
+                else:
+                    _row.pipeline_id = pipeline_id
+                    _row.pipeline_name = pipeline_name
+                    _row.sales_agent = req.sales_agent
+                    _row.customer = req.customer
+                    _row.call_id = req.call_id
+                    _row.status = "running"
+                    _row.canvas_json = json.dumps(pipeline_def.get("canvas", {}))
+                    _row.steps_json = json.dumps(run_steps)
+                    _row.log_json = ""
+                    _row.finished_at = None
+                    _s.add(_row)
+            if not existing_run_row:
+                run_record = PR(
+                    id=run_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=pipeline_name,
+                    sales_agent=req.sales_agent,
+                    customer=req.customer,
+                    call_id=req.call_id,
+                    status="running",
+                    canvas_json=json.dumps(pipeline_def.get("canvas", {})),
+                    steps_json=json.dumps(run_steps),
+                )
+                _s.add(run_record)
             _s.commit()
 
         yield _sse(
