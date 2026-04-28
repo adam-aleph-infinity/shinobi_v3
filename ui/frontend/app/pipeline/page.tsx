@@ -2005,11 +2005,12 @@ function PipelineCanvas() {
   }, [selectedCacheRun, parsedRunStepsById]);
 
   const cacheUrl = useMemo(() => {
+    if (runContextMode !== "historical") return null;
     if (!pipelineId || !salesAgent || !customer) return null;
     const runCallId = runNeedsCall ? callId : "";
     if (runNeedsCall && !runCallId) return null;
     return `/api/pipelines/${pipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(runCallId)}`;
-  }, [pipelineId, salesAgent, customer, runNeedsCall, callId]);
+  }, [runContextMode, pipelineId, salesAgent, customer, runNeedsCall, callId]);
   const { mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
   const getStepCacheDisplay = useCallback(
@@ -3799,44 +3800,18 @@ function PipelineCanvas() {
     isLoading: artifactTemplateLoading,
   } = useSWR<ArtifactPromptTemplate>(artifactTemplateUrl, fetcher, { revalidateOnFocus: false });
 
-  const runSessionStorageKey = useMemo(() => {
-    const pid = String(pipelineId || "").trim();
-    const a = String(salesAgent || "").trim();
-    const c = String(customer || "").trim();
-    if (!pid || !a || !c) return "";
-    const callPart = runNeedsCall ? String(callId || "").trim() : "";
-    return `pipeline:lastRunId:${pid}:${a}:${c}:${callPart}`;
-  }, [pipelineId, salesAgent, customer, runNeedsCall, callId]);
+  useEffect(() => {
+    if (runContextMode !== "new") return;
+    // New run mode should start clean: do not preload a previous run id/cache context.
+    setCurrentRunId("");
+  }, [runContextMode, pipelineId, salesAgent, customer, runNeedsCall, callId]);
 
   useEffect(() => {
-    if (!runSessionStorageKey || typeof window === "undefined") {
-      setCurrentRunId("");
-      return;
-    }
-    try {
-      const saved = String(sessionStorage.getItem(runSessionStorageKey) || "").trim();
-      setCurrentRunId(saved);
-    } catch {
-      setCurrentRunId("");
-    }
-  }, [runSessionStorageKey]);
-
-  useEffect(() => {
-    if (!runSessionStorageKey || typeof window === "undefined") return;
-    try {
-      const val = String(currentRunId || "").trim();
-      if (val) sessionStorage.setItem(runSessionStorageKey, val);
-      else sessionStorage.removeItem(runSessionStorageKey);
-    } catch {
-      // ignore sessionStorage errors
-    }
-  }, [runSessionStorageKey, currentRunId]);
-
-  useEffect(() => {
+    if (!running) return;
     const fromLive = String(livePipelineState?.run_id || "").trim();
     if (!fromLive) return;
     setCurrentRunId((prev) => (prev === fromLive ? prev : fromLive));
-  }, [livePipelineState?.run_id]);
+  }, [livePipelineState?.run_id, running]);
 
   // Sync agentDraft when selected node changes — always init so prompts are visible immediately
   useEffect(() => {
