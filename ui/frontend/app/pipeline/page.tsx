@@ -1416,6 +1416,7 @@ function PipelineCanvas() {
   const [runLogFilterMode, setRunLogFilterMode] = useState<CanvasLogFilterMode>("all");
   const [runLogsGrouped, setRunLogsGrouped] = useState(false);
   const [liveModeEnabled, setLiveModeEnabled] = useState(false);
+  const [liveListenAnyCall, setLiveListenAnyCall] = useState(false);
   const [liveWebhookStatus, setLiveWebhookStatus] = useState<LiveWebhookStatus>("off");
   const [liveCursorMs, setLiveCursorMs] = useState(0);
   const [liveTriggeredAt, setLiveTriggeredAt] = useState("");
@@ -3392,9 +3393,20 @@ function PipelineCanvas() {
       setLiveTriggeredAt("");
       return;
     }
-    if (!pipelineId || !salesAgent || !customer || (runNeedsCall && !callId)) {
+    if (
+      !pipelineId
+      || (
+        !liveListenAnyCall
+        && (!salesAgent || !customer || (runNeedsCall && !callId))
+      )
+    ) {
       setLiveWebhookStatus("error");
-      appendRunLog("Live mode needs pipeline + sales agent + customer" + (runNeedsCall ? " + call id" : ""), "warn");
+      appendRunLog(
+        liveListenAnyCall
+          ? "Live mode needs a selected pipeline"
+          : "Live mode needs pipeline + sales agent + customer" + (runNeedsCall ? " + call id" : ""),
+        "warn",
+      );
       return;
     }
 
@@ -3412,7 +3424,9 @@ function PipelineCanvas() {
     setLogsExpanded(true);
     setLogsCollapsed(false);
     appendRunLog(
-      `Live mode armed for ${salesAgent} · ${customer}${runNeedsCall ? ` · call ${callId}` : ""}`,
+      liveListenAnyCall
+        ? "Live mode armed for ANY CRM call webhook"
+        : `Live mode armed for ${salesAgent} · ${customer}${runNeedsCall ? ` · call ${callId}` : ""}`,
       "pipeline",
     );
 
@@ -3422,9 +3436,11 @@ function PipelineCanvas() {
       while (!stopped && !ctrl.signal.aborted) {
         try {
           const qp = new URLSearchParams();
-          qp.set("sales_agent", salesAgent);
-          qp.set("customer", customer);
-          if (runNeedsCall && callId) qp.set("call_id", callId);
+          if (!liveListenAnyCall) {
+            qp.set("sales_agent", salesAgent);
+            qp.set("customer", customer);
+            if (runNeedsCall && callId) qp.set("call_id", callId);
+          }
           qp.set("after_ms", String(Math.max(0, Math.floor(cursorMs))));
           qp.set("timeout_s", "45");
           const res = await fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/live-webhook/wait?${qp.toString()}`, {
@@ -3480,6 +3496,7 @@ function PipelineCanvas() {
     };
   }, [
     liveModeEnabled,
+    liveListenAnyCall,
     pipelineId,
     salesAgent,
     customer,
@@ -4692,7 +4709,12 @@ function PipelineCanvas() {
     return "text-gray-300";
   };
 
-  const liveModeReady = !!(pipelineId && salesAgent && customer && (!runNeedsCall || callId));
+  const liveModeReady = !!(
+    pipelineId && (
+      liveListenAnyCall
+      || (salesAgent && customer && (!runNeedsCall || callId))
+    )
+  );
   const liveStatusTone =
     liveWebhookStatus === "triggered" ? "border-emerald-600 text-emerald-300 bg-emerald-950/50 hover:bg-emerald-950/70" :
     liveWebhookStatus === "waiting" ? "border-amber-600 text-amber-300 bg-amber-950/40 hover:bg-amber-950/60" :
@@ -4802,6 +4824,26 @@ function PipelineCanvas() {
             {isActivePipeline ? "Active" : "Set active"}
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => {
+            if (liveModeEnabled) {
+              showToast("Disable Live mode before changing scope", false);
+              return;
+            }
+            setLiveListenAnyCall((v) => !v);
+          }}
+          className={cn(
+            "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
+            liveListenAnyCall
+              ? "border-cyan-600 text-cyan-200 bg-cyan-950/50 hover:bg-cyan-950/70"
+              : "border-gray-700 text-gray-300 hover:bg-gray-800",
+          )}
+          title={liveListenAnyCall ? "Listening scope: any CRM call" : "Listening scope: selected pair/call"}
+        >
+          <PhoneCall className="w-3 h-3" />
+          Any Call
+        </button>
 
         <button
           type="button"
@@ -4815,7 +4857,9 @@ function PipelineCanvas() {
             }
             if (!liveModeReady) {
               showToast(
-                `Live mode needs pipeline + sales agent + customer${runNeedsCall ? " + call id" : ""}`,
+                liveListenAnyCall
+                  ? "Live mode needs a selected pipeline"
+                  : `Live mode needs pipeline + sales agent + customer${runNeedsCall ? " + call id" : ""}`,
                 false,
               );
               return;
