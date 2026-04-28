@@ -494,10 +494,8 @@ interface PipelineNodeData extends Record<string, unknown> {
   stageIndex: number;
   runtimeStatus?: RuntimeStatus;
   runStepIndex?: number | null;
-  canRunWithDeps?: boolean;
   runButtonDisabled?: boolean;
   onRunStep?: () => void;
-  onRunStepWithDeps?: () => void;
   // agent node — linked backend agent
   agentId:    string;
   agentClass: string;
@@ -743,10 +741,8 @@ function NodeCard({
   children, meta, selected, kind,
   runtimeStatus = "pending",
   runStepIndex = null,
-  canRunWithDeps = false,
   runButtonDisabled = false,
   onRunStep,
-  onRunStepWithDeps,
 }: {
   children: React.ReactNode;
   meta:     Meta;
@@ -754,10 +750,8 @@ function NodeCard({
   kind:     NodeKind;
   runtimeStatus?: RuntimeStatus;
   runStepIndex?: number | null;
-  canRunWithDeps?: boolean;
   runButtonDisabled?: boolean;
   onRunStep?: () => void;
-  onRunStepWithDeps?: () => void;
 }) {
   const hasStepRun = typeof runStepIndex === "number" && runStepIndex >= 0;
   const ringColor =
@@ -796,24 +790,10 @@ function NodeCard({
               }}
               disabled={runButtonDisabled || !onRunStep}
               className="h-5 min-w-[24px] rounded border border-indigo-700/60 bg-indigo-900/50 px-1 text-[10px] font-bold text-indigo-200 hover:bg-indigo-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
-              title={`Run this step only (Step ${runStepIndex + 1})`}
+              title={`Run required upstream chain to Step ${runStepIndex + 1} (no downstream)`}
             >
               ▶
             </button>
-            {canRunWithDeps && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRunStepWithDeps?.();
-                }}
-                disabled={runButtonDisabled || !onRunStepWithDeps}
-                className="h-5 min-w-[30px] rounded border border-cyan-700/60 bg-cyan-900/45 px-1 text-[10px] font-bold text-cyan-200 hover:bg-cyan-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
-                title={`Run required upstream steps + this step (Step ${runStepIndex + 1})`}
-              >
-                ⏩
-              </button>
-            )}
           </div>
         )}
         {children}
@@ -896,7 +876,6 @@ function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData;
   const SrcIcon = src?.icon ?? null;
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
   const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
-  const canRunWithDeps = !!data.canRunWithDeps;
   const runButtonDisabled = !!data.runButtonDisabled;
   return (
     <NodeCard
@@ -905,10 +884,8 @@ function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData;
       kind="input"
       runtimeStatus={runtimeStatus}
       runStepIndex={runStepIndex}
-      canRunWithDeps={canRunWithDeps}
       runButtonDisabled={runButtonDisabled}
       onRunStep={data.onRunStep}
-      onRunStepWithDeps={data.onRunStepWithDeps}
     >
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{SrcIcon ? <SrcIcon className="w-4 h-4" /> : m.icon}</span>
@@ -941,7 +918,6 @@ function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNode
   const hasAgent = !!(data.agentId as string);
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
   const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
-  const canRunWithDeps = !!data.canRunWithDeps;
   const runButtonDisabled = !!data.runButtonDisabled;
   return (
     <NodeCard
@@ -950,10 +926,8 @@ function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNode
       kind="processing"
       runtimeStatus={runtimeStatus}
       runStepIndex={runStepIndex}
-      canRunWithDeps={canRunWithDeps}
       runButtonDisabled={runButtonDisabled}
       onRunStep={data.onRunStep}
-      onRunStepWithDeps={data.onRunStepWithDeps}
     >
       <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
@@ -996,7 +970,6 @@ function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData
   const m = getMeta("output", data.subType);
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
   const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
-  const canRunWithDeps = !!data.canRunWithDeps;
   const runButtonDisabled = !!data.runButtonDisabled;
   return (
     <NodeCard
@@ -1005,10 +978,8 @@ function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData
       kind="output"
       runtimeStatus={runtimeStatus}
       runStepIndex={runStepIndex}
-      canRunWithDeps={canRunWithDeps}
       runButtonDisabled={runButtonDisabled}
       onRunStep={data.onRunStep}
-      onRunStepWithDeps={data.onRunStepWithDeps}
     >
       <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
@@ -2301,18 +2272,13 @@ function PipelineCanvas() {
       } else if (n.type === "input") {
         runStepIndex = inputStepIndexByNodeId[n.id] ?? null;
       }
-      const canRunWithDeps =
-        runStepIndex != null &&
-        (runtimeGraph.stepParents[runStepIndex]?.length || 0) > 0;
       return {
         ...n,
         data: {
           ...base,
           runStepIndex,
-          canRunWithDeps,
           runButtonDisabled,
-          onRunStep: runStepIndex != null ? () => runNodeStep(runStepIndex, false) : undefined,
-          onRunStepWithDeps: canRunWithDeps ? () => runNodeStep(runStepIndex as number, true) : undefined,
+          onRunStep: runStepIndex != null ? () => runNodeStep(runStepIndex) : undefined,
         } satisfies PipelineNodeData,
       };
     });
@@ -2326,7 +2292,6 @@ function PipelineCanvas() {
     customer,
     runNeedsCall,
     callId,
-    runtimeGraph.stepParents,
   ]);
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
@@ -3577,7 +3542,7 @@ function PipelineCanvas() {
     return Array.from(visited).sort((a, b) => a - b);
   }
 
-  function runNodeStep(targetStepIndex: number, includeDependencies: boolean) {
+  function runNodeStep(targetStepIndex: number) {
     if (!Number.isFinite(targetStepIndex) || targetStepIndex < 0) {
       showToast("Invalid target step", false);
       return;
@@ -3586,12 +3551,29 @@ function PipelineCanvas() {
       showToast("A run is already in progress", false);
       return;
     }
-    const executeStepIndices = includeDependencies
-      ? getUpstreamStepClosure(targetStepIndex)
-      : [targetStepIndex];
+    let executeStepIndices = getUpstreamStepClosure(targetStepIndex);
+    if (runContextMode === "historical" && selectedCacheRun) {
+      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+      const satisfied = new Set<number>();
+      runSteps.forEach((row, idx) => {
+        const rawState = String(row.state || row.status || "").toLowerCase();
+        if (["done", "completed", "pass", "success", "cached", "cache_hit"].includes(rawState)) {
+          satisfied.add(idx);
+        }
+      });
+      const before = executeStepIndices.length;
+      executeStepIndices = executeStepIndices.filter((idx) => !satisfied.has(idx));
+      const skipped = before - executeStepIndices.length;
+      if (skipped > 0) {
+        appendRunLog(`Step play: skipped ${skipped} already completed/cached step(s) from selected run`, "pipeline");
+      }
+    }
+    if (!executeStepIndices.length) {
+      showToast("All required upstream steps are already completed/cached", true);
+      return;
+    }
     void runPipeline("default", {
       executeStepIndices,
-      forceStepIndices: [targetStepIndex],
       force: false,
       resumePartial: true,
     });
