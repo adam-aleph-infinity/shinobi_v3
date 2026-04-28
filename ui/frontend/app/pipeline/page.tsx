@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
+const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
 
@@ -285,6 +286,16 @@ interface PipelineRunExecOptions {
   resumePartial?: boolean;
   continueRunId?: string;
   prepareInputOnly?: boolean;
+}
+
+interface PipelineOpenRunPayload {
+  source?: string;
+  run_id?: string;
+  pipeline_id?: string;
+  pipeline_name?: string;
+  sales_agent?: string;
+  customer?: string;
+  call_id?: string;
 }
 
 interface InputPreviewState {
@@ -1407,6 +1418,7 @@ function PipelineCanvas() {
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
   const [expandedHistoryRunIds, setExpandedHistoryRunIds] = useState<Record<string, boolean>>({});
+  const [collapsedHistoryDayIds, setCollapsedHistoryDayIds] = useState<Record<string, boolean>>({});
   const [showCallsPanel, setShowCallsPanel] = useState(false);
   const [showCrmPanel, setShowCrmPanel] = useState(false);
   const [showHistoricalRunModeDialog, setShowHistoricalRunModeDialog] = useState(false);
@@ -1432,6 +1444,7 @@ function PipelineCanvas() {
   const [callTranscriptText, setCallTranscriptText] = useState("");
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
+  const [pendingOpenRunPayload, setPendingOpenRunPayload] = useState<PipelineOpenRunPayload | null>(null);
 
   useEffect(() => {
     return () => {
@@ -1445,6 +1458,22 @@ function PipelineCanvas() {
     setLogsExpanded(true);
     setLogsCollapsed(false);
   }, [running]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(PIPELINE_OPEN_RUN_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as PipelineOpenRunPayload;
+      if (parsed && typeof parsed === "object") {
+        setPendingOpenRunPayload(parsed);
+      }
+    } catch {
+      // ignore malformed payload
+    } finally {
+      window.localStorage.removeItem(PIPELINE_OPEN_RUN_STORAGE_KEY);
+    }
+  }, []);
 
   const agentUsageByPipeline = useMemo(() => {
     const out: Record<string, { total: number; other: number }> = {};
@@ -1763,6 +1792,48 @@ function PipelineCanvas() {
     });
   }, [runsData, salesAgent, customer, runNeedsCall, callId]);
 
+  const historyRunDayGroups = useMemo(() => {
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    const dayIdFromEpoch = (epoch: number) => {
+      const d = new Date(epoch);
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    };
+    const labelFromDayId = (dayId: string) => {
+      if (dayId === "unknown") return "Unknown date";
+      const d = new Date(`${dayId}T00:00:00`);
+      if (Number.isNaN(d.getTime())) return dayId;
+      return d.toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric" });
+    };
+
+    const byDay = new Map<string, PipelineRunRecord[]>();
+    for (const run of historyRuns) {
+      const epoch = parseDateEpoch(run.started_at || run.finished_at || "");
+      const dayId = epoch != null ? dayIdFromEpoch(epoch) : "unknown";
+      if (!byDay.has(dayId)) byDay.set(dayId, []);
+      byDay.get(dayId)!.push(run);
+    }
+
+    const groups = Array.from(byDay.entries()).map(([dayId, runs]) => {
+      const sortedRuns = [...runs].sort((a, b) => {
+        const ea = parseDateEpoch(a.started_at || a.finished_at || "") ?? 0;
+        const eb = parseDateEpoch(b.started_at || b.finished_at || "") ?? 0;
+        return eb - ea;
+      });
+      return {
+        dayId,
+        label: labelFromDayId(dayId),
+        runs: sortedRuns,
+      };
+    });
+
+    groups.sort((a, b) => {
+      if (a.dayId === "unknown") return 1;
+      if (b.dayId === "unknown") return -1;
+      return a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0;
+    });
+    return groups;
+  }, [historyRuns]);
+
   const cacheRunOptions = useMemo(
     () =>
       historyRuns.map((run) => {
@@ -1798,10 +1869,7 @@ function PipelineCanvas() {
 
   useEffect(() => {
     if (runContextMode !== "historical") return;
-    if (!historyRuns.length) {
-      setSelectedCacheRunId("");
-      return;
-    }
+    if (!historyRuns.length) return;
     if (selectedCacheRunId && historyRuns.some((r) => r.id === selectedCacheRunId)) return;
     setSelectedCacheRunId(historyRuns[0].id);
   }, [selectedCacheRunId, historyRuns, runContextMode]);
@@ -3846,6 +3914,39 @@ function PipelineCanvas() {
   } = useSWR<ArtifactPromptTemplate>(artifactTemplateUrl, fetcher, { revalidateOnFocus: false });
 
   useEffect(() => {
+    if (!pendingOpenRunPayload) return;
+
+    const targetAgent = String(pendingOpenRunPayload.sales_agent || "").trim();
+    const targetCustomer = String(pendingOpenRunPayload.customer || "").trim();
+    const targetCallId = String(pendingOpenRunPayload.call_id || "").trim();
+    const targetPipelineId = String(pendingOpenRunPayload.pipeline_id || "").trim();
+    const targetPipelineName = String(pendingOpenRunPayload.pipeline_name || "").trim();
+    const targetRunId = String(pendingOpenRunPayload.run_id || "").trim();
+
+    if (targetAgent && targetCustomer) {
+      setCustomer(targetCustomer, targetAgent);
+    }
+    if (targetCallId) {
+      setCallId(targetCallId);
+    }
+
+    if (targetPipelineId) {
+      const existing = allPipelines.find((p) => p.id === targetPipelineId);
+      if (!existing) return; // Wait for pipelines to load
+      loadPipelineToCanvas(targetPipelineId);
+      setActivePipeline(targetPipelineId, targetPipelineName || existing.name || "");
+    }
+
+    if (targetRunId) {
+      setRunContextMode("historical");
+      setSelectedCacheRunId(targetRunId);
+      setCurrentRunId(targetRunId);
+    }
+
+    setPendingOpenRunPayload(null);
+  }, [pendingOpenRunPayload, allPipelines, setCustomer, setCallId, setActivePipeline]);
+
+  useEffect(() => {
     if (runContextMode !== "new") return;
     // New run mode should start clean: do not preload a previous run id/cache context.
     setCurrentRunId("");
@@ -5040,61 +5141,75 @@ function PipelineCanvas() {
             {historyRuns.length === 0 && (
               <p className="text-xs text-gray-600 italic px-1 py-2">No runs found.</p>
             )}
-            {historyRuns.map(run => (
-              (() => {
-                const expanded = !!expandedHistoryRunIds[run.id];
-                const timeline = runTimelineById.get(run.id);
-                const runStatus = String(run.status || "").toLowerCase();
-                const runStatusClass = runStatus === "done"
-                  ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                  : runStatus === "error"
-                    ? "text-red-300 border-red-700/50 bg-red-950/40"
-                    : "text-orange-300 border-orange-700/50 bg-orange-950/40";
-                return (
-                  <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-2 py-2">
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
-                        className="min-w-0 flex-1 flex items-center gap-1.5 text-left hover:opacity-90 transition-opacity"
-                        title={expanded ? "Collapse run details" : "Expand run details"}
-                      >
-                        <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
-                        <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
-                        <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
-                      </button>
-                      <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
-                        {run.status}
-                      </span>
-                    </div>
-                    <p className="mt-1 text-[9px] text-gray-500 truncate">
-                      {relativeTime(run.started_at)}{run.call_id ? ` · call ${run.call_id}` : ""}
-                    </p>
-                    {expanded && (
-                      <div className="mt-2 space-y-1.5">
-                        {!timeline || timeline.rows.length === 0 ? (
-                          <p className="text-[10px] text-gray-500 italic">No step execution data.</p>
-                        ) : (
-                          timeline.rows.map((row) => (
-                            <div key={`${run.id}-step-${row.stepIndex}`} className="rounded border border-gray-800 bg-gray-950 p-1.5">
-                              <div className="flex items-center gap-1.5">
-                                <p className="text-[9px] text-gray-500 shrink-0">S{row.stepIndex + 1}</p>
-                                <p className="text-[10px] text-gray-200 truncate flex-1">{row.elementName}</p>
-                                <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border", row.statusClass)}>
-                                  {row.statusLabel}
-                                </span>
-                              </div>
-                              <p className="mt-1 text-[9px] text-gray-500 truncate">
-                                {row.durationLabel}{row.model ? ` · ${row.model}` : ""}
-                              </p>
-                            </div>
-                          ))
+            {historyRunDayGroups.map((group) => {
+              const dayCollapsed = !!collapsedHistoryDayIds[group.dayId];
+              return (
+                <div key={group.dayId} className="space-y-1.5">
+                  <button
+                    onClick={() => setCollapsedHistoryDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
+                    className="w-full flex items-center gap-1.5 px-1 py-1 rounded text-left hover:bg-gray-800/60 transition-colors"
+                    title={dayCollapsed ? "Expand day folder" : "Collapse day folder"}
+                  >
+                    <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", !dayCollapsed && "rotate-90")} />
+                    <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-wide truncate">{group.label}</span>
+                    <span className="ml-auto text-[9px] text-gray-600">{group.runs.length}</span>
+                  </button>
+                  {!dayCollapsed && group.runs.map((run) => {
+                    const expanded = !!expandedHistoryRunIds[run.id];
+                    const timeline = runTimelineById.get(run.id);
+                    const runStatus = String(run.status || "").toLowerCase();
+                    const runStatusClass = runStatus === "done"
+                      ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
+                      : runStatus === "error"
+                        ? "text-red-300 border-red-700/50 bg-red-950/40"
+                        : "text-orange-300 border-orange-700/50 bg-orange-950/40";
+                    return (
+                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-2 py-2">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
+                            className="min-w-0 flex-1 flex items-center gap-1.5 text-left hover:opacity-90 transition-opacity"
+                            title={expanded ? "Collapse run details" : "Expand run details"}
+                          >
+                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
+                            <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
+                            <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
+                          </button>
+                          <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
+                            {run.status}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[9px] text-gray-500 truncate">
+                          {relativeTime(run.started_at)}{run.call_id ? ` · call ${run.call_id}` : ""}
+                        </p>
+                        {expanded && (
+                          <div className="mt-2 space-y-1.5">
+                            {!timeline || timeline.rows.length === 0 ? (
+                              <p className="text-[10px] text-gray-500 italic">No step execution data.</p>
+                            ) : (
+                              timeline.rows.map((row) => (
+                                <div key={`${run.id}-step-${row.stepIndex}`} className="rounded border border-gray-800 bg-gray-950 p-1.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <p className="text-[9px] text-gray-500 shrink-0">S{row.stepIndex + 1}</p>
+                                    <p className="text-[10px] text-gray-200 truncate flex-1">{row.elementName}</p>
+                                    <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border", row.statusClass)}>
+                                      {row.statusLabel}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-[9px] text-gray-500 truncate">
+                                    {row.durationLabel}{row.model ? ` · ${row.model}` : ""}
+                                  </p>
+                                </div>
+                              ))
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
-                  </div>
-                );
-              })()
-            ))}
+                    );
+                  })}
+                </div>
+              );
+            })}
           </div>
         </aside>
 
