@@ -3813,7 +3813,9 @@ function PipelineCanvas() {
         >
           <PhoneCall className="w-3 h-3 text-amber-400 shrink-0" />
           <span className="text-[11px] text-gray-200 truncate">
-            {!runNeedsCall ? "Per-pair scope" : (callId ? `Call ${callId}` : "Call ID…")}
+            {callId
+              ? `Call ${callId}`
+              : (!runNeedsCall ? "Per-pair scope" : "Call ID…")}
           </span>
           <ChevronRight className="w-3 h-3 text-gray-500 ml-auto" />
         </button>
