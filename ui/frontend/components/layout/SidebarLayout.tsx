@@ -133,10 +133,15 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         />
       )}
       {mounted && collapsed && (
-        <div className="fixed top-0 left-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none">
+        <div className="fixed top-0 left-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none relative">
           <button
             onClick={toggleSidebar}
-            className="pointer-events-auto p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+            className="pointer-events-auto absolute inset-0"
+            title="Show sidebar"
+            aria-label="Show sidebar"
+          />
+          <button
+            className="pointer-events-none p-1 rounded text-gray-500"
             title="Show sidebar"
             aria-label="Show sidebar"
           >
@@ -148,12 +153,17 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
       {mounted && copilotCollapsed && (
         <div
-          className="fixed top-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none"
+          className="fixed top-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none relative"
           style={{ left: collapsed ? TONGUE_BAR_WIDTH : SIDEBAR_WIDTH }}
         >
           <button
             onClick={toggleCopilot}
-            className="pointer-events-auto p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+            className="pointer-events-auto absolute inset-0"
+            title="Show copilot panel"
+            aria-label="Show copilot panel"
+          />
+          <button
+            className="pointer-events-none p-1 rounded text-gray-500"
             title="Show copilot panel"
             aria-label="Show copilot panel"
           >
