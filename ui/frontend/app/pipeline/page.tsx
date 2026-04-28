@@ -276,6 +276,7 @@ interface CanvasLogLine {
 type RunContextMode = "new" | "historical";
 type ResultViewMode = "rendered" | "raw";
 type HistoricalRunExecMode = "force_full" | "failed_only";
+type LiveWebhookStatus = "off" | "waiting" | "triggered" | "error";
 
 interface PipelineRunExecOptions {
   executeStepIndices?: number[];
@@ -1414,6 +1415,12 @@ function PipelineCanvas() {
   const [runLogsSearch, setRunLogsSearch] = useState("");
   const [runLogFilterMode, setRunLogFilterMode] = useState<CanvasLogFilterMode>("all");
   const [runLogsGrouped, setRunLogsGrouped] = useState(false);
+  const [liveModeEnabled, setLiveModeEnabled] = useState(false);
+  const [liveWebhookStatus, setLiveWebhookStatus] = useState<LiveWebhookStatus>("off");
+  const [liveCursorMs, setLiveCursorMs] = useState(0);
+  const [liveTriggeredAt, setLiveTriggeredAt] = useState("");
+  const liveCursorRef = useRef(0);
+  const liveWaitAbortRef = useRef<AbortController | null>(null);
   const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
   const [currentRunId, setCurrentRunId] = useState("");
@@ -1427,6 +1434,7 @@ function PipelineCanvas() {
   useEffect(() => {
     return () => {
       runAbortRef.current?.abort();
+      liveWaitAbortRef.current?.abort();
     };
   }, []);
 
@@ -3376,6 +3384,110 @@ function PipelineCanvas() {
     });
   }, []);
 
+  useEffect(() => {
+    liveWaitAbortRef.current?.abort();
+
+    if (!liveModeEnabled) {
+      setLiveWebhookStatus("off");
+      setLiveTriggeredAt("");
+      return;
+    }
+    if (!pipelineId || !salesAgent || !customer || (runNeedsCall && !callId)) {
+      setLiveWebhookStatus("error");
+      appendRunLog("Live mode needs pipeline + sales agent + customer" + (runNeedsCall ? " + call id" : ""), "warn");
+      return;
+    }
+
+    const ctrl = new AbortController();
+    liveWaitAbortRef.current = ctrl;
+    let stopped = false;
+    let cursorMs = Number(liveCursorRef.current || 0);
+    if (!Number.isFinite(cursorMs) || cursorMs <= 0) {
+      cursorMs = Date.now() - 1000;
+      setLiveCursorMs(cursorMs);
+      liveCursorRef.current = cursorMs;
+    }
+
+    setLiveWebhookStatus("waiting");
+    setLogsExpanded(true);
+    setLogsCollapsed(false);
+    appendRunLog(
+      `Live mode armed for ${salesAgent} · ${customer}${runNeedsCall ? ` · call ${callId}` : ""}`,
+      "pipeline",
+    );
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    const loop = async () => {
+      while (!stopped && !ctrl.signal.aborted) {
+        try {
+          const qp = new URLSearchParams();
+          qp.set("sales_agent", salesAgent);
+          qp.set("customer", customer);
+          if (runNeedsCall && callId) qp.set("call_id", callId);
+          qp.set("after_ms", String(Math.max(0, Math.floor(cursorMs))));
+          qp.set("timeout_s", "45");
+          const res = await fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/live-webhook/wait?${qp.toString()}`, {
+            signal: ctrl.signal,
+            cache: "no-store",
+          });
+          if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            throw new Error(`Live wait failed (${res.status})${body ? `: ${body.slice(0, 120)}` : ""}`);
+          }
+          const data = await res.json();
+          const nextCursor = Number(data?.cursor_ms || 0);
+          if (Number.isFinite(nextCursor) && nextCursor > cursorMs) {
+            cursorMs = nextCursor;
+            setLiveCursorMs(nextCursor);
+            liveCursorRef.current = nextCursor;
+          }
+
+          if (data?.triggered && data?.event) {
+            setLiveWebhookStatus("triggered");
+            const event = data.event as Record<string, any>;
+            const payload = (event?.payload && typeof event.payload === "object") ? event.payload : {};
+            const eventCallId = String(payload.call_id || "").trim();
+            const eventAgent = String(payload.agent || "").trim();
+            const eventAt = String(event?.received_at || "");
+            setLiveTriggeredAt(eventAt || new Date().toISOString());
+            appendRunLog(
+              `[LIVE] webhook ${String(event?.webhook_type || "event")} received${eventCallId ? ` · call ${eventCallId}` : ""}${eventAgent ? ` · agent ${eventAgent}` : ""}`,
+              "pipeline",
+            );
+            const payloadPretty = JSON.stringify(payload, null, 2);
+            const clipped = payloadPretty.length > 4000
+              ? `${payloadPretty.slice(0, 4000)}\n… [payload truncated]`
+              : payloadPretty;
+            appendRunLog(`[LIVE] payload:\n${clipped}`, "pipeline");
+            await sleep(950);
+            if (!stopped && !ctrl.signal.aborted) setLiveWebhookStatus("waiting");
+          }
+        } catch (e: any) {
+          if (e?.name === "AbortError" || stopped || ctrl.signal.aborted) break;
+          setLiveWebhookStatus("error");
+          appendRunLog(`[LIVE] wait error: ${String(e?.message || "unknown error")}`, "error");
+          await sleep(1200);
+          if (!stopped && !ctrl.signal.aborted) setLiveWebhookStatus("waiting");
+        }
+      }
+    };
+
+    void loop();
+    return () => {
+      stopped = true;
+      ctrl.abort();
+    };
+  }, [
+    liveModeEnabled,
+    pipelineId,
+    salesAgent,
+    customer,
+    runNeedsCall,
+    callId,
+    appendRunLog,
+  ]);
+
   async function runPipeline(
     execMode: HistoricalRunExecMode | "default" = "default",
     execOpts: PipelineRunExecOptions = {},
@@ -4580,6 +4692,18 @@ function PipelineCanvas() {
     return "text-gray-300";
   };
 
+  const liveModeReady = !!(pipelineId && salesAgent && customer && (!runNeedsCall || callId));
+  const liveStatusTone =
+    liveWebhookStatus === "triggered" ? "border-emerald-600 text-emerald-300 bg-emerald-950/50 hover:bg-emerald-950/70" :
+    liveWebhookStatus === "waiting" ? "border-amber-600 text-amber-300 bg-amber-950/40 hover:bg-amber-950/60" :
+    liveWebhookStatus === "error" ? "border-red-700 text-red-300 bg-red-950/40 hover:bg-red-950/60" :
+    "border-gray-700 text-gray-300 hover:bg-gray-800";
+  const liveStatusText =
+    liveWebhookStatus === "triggered" ? "Triggered" :
+    liveWebhookStatus === "waiting" ? "Waiting" :
+    liveWebhookStatus === "error" ? "Error" :
+    "Off";
+
   return (
     <div className="flex flex-col h-full w-full">
 
@@ -4680,6 +4804,48 @@ function PipelineCanvas() {
         )}
 
         <button
+          type="button"
+          onClick={() => {
+            if (liveModeEnabled) {
+              setLiveModeEnabled(false);
+              setLiveWebhookStatus("off");
+              setLiveTriggeredAt("");
+              appendRunLog("Live mode disabled", "warn");
+              return;
+            }
+            if (!liveModeReady) {
+              showToast(
+                `Live mode needs pipeline + sales agent + customer${runNeedsCall ? " + call id" : ""}`,
+                false,
+              );
+              return;
+            }
+            liveCursorRef.current = Date.now() - 1000;
+            setLiveCursorMs(liveCursorRef.current);
+            setLiveModeEnabled(true);
+            setLiveWebhookStatus("waiting");
+            setLogsExpanded(true);
+            setLogsCollapsed(false);
+          }}
+          disabled={!liveModeEnabled && !liveModeReady}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
+            liveStatusTone,
+            liveModeEnabled && liveWebhookStatus === "waiting" ? "animate-pulse" : "",
+            (!liveModeEnabled && !liveModeReady) ? "opacity-40 cursor-not-allowed" : "",
+          )}
+          title={
+            liveModeEnabled
+              ? "Disable live webhook wait"
+              : "Enable live webhook wait mode for current context"
+          }
+        >
+          <Zap className="w-3 h-3" />
+          Live
+          <span className="text-[10px] opacity-90">{liveStatusText}</span>
+        </button>
+
+        <button
           onClick={() => {
             if (running) {
               void stopPipeline();
@@ -4726,6 +4892,11 @@ function PipelineCanvas() {
         {runError && (
           <span className="text-[10px] text-red-300 bg-red-950/40 border border-red-800/40 px-2 py-1 rounded-lg max-w-[360px] truncate">
             {runError}
+          </span>
+        )}
+        {liveModeEnabled && liveTriggeredAt && (
+          <span className="text-[10px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/40 px-2 py-1 rounded-lg max-w-[260px] truncate">
+            Last live trigger: {new Date(liveTriggeredAt).toLocaleTimeString()}
           </span>
         )}
 

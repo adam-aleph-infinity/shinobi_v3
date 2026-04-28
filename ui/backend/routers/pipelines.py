@@ -37,10 +37,93 @@ _AI_PIPELINES_FILE = _AI_REGISTRY_DIR / "pipelines_snapshot.json"
 _AI_INTERNAL_PROMPTS_FILE = _AI_REGISTRY_DIR / "internal_prompt_templates.json"
 _AI_README_FILE = _AI_REGISTRY_DIR / "README.md"
 _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
+_WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
 _RUN_SUBSCRIBERS: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+
+
+def _norm_ci(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _parse_iso_to_ms(value: Any) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return 0
+    try:
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def _find_latest_matching_webhook_event(
+    *,
+    after_ms: int,
+    sales_agent: str,
+    customer: str,
+    call_id: str,
+    limit_files: int = 300,
+) -> Optional[dict[str, Any]]:
+    try:
+        if not _WEBHOOK_INBOX_DIR.exists():
+            return None
+        files = sorted(
+            _WEBHOOK_INBOX_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[: max(10, min(int(limit_files or 300), 2000))]
+    except Exception:
+        return None
+
+    wanted_agent = _norm_ci(sales_agent)
+    wanted_customer = _norm_ci(customer)
+    wanted_call_id = _norm_ci(call_id)
+
+    for fp in files:
+        try:
+            st = fp.stat()
+            mtime_ms = int(float(st.st_mtime) * 1000.0)
+            if after_ms > 0 and mtime_ms <= after_ms:
+                # Files are newest-first; once below cursor, older files won't match either.
+                break
+            raw = json.loads(fp.read_text(encoding="utf-8", errors="replace"))
+            payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        except Exception:
+            continue
+
+        payload_agent = _norm_ci(payload.get("agent"))
+        payload_customer = _norm_ci(payload.get("customer"))
+        payload_call_id = _norm_ci(payload.get("call_id"))
+
+        if wanted_agent and payload_agent and payload_agent != wanted_agent:
+            continue
+        if wanted_call_id and payload_call_id and payload_call_id != wanted_call_id:
+            continue
+        # Customer is optional in webhook payload; if present it must match.
+        if wanted_customer and payload_customer and payload_customer != wanted_customer:
+            continue
+
+        received_at = str(raw.get("received_at") or "")
+        received_ms = _parse_iso_to_ms(received_at) or mtime_ms
+        if after_ms > 0 and received_ms <= after_ms:
+            continue
+
+        return {
+            "event_id": str(raw.get("event_id") or ""),
+            "webhook_type": str(raw.get("webhook_type") or ""),
+            "compat_mode": str(raw.get("compat_mode") or ""),
+            "received_at": received_at,
+            "received_ms": received_ms,
+            "file": str(fp),
+            "payload": payload,
+        }
+    return None
 
 
 def _safe_template_format(template: str, values: dict[str, Any]) -> str:
@@ -3958,6 +4041,54 @@ def get_pipeline_state(
         return data
     except Exception:
         return None
+
+
+@router.get("/{pipeline_id}/live-webhook/wait")
+async def wait_for_live_webhook(
+    pipeline_id: str,
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: str = Query(""),
+    after_ms: int = Query(0, ge=0),
+    timeout_s: float = Query(45.0, ge=1.0, le=90.0),
+):
+    """Long-poll for next webhook payload matching the current pipeline context."""
+    _find_file(pipeline_id)  # validate pipeline exists
+
+    wanted_agent = str(sales_agent or "").strip()
+    wanted_customer = str(customer or "").strip()
+    wanted_call_id = str(call_id or "").strip()
+
+    cursor_ms = int(after_ms or 0)
+    deadline = time.time() + float(timeout_s)
+    poll_interval_s = 0.75
+
+    while True:
+        evt = _find_latest_matching_webhook_event(
+            after_ms=cursor_ms,
+            sales_agent=wanted_agent,
+            customer=wanted_customer,
+            call_id=wanted_call_id,
+        )
+        if evt:
+            evt_ms = int(evt.get("received_ms") or 0)
+            return {
+                "ok": True,
+                "triggered": True,
+                "pipeline_id": pipeline_id,
+                "cursor_ms": evt_ms or cursor_ms,
+                "event": evt,
+            }
+
+        if time.time() >= deadline:
+            return {
+                "ok": True,
+                "triggered": False,
+                "pipeline_id": pipeline_id,
+                "cursor_ms": cursor_ms,
+                "timeout": True,
+            }
+        await asyncio.sleep(poll_interval_s)
 
 
 @router.post("/{pipeline_id}/run")
