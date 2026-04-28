@@ -4089,11 +4089,13 @@ function PipelineCanvas() {
 
   useEffect(() => {
     if (selKind !== "processing" || !selectedNodeId || !agentDraft) return;
-    const incoming = edges
-      .filter((e) => e.target === selectedNodeId)
-      .map((e) => nodes.find((n) => n.id === e.source))
-      .filter(Boolean) as Node[];
-    const connectedOutputNodes = incoming.filter((n) => n.type === "output");
+    const connectedOutputNodes = edges
+      .filter((e) => e.source === selectedNodeId)
+      .map((e) => nodes.find((n) => n.id === e.target))
+      .filter((n): n is Node => {
+        if (!n) return false;
+        return n.type === "output";
+      });
     const inferred = inferAgentClassFromConnectedOutputs(connectedOutputNodes, outputProfiles);
     if (!inferred) return;
 
@@ -4404,7 +4406,13 @@ function PipelineCanvas() {
         .filter((e) => e.target === selectedNode.id)
         .map((e) => nodes.find((n) => n.id === e.source))
         .filter(Boolean) as Node[];
-      const connectedOutputNodes = incomingSources.filter((n) => n.type === "output");
+      const connectedOutputNodes = edges
+        .filter((e) => e.source === selectedNode.id)
+        .map((e) => nodes.find((n) => n.id === e.target))
+        .filter((n): n is Node => {
+          if (!n) return false;
+          return n.type === "output";
+        });
       const inferredAgentClass = inferAgentClassFromConnectedOutputs(connectedOutputNodes, outputProfiles);
       const connectedSources = incomingSources
         .map((src): CS | null => {
