@@ -4136,9 +4136,9 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div className="absolute inset-0 z-40 bg-black/65 backdrop-blur-[1px] p-3 flex items-center justify-center">
+            <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-[1px] p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-800/45 bg-gray-950/97 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-800/45 bg-gray-950/98 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
@@ -4272,9 +4272,9 @@ function PipelineCanvas() {
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-40 bg-black/65 backdrop-blur-[1px] p-3 flex items-center justify-center">
+            <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-[1px] p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-cyan-800/45 bg-gray-950/97 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-cyan-800/45 bg-gray-950/98 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
@@ -4444,9 +4444,9 @@ function PipelineCanvas() {
           )}
 
           {selectedNodeId && (
-            <div className="absolute inset-0 z-30 bg-black/65 backdrop-blur-[1px] p-3 flex items-center justify-center">
+            <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-[1px] p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700/45 bg-gray-900/97 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700/45 bg-gray-900/98 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
