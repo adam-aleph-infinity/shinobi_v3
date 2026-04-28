@@ -2494,6 +2494,87 @@ def _llm_call_with_files(
         system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
 
+def _resolve_provider_file_refs(
+    model: str,
+    file_inputs: dict[str, str],
+    db: Session,
+) -> dict[str, str]:
+    """Resolve provider file IDs for logging/preview without running the model call."""
+    refs: dict[str, str] = {}
+    if not file_inputs:
+        return refs
+
+    ctx = getattr(db, "_agent_run_ctx", {})
+    if model.startswith("gemini"):
+        for key, content in file_inputs.items():
+            f = _get_or_upload_gemini(
+                content,
+                key,
+                ctx.get("source_for_key", {}).get(key, ""),
+                ctx.get("sales_agent", ""),
+                ctx.get("customer", ""),
+                ctx.get("call_id", ""),
+                db,
+            )
+            refs[key] = str(getattr(f, "name", "") or "unknown")
+        return refs
+
+    if model.startswith("claude-"):
+        for key, content in file_inputs.items():
+            file_id = _get_or_upload_anthropic(
+                content,
+                key,
+                ctx.get("source_for_key", {}).get(key, ""),
+                ctx.get("sales_agent", ""),
+                ctx.get("customer", ""),
+                ctx.get("call_id", ""),
+                db,
+            )
+            refs[key] = file_id
+        return refs
+
+    if model.startswith("grok"):
+        import sys
+        sys.path.insert(0, str(settings.project_root))
+        from shared.llm_client import resolve_grok_key
+
+        api_key = resolve_grok_key() or ""
+        if not api_key:
+            raise RuntimeError("GROK_API_KEY/XAI_API_KEY not set")
+        for key, content in file_inputs.items():
+            file_id, _ = _get_or_upload_openai(
+                content,
+                key,
+                ctx.get("source_for_key", {}).get(key, ""),
+                ctx.get("sales_agent", ""),
+                ctx.get("customer", ""),
+                ctx.get("call_id", ""),
+                "grok",
+                api_key,
+                db,
+            )
+            refs[key] = file_id
+        return refs
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    for key, content in file_inputs.items():
+        file_id, _ = _get_or_upload_openai(
+            content,
+            key,
+            ctx.get("source_for_key", {}).get(key, ""),
+            ctx.get("sales_agent", ""),
+            ctx.get("customer", ""),
+            ctx.get("call_id", ""),
+            "openai",
+            api_key,
+            db,
+        )
+        refs[key] = file_id
+    return refs
+
+
 def _resolve_input(source: str, agent_id: Optional[str],
                    sales_agent: str, customer: str, call_id: str,
                    manual_inputs: dict, db: Session,

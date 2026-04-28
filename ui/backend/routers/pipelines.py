@@ -4108,6 +4108,7 @@ async def run_pipeline(
     from ui.backend.routers.universal_agents import (
         _sse, _is_file_source, _resolve_input,
         _llm_call_with_files, _llm_call_anthropic_files_streaming,
+        _resolve_provider_file_refs,
         _load_all as _load_agents,
     )
 
@@ -5501,6 +5502,33 @@ async def run_pipeline(
                     else:
                         _log_display = f"{len(file_inputs)} file(s)"
                     log_buffer.emit(f"[LLM] {model} — {_log_display} input · {cid_short}")
+                    try:
+                        def _resolve_refs_only() -> dict[str, str]:
+                            with Session(_db_engine) as _ldb:
+                                _ldb._agent_run_ctx = {
+                                    "sales_agent": req.sales_agent,
+                                    "customer": req.customer,
+                                    "call_id": req.call_id,
+                                    "source_for_key": source_for_key,
+                                }
+                                return _resolve_provider_file_refs(model, file_inputs, _ldb)
+
+                        file_ref_map = await loop.run_in_executor(None, _resolve_refs_only)
+                        if file_ref_map:
+                            _ref_preview = ", ".join(f"{k}={v}" for k, v in list(file_ref_map.items())[:6])
+                            if len(file_ref_map) > 6:
+                                _ref_preview += f", …(+{len(file_ref_map)-6} more)"
+                            log_buffer.emit(
+                                f"[PIPELINE] Step {step_idx + 1} file refs: {_ref_preview} · {cid_short}"
+                            )
+                            yield _sse("progress", {
+                                "step": step_idx,
+                                "msg": f"File refs: {_ref_preview}",
+                            })
+                    except Exception as _ref_exc:
+                        log_buffer.emit(
+                            f"[PIPELINE] ⚠ Step {step_idx + 1} file ref resolution failed: {_ref_exc} · {cid_short}"
+                        )
 
                     step_start_t = time.time()
                     llm_err = False
