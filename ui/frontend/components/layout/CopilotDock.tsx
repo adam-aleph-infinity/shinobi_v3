@@ -278,14 +278,16 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
   return (
     <aside className="h-screen bg-gray-900 border-r border-gray-800 flex flex-col relative pl-6">
       {onToggle && (
-        <button
-          onClick={onToggle}
-          className="absolute left-0 top-0 h-full w-6 border-r border-gray-800 bg-gray-900/95 text-gray-500 hover:text-white hover:bg-gray-800 transition-colors flex items-center justify-center z-20"
-          title="Hide copilot"
-          aria-label="Hide copilot"
-        >
-          <PanelLeftClose className="w-4 h-4" />
-        </button>
+        <div className="absolute left-0 top-0 h-full w-6 border-r border-gray-800 bg-gray-900/95 text-gray-500 flex items-center justify-center z-20 pointer-events-none">
+          <button
+            onClick={onToggle}
+            className="pointer-events-auto p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+            title="Hide copilot"
+            aria-label="Hide copilot"
+          >
+            <PanelLeftClose className="w-4 h-4" />
+          </button>
+        </div>
       )}
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-start gap-2">
         <div className="min-w-0">
