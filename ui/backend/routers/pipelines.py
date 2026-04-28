@@ -2326,6 +2326,7 @@ class PipelineRunRequest(BaseModel):
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
     resume_partial: bool = False  # allow per-step cache fallback when exact fingerprint miss
     execute_step_indices: list[int] = []  # run only these step indices (0-based); empty = run all
+    prepare_input_only: bool = False  # resolve selected step inputs only; do not execute model
 
 
 class PipelineStopRequest(BaseModel):
@@ -4228,6 +4229,7 @@ async def run_pipeline(
                 "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
                 "resume_partial": bool(req.resume_partial),
                 "execute_step_indices": [int(i) for i in (req.execute_step_indices or [])],
+                "prepare_input_only": bool(req.prepare_input_only),
             },
             client_local_time=client_local_time,
             client_timezone=client_timezone,
@@ -4360,6 +4362,8 @@ async def run_pipeline(
 
         def _step_status_to_ui(_s: dict) -> str:
             raw = (_s.get("state") or _s.get("status") or "waiting")
+            if raw in ("input_prepared", "prepared"):
+                return "pending"
             if raw in ("failed", "error"):
                 return "error"
             if raw in ("running", "loading"):
@@ -4370,6 +4374,8 @@ async def run_pipeline(
 
         def _step_input_status(_s: dict) -> str:
             raw = (_s.get("state") or _s.get("status") or "waiting")
+            if raw in ("input_prepared", "prepared"):
+                return "done" if _s.get("input_ready") else "pending"
             if raw in ("failed", "error"):
                 return "error"
             if raw in ("running", "loading"):
@@ -4983,8 +4989,9 @@ async def run_pipeline(
             _execute_step_indices.append(_idx)
         _execute_step_set: Optional[set[int]] = set(_execute_step_indices) if _execute_step_indices else None
         if _execute_step_set:
+            _mode_suffix = " (inputs only)" if req.prepare_input_only else ""
             log_buffer.emit(
-                f"[PIPELINE] ▶ Targeted execution: {len(_execute_step_indices)} step(s) selected · {cid_short}"
+                f"[PIPELINE] ▶ Targeted execution: {len(_execute_step_indices)} step(s) selected{_mode_suffix} · {cid_short}"
             )
         # Rewrite once after canvas maps are available so JSON includes node_states.
         save_steps()
@@ -5417,6 +5424,27 @@ async def run_pipeline(
                     )
                     run_steps[step_idx]["input_fingerprint"] = input_fingerprint
 
+                    if req.prepare_input_only:
+                        _prepared_at = datetime.utcnow().isoformat()
+                        run_steps[step_idx].update({
+                            "state": "input_prepared",
+                            "end_time": _prepared_at,
+                            "input_ready": True,
+                            "cache_mode": "input_prepared",
+                            "error_msg": "",
+                        })
+                        save_steps()
+                        log_buffer.emit(
+                            f"[PIPELINE] ↺ Step {step_idx + 1}/{len(steps)}: {agent_name} → input prepared · {cid_short}"
+                        )
+                        yield _sse("input_ready", {"step": step_idx})
+                        yield _sse("input_prepared", {
+                            "step": step_idx,
+                            "agent_name": agent_name,
+                            "input_fingerprint": input_fingerprint,
+                        })
+                        continue
+
                     # ── Check cache (pipeline+step+input fingerprint) ────────
                     if not req.force and step_idx not in req.force_step_indices:
                         cached = None
@@ -5821,6 +5849,16 @@ async def run_pipeline(
                                     output_profile=_par_rdef,
                                 )
 
+                                if req.prepare_input_only:
+                                    return {
+                                        "step_idx": par_idx,
+                                        "status": "input_prepared",
+                                        "agent_name": _par_aname,
+                                        "model": _par_model,
+                                        "input_fingerprint": _par_fp,
+                                        "input_ready": _par_input_ready,
+                                    }
+
                                 if not req.force and par_idx not in req.force_step_indices:
                                     _cached = None
                                     _cached_via_resume_partial = False
@@ -5945,7 +5983,26 @@ async def run_pipeline(
                         _rst  = _res["status"]
                         _rn   = _res.get("agent_name", "")
                         _rm   = _res.get("model", "")
-                        if _rst == "cached":
+                        if _rst == "input_prepared":
+                            run_steps[_ri].update({
+                                "state": "input_prepared",
+                                "end_time": datetime.utcnow().isoformat(),
+                                "input_ready": _res.get("input_ready", True),
+                                "cache_mode": "input_prepared",
+                                "error_msg": "",
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
+                            })
+                            save_steps()
+                            log_buffer.emit(
+                                f"[PIPELINE] ↺ Step {_ri + 1}/{len(steps)}: {_rn} → input prepared · {cid_short}"
+                            )
+                            yield _sse("input_ready", {"step": _ri})
+                            yield _sse("input_prepared", {
+                                "step": _ri,
+                                "agent_name": _rn,
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
+                            })
+                        elif _rst == "cached":
                             _persist_structured_artifact(
                                 _step_idx=_ri,
                                 _content=_res["content"],

@@ -284,6 +284,7 @@ interface PipelineRunExecOptions {
   force?: boolean;
   resumePartial?: boolean;
   continueRunId?: string;
+  prepareInputOnly?: boolean;
 }
 
 interface InputPreviewState {
@@ -2131,10 +2132,12 @@ function PipelineCanvas() {
           inputReady: idx >= 0 ? !!inputReadyByStep[idx] : false,
         };
       });
+      const hasInputReady = connected.some((s) => s.inputReady);
       if (connected.some((s) => s.status === "error")) runtimeByNodeId[inputId] = "error";
       else if (connected.some((s) => s.status === "done")) runtimeByNodeId[inputId] = "done";
       else if (connected.some((s) => s.status === "cached")) runtimeByNodeId[inputId] = "cached";
       else if (connected.some((s) => s.status === "loading" && s.inputReady)) runtimeByNodeId[inputId] = "done";
+      else if (hasInputReady) runtimeByNodeId[inputId] = runContextMode === "historical" ? "cached" : "done";
       else if (connected.some((s) => s.status === "loading")) runtimeByNodeId[inputId] = "loading";
       else runtimeByNodeId[inputId] = "pending";
     });
@@ -2151,7 +2154,7 @@ function PipelineCanvas() {
       });
       return changed ? next : ns;
     });
-  }, [runtimeGraph, setNodes]);
+  }, [runtimeGraph, runContextMode, setNodes]);
 
   useEffect(() => {
     if (running) return;
@@ -3566,7 +3569,7 @@ function PipelineCanvas() {
         .filter((i) => Number.isFinite(i) && i >= 0 && i < stepCount)
         .map((i) => Math.floor(i))));
       appendRunLog(
-        `Targeted run: step ${executeStepIndices.map((i) => i + 1).join(", ")}${forceStepIndices.length ? ` · force steps ${forceStepIndices.map((i) => i + 1).join(", ")}` : ""}`,
+        `Targeted run: step ${executeStepIndices.map((i) => i + 1).join(", ")}${execOpts.prepareInputOnly ? " · inputs only" : ""}${forceStepIndices.length ? ` · force steps ${forceStepIndices.map((i) => i + 1).join(", ")}` : ""}`,
         "pipeline",
       );
     } else if (runContextMode === "historical") {
@@ -3621,6 +3624,7 @@ function PipelineCanvas() {
           resume_partial: resumePartial,
           force_step_indices: forceStepIndices,
           execute_step_indices: executeStepIndices,
+          prepare_input_only: !!execOpts.prepareInputOnly,
         }),
         signal: ctrl.signal,
       });
@@ -3656,6 +3660,11 @@ function PipelineCanvas() {
         if (type === "step_done") {
           setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "done" : s)));
           setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? true : ready)));
+        }
+        if (type === "input_prepared") {
+          setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? true : ready)));
+          setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "pending" : s)));
+          appendRunLog(`${stepName}: input prepared`, "pipeline");
         }
         if (type === "input_ready") {
           setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? true : ready)));
@@ -3705,7 +3714,6 @@ function PipelineCanvas() {
     ).trim();
     void runPipeline("default", {
       executeStepIndices: [targetStepIndex],
-      forceStepIndices: [targetStepIndex],
       force: false,
       resumePartial: true,
       continueRunId: preferredRunId,
@@ -3735,6 +3743,7 @@ function PipelineCanvas() {
       force: false,
       resumePartial: true,
       continueRunId: preferredRunId,
+      prepareInputOnly: true,
     });
   }
 
