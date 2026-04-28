@@ -1,6 +1,6 @@
 {
   "name": "shinobi-ui",
-  "version": "6.2.93",
+  "version": "6.2.94",
   "private": true,
   "scripts": {
     "dev": "NODE_OPTIONS=--no-deprecation next dev",

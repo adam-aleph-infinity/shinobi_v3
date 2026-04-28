@@ -448,45 +448,83 @@ function AgentPickerGrid({
   onChange: (agent: UniversalAgent) => void;
 }) {
   const [search, setSearch] = useState("");
+  const classOrder = ["persona", "notes", "scorer", "compliance", "general", ""];
   const filtered = allAgents.filter(a =>
     (a.name ?? "").toLowerCase().includes(search.toLowerCase()) ||
     (a.agent_class ?? "").toLowerCase().includes(search.toLowerCase())
   );
+  const grouped = filtered.reduce<Record<string, UniversalAgent[]>>((acc, agent) => {
+    const key = String(agent.agent_class || "").toLowerCase();
+    (acc[key] ||= []).push(agent);
+    return acc;
+  }, {});
+  const orderedGroups = Object.keys(grouped).sort((a, b) => {
+    const ai = classOrder.indexOf(a);
+    const bi = classOrder.indexOf(b);
+    if (ai === -1 && bi === -1) return a.localeCompare(b);
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
+
+  const renderAgentCard = (a: UniversalAgent) => {
+    const meta = classMeta(a.agent_class ?? "");
+    const isSel = value === a.id;
+    const req = CLASS_REQUIRES_PREV[a.agent_class?.toLowerCase() ?? ""];
+    const usage = usageByAgent[a.id] ?? { total: 0, other: 0 };
+    return (
+      <button
+        key={a.id}
+        onClick={() => onChange(a)}
+        title={a.description}
+        className={`flex items-center gap-1.5 p-2 rounded-lg border text-left transition-colors
+          ${isSel ? `${meta.borderColor} bg-gray-800` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 hover:border-gray-600"}`}
+      >
+        <AgentClassIcon cls={a.agent_class ?? ""} size="sm" />
+        <div className="min-w-0 flex-1">
+          <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : "text-gray-300"}`}>{a.name}</p>
+          <p className={`text-[9px] ${meta.textColor}`}>{meta.label}</p>
+          {usage.total > 0 && (
+            <p className={`text-[9px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
+              {usage.other > 0
+                ? `Used in ${usage.total} pipelines (${usage.other} other)`
+                : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
+            </p>
+          )}
+        </div>
+        {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
+        {req && !isSel && (
+          <span title={`Should follow a ${req} step`}><TriangleAlert className="w-3 h-3 text-amber-600/60 shrink-0" /></span>
+        )}
+      </button>
+    );
+  };
+
   return (
     <div className="space-y-1.5">
       <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search agents…"
         className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-600 outline-none focus:border-indigo-500" />
-      <div className="grid grid-cols-2 gap-1 max-h-52 overflow-y-auto">
-        {filtered.map(a => {
-          const meta  = classMeta(a.agent_class ?? "");
-          const isSel = value === a.id;
-          const req   = CLASS_REQUIRES_PREV[a.agent_class?.toLowerCase() ?? ""];
-          const usage = usageByAgent[a.id] ?? { total: 0, other: 0 };
+      <div className="max-h-52 overflow-y-auto space-y-2">
+        {filtered.length > 0 && orderedGroups.map((groupKey) => {
+          const agents = grouped[groupKey] || [];
+          if (!agents.length) return null;
+          const meta = classMeta(groupKey);
           return (
-            <button key={a.id} onClick={() => onChange(a)} title={a.description}
-              className={`flex items-center gap-1.5 p-2 rounded-lg border text-left transition-colors
-                ${isSel ? `${meta.borderColor} bg-gray-800` : "border-gray-700/50 bg-gray-800/30 hover:bg-gray-800 hover:border-gray-600"}`}>
-              <AgentClassIcon cls={a.agent_class ?? ""} size="sm" />
-              <div className="min-w-0 flex-1">
-                <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : "text-gray-300"}`}>{a.name}</p>
-                <p className={`text-[9px] ${meta.textColor}`}>{meta.label}</p>
-                {usage.total > 0 && (
-                  <p className={`text-[9px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
-                    {usage.other > 0
-                      ? `Used in ${usage.total} pipelines (${usage.other} other)`
-                      : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
-                  </p>
-                )}
+            <div key={groupKey} className="space-y-1">
+              <div className="flex items-center gap-1.5 px-0.5">
+                <span className={cn("text-[9px] uppercase tracking-wider font-semibold", meta.textColor)}>
+                  {meta.label}
+                </span>
+                <span className="text-[9px] text-gray-600">({agents.length})</span>
               </div>
-              {isSel && <Check className="w-3 h-3 text-white shrink-0" />}
-              {req && !isSel && (
-                <span title={`Should follow a ${req} step`}><TriangleAlert className="w-3 h-3 text-amber-600/60 shrink-0" /></span>
-              )}
-            </button>
+              <div className="grid grid-cols-2 gap-1">
+                {agents.map((a) => renderAgentCard(a))}
+              </div>
+            </div>
           );
         })}
         {filtered.length === 0 && (
-          <p className="col-span-2 text-xs text-gray-600 italic text-center py-3">No agents match</p>
+          <p className="text-xs text-gray-600 italic text-center py-3">No agents match</p>
         )}
       </div>
     </div>
