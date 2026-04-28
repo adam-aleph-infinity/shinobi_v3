@@ -4088,6 +4088,36 @@ function PipelineCanvas() {
   }, [selectedNodeId, allAgents.length]);
 
   useEffect(() => {
+    if (selKind !== "processing" || !selectedNodeId || !agentDraft) return;
+    const incoming = edges
+      .filter((e) => e.target === selectedNodeId)
+      .map((e) => nodes.find((n) => n.id === e.source))
+      .filter(Boolean) as Node[];
+    const connectedOutputNodes = incoming.filter((n) => n.type === "output");
+    const inferred = inferAgentClassFromConnectedOutputs(connectedOutputNodes, outputProfiles);
+    if (!inferred) return;
+
+    const draftClass = normalizeAgentClass(agentDraft.agent_class || "");
+    const nodeClass = normalizeAgentClass(String(selData?.agentClass || ""));
+
+    if (draftClass !== inferred) {
+      setAgentDraft((prev) => (prev ? { ...prev, agent_class: inferred } : prev));
+      setAgentSaved(false);
+    }
+    if (nodeClass !== inferred) {
+      updateNodeData(selectedNodeId, { agentClass: inferred });
+    }
+  }, [
+    selKind,
+    selectedNodeId,
+    edges,
+    nodes,
+    outputProfiles,
+    agentDraft,
+    selData?.agentClass,
+  ]);
+
+  useEffect(() => {
     setResultViewMode("rendered");
   }, [selectedNodeId]);
 
@@ -4448,13 +4478,17 @@ function PipelineCanvas() {
                       allAgents={allAgents}
                       usageByAgent={agentUsageByPipeline}
                       onChange={agent => {
+                        const autoCls = inferredAgentClass || normalizeAgentClass(agent.agent_class || "") || "general";
                         updateNodeData(selectedNode.id, {
-                          agentId: agent.id, agentClass: agent.agent_class, agentName: agent.name, label: agent.name,
+                          agentId: agent.id,
+                          agentClass: autoCls,
+                          agentName: agent.name,
+                          label: agent.name,
                         });
                         setAgentDraft({
                           name: agent.name,
                           description: agent.description ?? "",
-                          agent_class: agent.agent_class ?? "",
+                          agent_class: autoCls,
                           model: agent.model ?? "gpt-5.4",
                           temperature: agent.temperature ?? 0,
                           system_prompt: agent.system_prompt ?? "",
@@ -4518,26 +4552,7 @@ function PipelineCanvas() {
                     <PropertiesSection title="Model & Settings">
                       <div className="space-y-2.5">
                         <div className="space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <label className="block text-[9px] text-gray-500">Agent Class</label>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (!inferredAgentClass) {
-                                  showToast("No connected output artifact found to infer class", false);
-                                  return;
-                                }
-                                setAgentDraft((f) => (f ? { ...f, agent_class: inferredAgentClass } : f));
-                                updateNodeData(selectedNode.id, { agentClass: inferredAgentClass });
-                                setAgentSaved(false);
-                                showToast(`Auto class set to ${classMeta(inferredAgentClass).label}`, true);
-                              }}
-                              className="px-2 py-1 rounded-md border border-gray-700 text-[9px] text-gray-300 hover:bg-gray-800"
-                              title="Detect class from connected output artifact"
-                            >
-                              Auto from output
-                            </button>
-                          </div>
+                          <label className="block text-[9px] text-gray-500">Agent Class</label>
                           <div className="grid grid-cols-2 gap-1.5">
                             {AGENT_CLASS_ORDER.map((cls) => {
                               const meta = classMeta(cls);
@@ -4565,7 +4580,7 @@ function PipelineCanvas() {
                           </div>
                           {inferredAgentClass ? (
                             <p className="text-[9px] text-gray-500">
-                              Connected artifact suggests:{" "}
+                              Auto from connected output:{" "}
                               <span className={classMeta(inferredAgentClass).textColor}>
                                 {classMeta(inferredAgentClass).label}
                               </span>
