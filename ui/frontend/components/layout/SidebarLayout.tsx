@@ -1,24 +1,26 @@
 "use client";
-import { useState, useEffect } from "react";
+
+import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
+import { Bot, Home } from "lucide-react";
+import { cn } from "@/lib/utils";
 import AppSidebar from "./AppSidebar";
 import CopilotDock from "./CopilotDock";
 import { ContextBar } from "./ContextBar";
-import { PanelLeftOpen } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { usePathname } from "next/navigation";
 
 const SIDEBAR_WIDTH = 224;
-const TONGUE_BAR_WIDTH = 24;
+const RAIL_WIDTH = 32;
 const COPILOT_DEFAULT_WIDTH = 304;
-const COPILOT_MIN_WIDTH = 280;
-const COPILOT_MAX_WIDTH = 520;
+const COPILOT_MIN_WIDTH = 260;
+const COPILOT_MAX_WIDTH = 560;
 const MIN_CONTENT_WIDTH = 560;
 
 function clampCopilotWidth(raw: number, sidebarCollapsed: boolean): number {
   const hardClamped = Math.min(COPILOT_MAX_WIDTH, Math.max(COPILOT_MIN_WIDTH, raw));
   if (typeof window === "undefined") return hardClamped;
   const sidebarSpace = sidebarCollapsed ? 0 : SIDEBAR_WIDTH;
-  const viewportMax = Math.max(COPILOT_MIN_WIDTH, window.innerWidth - sidebarSpace - MIN_CONTENT_WIDTH);
+  const chromeSpace = sidebarSpace + RAIL_WIDTH + RAIL_WIDTH;
+  const viewportMax = Math.max(220, window.innerWidth - chromeSpace - MIN_CONTENT_WIDTH);
   return Math.min(hardClamped, viewportMax);
 }
 
@@ -58,16 +60,14 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
   useEffect(() => {
     if (!mounted) return;
-    const onResize = () => {
-      setCopilotWidth((current) => clampCopilotWidth(current, collapsed));
-    };
+    const onResize = () => setCopilotWidth((current) => clampCopilotWidth(current, collapsed));
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [collapsed, mounted]);
 
   const toggleSidebar = () => {
-    setCollapsed(c => {
-      const next = !c;
+    setCollapsed((curr) => {
+      const next = !curr;
       localStorage.setItem("sidebar-collapsed", String(next));
       setCopilotWidth((current) => clampCopilotWidth(current, next));
       return next;
@@ -75,8 +75,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   };
 
   const toggleCopilot = () => {
-    setCopilotCollapsed(c => {
-      const next = !c;
+    setCopilotCollapsed((curr) => {
+      const next = !curr;
       localStorage.setItem("copilot-collapsed", String(next));
       return next;
     });
@@ -86,13 +86,16 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     if (e.button !== 0) return;
     e.preventDefault();
 
-    const panelLeft = collapsed ? 0 : SIDEBAR_WIDTH;
+    const startX = e.clientX;
+    const startWidth = copilotWidth;
+
     setResizingCopilot(true);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
 
     const onMove = (ev: MouseEvent) => {
-      const next = clampCopilotWidth(ev.clientX - panelLeft, collapsed);
+      const delta = ev.clientX - startX;
+      const next = clampCopilotWidth(startWidth + delta, collapsed);
       setCopilotWidth(next);
     };
     const onUp = () => {
@@ -107,11 +110,10 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     window.addEventListener("mouseup", onUp);
   };
 
-  const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
-  const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
-  const contentOffset = sidebarOffset + copilotOffset;
   const isPipelinePage = pathname === "/pipeline";
   const showContextBar = pathname !== "/pipeline";
+  const sidebarPanelWidth = mounted && collapsed ? 0 : SIDEBAR_WIDTH;
+  const copilotPanelWidth = mounted && copilotCollapsed ? 0 : copilotWidth;
 
   if (embeddedMode) {
     return (
@@ -122,101 +124,91 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   }
 
   return (
-    <>
-      {/* Sidebar — hidden until mounted to avoid hydration mismatch */}
-      {!mounted && <div className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 z-40" />}
-      {!mounted && (
-        <div
-          className="fixed top-0 h-screen bg-gray-900 border-r border-gray-800 z-30"
-          style={{ left: SIDEBAR_WIDTH, width: COPILOT_DEFAULT_WIDTH }}
-        />
-      )}
-      {mounted && collapsed && (
-        <div className="fixed top-0 left-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none relative">
-          <button
-            onClick={toggleSidebar}
-            className="pointer-events-auto absolute inset-0"
-            title="Show sidebar"
-            aria-label="Show sidebar"
-          />
-          <button
-            className="pointer-events-none p-1 rounded text-gray-500"
-            title="Show sidebar"
-            aria-label="Show sidebar"
-          >
-            <PanelLeftOpen className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-      {mounted && !collapsed && <AppSidebar onToggle={toggleSidebar} />}
-
-      {mounted && copilotCollapsed && (
-        <div
-          className="fixed top-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none relative"
-          style={{ left: collapsed ? TONGUE_BAR_WIDTH : SIDEBAR_WIDTH }}
-        >
-          <button
-            onClick={toggleCopilot}
-            className="pointer-events-auto absolute inset-0"
-            title="Show copilot panel"
-            aria-label="Show copilot panel"
-          />
-          <button
-            className="pointer-events-none p-1 rounded text-gray-500"
-            title="Show copilot panel"
-            aria-label="Show copilot panel"
-          >
-            <PanelLeftOpen className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-      {mounted && !copilotCollapsed && (
-        <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: copilotWidth }}>
-          <CopilotDock onToggle={toggleCopilot} />
-          <div className="absolute top-0 -right-1 h-full w-3 z-40">
-            <button
-              type="button"
-              aria-label="Resize copilot panel"
-              onMouseDown={startCopilotResize}
-              className="group h-full w-full cursor-col-resize flex items-center justify-center"
-            >
-              <span
-                className={cn(
-                  "h-20 w-[2px] rounded bg-gray-700/70 group-hover:bg-indigo-400 transition-colors",
-                  resizingCopilot && "h-full bg-indigo-400"
-                )}
-              />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Main content — always same structure so React doesn't remount children */}
+    <main className="fixed inset-0 flex overflow-hidden bg-gray-950">
       <div
         className={cn(
-          "fixed top-0 bottom-0 right-0 transition-[left] duration-200 overflow-x-hidden",
+          "h-full shrink-0 overflow-hidden bg-gray-900 transition-[width] duration-200",
+          sidebarPanelWidth > 0 && "border-r border-gray-800",
           resizingCopilot && "transition-none",
         )}
-        style={{ left: contentOffset }}
+        style={{ width: sidebarPanelWidth }}
       >
-        <div className="h-full flex flex-col">
-          {mounted && showContextBar && (
-            <div className="shrink-0 z-30">
-              <ContextBar />
-            </div>
-          )}
-          <main
-            className={cn(
-              "flex-1 min-h-0",
-              isPipelinePage
-                ? "p-0 overflow-hidden"
-                : "p-6 overflow-y-auto",
-            )}
-          >
-            {children}
-          </main>
-        </div>
+        {sidebarPanelWidth > 0 && <AppSidebar />}
       </div>
-    </>
+
+      <button
+        type="button"
+        onClick={toggleSidebar}
+        title={collapsed ? "Show toolbar" : "Hide toolbar"}
+        aria-label={collapsed ? "Show toolbar" : "Hide toolbar"}
+        className={cn(
+          "h-full shrink-0 border-r border-gray-800 bg-gray-900/95 w-8",
+          "flex items-center justify-center text-gray-500 hover:text-white transition-colors",
+          !collapsed && "text-indigo-300",
+        )}
+      >
+        <Home className="h-4 w-4" />
+      </button>
+
+      <div
+        className={cn(
+          "h-full shrink-0 overflow-hidden bg-gray-900 transition-[width] duration-200 relative",
+          copilotPanelWidth > 0 && "border-r border-gray-800",
+          resizingCopilot && "transition-none",
+        )}
+        style={{ width: copilotPanelWidth }}
+      >
+        {copilotPanelWidth > 0 && (
+          <>
+            <CopilotDock />
+            <div className="absolute top-0 -right-1 h-full w-3 z-30">
+              <button
+                type="button"
+                aria-label="Resize copilot panel"
+                onMouseDown={startCopilotResize}
+                className="group h-full w-full cursor-col-resize flex items-center justify-center"
+              >
+                <span
+                  className={cn(
+                    "h-24 w-[2px] rounded bg-gray-700/70 group-hover:bg-indigo-400 transition-colors",
+                    resizingCopilot && "h-full bg-indigo-400"
+                  )}
+                />
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={toggleCopilot}
+        title={copilotCollapsed ? "Show copilot" : "Hide copilot"}
+        aria-label={copilotCollapsed ? "Show copilot" : "Hide copilot"}
+        className={cn(
+          "h-full shrink-0 border-r border-gray-800 bg-gray-900/95 w-8",
+          "flex items-center justify-center text-gray-500 hover:text-white transition-colors",
+          !copilotCollapsed && "text-indigo-300",
+        )}
+      >
+        <Bot className="h-4 w-4" />
+      </button>
+
+      <section className="min-w-0 flex-1 h-full flex flex-col">
+        {mounted && showContextBar && (
+          <div className="shrink-0 z-20">
+            <ContextBar />
+          </div>
+        )}
+        <main
+          className={cn(
+            "flex-1 min-h-0",
+            isPipelinePage ? "p-0 overflow-hidden" : "p-6 overflow-y-auto",
+          )}
+        >
+          {children}
+        </main>
+      </section>
+    </main>
   );
 }

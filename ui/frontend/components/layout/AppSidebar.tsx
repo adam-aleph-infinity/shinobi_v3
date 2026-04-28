@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
+  FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
   User, ShieldCheck,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
@@ -107,7 +107,7 @@ function SidebarClock() {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
-export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
+export default function AppSidebar() {
   const pathname = usePathname();
   const isCallsPage = pathname === "/calls";
   const [isDevelopmentHost, setIsDevelopmentHost] = useState(false);
@@ -129,24 +129,7 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
   };
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40 relative pr-5">
-      {onToggle && (
-        <div className="absolute right-0 top-0 h-full w-5 border-l border-gray-800 bg-gray-900/95 text-gray-500 flex items-center justify-center pointer-events-none relative">
-          <button
-            onClick={onToggle}
-            className="pointer-events-auto absolute inset-0"
-            title="Collapse sidebar"
-            aria-label="Collapse sidebar"
-          />
-          <button
-            className="pointer-events-none p-1 rounded text-gray-500"
-            title="Collapse sidebar"
-            aria-label="Collapse sidebar"
-          >
-            <PanelLeftClose className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+    <aside className="h-full w-full bg-gray-900 flex flex-col">
       {/* Logo */}
       <div className="p-4 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-2">

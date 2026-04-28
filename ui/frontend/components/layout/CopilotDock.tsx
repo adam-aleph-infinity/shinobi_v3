@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Bot, Loader2, PanelLeftClose, Plus, Send, Trash2, User, Wrench } from "lucide-react";
+import { Bot, Loader2, Plus, Send, Trash2, User, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type SessionSummary = {
@@ -60,7 +60,7 @@ function fmtTime(iso: string): string {
   }
 }
 
-export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
+export default function CopilotDock() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -276,24 +276,7 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
   }
 
   return (
-    <aside className="h-screen bg-gray-900 border-r border-gray-800 flex flex-col relative pl-6">
-      {onToggle && (
-        <div className="absolute left-0 top-0 h-full w-6 border-r border-gray-800 bg-gray-900/95 text-gray-500 flex items-center justify-center z-20 pointer-events-none relative">
-          <button
-            onClick={onToggle}
-            className="pointer-events-auto absolute inset-0"
-            title="Hide copilot"
-            aria-label="Hide copilot"
-          />
-          <button
-            className="pointer-events-none p-1 rounded text-gray-500"
-            title="Hide copilot"
-            aria-label="Hide copilot"
-          >
-            <PanelLeftClose className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+    <aside className="h-full w-full bg-gray-900 flex flex-col">
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-start gap-2">
         <div className="min-w-0">
           <h1 className="text-sm font-semibold text-white leading-tight">AI Copilot</h1>
