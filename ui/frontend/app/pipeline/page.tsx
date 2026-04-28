@@ -3629,6 +3629,16 @@ function PipelineCanvas() {
         .filter((i) => Number.isFinite(i) && i >= 0 && i < stepCount)
         .map((i) => Math.floor(i))));
     }
+    // Safety net: any targeted non-input-only run should execute the selected
+    // step, not silently cache-hit, even if a caller omitted forceStepIndices.
+    if (
+      executeStepIndices.length > 0
+      && !execOpts.prepareInputOnly
+      && !force
+      && forceStepIndices.length === 0
+    ) {
+      forceStepIndices = [...executeStepIndices];
+    }
     const continueRunId = String(execOpts.continueRunId || "").trim();
     if (continueRunId) {
       appendRunLog(`Continuing run id ${continueRunId.slice(0, 8)}`, "pipeline");
@@ -3737,6 +3747,7 @@ function PipelineCanvas() {
     ).trim();
     void runPipeline("default", {
       executeStepIndices: [targetStepIndex],
+      forceStepIndices: [targetStepIndex],
       force: false,
       resumePartial: true,
       continueRunId: preferredRunId,
