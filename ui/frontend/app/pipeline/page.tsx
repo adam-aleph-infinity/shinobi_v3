@@ -223,11 +223,11 @@ interface PipelineRunStep {
   model?: string;
   status?: string;
   state?: string;
+  input_ready?: boolean;
   start_time?: string | null;
   end_time?: string | null;
   execution_time_s?: number | null;
   cache_mode?: string;
-  input_ready?: boolean;
   input_sources?: PipelineRunStepInputSource[];
   cached_locations?: PipelineRunStepCachedLocation[];
   input_token_est?: number;
@@ -245,6 +245,32 @@ interface StepCacheDisplay {
   status?: string;
   errorMsg?: string;
   content: string;
+}
+
+interface PipelineLiveStateStep {
+  state?: string;
+  status?: string;
+  input_ready?: boolean;
+  cached_locations?: Array<{ type?: string; id?: string }>;
+}
+
+interface PipelineLiveState {
+  run_id?: string;
+  status?: string;
+  steps?: PipelineLiveStateStep[];
+  node_states?: {
+    input?: Record<string, string>;
+    processing?: Record<string, string>;
+    output?: Record<string, string>;
+  };
+}
+
+type CanvasLogFilterMode = "all" | "llm" | "pipeline" | "errors";
+
+interface CanvasLogLine {
+  ts: string;
+  text: string;
+  level: "llm" | "pipeline" | "error" | "warn" | "info";
 }
 
 type RunContextMode = "new" | "historical";
@@ -508,6 +534,7 @@ const STAGE_LABELS: Record<NodeKind, string> = {
 
 // Maximum total stages: input + 3 × (processing + output)
 const MAX_TOTAL_STAGES = 7;
+const LOGS_PANEL_WIDTH = "clamp(340px, 25vw, 560px)";
 
 // All valid X snap targets: union of every position used in CENTERED_X
 const ALL_SNAP_X = [...new Set(CENTERED_X.flat())].sort((a, b) => a - b); // [20,140,260,380,500,620,740]
@@ -702,10 +729,15 @@ function NodeCard({
     runtimeStatus === "error" ? "shadow-[0_0_16px_rgba(239,68,68,0.25)]" :
     "";
   return (
-    <div className={`w-[200px] rounded-xl border-2 shadow-2xl transition-all duration-150
-      ${runtimeBorder} bg-gray-900 ${runtimeGlow}
-      ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40` : "opacity-90 hover:opacity-100"}`}>
-      {children}
+    <div className="relative">
+      {runtimeStatus === "loading" && (
+        <div className="pointer-events-none absolute -inset-1 rounded-2xl border-2 border-yellow-400 border-t-transparent animate-spin" />
+      )}
+      <div className={`w-[200px] rounded-xl border-2 shadow-2xl transition-all duration-150
+        ${runtimeBorder} bg-gray-900 ${runtimeGlow}
+        ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40` : "opacity-90 hover:opacity-100"}`}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -1095,6 +1127,22 @@ function relativeTime(iso: string | null): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+function classifyCanvasLogLine(text: string): CanvasLogLine["level"] {
+  const t = String(text || "");
+  const up = t.toUpperCase();
+  if (up.includes("ERROR") || up.includes("FAILED") || up.includes("EXCEPTION") || up.includes("TRACEBACK")) return "error";
+  if (up.includes("WARN")) return "warn";
+  if (
+    up.includes("[LLM]")
+    || up.includes("[VOTE]")
+    || up.includes("[SMOOTH]")
+    || up.includes("THINKING")
+    || up.includes("STREAM")
+  ) return "llm";
+  if (up.includes("[PIPELINE]") || up.includes("STEP ") || up.includes("PIPELINE")) return "pipeline";
+  return "info";
+}
+
 // ── Inner canvas ──────────────────────────────────────────────────────────────
 
 let nodeSeq = 1;
@@ -1267,9 +1315,13 @@ function PipelineCanvas() {
   const [showCrmPanel, setShowCrmPanel] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [logsCollapsed, setLogsCollapsed] = useState(false);
-  const [runLogLines, setRunLogLines] = useState<string[]>([]);
+  const [runLogLines, setRunLogLines] = useState<CanvasLogLine[]>([]);
+  const [runLogsSearch, setRunLogsSearch] = useState("");
+  const [runLogFilterMode, setRunLogFilterMode] = useState<CanvasLogFilterMode>("all");
+  const [runLogsGrouped, setRunLogsGrouped] = useState(false);
   const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
+  const [stepInputReady, setStepInputReady] = useState<boolean[]>([]);
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
   const [callTranscriptText, setCallTranscriptText] = useState("");
@@ -1373,6 +1425,20 @@ function PipelineCanvas() {
   );
   const runScope = String(selectedPipeline?.scope || "per_call").toLowerCase();
   const runNeedsCall = runScope !== "per_pair";
+
+  const liveStateUrl = useMemo(() => {
+    if (!pipelineId || !salesAgent || !customer) return null;
+    const qp = new URLSearchParams({
+      sales_agent: salesAgent,
+      customer,
+    });
+    return `/api/pipelines/${encodeURIComponent(pipelineId)}/state?${qp.toString()}`;
+  }, [pipelineId, salesAgent, customer]);
+  const { data: livePipelineState, mutate: mutateLivePipelineState } = useSWR<PipelineLiveState>(
+    liveStateUrl,
+    fetcher,
+    { refreshInterval: running ? 1500 : 5000 },
+  );
 
   const statusPipelineId = pipelineId || activePipelineId;
   const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
@@ -1765,7 +1831,7 @@ function PipelineCanvas() {
           },
           not_run: {
             label: "not run",
-            className: "text-gray-300 border-gray-700/60 bg-gray-900/60",
+            className: "text-gray-300 border-gray-700 bg-gray-900",
           },
         }[status];
 
@@ -1885,7 +1951,7 @@ function PipelineCanvas() {
     return { stepToProcNodeIds, procToOutputNodeIds, inputToProcNodeIds };
   }, [nodes, edges]);
 
-  const applyRuntimeStatusMap = useCallback((statuses: RuntimeStatus[]) => {
+  const applyRuntimeStatusMap = useCallback((statuses: RuntimeStatus[], inputReadyByStep: boolean[] = []) => {
     const runtimeByNodeId: Record<string, RuntimeStatus> = {};
 
     runtimeGraph.stepToProcNodeIds.forEach((procId, idx) => {
@@ -1898,11 +1964,18 @@ function PipelineCanvas() {
     });
 
     Object.entries(runtimeGraph.inputToProcNodeIds).forEach(([inputId, procIds]) => {
-      const connected = procIds.map(pid => runtimeByNodeId[pid] ?? "pending");
-      if (connected.some(s => s === "error")) runtimeByNodeId[inputId] = "error";
-      else if (connected.some(s => s === "loading")) runtimeByNodeId[inputId] = "loading";
-      else if (connected.some(s => s === "done")) runtimeByNodeId[inputId] = "done";
-      else if (connected.some(s => s === "cached")) runtimeByNodeId[inputId] = "cached";
+      const connected = procIds.map((pid) => {
+        const idx = runtimeGraph.stepToProcNodeIds.indexOf(pid);
+        return {
+          status: runtimeByNodeId[pid] ?? "pending",
+          inputReady: idx >= 0 ? !!inputReadyByStep[idx] : false,
+        };
+      });
+      if (connected.some((s) => s.status === "error")) runtimeByNodeId[inputId] = "error";
+      else if (connected.some((s) => s.status === "done")) runtimeByNodeId[inputId] = "done";
+      else if (connected.some((s) => s.status === "cached")) runtimeByNodeId[inputId] = "cached";
+      else if (connected.some((s) => s.status === "loading" && s.inputReady)) runtimeByNodeId[inputId] = "done";
+      else if (connected.some((s) => s.status === "loading")) runtimeByNodeId[inputId] = "loading";
       else runtimeByNodeId[inputId] = "pending";
     });
 
@@ -1925,10 +1998,12 @@ function PipelineCanvas() {
     const stepCount = runtimeGraph.stepToProcNodeIds.length;
     if (stepCount <= 0) {
       setStepStatuses([]);
-      applyRuntimeStatusMap([]);
+      setStepInputReady([]);
+      applyRuntimeStatusMap([], []);
       return;
     }
     const next = Array.from({ length: stepCount }, () => "pending" as RuntimeStatus);
+    const nextInputReady = Array.from({ length: stepCount }, () => false);
     if (runContextMode === "historical" && selectedCacheRun) {
       const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
       runSteps.forEach((row, idx) => {
@@ -1939,15 +2014,64 @@ function PipelineCanvas() {
         else if (["cached", "cache_hit"].includes(rawState)) next[idx] = "cached";
         else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
         else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
+        nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
+      });
+    } else if (runContextMode === "new" && Array.isArray(livePipelineState?.steps)) {
+      livePipelineState.steps.forEach((row, idx) => {
+        if (idx >= next.length || !row) return;
+        const rawState = String(row.state || row.status || "").toLowerCase();
+        const hasCache = Array.isArray(row.cached_locations) && row.cached_locations.length > 0;
+        if (["failed", "fail", "error"].includes(rawState)) next[idx] = "error";
+        else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
+        else if (["completed", "done", "pass", "success", "ok"].includes(rawState)) next[idx] = hasCache ? "cached" : "done";
+        nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
       });
     }
     setStepStatuses(next);
-    applyRuntimeStatusMap(next);
-  }, [runtimeGraph.stepToProcNodeIds, running, applyRuntimeStatusMap, runContextMode, selectedCacheRun, parsedRunStepsById]);
+    setStepInputReady(nextInputReady);
+    applyRuntimeStatusMap(next, nextInputReady);
+  }, [
+    runtimeGraph.stepToProcNodeIds,
+    running,
+    applyRuntimeStatusMap,
+    runContextMode,
+    selectedCacheRun,
+    parsedRunStepsById,
+    livePipelineState,
+  ]);
 
   useEffect(() => {
-    applyRuntimeStatusMap(stepStatuses);
-  }, [stepStatuses, applyRuntimeStatusMap]);
+    applyRuntimeStatusMap(stepStatuses, stepInputReady);
+  }, [stepStatuses, stepInputReady, applyRuntimeStatusMap]);
+
+  useEffect(() => {
+    if (running || runContextMode !== "new") return;
+    const nodeStates = livePipelineState?.node_states;
+    if (!nodeStates) return;
+    const toRuntimeStatus = (raw: string): RuntimeStatus => {
+      const s = String(raw || "").toLowerCase();
+      if (["running", "loading", "started"].includes(s)) return "loading";
+      if (["cached", "cache_hit"].includes(s)) return "cached";
+      if (["done", "completed", "pass", "success", "ok"].includes(s)) return "done";
+      if (["failed", "fail", "error"].includes(s)) return "error";
+      return "pending";
+    };
+    setNodes((ns) => {
+      let changed = false;
+      const next = ns.map((n) => {
+        const bucket = n.type === "input" ? nodeStates.input : n.type === "processing" ? nodeStates.processing : nodeStates.output;
+        const raw = String(bucket?.[n.id] || "");
+        if (!raw) return n;
+        const status = toRuntimeStatus(raw);
+        const data = n.data as PipelineNodeData;
+        const prev = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+        if (prev === status) return n;
+        changed = true;
+        return { ...n, data: { ...data, runtimeStatus: status } satisfies PipelineNodeData };
+      });
+      return changed ? next : ns;
+    });
+  }, [running, runContextMode, livePipelineState?.node_states, setNodes]);
 
   // Keep processing node agent metadata in sync with agent library edits from other pages.
   useEffect(() => {
@@ -3053,11 +3177,12 @@ function PipelineCanvas() {
     return summary;
   }
 
-  const appendRunLog = useCallback((line: string) => {
+  const appendRunLog = useCallback((line: string, levelHint?: CanvasLogLine["level"]) => {
     const ts = new Date().toLocaleTimeString();
-    const formatted = `[${ts}] ${line}`;
+    const text = String(line || "");
+    const level = levelHint ?? classifyCanvasLogLine(text);
     setRunLogLines((prev) => {
-      const next = [...prev, formatted];
+      const next = [...prev, { ts, text, level }];
       return next.length > 800 ? next.slice(next.length - 800) : next;
     });
   }, []);
@@ -3090,6 +3215,7 @@ function PipelineCanvas() {
       () => "pending" as RuntimeStatus,
     );
     setStepStatuses(freshStatuses);
+    setStepInputReady(Array.from({ length: runtimeGraph.stepToProcNodeIds.length }, () => false));
     setSelectedNodeId(null);
     setLogsExpanded(true);
     setLogsCollapsed(false);
@@ -3115,24 +3241,36 @@ function PipelineCanvas() {
       if (!res.body) throw new Error("No response body");
 
       const summary = await readPipelineSSE(res, (type, evt, stepIdx) => {
+        if (type === "pipeline_start") appendRunLog(`Pipeline started`, "pipeline");
+        if (type === "pipeline_done") appendRunLog(`Pipeline finished`, "pipeline");
+        if (type === "progress" && evt?.msg) appendRunLog(String(evt.msg));
+        if (type === "stream" && evt?.text) appendRunLog(String(evt.text), "llm");
+        if (type === "thinking" && evt?.content) appendRunLog(String(evt.content), "llm");
         if (stepIdx == null) return;
         const stepName = runtimeGraph.stepToProcNodeIds[stepIdx] || `step_${stepIdx + 1}`;
-        if (type === "step_start") appendRunLog(`${stepName}: started`);
-        if (type === "step_cached") appendRunLog(`${stepName}: cache hit`);
-        if (type === "step_done") appendRunLog(`${stepName}: done`);
+        if (type === "step_start") appendRunLog(`${stepName}: started`, "pipeline");
+        if (type === "step_cached") appendRunLog(`${stepName}: cache hit`, "pipeline");
+        if (type === "step_done") appendRunLog(`${stepName}: done`, "pipeline");
         if (type === "step_start") {
           setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "loading" : s)));
+          setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? false : ready)));
         }
         if (type === "step_cached") {
           setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "cached" : s)));
+          setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? true : ready)));
         }
         if (type === "step_done") {
           setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "done" : s)));
+          setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? true : ready)));
+        }
+        if (type === "input_ready") {
+          setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? true : ready)));
+          appendRunLog(`${stepName}: input ready`, "pipeline");
         }
         if (type === "error" && evt?.step != null) {
           setStepStatuses(prev => prev.map((s, i) => (i === evt.step ? "error" : s)));
           setRunError(prev => prev || String(evt?.msg || "Pipeline run ended with an error"));
-          appendRunLog(`ERROR at step ${evt.step + 1}: ${String(evt?.msg || "unknown error")}`);
+          appendRunLog(`ERROR at step ${evt.step + 1}: ${String(evt?.msg || "unknown error")}`, "error");
         }
       });
 
@@ -3147,11 +3285,12 @@ function PipelineCanvas() {
       }
       mutateCache();
       mutateRuns();
+      mutateLivePipelineState();
     } catch (e: any) {
       if (e?.name !== "AbortError") {
         setRunError(e?.message || "Pipeline run failed");
         showToast(e?.message || "Pipeline run failed", false);
-        appendRunLog(`Run failed: ${String(e?.message || "unknown error")}`);
+        appendRunLog(`Run failed: ${String(e?.message || "unknown error")}`, "error");
       }
     } finally {
       setRunning(false);
@@ -3163,7 +3302,7 @@ function PipelineCanvas() {
     runAbortRef.current?.abort();
     setRunning(false);
     setRunError("Run stopped by user.");
-    appendRunLog("Run stopped by user");
+    appendRunLog("Run stopped by user", "warn");
     try {
       await fetch(`/api/pipelines/${pipelineId}/stop`, {
         method: "POST",
@@ -3177,6 +3316,7 @@ function PipelineCanvas() {
     } catch {
       // local abort already stopped UI
     }
+    mutateLivePipelineState();
   }
 
   // ── Right properties panel ────────────────────────────────────────────────
@@ -3659,16 +3799,6 @@ function PipelineCanvas() {
               <div className="lg:col-span-6 min-h-0 overflow-y-auto pr-1 space-y-2.5">
                 {agentDraft ? (
                   <>
-                    {agId && (
-                      <PropertiesSection title="Agent Name">
-                        <input
-                          value={agentDraft.name}
-                          onChange={e => setAgentDraft(f => f ? { ...f, name: e.target.value } : f)}
-                          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
-                        />
-                      </PropertiesSection>
-                    )}
-
                     <PropertiesSection title="System Prompt">
                       <textarea
                         value={agentDraft.system_prompt}
@@ -3690,7 +3820,7 @@ function PipelineCanvas() {
                     </PropertiesSection>
                   </>
                 ) : (
-                  <div className="h-full rounded-xl border border-gray-800 bg-gray-900/60 p-4 text-xs text-gray-500">
+                  <div className="h-full rounded-xl border border-gray-800 bg-gray-900 p-4 text-xs text-gray-500">
                     Select an agent on the left to edit prompts.
                   </div>
                 )}
@@ -3870,7 +4000,7 @@ function PipelineCanvas() {
                       const selectedProfile = selectableOutputProfiles.find(p => p.id === String(selData.outputProfileId || ""));
                       if (!selectedProfile) return null;
                       return (
-                        <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-2 space-y-1">
+                        <div className="rounded-lg border border-gray-800 bg-gray-900 p-2 space-y-1">
                           <p className="text-[10px] text-indigo-300 font-medium">{selectedProfile.name}</p>
                           <p className="text-[10px] text-gray-500">
                             type: {selectedProfile.artifact_type || "—"} · class: {selectedProfile.artifact_class || "—"} · format: {selectedProfile.output_format}
@@ -4024,6 +4154,36 @@ function PipelineCanvas() {
     setShowCallsPanel(true);
     setShowCrmPanel(false);
     setSelectedNodeId(null);
+  };
+
+  const filteredRunLogs = useMemo(() => {
+    const byMode = runLogFilterMode === "all"
+      ? runLogLines
+      : runLogFilterMode === "llm"
+        ? runLogLines.filter((l) => l.level === "llm")
+        : runLogFilterMode === "pipeline"
+          ? runLogLines.filter((l) => l.level === "pipeline")
+          : runLogLines.filter((l) => l.level === "error" || l.level === "warn");
+    const q = runLogsSearch.trim().toLowerCase();
+    if (!q) return byMode;
+    return byMode.filter((l) => l.text.toLowerCase().includes(q));
+  }, [runLogLines, runLogFilterMode, runLogsSearch]);
+
+  const groupedRunLogs = useMemo(() => {
+    const groups: Record<string, CanvasLogLine[]> = {};
+    for (const line of filteredRunLogs) {
+      const key = line.level;
+      (groups[key] ??= []).push(line);
+    }
+    return groups;
+  }, [filteredRunLogs]);
+
+  const logLevelClass = (level: CanvasLogLine["level"]) => {
+    if (level === "error") return "text-red-300";
+    if (level === "warn") return "text-yellow-300";
+    if (level === "pipeline") return "text-indigo-300";
+    if (level === "llm") return "text-teal-300";
+    return "text-gray-300";
   };
 
   return (
@@ -4393,9 +4553,9 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-[1px] p-3 flex items-center justify-center">
+            <div className="absolute inset-0 z-40 bg-black p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-800/45 bg-gray-950/98 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-800 bg-gray-950 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
@@ -4445,7 +4605,7 @@ function PipelineCanvas() {
                                 "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
                                 selected
                                   ? "border-amber-600/70 bg-amber-900/30"
-                                  : "border-gray-800 bg-gray-900/60 hover:bg-gray-800/80",
+                                  : "border-gray-800 bg-gray-900 hover:bg-gray-800",
                               )}
                             >
                               <div className="flex items-center gap-1.5">
@@ -4529,9 +4689,9 @@ function PipelineCanvas() {
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-[1px] p-3 flex items-center justify-center">
+            <div className="absolute inset-0 z-40 bg-black p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-cyan-800/45 bg-gray-950/98 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-cyan-800 bg-gray-950 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
@@ -4553,50 +4713,126 @@ function PipelineCanvas() {
           )}
 
           {logsExpanded && (
-            <div className={cn(
-              "absolute right-3 bottom-3 z-20 rounded-xl border border-indigo-800/35 bg-gray-950/95 shadow-2xl overflow-hidden transition-all duration-200",
-              logsCollapsed ? "w-[420px] h-12" : "w-[min(42vw,760px)] h-72",
-            )}>
+            <div
+              className={cn(
+                "absolute right-0 top-0 bottom-0 z-20 border-l border-indigo-800 bg-gray-950 shadow-2xl overflow-hidden transition-all duration-200",
+                logsCollapsed ? "w-14" : "",
+              )}
+              style={{ width: logsCollapsed ? 56 : LOGS_PANEL_WIDTH }}
+            >
               <div className="h-12 px-3 flex items-center gap-2 border-b border-gray-800">
                 <History className="w-4 h-4 text-indigo-400 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-gray-200 font-semibold">Run Logs</p>
-                  <p className="text-[10px] text-gray-500 truncate">
-                    {running ? "Pipeline executing…" : (runLogLines.length ? `${runLogLines.length} events` : "No run events yet")}
-                  </p>
-                </div>
+                {!logsCollapsed && (
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-gray-200 font-semibold">Run Logs</p>
+                    <p className="text-[10px] text-gray-500 truncate">
+                      {running ? "Pipeline executing…" : (runLogLines.length ? `${runLogLines.length} events` : "No run events yet")}
+                    </p>
+                  </div>
+                )}
                 <button
                   onClick={() => setLogsCollapsed(v => !v)}
-                  className="px-2 py-1 rounded-md border border-gray-700 text-[11px] text-gray-300 hover:bg-gray-800 transition-colors"
-                >
-                  {logsCollapsed ? "Expand" : "Minimize"}
-                </button>
-                <button
-                  onClick={() => setLogsExpanded(false)}
                   className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                  title="Close logs panel"
+                  title={logsCollapsed ? "Expand logs panel" : "Minimize logs panel"}
                 >
-                  <X className="w-3.5 h-3.5" />
+                  {logsCollapsed ? <ChevronRight className="w-4 h-4" /> : <X className="w-4 h-4" />}
                 </button>
               </div>
               {!logsCollapsed && (
-                <div className="h-[calc(100%-3rem)] overflow-y-auto p-2">
-                  {runLogLines.length === 0 ? (
-                    <p className="text-xs text-gray-600 italic px-1 py-2">Run logs will appear here.</p>
-                  ) : (
-                    <pre className="text-[11px] leading-5 text-gray-200 font-mono whitespace-pre-wrap break-words">
-                      {runLogLines.join("\n")}
-                    </pre>
-                  )}
+                <div className="h-[calc(100%-3rem)] flex flex-col min-h-0">
+                  <div className="px-3 py-2 border-b border-gray-800 flex items-center gap-1">
+                    {(["all", "llm", "pipeline", "errors"] as CanvasLogFilterMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={() => setRunLogFilterMode(mode)}
+                        className={cn(
+                          "px-2 py-0.5 rounded text-[10px] font-medium transition-colors",
+                          runLogFilterMode === mode
+                            ? mode === "llm"
+                              ? "bg-teal-800 text-teal-200"
+                              : mode === "pipeline"
+                                ? "bg-indigo-800 text-indigo-200"
+                                : mode === "errors"
+                                  ? "bg-red-800 text-red-200"
+                                  : "bg-gray-700 text-white"
+                            : "text-gray-500 hover:text-gray-300",
+                        )}
+                      >
+                        {mode === "all" ? "All" : mode === "llm" ? "LLM" : mode === "pipeline" ? "Pipeline" : "Errors"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="px-3 py-2 border-b border-gray-800 flex items-center gap-2">
+                    <input
+                      className="flex-1 min-w-0 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-[11px] text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                      placeholder="Filter logs…"
+                      value={runLogsSearch}
+                      onChange={(e) => setRunLogsSearch(e.target.value)}
+                    />
+                    <button
+                      onClick={() => setRunLogsGrouped((v) => !v)}
+                      className={cn(
+                        "px-2 py-1 rounded border text-[10px] transition-colors",
+                        runLogsGrouped
+                          ? "border-violet-700 bg-violet-900 text-violet-200"
+                          : "border-gray-700 text-gray-400 hover:bg-gray-800",
+                      )}
+                    >
+                      Group
+                    </button>
+                    <button
+                      onClick={() => setRunLogLines([])}
+                      className="px-2 py-1 rounded border border-gray-700 text-[10px] text-gray-400 hover:bg-gray-800 transition-colors"
+                    >
+                      Clear
+                    </button>
+                    <span className="text-[10px] text-gray-600">{filteredRunLogs.length}</span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-3 space-y-1 font-mono">
+                    {filteredRunLogs.length === 0 ? (
+                      <p className="text-xs text-gray-600 italic px-1 py-2">Run logs will appear here.</p>
+                    ) : runLogsGrouped ? (
+                      <>
+                        {Object.entries(groupedRunLogs).map(([group, lines]) => (
+                          <div key={group} className="mb-2">
+                            <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                              {group} ({lines.length})
+                            </p>
+                            <div className="pl-2 border-l border-gray-800 space-y-0.5">
+                              {lines.map((line, idx) => (
+                                <div key={`${group}-${idx}`} className="flex gap-2 leading-5 items-start">
+                                  <span className="text-gray-700 shrink-0 w-16">{line.ts}</span>
+                                  <span className={cn("min-w-0 whitespace-pre-wrap break-words", logLevelClass(line.level))}>
+                                    {line.text}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <>
+                        {filteredRunLogs.map((line, idx) => (
+                          <div key={`${line.ts}-${idx}`} className="flex gap-2 leading-5 items-start">
+                            <span className="text-gray-700 shrink-0 w-16">{line.ts}</span>
+                            <span className={cn("min-w-0 whitespace-pre-wrap break-words", logLevelClass(line.level))}>
+                              {line.text}
+                            </span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
           )}
 
           {showBundleImport && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black p-4">
               <div
-                className="w-full max-w-3xl rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
+                className="w-full max-w-3xl rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
@@ -4651,9 +4887,9 @@ function PipelineCanvas() {
           )}
 
           {showBundleCopyFallback && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black p-4">
               <div
-                className="w-full max-w-3xl rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
+                className="w-full max-w-3xl rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
@@ -4701,9 +4937,9 @@ function PipelineCanvas() {
           )}
 
           {selectedNodeId && (
-            <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-[1px] p-3 flex items-center justify-center">
+            <div className="absolute inset-0 z-30 bg-black p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700/45 bg-gray-900/98 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
+                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
@@ -4716,10 +4952,27 @@ function PipelineCanvas() {
                 <div className="h-full w-full rounded-[inherit] overflow-hidden flex flex-col">
                   <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
                     <div className="min-w-0">
-                      <p className="text-xs text-gray-500 uppercase tracking-wide">Edit Element</p>
-                      <p className="text-sm text-white font-semibold truncate">
-                        {(selectedNode?.data as PipelineNodeData | undefined)?.label || "Element"}
-                      </p>
+                      <input
+                        value={
+                          selKind === "processing" && agentDraft
+                            ? agentDraft.name
+                            : String((selectedNode?.data as PipelineNodeData | undefined)?.label || "Element")
+                        }
+                        onChange={(e) => {
+                          if (!selectedNode) return;
+                          const next = e.target.value;
+                          const nodeData = selectedNode.data as PipelineNodeData;
+                          if (selKind === "processing" && agentDraft) {
+                            setAgentDraft((prev) => (prev ? { ...prev, name: next } : prev));
+                          }
+                          updateNodeData(selectedNode.id, {
+                            label: next,
+                            ...(selKind === "processing" && nodeData.agentId ? { agentName: next } : {}),
+                          });
+                        }}
+                        className="w-[min(58vw,680px)] max-w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-sm text-white font-semibold outline-none focus:border-indigo-500"
+                        placeholder="Element name"
+                      />
                     </div>
                   </div>
                   <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>
@@ -4732,12 +4985,12 @@ function PipelineCanvas() {
 
           <div
             className={cn(
-              "absolute bottom-3 z-20 rounded-xl border border-gray-800 bg-gray-950/95 shadow-2xl transition-all duration-200 overflow-hidden",
+              "absolute bottom-3 z-20 rounded-xl border border-gray-800 bg-gray-950 shadow-2xl transition-all duration-200 overflow-hidden",
               historyExpanded ? "h-72" : "h-12",
             )}
             style={{
               left: 12,
-              right: logsExpanded && !logsCollapsed ? "calc(min(42vw, 760px) + 16px)" : 12,
+              right: logsExpanded && !logsCollapsed ? `calc(${LOGS_PANEL_WIDTH} + 16px)` : 12,
             }}
           >
             <div className="h-12 px-3 flex items-center gap-2 border-b border-gray-800">
@@ -4782,7 +5035,7 @@ function PipelineCanvas() {
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
                         : "text-orange-300 border-orange-700/50 bg-orange-950/40";
                     return (
-                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2">
+                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-3 py-2">
                         <div className="flex items-center gap-3">
                           <button
                             onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
@@ -4805,15 +5058,15 @@ function PipelineCanvas() {
                         {expanded && (
                           <div className="mt-2 ml-3 pl-3 border-l border-gray-800 space-y-2">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
-                              <div className="rounded border border-gray-800 bg-gray-900/60 px-2 py-1">
+                              <div className="rounded border border-gray-800 bg-gray-900 px-2 py-1">
                                 <p className="text-gray-500">Run started</p>
                                 <p className="text-gray-200">{timeline?.runStartedLabel || "—"}</p>
                               </div>
-                              <div className="rounded border border-gray-800 bg-gray-900/60 px-2 py-1">
+                              <div className="rounded border border-gray-800 bg-gray-900 px-2 py-1">
                                 <p className="text-gray-500">Run finished</p>
                                 <p className="text-gray-200">{timeline?.runFinishedLabel || "—"}</p>
                               </div>
-                              <div className="rounded border border-gray-800 bg-gray-900/60 px-2 py-1">
+                              <div className="rounded border border-gray-800 bg-gray-900 px-2 py-1">
                                 <p className="text-gray-500">Run duration</p>
                                 <p className="text-gray-200">{timeline?.runDurationLabel || "—"}</p>
                               </div>
@@ -4824,7 +5077,7 @@ function PipelineCanvas() {
                             ) : (
                               <div className="space-y-2">
                                 {timeline.rows.map((row) => (
-                                  <div key={`${run.id}-step-${row.stepIndex}`} className="rounded-lg border border-gray-800 bg-gray-950/70 p-2">
+                                  <div key={`${run.id}-step-${row.stepIndex}`} className="rounded-lg border border-gray-800 bg-gray-950 p-2">
                                     <div className="flex items-center gap-2">
                                       <p className="text-[10px] text-gray-500 shrink-0">
                                         Step {row.stepIndex + 1}{row.stageIndex != null ? ` · Stage ${row.stageIndex + 1}` : ""}
