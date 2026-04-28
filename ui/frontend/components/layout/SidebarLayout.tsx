@@ -113,9 +113,6 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const contentWidth = `calc(100vw - ${contentOffset}px)`;
   const isPipelinePage = pathname === "/pipeline";
   const showContextBar = pathname !== "/pipeline";
-  const contentStyle = isPipelinePage
-    ? { left: contentOffset, width: contentWidth }
-    : { marginLeft: contentOffset, width: contentWidth };
 
   if (embeddedMode) {
     return (
@@ -183,24 +180,28 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {/* Main content — always same structure so React doesn't remount children */}
       <div
         className={cn(
-          "transition-[margin,width,left] duration-200 overflow-x-hidden",
-          isPipelinePage ? "fixed top-0 h-screen overflow-hidden" : "min-h-screen",
+          "fixed top-0 h-screen transition-[width,left] duration-200 overflow-hidden",
           resizingCopilot && "transition-none",
         )}
-        style={contentStyle}
+        style={{ left: contentOffset, width: contentWidth }}
       >
-        <div className="sticky top-0 z-30">
-          {mounted && showContextBar && <ContextBar />}
-        </div>
-        <main
-          className={cn(
-            isPipelinePage
-              ? "h-full p-0 overflow-hidden"
-              : "min-h-screen p-6",
+        <div className="h-full flex flex-col">
+          {mounted && showContextBar && (
+            <div className="shrink-0 z-30">
+              <ContextBar />
+            </div>
           )}
-        >
-          {children}
-        </main>
+          <main
+            className={cn(
+              "flex-1 min-h-0",
+              isPipelinePage
+                ? "p-0 overflow-hidden"
+                : "p-6 overflow-y-auto",
+            )}
+          >
+            {children}
+          </main>
+        </div>
       </div>
     </>
   );
