@@ -1099,7 +1099,11 @@ function PipelineCanvas() {
   const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
   const { data: navAgents } = useSWR<NavAgentOption[]>("/api/crm/nav/agents", fetcher);
-  const { data: navCustomers } = useSWR<NavCustomerOption[]>(
+  const {
+    data: navCustomers,
+    isValidating: navCustomersValidating,
+    error: navCustomersError,
+  } = useSWR<NavCustomerOption[]>(
     salesAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(salesAgent)}` : null,
     fetcher,
   );
@@ -1293,20 +1297,20 @@ function PipelineCanvas() {
       const nextAgent = String(payload.agent || "").trim();
       const nextCustomer = String(payload.customer || "").trim();
       if (!nextAgent || !nextCustomer) return;
-      setSalesAgent(nextAgent);
       setCustomer(nextCustomer, nextAgent);
       setShowCrmPanel(false);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [setCustomer, setSalesAgent]);
+  }, [setCustomer]);
 
   useEffect(() => {
     if (!customer || !navCustomers) return;
+    if (navCustomersValidating || navCustomersError) return;
     if (!navCustomers.some(c => c.customer === customer)) {
       setCustomer("");
     }
-  }, [customer, navCustomers, setCustomer]);
+  }, [customer, navCustomers, navCustomersValidating, navCustomersError, setCustomer]);
 
   useEffect(() => {
     if (!callId) return;
