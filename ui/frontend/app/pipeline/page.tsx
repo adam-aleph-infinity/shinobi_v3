@@ -3993,39 +3993,62 @@ function PipelineCanvas() {
     );
   }
 
+  function stripCodeFence(raw: string): string {
+    const s = String(raw || "").trim();
+    if (!s.startsWith("```")) return s;
+    const lines = s.split("\n");
+    if (lines.length < 3) return s;
+    if (!lines[0].startsWith("```")) return s;
+    const last = lines[lines.length - 1].trim();
+    if (last !== "```") return s;
+    return lines.slice(1, -1).join("\n").trim();
+  }
+
   function unwrapResponseEnvelope(raw: string): { text: string; unwrapped: boolean } {
-    let current = String(raw || "").trim();
+    const original = String(raw || "");
+    let current = stripCodeFence(original);
     let unwrapped = false;
-    for (let depth = 0; depth < 4; depth += 1) {
+
+    const pickPayload = (obj: Record<string, unknown>): unknown => {
+      const keys = ["response", "results", "content", "data", "note", "output", "result", "text"];
+      for (const key of keys) {
+        if (obj[key] != null) return obj[key];
+      }
+      const ownKeys = Object.keys(obj);
+      if (ownKeys.length === 1) return obj[ownKeys[0]];
+      return undefined;
+    };
+
+    for (let depth = 0; depth < 6; depth += 1) {
       if (!current) break;
+      let parsed: unknown = null;
       try {
-        const parsed = JSON.parse(current);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) break;
-        const obj = parsed as Record<string, unknown>;
-        const responseVal = obj.response;
-        if (typeof responseVal === "string" && responseVal.trim()) {
-          current = responseVal.trim();
-          unwrapped = true;
-          continue;
-        }
-        const resultsVal = obj.results;
-        if (typeof resultsVal === "string" && resultsVal.trim()) {
-          current = resultsVal.trim();
-          unwrapped = true;
-          continue;
-        }
-        const contentVal = obj.content;
-        if (typeof contentVal === "string" && contentVal.trim()) {
-          current = contentVal.trim();
-          unwrapped = true;
-          continue;
-        }
-        break;
+        parsed = JSON.parse(current);
       } catch {
         break;
       }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) break;
+      const payload = pickPayload(parsed as Record<string, unknown>);
+      if (payload == null) break;
+
+      if (typeof payload === "string") {
+        const next = stripCodeFence(payload);
+        if (!next.trim()) break;
+        current = next.trim();
+        unwrapped = true;
+        continue;
+      }
+
+      if (typeof payload === "object") {
+        current = JSON.stringify(payload, null, 2);
+        unwrapped = true;
+        continue;
+      }
+
+      break;
     }
-    return { text: current || String(raw || ""), unwrapped };
+
+    return { text: current || original, unwrapped };
   }
 
   function renderResultContent(content: string, sourceHint = "") {
