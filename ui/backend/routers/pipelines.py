@@ -5338,20 +5338,8 @@ async def run_pipeline(
                     temperature   = float(runtime_agent_def.get("temperature", 0.0))
                     system_prompt = runtime_agent_def.get("system_prompt", "")
                     user_template = runtime_agent_def.get("user_prompt", "")
-                    _step_sub_type = str(
-                        ((_step_output_meta.get(step_idx) or {}).get("sub_type") or "")
-                    ).strip().lower()
-                    system_prompt, user_template = _apply_call_id_contract(
-                        system_prompt=system_prompt,
-                        user_template=user_template,
-                        agent_def=runtime_agent_def,
-                        artifact_sub_type=_step_sub_type,
-                    )
-                    system_prompt, user_template = _apply_output_contract_to_prompts(
-                        system_prompt=system_prompt,
-                        user_template=user_template,
-                        agent_def=runtime_agent_def,
-                    )
+                    # Intentionally do not mutate prompts at runtime.
+                    # Execution must use exactly the stored system/user prompts.
                     manual_inputs = {"_chain_previous": prev_content}
                     source_for_key = {
                         inp.get("key", ""): _public_input_source(
@@ -5398,17 +5386,10 @@ async def run_pipeline(
                     run_steps[step_idx]["input_ready"] = True
                     save_steps()  # input files/text resolved — persist input-node readiness
 
-                    file_keys = {
-                        inp.get("key", "")
-                        for inp in runtime_agent_def.get("inputs", [])
-                        if _is_file_source(
-                            _public_input_source(
-                                overrides.get(inp.get("key", ""), inp.get("source", "manual"))
-                            )
-                        )
-                    }
-                    file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
-                    inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
+                    # Strict runtime policy:
+                    # always pass resolved inputs as provider files only.
+                    file_inputs = dict(resolved)
+                    inline_inputs: dict[str, str] = {}
 
                     input_fingerprint = _build_input_fingerprint(
                         pipeline_id=pipeline_id,
@@ -5757,20 +5738,8 @@ async def run_pipeline(
                         _par_temp   = float(_par_rdef.get("temperature", 0.0))
                         _par_sysp   = _par_rdef.get("system_prompt", "")
                         _par_ut     = _par_rdef.get("user_prompt", "")
-                        _par_sub_type = str(
-                            ((_step_output_meta.get(par_idx) or {}).get("sub_type") or "")
-                        ).strip().lower()
-                        _par_sysp, _par_ut = _apply_call_id_contract(
-                            system_prompt=_par_sysp,
-                            user_template=_par_ut,
-                            agent_def=_par_rdef,
-                            artifact_sub_type=_par_sub_type,
-                        )
-                        _par_sysp, _par_ut = _apply_output_contract_to_prompts(
-                            system_prompt=_par_sysp,
-                            user_template=_par_ut,
-                            agent_def=_par_rdef,
-                        )
+                        # Intentionally do not mutate prompts at runtime.
+                        # Execution must use exactly the stored system/user prompts.
                         _par_mi     = {"_chain_previous": _sp}
                         _par_fp     = ""
                         _par_input_ready = False
@@ -5825,17 +5794,10 @@ async def run_pipeline(
                                     )
                                 _par_input_ready = True
 
-                                _par_fkeys = {
-                                    _inp.get("key", "")
-                                    for _inp in _par_rdef.get("inputs", [])
-                                    if _is_file_source(
-                                        _public_input_source(
-                                            _par_ov.get(_inp.get("key", ""), _inp.get("source", "manual"))
-                                        )
-                                    )
-                                }
-                                _par_fi = {k: v for k, v in _par_resolved.items() if k in _par_fkeys}
-                                _par_ii = {k: v for k, v in _par_resolved.items() if k not in _par_fkeys}
+                                # Strict runtime policy:
+                                # always pass resolved inputs as provider files only.
+                                _par_fi = dict(_par_resolved)
+                                _par_ii: dict[str, str] = {}
                                 _par_fp = _build_input_fingerprint(
                                     pipeline_id=pipeline_id,
                                     step_idx=par_idx,
