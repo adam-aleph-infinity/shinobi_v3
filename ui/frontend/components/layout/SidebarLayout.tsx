@@ -110,6 +110,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
   const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
   const contentOffset = sidebarOffset + copilotOffset;
+  const contentWidth = `calc(100vw - ${contentOffset}px)`;
+  const isPipelinePage = pathname === "/pipeline";
   const showContextBar = pathname !== "/pipeline";
 
   if (embeddedMode) {
@@ -181,14 +183,21 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       )}
 
       {/* Main content — always same structure so React doesn't remount children */}
-      <div className={cn("transition-[margin] duration-200", resizingCopilot && "transition-none")} style={{ marginLeft: contentOffset }}>
+      <div
+        className={cn(
+          "transition-[margin,width] duration-200 overflow-x-hidden",
+          isPipelinePage ? "h-screen overflow-hidden" : "min-h-screen",
+          resizingCopilot && "transition-none",
+        )}
+        style={{ marginLeft: contentOffset, width: contentWidth }}
+      >
         <div className="sticky top-0 z-30">
           {mounted && showContextBar && <ContextBar />}
         </div>
         <main
           className={cn(
-            pathname === "/pipeline"
-              ? "h-screen p-0 overflow-hidden"
+            isPipelinePage
+              ? "h-full p-0 overflow-hidden"
               : "min-h-screen p-6",
           )}
         >
