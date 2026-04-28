@@ -3,12 +3,12 @@ import { useState, useEffect } from "react";
 import AppSidebar from "./AppSidebar";
 import CopilotDock from "./CopilotDock";
 import { ContextBar } from "./ContextBar";
-import { PanelLeftOpen } from "lucide-react";
+import { Bot, Home } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { usePathname } from "next/navigation";
 
 const SIDEBAR_WIDTH = 224;
-const TONGUE_BAR_WIDTH = 24;
+const TOGGLE_STRIP_WIDTH = 12;
 const COPILOT_DEFAULT_WIDTH = 304;
 const COPILOT_MIN_WIDTH = 280;
 const COPILOT_MAX_WIDTH = 520;
@@ -133,33 +133,28 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         />
       )}
       {mounted && collapsed && (
-        <div className="fixed top-0 left-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none">
-          <button
-            onClick={toggleSidebar}
-            className="pointer-events-auto p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-            title="Show sidebar"
-            aria-label="Show sidebar"
-          >
-            <PanelLeftOpen className="w-4 h-4" />
-          </button>
-        </div>
+        <button
+          onClick={toggleSidebar}
+          className="fixed top-0 left-0 z-50 h-screen bg-gray-900/95 border-r border-gray-800 text-gray-500 hover:text-white hover:bg-gray-800/95 transition-colors flex items-center justify-center"
+          style={{ width: TOGGLE_STRIP_WIDTH }}
+          title="Show main tools"
+          aria-label="Show main tools"
+        >
+          <Home className="w-4 h-4" />
+        </button>
       )}
       {mounted && !collapsed && <AppSidebar onToggle={toggleSidebar} />}
 
       {mounted && copilotCollapsed && (
-        <div
-          className="fixed top-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 flex items-center justify-center pointer-events-none"
-          style={{ left: collapsed ? TONGUE_BAR_WIDTH : SIDEBAR_WIDTH }}
+        <button
+          onClick={toggleCopilot}
+          className="fixed top-0 z-50 h-screen bg-gray-900/95 border-r border-gray-800 text-gray-500 hover:text-white hover:bg-gray-800/95 transition-colors flex items-center justify-center"
+          style={{ left: collapsed ? TOGGLE_STRIP_WIDTH : SIDEBAR_WIDTH, width: TOGGLE_STRIP_WIDTH }}
+          title="Show copilot panel"
+          aria-label="Show copilot panel"
         >
-          <button
-            onClick={toggleCopilot}
-            className="pointer-events-auto p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-            title="Show copilot panel"
-            aria-label="Show copilot panel"
-          >
-            <PanelLeftOpen className="w-4 h-4" />
-          </button>
-        </div>
+          <Bot className="w-4 h-4" />
+        </button>
       )}
       {mounted && !copilotCollapsed && (
         <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: copilotWidth }}>
