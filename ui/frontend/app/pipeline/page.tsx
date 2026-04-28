@@ -322,6 +322,13 @@ const MODEL_GROUPS = [
   { provider: "xAI",       models: ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"] },
 ];
 
+interface RuntimeGraph {
+  stepToProcNodeIds: string[];
+  procToOutputNodeIds: Record<string, string[]>;
+  inputToProcNodeIds: Record<string, string[]>;
+  stepParents: Record<number, number[]>;
+}
+
 const INPUT_SOURCES = [
   { value: "transcript",        label: "Transcript",   shortLabel: "Transcript", icon: Mic2,
     badge: "bg-blue-900/50 text-blue-300 border-blue-700/50", desc: "Single call transcript" },
@@ -791,7 +798,7 @@ function NodeCard({
               className="h-5 min-w-[24px] rounded border border-indigo-700/60 bg-indigo-900/50 px-1 text-[10px] font-bold text-indigo-200 hover:bg-indigo-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
               title={`Run this step only (Step ${runStepIndex + 1})`}
             >
-              |&gt;
+              ▶
             </button>
             {canRunWithDeps && (
               <button
@@ -804,7 +811,7 @@ function NodeCard({
                 className="h-5 min-w-[30px] rounded border border-cyan-700/60 bg-cyan-900/45 px-1 text-[10px] font-bold text-cyan-200 hover:bg-cyan-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
                 title={`Run required upstream steps + this step (Step ${runStepIndex + 1})`}
               >
-                |&gt;&gt;
+                ⏩
               </button>
             )}
           </div>
@@ -2049,7 +2056,7 @@ function PipelineCanvas() {
   edgesRef.current  = edges;
   stagesRef.current = stages;
 
-  const runtimeGraph = useMemo(() => {
+  const runtimeGraph = useMemo<RuntimeGraph>(() => {
     const processingOrdered = [...nodes]
       .filter(n => n.type === "processing" && String((n.data as PipelineNodeData).agentId || "").trim())
       .sort((a, b) => {
@@ -2058,8 +2065,16 @@ function PipelineCanvas() {
         return da.stageIndex !== db.stageIndex ? da.stageIndex - db.stageIndex : a.position.x - b.position.x;
       });
     const stepToProcNodeIds = processingOrdered.map(n => n.id);
+    const procNodeIdToStepIndex = new Map(stepToProcNodeIds.map((id, idx) => [id, idx]));
     const procToOutputNodeIds: Record<string, string[]> = {};
     const inputToProcNodeIds: Record<string, string[]> = {};
+    const outputToProcNodeIds: Record<string, string[]> = {};
+    const outputProducerProcId: Record<string, string> = {};
+    const stepParentSet: Record<number, Set<number>> = {};
+    const getOrCreateStepParentSet = (idx: number): Set<number> => {
+      if (!stepParentSet[idx]) stepParentSet[idx] = new Set<number>();
+      return stepParentSet[idx];
+    };
 
     for (const e of edges) {
       const src = nodes.find(n => n.id === e.source);
@@ -2071,8 +2086,43 @@ function PipelineCanvas() {
       if (src.type === "input" && tgt.type === "processing") {
         (inputToProcNodeIds[src.id] ??= []).push(tgt.id);
       }
+      if (src.type === "output" && tgt.type === "processing") {
+        (outputToProcNodeIds[src.id] ??= []).push(tgt.id);
+      }
+      if (src.type === "processing" && tgt.type === "processing") {
+        const srcIdx = procNodeIdToStepIndex.get(src.id);
+        const tgtIdx = procNodeIdToStepIndex.get(tgt.id);
+        if (srcIdx != null && tgtIdx != null && srcIdx !== tgtIdx) {
+          getOrCreateStepParentSet(tgtIdx).add(srcIdx);
+        }
+      }
     }
-    return { stepToProcNodeIds, procToOutputNodeIds, inputToProcNodeIds };
+
+    // processing -> output producer map
+    Object.entries(procToOutputNodeIds).forEach(([procId, outIds]) => {
+      outIds.forEach((oid) => {
+        if (oid) outputProducerProcId[oid] = procId;
+      });
+    });
+
+    // output -> processing implies dependency: producer(processing) -> downstream(processing)
+    Object.entries(outputToProcNodeIds).forEach(([outputId, targetProcIds]) => {
+      const producerProcId = outputProducerProcId[outputId];
+      if (!producerProcId) return;
+      const producerIdx = procNodeIdToStepIndex.get(producerProcId);
+      if (producerIdx == null) return;
+      targetProcIds.forEach((targetProcId) => {
+        const targetIdx = procNodeIdToStepIndex.get(targetProcId);
+        if (targetIdx == null || targetIdx === producerIdx) return;
+        getOrCreateStepParentSet(targetIdx).add(producerIdx);
+      });
+    });
+
+    const stepParents: Record<number, number[]> = {};
+    for (let i = 0; i < stepToProcNodeIds.length; i += 1) {
+      stepParents[i] = Array.from(stepParentSet[i] || []).sort((a, b) => a - b);
+    }
+    return { stepToProcNodeIds, procToOutputNodeIds, inputToProcNodeIds, stepParents };
   }, [nodes, edges]);
 
   const applyRuntimeStatusMap = useCallback((statuses: RuntimeStatus[], inputReadyByStep: boolean[] = []) => {
@@ -2251,7 +2301,9 @@ function PipelineCanvas() {
       } else if (n.type === "input") {
         runStepIndex = inputStepIndexByNodeId[n.id] ?? null;
       }
-      const canRunWithDeps = runStepIndex != null && runStepIndex > 0;
+      const canRunWithDeps =
+        runStepIndex != null &&
+        (runtimeGraph.stepParents[runStepIndex]?.length || 0) > 0;
       return {
         ...n,
         data: {
@@ -2274,6 +2326,7 @@ function PipelineCanvas() {
     customer,
     runNeedsCall,
     callId,
+    runtimeGraph.stepParents,
   ]);
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
@@ -3512,6 +3565,18 @@ function PipelineCanvas() {
     }
   }
 
+  function getUpstreamStepClosure(targetStepIndex: number): number[] {
+    const visited = new Set<number>();
+    const walk = (idx: number) => {
+      if (visited.has(idx)) return;
+      visited.add(idx);
+      const parents = runtimeGraph.stepParents[idx] || [];
+      for (const p of parents) walk(p);
+    };
+    walk(targetStepIndex);
+    return Array.from(visited).sort((a, b) => a - b);
+  }
+
   function runNodeStep(targetStepIndex: number, includeDependencies: boolean) {
     if (!Number.isFinite(targetStepIndex) || targetStepIndex < 0) {
       showToast("Invalid target step", false);
@@ -3522,7 +3587,7 @@ function PipelineCanvas() {
       return;
     }
     const executeStepIndices = includeDependencies
-      ? Array.from({ length: targetStepIndex + 1 }, (_, i) => i)
+      ? getUpstreamStepClosure(targetStepIndex)
       : [targetStepIndex];
     void runPipeline("default", {
       executeStepIndices,
