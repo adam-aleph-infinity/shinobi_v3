@@ -4202,7 +4202,10 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div className="absolute inset-0 z-40 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col relative">
+            <div
+              className="absolute inset-0 z-40 flex flex-col relative border border-indigo-800/40 bg-gray-950/76 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)]"
+              style={{ animation: "canvasPopupIn 180ms ease-out" }}
+            >
               <button
                 onClick={() => setShowCallsPanel(false)}
                 className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
@@ -4316,7 +4319,10 @@ function PipelineCanvas() {
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-40 bg-gray-950 border border-gray-800 shadow-2xl relative">
+            <div
+              className="absolute inset-0 z-40 border border-cyan-800/35 bg-gray-950/78 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] relative"
+              style={{ animation: "canvasPopupIn 180ms ease-out" }}
+            >
               <button
                 onClick={() => setShowCrmPanel(false)}
                 className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
@@ -4336,9 +4342,10 @@ function PipelineCanvas() {
             <>
               <div
                 className={cn(
-                  "absolute inset-y-0 right-0 z-20 w-[min(38%,900px)] min-w-[400px] border-l border-gray-800 bg-gray-950 shadow-2xl flex flex-col transition-transform duration-200 relative",
+                  "absolute inset-y-0 right-0 z-20 w-[min(38%,900px)] min-w-[400px] border-l border-indigo-800/35 bg-gray-950/90 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.72)] flex flex-col transition-transform duration-200 relative",
                   runLogsVisible ? "translate-x-0" : "translate-x-full pointer-events-none",
                 )}
+                style={runLogsVisible ? { animation: "canvasPopupIn 180ms ease-out" } : undefined}
               >
                 <button
                   onClick={() => setRunLogsVisible(false)}
@@ -4376,7 +4383,10 @@ function PipelineCanvas() {
 
           {showBundleImport && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
-              <div className="w-full max-w-3xl rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+              <div
+                className="w-full max-w-3xl rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
+                style={{ animation: "canvasPopupIn 180ms ease-out" }}
+              >
                 <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
                   <p className="text-sm font-semibold text-white">Paste Pipeline Bundle</p>
                   <button
@@ -4430,7 +4440,10 @@ function PipelineCanvas() {
 
           {showBundleCopyFallback && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4">
-              <div className="w-full max-w-3xl rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+              <div
+                className="w-full max-w-3xl rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
+                style={{ animation: "canvasPopupIn 180ms ease-out" }}
+              >
                 <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
                   <p className="text-sm font-semibold text-white">Copy Pipeline Bundle</p>
                   <button
@@ -4476,7 +4489,7 @@ function PipelineCanvas() {
           )}
 
           {selectedNodeId && (
-            <div className="absolute inset-0 z-30 bg-black/45 p-4 relative">
+            <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[2px] p-4 relative">
               <button
                 onClick={() => setSelectedNodeId(null)}
                 className="absolute top-2 left-1/2 -translate-x-1/2 z-40 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
@@ -4484,7 +4497,10 @@ function PipelineCanvas() {
               >
                 <X className="w-5 h-5" />
               </button>
-              <div className="w-full h-full rounded-xl border border-gray-700 bg-gray-900 shadow-2xl overflow-hidden flex flex-col">
+              <div
+                className="w-full h-full rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden flex flex-col"
+                style={{ animation: "canvasPopupIn 180ms ease-out" }}
+              >
                 <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
                   <div className="min-w-0">
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Edit Element</p>
