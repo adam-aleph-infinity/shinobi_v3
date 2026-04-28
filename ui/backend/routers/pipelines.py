@@ -2241,6 +2241,7 @@ class PipelineRunRequest(BaseModel):
     force: bool = False
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
     resume_partial: bool = False  # allow per-step cache fallback when exact fingerprint miss
+    execute_step_indices: list[int] = []  # run only these step indices (0-based); empty = run all
 
 
 class PipelineStopRequest(BaseModel):
@@ -4085,6 +4086,7 @@ async def run_pipeline(
                 "force": bool(req.force),
                 "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
                 "resume_partial": bool(req.resume_partial),
+                "execute_step_indices": [int(i) for i in (req.execute_step_indices or [])],
             },
             client_local_time=client_local_time,
             client_timezone=client_timezone,
@@ -4792,6 +4794,23 @@ async def run_pipeline(
                 _seen_stages.append(_cs)
             _grp[_cs].append(_si)
         _ordered_stages = [(_cs, _grp[_cs]) for _cs in _seen_stages]
+
+        _execute_step_indices: list[int] = []
+        _seen_exec: set[int] = set()
+        for _raw_idx in (req.execute_step_indices or []):
+            try:
+                _idx = int(_raw_idx)
+            except Exception:
+                continue
+            if _idx < 0 or _idx >= len(steps) or _idx in _seen_exec:
+                continue
+            _seen_exec.add(_idx)
+            _execute_step_indices.append(_idx)
+        _execute_step_set: Optional[set[int]] = set(_execute_step_indices) if _execute_step_indices else None
+        if _execute_step_set:
+            log_buffer.emit(
+                f"[PIPELINE] ▶ Targeted execution: {len(_execute_step_indices)} step(s) selected · {cid_short}"
+            )
         # Rewrite once after canvas maps are available so JSON includes node_states.
         save_steps()
 
@@ -5019,10 +5038,17 @@ async def run_pipeline(
 
             fatal_error = False
 
-            for _canvas_stage, step_indices in _ordered_stages:
+            for _canvas_stage, _stage_step_indices in _ordered_stages:
                 _raise_if_stop_requested()
                 if fatal_error:
                     break
+                step_indices = (
+                    [i for i in _stage_step_indices if i in _execute_step_set]
+                    if _execute_step_set is not None
+                    else _stage_step_indices
+                )
+                if not step_indices:
+                    continue
 
                 # ── Single-step stage (streaming ok) ─────────────────────────
                 if len(step_indices) == 1:

@@ -275,6 +275,14 @@ interface CanvasLogLine {
 
 type RunContextMode = "new" | "historical";
 type ResultViewMode = "rendered" | "raw";
+type HistoricalRunExecMode = "force_full" | "failed_only";
+
+interface PipelineRunExecOptions {
+  executeStepIndices?: number[];
+  forceStepIndices?: number[];
+  force?: boolean;
+  resumePartial?: boolean;
+}
 
 interface InputPreviewState {
   loading: boolean;
@@ -478,6 +486,11 @@ interface PipelineNodeData extends Record<string, unknown> {
   prompt:     string;
   stageIndex: number;
   runtimeStatus?: RuntimeStatus;
+  runStepIndex?: number | null;
+  canRunWithDeps?: boolean;
+  runButtonDisabled?: boolean;
+  onRunStep?: () => void;
+  onRunStepWithDeps?: () => void;
   // agent node — linked backend agent
   agentId:    string;
   agentClass: string;
@@ -602,6 +615,23 @@ const HANDLE_CSS = `
     background:#1e1b4b!important;border-color:#6366f1!important; }
 `;
 
+const NODE_RUNTIME_CSS = `
+  .pipeline-node-snake {
+    fill: none;
+    stroke: #facc15;
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 48 220;
+    animation: pipeline-node-snake 1.05s linear infinite;
+    filter: drop-shadow(0 0 3px rgba(250, 204, 21, 0.75));
+  }
+
+  @keyframes pipeline-node-snake {
+    to { stroke-dashoffset: -268; }
+  }
+`;
+
 // ── Sleeve background node ────────────────────────────────────────────────────
 
 function SleeveNode({ data }: { data: Record<string, unknown> }) {
@@ -705,13 +735,24 @@ function findAutoConnect(
 function NodeCard({
   children, meta, selected, kind,
   runtimeStatus = "pending",
+  runStepIndex = null,
+  canRunWithDeps = false,
+  runButtonDisabled = false,
+  onRunStep,
+  onRunStepWithDeps,
 }: {
   children: React.ReactNode;
   meta:     Meta;
   selected: boolean;
   kind:     NodeKind;
   runtimeStatus?: RuntimeStatus;
+  runStepIndex?: number | null;
+  canRunWithDeps?: boolean;
+  runButtonDisabled?: boolean;
+  onRunStep?: () => void;
+  onRunStepWithDeps?: () => void;
 }) {
+  const hasStepRun = typeof runStepIndex === "number" && runStepIndex >= 0;
   const ringColor =
     kind === "input"      ? "ring-blue-400/50" :
     kind === "processing" ? "ring-indigo-400/50" :
@@ -719,23 +760,55 @@ function NodeCard({
   const runtimeBorder =
     runtimeStatus === "done" ? "border-emerald-500" :
     runtimeStatus === "cached" ? "border-amber-500" :
-    runtimeStatus === "loading" ? "border-orange-500" :
     runtimeStatus === "error" ? "border-red-500" :
     meta.border;
   const runtimeGlow =
     runtimeStatus === "done" ? "shadow-[0_0_16px_rgba(34,197,94,0.25)]" :
     runtimeStatus === "cached" ? "shadow-[0_0_16px_rgba(245,158,11,0.25)]" :
-    runtimeStatus === "loading" ? "shadow-[0_0_18px_rgba(249,115,22,0.30)]" :
     runtimeStatus === "error" ? "shadow-[0_0_16px_rgba(239,68,68,0.25)]" :
     "";
   return (
     <div className="relative">
       {runtimeStatus === "loading" && (
-        <div className="pointer-events-none absolute -inset-1 rounded-2xl border-2 border-yellow-400 border-t-transparent animate-spin" />
+        <div className="pointer-events-none absolute -inset-1">
+          <svg className="w-full h-full" viewBox="0 0 208 96" preserveAspectRatio="none" aria-hidden="true">
+            <rect x="2" y="2" width="204" height="92" rx="14" ry="14" className="pipeline-node-snake" />
+          </svg>
+        </div>
       )}
       <div className={`w-[200px] rounded-xl border-2 shadow-2xl transition-all duration-150
         ${runtimeBorder} bg-gray-900 ${runtimeGlow}
         ${selected ? `ring-2 ${ringColor} shadow-indigo-900/40` : "opacity-90 hover:opacity-100"}`}>
+        {hasStepRun && (
+          <div className="absolute right-1.5 top-1.5 z-20 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRunStep?.();
+              }}
+              disabled={runButtonDisabled || !onRunStep}
+              className="h-5 min-w-[24px] rounded border border-indigo-700/60 bg-indigo-900/50 px-1 text-[10px] font-bold text-indigo-200 hover:bg-indigo-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
+              title={`Run this step only (Step ${runStepIndex + 1})`}
+            >
+              |&gt;
+            </button>
+            {canRunWithDeps && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRunStepWithDeps?.();
+                }}
+                disabled={runButtonDisabled || !onRunStepWithDeps}
+                className="h-5 min-w-[30px] rounded border border-cyan-700/60 bg-cyan-900/45 px-1 text-[10px] font-bold text-cyan-200 hover:bg-cyan-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
+                title={`Run required upstream steps + this step (Step ${runStepIndex + 1})`}
+              >
+                |&gt;&gt;
+              </button>
+            )}
+          </div>
+        )}
         {children}
       </div>
     </div>
@@ -815,8 +888,21 @@ function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData;
   const src = INPUT_SOURCES.find(s => s.value === (data.inputSource as string)) ?? null;
   const SrcIcon = src?.icon ?? null;
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+  const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
+  const canRunWithDeps = !!data.canRunWithDeps;
+  const runButtonDisabled = !!data.runButtonDisabled;
   return (
-    <NodeCard meta={m} selected={!!selected} kind="input" runtimeStatus={runtimeStatus}>
+    <NodeCard
+      meta={m}
+      selected={!!selected}
+      kind="input"
+      runtimeStatus={runtimeStatus}
+      runStepIndex={runStepIndex}
+      canRunWithDeps={canRunWithDeps}
+      runButtonDisabled={runButtonDisabled}
+      onRunStep={data.onRunStep}
+      onRunStepWithDeps={data.onRunStepWithDeps}
+    >
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{SrcIcon ? <SrcIcon className="w-4 h-4" /> : m.icon}</span>
         <EditableNodeLabel
@@ -847,8 +933,21 @@ function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNode
   const Icon = CLASS_ICON[cls.toLowerCase()] ?? Bot;
   const hasAgent = !!(data.agentId as string);
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+  const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
+  const canRunWithDeps = !!data.canRunWithDeps;
+  const runButtonDisabled = !!data.runButtonDisabled;
   return (
-    <NodeCard meta={m} selected={!!selected} kind="processing" runtimeStatus={runtimeStatus}>
+    <NodeCard
+      meta={m}
+      selected={!!selected}
+      kind="processing"
+      runtimeStatus={runtimeStatus}
+      runStepIndex={runStepIndex}
+      canRunWithDeps={canRunWithDeps}
+      runButtonDisabled={runButtonDisabled}
+      onRunStep={data.onRunStep}
+      onRunStepWithDeps={data.onRunStepWithDeps}
+    >
       <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">
@@ -889,8 +988,21 @@ function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData
   const { setNodes } = useReactFlow();
   const m = getMeta("output", data.subType);
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+  const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
+  const canRunWithDeps = !!data.canRunWithDeps;
+  const runButtonDisabled = !!data.runButtonDisabled;
   return (
-    <NodeCard meta={m} selected={!!selected} kind="output" runtimeStatus={runtimeStatus}>
+    <NodeCard
+      meta={m}
+      selected={!!selected}
+      kind="output"
+      runtimeStatus={runtimeStatus}
+      runStepIndex={runStepIndex}
+      canRunWithDeps={canRunWithDeps}
+      runButtonDisabled={runButtonDisabled}
+      onRunStep={data.onRunStep}
+      onRunStepWithDeps={data.onRunStepWithDeps}
+    >
       <Handle type="target" position={Position.Top} className="rf-tgt" />
       <div className={`${m.color} flex items-center gap-2.5 px-4 py-2.5 rounded-t-xl`}>
         <span className="text-white/90 shrink-0">{m.icon}</span>
@@ -1309,10 +1421,10 @@ function PipelineCanvas() {
   const [runError, setRunError] = useState("");
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
-  const [historyExpanded, setHistoryExpanded] = useState(true);
   const [expandedHistoryRunIds, setExpandedHistoryRunIds] = useState<Record<string, boolean>>({});
   const [showCallsPanel, setShowCallsPanel] = useState(false);
   const [showCrmPanel, setShowCrmPanel] = useState(false);
+  const [showHistoricalRunModeDialog, setShowHistoricalRunModeDialog] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [logsCollapsed, setLogsCollapsed] = useState(false);
   const [runLogLines, setRunLogLines] = useState<CanvasLogLine[]>([]);
@@ -1321,6 +1433,7 @@ function PipelineCanvas() {
   const [runLogsGrouped, setRunLogsGrouped] = useState(false);
   const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
+  const [currentRunId, setCurrentRunId] = useState("");
   const [stepInputReady, setStepInputReady] = useState<boolean[]>([]);
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
@@ -1888,6 +2001,17 @@ function PipelineCanvas() {
     return out;
   }, [historyRuns, parsedRunStepsById, formatDurationLabel, formatRunAbsoluteTime]);
 
+  const selectedCacheRunFailedStepIndices = useMemo(() => {
+    if (!selectedCacheRun) return [] as number[];
+    const steps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+    const out: number[] = [];
+    steps.forEach((s, idx) => {
+      const raw = String(s?.state || s?.status || "").toLowerCase().trim();
+      if (["failed", "error", "fail"].includes(raw)) out.push(idx);
+    });
+    return out;
+  }, [selectedCacheRun, parsedRunStepsById]);
+
   const cacheUrl = useMemo(() => {
     if (!pipelineId || !salesAgent || !customer) return null;
     const runCallId = runNeedsCall ? callId : "";
@@ -2016,16 +2140,6 @@ function PipelineCanvas() {
         else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
       });
-    } else if (runContextMode === "new" && Array.isArray(livePipelineState?.steps)) {
-      livePipelineState.steps.forEach((row, idx) => {
-        if (idx >= next.length || !row) return;
-        const rawState = String(row.state || row.status || "").toLowerCase();
-        const hasCache = Array.isArray(row.cached_locations) && row.cached_locations.length > 0;
-        if (["failed", "fail", "error"].includes(rawState)) next[idx] = "error";
-        else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
-        else if (["completed", "done", "pass", "success", "ok"].includes(rawState)) next[idx] = hasCache ? "cached" : "done";
-        nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
-      });
     }
     setStepStatuses(next);
     setStepInputReady(nextInputReady);
@@ -2037,41 +2151,11 @@ function PipelineCanvas() {
     runContextMode,
     selectedCacheRun,
     parsedRunStepsById,
-    livePipelineState,
   ]);
 
   useEffect(() => {
     applyRuntimeStatusMap(stepStatuses, stepInputReady);
   }, [stepStatuses, stepInputReady, applyRuntimeStatusMap]);
-
-  useEffect(() => {
-    if (running || runContextMode !== "new") return;
-    const nodeStates = livePipelineState?.node_states;
-    if (!nodeStates) return;
-    const toRuntimeStatus = (raw: string): RuntimeStatus => {
-      const s = String(raw || "").toLowerCase();
-      if (["running", "loading", "started"].includes(s)) return "loading";
-      if (["cached", "cache_hit"].includes(s)) return "cached";
-      if (["done", "completed", "pass", "success", "ok"].includes(s)) return "done";
-      if (["failed", "fail", "error"].includes(s)) return "error";
-      return "pending";
-    };
-    setNodes((ns) => {
-      let changed = false;
-      const next = ns.map((n) => {
-        const bucket = n.type === "input" ? nodeStates.input : n.type === "processing" ? nodeStates.processing : nodeStates.output;
-        const raw = String(bucket?.[n.id] || "");
-        if (!raw) return n;
-        const status = toRuntimeStatus(raw);
-        const data = n.data as PipelineNodeData;
-        const prev = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
-        if (prev === status) return n;
-        changed = true;
-        return { ...n, data: { ...data, runtimeStatus: status } satisfies PipelineNodeData };
-      });
-      return changed ? next : ns;
-    });
-  }, [running, runContextMode, livePipelineState?.node_states, setNodes]);
 
   // Keep processing node agent metadata in sync with agent library edits from other pages.
   useEffect(() => {
@@ -2129,7 +2213,68 @@ function PipelineCanvas() {
   }, [stages.length, setViewport]);
 
   // Render only actual flow nodes; swimbars are drawn as a non-interactive backdrop.
-  const allNodes = useMemo(() => [...nodes], [nodes]);
+  const allNodes = useMemo(() => {
+    const procStepIndexByNodeId: Record<string, number> = {};
+    runtimeGraph.stepToProcNodeIds.forEach((nodeId, idx) => {
+      procStepIndexByNodeId[nodeId] = idx;
+    });
+    const outputStepIndexByNodeId: Record<string, number> = {};
+    const inputStepIndexByNodeId: Record<string, number> = {};
+    const incomingByNode: Record<string, string[]> = {};
+    const outgoingByNode: Record<string, string[]> = {};
+    edges.forEach((e) => {
+      (incomingByNode[String(e.target)] ??= []).push(String(e.source));
+      (outgoingByNode[String(e.source)] ??= []).push(String(e.target));
+    });
+    for (const n of nodes) {
+      if (n.type === "output") {
+        const incoming = incomingByNode[n.id] || [];
+        const srcProc = incoming.find((sid) => procStepIndexByNodeId[sid] != null);
+        if (srcProc != null) outputStepIndexByNodeId[n.id] = procStepIndexByNodeId[srcProc];
+      } else if (n.type === "input") {
+        const outgoing = outgoingByNode[n.id] || [];
+        const idxs = outgoing
+          .map((tid) => procStepIndexByNodeId[tid])
+          .filter((idx): idx is number => Number.isFinite(idx));
+        if (idxs.length) inputStepIndexByNodeId[n.id] = Math.min(...idxs);
+      }
+    }
+
+    const runButtonDisabled = running || !pipelineId || !salesAgent || !customer || (runNeedsCall && !callId);
+    return nodes.map((n) => {
+      const base = n.data as PipelineNodeData;
+      let runStepIndex: number | null = null;
+      if (n.type === "processing") {
+        runStepIndex = procStepIndexByNodeId[n.id] ?? null;
+      } else if (n.type === "output") {
+        runStepIndex = outputStepIndexByNodeId[n.id] ?? null;
+      } else if (n.type === "input") {
+        runStepIndex = inputStepIndexByNodeId[n.id] ?? null;
+      }
+      const canRunWithDeps = runStepIndex != null && runStepIndex > 0;
+      return {
+        ...n,
+        data: {
+          ...base,
+          runStepIndex,
+          canRunWithDeps,
+          runButtonDisabled,
+          onRunStep: runStepIndex != null ? () => runNodeStep(runStepIndex, false) : undefined,
+          onRunStepWithDeps: canRunWithDeps ? () => runNodeStep(runStepIndex as number, true) : undefined,
+        } satisfies PipelineNodeData,
+      };
+    });
+  }, [
+    nodes,
+    edges,
+    runtimeGraph.stepToProcNodeIds,
+    running,
+    pipelineId,
+    salesAgent,
+    customer,
+    runNeedsCall,
+    callId,
+  ]);
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
@@ -3187,7 +3332,10 @@ function PipelineCanvas() {
     });
   }, []);
 
-  async function runPipeline() {
+  async function runPipeline(
+    execMode: HistoricalRunExecMode | "default" = "default",
+    execOpts: PipelineRunExecOptions = {},
+  ) {
     if (!pipelineId) {
       showToast("Select and save a pipeline first", false);
       return;
@@ -3202,6 +3350,17 @@ function PipelineCanvas() {
     }
     if (runtimeGraph.stepToProcNodeIds.length === 0) {
       showToast("Pipeline has no runnable processing steps", false);
+      return;
+    }
+    const stepCount = runtimeGraph.stepToProcNodeIds.length;
+    const executeStepIndices = Array.from(
+      new Set((execOpts.executeStepIndices || [])
+        .map((i) => Number(i))
+        .filter((i) => Number.isFinite(i) && i >= 0 && i < stepCount)
+        .map((i) => Math.floor(i))),
+    ).sort((a, b) => a - b);
+    if ((execOpts.executeStepIndices || []).length > 0 && executeStepIndices.length === 0) {
+      showToast("No valid target step selected", false);
       return;
     }
 
@@ -3222,6 +3381,55 @@ function PipelineCanvas() {
     setRunLogLines([]);
     appendRunLog(`Run started for ${salesAgent} · ${customer}${runNeedsCall ? ` · call ${callId}` : ""}`);
 
+    let force = true;
+    let resumePartial = false;
+    let forceStepIndices: number[] = [];
+    if (executeStepIndices.length > 0) {
+      force = execOpts.force ?? false;
+      resumePartial = execOpts.resumePartial ?? true;
+      forceStepIndices = Array.from(new Set((execOpts.forceStepIndices || [])
+        .map((i) => Number(i))
+        .filter((i) => Number.isFinite(i) && i >= 0 && i < stepCount)
+        .map((i) => Math.floor(i))));
+      appendRunLog(
+        `Targeted run: step ${executeStepIndices.map((i) => i + 1).join(", ")}${forceStepIndices.length ? ` · force steps ${forceStepIndices.map((i) => i + 1).join(", ")}` : ""}`,
+        "pipeline",
+      );
+    } else if (runContextMode === "historical") {
+      if (execMode === "failed_only") {
+        if (!selectedCacheRun) {
+          showToast("Select a historical run first", false);
+          setRunning(false);
+          return;
+        }
+        if (!selectedCacheRunFailedStepIndices.length) {
+          showToast("Selected run has no failed steps", false);
+          setRunning(false);
+          return;
+        }
+        force = false;
+        resumePartial = true;
+        forceStepIndices = [...selectedCacheRunFailedStepIndices];
+        appendRunLog(
+          `Historical rerun mode: failed-only (${forceStepIndices.length} step${forceStepIndices.length === 1 ? "" : "s"})`,
+          "pipeline",
+        );
+      } else {
+        force = true;
+        resumePartial = false;
+        forceStepIndices = [];
+        appendRunLog("Historical rerun mode: force full rerun", "pipeline");
+      }
+    }
+    if (execOpts.force != null) force = !!execOpts.force;
+    if (execOpts.resumePartial != null) resumePartial = !!execOpts.resumePartial;
+    if ((execOpts.forceStepIndices || []).length > 0) {
+      forceStepIndices = Array.from(new Set((execOpts.forceStepIndices || [])
+        .map((i) => Number(i))
+        .filter((i) => Number.isFinite(i) && i >= 0 && i < stepCount)
+        .map((i) => Math.floor(i))));
+    }
+
     try {
       const res = await fetch(`/api/pipelines/${pipelineId}/run`, {
         method: "POST",
@@ -3230,7 +3438,10 @@ function PipelineCanvas() {
           sales_agent: salesAgent,
           customer,
           call_id: runNeedsCall ? callId : "",
-          force: true,
+          force,
+          resume_partial: resumePartial,
+          force_step_indices: forceStepIndices,
+          execute_step_indices: executeStepIndices,
         }),
         signal: ctrl.signal,
       });
@@ -3243,6 +3454,10 @@ function PipelineCanvas() {
       const summary = await readPipelineSSE(res, (type, evt, stepIdx) => {
         if (type === "pipeline_start") appendRunLog(`Pipeline started`, "pipeline");
         if (type === "pipeline_done") appendRunLog(`Pipeline finished`, "pipeline");
+        if (type === "pipeline_start" && evt?.run_id) {
+          const rid = String(evt.run_id || "").trim();
+          if (rid) setCurrentRunId(rid);
+        }
         if (type === "progress" && evt?.msg) appendRunLog(String(evt.msg));
         if (type === "stream" && evt?.text) appendRunLog(String(evt.text), "llm");
         if (type === "thinking" && evt?.content) appendRunLog(String(evt.content), "llm");
@@ -3295,6 +3510,26 @@ function PipelineCanvas() {
     } finally {
       setRunning(false);
     }
+  }
+
+  function runNodeStep(targetStepIndex: number, includeDependencies: boolean) {
+    if (!Number.isFinite(targetStepIndex) || targetStepIndex < 0) {
+      showToast("Invalid target step", false);
+      return;
+    }
+    if (running) {
+      showToast("A run is already in progress", false);
+      return;
+    }
+    const executeStepIndices = includeDependencies
+      ? Array.from({ length: targetStepIndex + 1 }, (_, i) => i)
+      : [targetStepIndex];
+    void runPipeline("default", {
+      executeStepIndices,
+      forceStepIndices: [targetStepIndex],
+      force: false,
+      resumePartial: true,
+    });
   }
 
   async function stopPipeline() {
@@ -3358,6 +3593,45 @@ function PipelineCanvas() {
     data: artifactTemplate,
     isLoading: artifactTemplateLoading,
   } = useSWR<ArtifactPromptTemplate>(artifactTemplateUrl, fetcher, { revalidateOnFocus: false });
+
+  const runSessionStorageKey = useMemo(() => {
+    const pid = String(pipelineId || "").trim();
+    const a = String(salesAgent || "").trim();
+    const c = String(customer || "").trim();
+    if (!pid || !a || !c) return "";
+    const callPart = runNeedsCall ? String(callId || "").trim() : "";
+    return `pipeline:lastRunId:${pid}:${a}:${c}:${callPart}`;
+  }, [pipelineId, salesAgent, customer, runNeedsCall, callId]);
+
+  useEffect(() => {
+    if (!runSessionStorageKey || typeof window === "undefined") {
+      setCurrentRunId("");
+      return;
+    }
+    try {
+      const saved = String(sessionStorage.getItem(runSessionStorageKey) || "").trim();
+      setCurrentRunId(saved);
+    } catch {
+      setCurrentRunId("");
+    }
+  }, [runSessionStorageKey]);
+
+  useEffect(() => {
+    if (!runSessionStorageKey || typeof window === "undefined") return;
+    try {
+      const val = String(currentRunId || "").trim();
+      if (val) sessionStorage.setItem(runSessionStorageKey, val);
+      else sessionStorage.removeItem(runSessionStorageKey);
+    } catch {
+      // ignore sessionStorage errors
+    }
+  }, [runSessionStorageKey, currentRunId]);
+
+  useEffect(() => {
+    const fromLive = String(livePipelineState?.run_id || "").trim();
+    if (!fromLive) return;
+    setCurrentRunId((prev) => (prev === fromLive ? prev : fromLive));
+  }, [livePipelineState?.run_id]);
 
   // Sync agentDraft when selected node changes — always init so prompts are visible immediately
   useEffect(() => {
@@ -3494,6 +3768,41 @@ function PipelineCanvas() {
     );
   }
 
+  function unwrapResponseEnvelope(raw: string): { text: string; unwrapped: boolean } {
+    let current = String(raw || "").trim();
+    let unwrapped = false;
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (!current) break;
+      try {
+        const parsed = JSON.parse(current);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) break;
+        const obj = parsed as Record<string, unknown>;
+        const responseVal = obj.response;
+        if (typeof responseVal === "string" && responseVal.trim()) {
+          current = responseVal.trim();
+          unwrapped = true;
+          continue;
+        }
+        const resultsVal = obj.results;
+        if (typeof resultsVal === "string" && resultsVal.trim()) {
+          current = resultsVal.trim();
+          unwrapped = true;
+          continue;
+        }
+        const contentVal = obj.content;
+        if (typeof contentVal === "string" && contentVal.trim()) {
+          current = contentVal.trim();
+          unwrapped = true;
+          continue;
+        }
+        break;
+      } catch {
+        break;
+      }
+    }
+    return { text: current || String(raw || ""), unwrapped };
+  }
+
   function renderResultContent(content: string, sourceHint = "") {
     const text = String(content || "");
     if (!text.trim()) {
@@ -3512,6 +3821,15 @@ function PipelineCanvas() {
       return (
         <div className="h-80 border border-gray-700 rounded-lg overflow-hidden bg-gray-900">
           <TranscriptViewer content={text} format="txt" className="h-full" />
+        </div>
+      );
+    }
+
+    const unwrapped = unwrapResponseEnvelope(text);
+    if (unwrapped.unwrapped) {
+      return (
+        <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 text-[11px] text-gray-200 whitespace-pre-wrap break-words leading-relaxed">
+          {unwrapped.text}
         </div>
       );
     }
@@ -4261,6 +4579,12 @@ function PipelineCanvas() {
               ))}
             </select>
           )}
+          <span
+            className="px-2 py-1 rounded border border-gray-700 bg-gray-900 text-[10px] text-indigo-300 font-mono min-w-[86px] text-center"
+            title={currentRunId ? `Current run id: ${currentRunId}` : "No run id yet"}
+          >
+            {currentRunId ? currentRunId.slice(0, 8) : "no-run"}
+          </span>
         </div>
         <span className="text-[10px] px-2 py-1 rounded-lg border border-gray-800 text-gray-400 bg-gray-950/40 shrink-0">
           Scope: {runNeedsCall ? "per call" : "per pair"}
@@ -4280,7 +4604,17 @@ function PipelineCanvas() {
         )}
 
         <button
-          onClick={running ? stopPipeline : runPipeline}
+          onClick={() => {
+            if (running) {
+              void stopPipeline();
+              return;
+            }
+            if (runContextMode === "historical") {
+              setShowHistoricalRunModeDialog(true);
+              return;
+            }
+            void runPipeline("default");
+          }}
           disabled={!pipelineId || pipelineSaving || (!salesAgent || !customer) || (runNeedsCall && !callId)}
           className={cn(
             "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
@@ -4355,8 +4689,85 @@ function PipelineCanvas() {
       {/* ── Main content ──────────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0">
 
-        {/* ── Left panel ──────────────────────────────────────────────── */}
-        <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden">
+        {/* ── Left panel: Run history ─────────────────────────────────── */}
+        <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden order-1">
+          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Run History</p>
+            <p className="text-[9px] text-gray-700 mt-0.5">
+              {historyRuns.length > 0
+                ? `${historyRuns.length} runs for current context`
+                : "No runs yet for current filter"}
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 space-y-2">
+            {historyRuns.length === 0 && (
+              <p className="text-xs text-gray-600 italic px-1 py-2">No runs found.</p>
+            )}
+            {historyRuns.map(run => (
+              (() => {
+                const expanded = !!expandedHistoryRunIds[run.id];
+                const timeline = runTimelineById.get(run.id);
+                const runStatus = String(run.status || "").toLowerCase();
+                const runStatusClass = runStatus === "done"
+                  ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
+                  : runStatus === "error"
+                    ? "text-red-300 border-red-700/50 bg-red-950/40"
+                    : "text-orange-300 border-orange-700/50 bg-orange-950/40";
+                return (
+                  <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-2 py-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
+                        className="min-w-0 flex-1 flex items-center gap-1.5 text-left hover:opacity-90 transition-opacity"
+                        title={expanded ? "Collapse run details" : "Expand run details"}
+                      >
+                        <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
+                        <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
+                        <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
+                      </button>
+                      <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
+                        {run.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[9px] text-gray-500 truncate">
+                      {relativeTime(run.started_at)}{run.call_id ? ` · call ${run.call_id}` : ""}
+                    </p>
+                    {expanded && (
+                      <div className="mt-2 space-y-1.5">
+                        {!timeline || timeline.rows.length === 0 ? (
+                          <p className="text-[10px] text-gray-500 italic">No step execution data.</p>
+                        ) : (
+                          timeline.rows.map((row) => (
+                            <div key={`${run.id}-step-${row.stepIndex}`} className="rounded border border-gray-800 bg-gray-950 p-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <p className="text-[9px] text-gray-500 shrink-0">S{row.stepIndex + 1}</p>
+                                <p className="text-[10px] text-gray-200 truncate flex-1">{row.elementName}</p>
+                                <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border", row.statusClass)}>
+                                  {row.statusLabel}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-[9px] text-gray-500 truncate">
+                                {row.durationLabel}{row.model ? ` · ${row.model}` : ""}
+                              </p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            ))}
+          </div>
+        </aside>
+
+        {/* ── Right panel: Pipelines + elements ───────────────────────── */}
+        <aside
+          className={cn(
+            "w-52 shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col overflow-hidden order-3 transition-all duration-200",
+            logsExpanded && !logsCollapsed && "w-0 border-l-0 opacity-0 pointer-events-none",
+          )}
+        >
 
           {/* Pipelines list */}
           <div className="border-b border-gray-800 shrink-0">
@@ -4518,8 +4929,8 @@ function PipelineCanvas() {
         </aside>
 
         {/* ── Canvas ────────────────────────────────────────────────────── */}
-        <style>{HANDLE_CSS}</style>
-        <div className="flex-1 relative" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
+        <style>{HANDLE_CSS + NODE_RUNTIME_CSS}</style>
+        <div className="flex-1 relative order-2" ref={canvasContainerRef} onDrop={onDrop} onDragOver={onDragOver}>
           <SwimbarBackdrop stages={stages} viewport={canvasViewport} />
           <ReactFlow
             nodes={allNodes}
@@ -4707,6 +5118,50 @@ function PipelineCanvas() {
                     src={crmPanelUrl}
                     className="w-full h-full border-0 bg-gray-900"
                   />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showHistoricalRunModeDialog && (
+            <div className="absolute inset-0 z-50 bg-black/80 p-4 flex items-center justify-center">
+              <div className="w-full max-w-md rounded-xl border border-indigo-700 bg-gray-900 shadow-2xl">
+                <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                  <p className="text-sm font-semibold text-white">Historical Run Options</p>
+                  <button
+                    onClick={() => setShowHistoricalRunModeDialog(false)}
+                    className="p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+                    title="Close"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <p className="text-xs text-gray-400">
+                    Choose how to execute this pipeline from historical context.
+                  </p>
+                  <button
+                    onClick={() => {
+                      setShowHistoricalRunModeDialog(false);
+                      void runPipeline("force_full");
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-lg border border-red-700/60 bg-red-950/30 hover:bg-red-950/50 transition-colors"
+                  >
+                    <p className="text-xs font-semibold text-red-200">Force Full Rerun</p>
+                    <p className="text-[11px] text-red-300/80 mt-0.5">Run all steps again from scratch.</p>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowHistoricalRunModeDialog(false);
+                      void runPipeline("failed_only");
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-lg border border-amber-700/60 bg-amber-950/30 hover:bg-amber-950/50 transition-colors"
+                  >
+                    <p className="text-xs font-semibold text-amber-200">Run Failed Parts Only</p>
+                    <p className="text-[11px] text-amber-300/80 mt-0.5">
+                      Re-run failed steps, reuse cache for the rest.
+                    </p>
+                  </button>
                 </div>
               </div>
             </div>
@@ -4983,152 +5438,6 @@ function PipelineCanvas() {
             </div>
           )}
 
-          <div
-            className={cn(
-              "absolute bottom-3 z-20 rounded-xl border border-gray-800 bg-gray-950 shadow-2xl transition-all duration-200 overflow-hidden",
-              historyExpanded ? "h-72" : "h-12",
-            )}
-            style={{
-              left: 12,
-              right: logsExpanded && !logsCollapsed ? `calc(${LOGS_PANEL_WIDTH} + 16px)` : 12,
-            }}
-          >
-            <div className="h-12 px-3 flex items-center gap-2 border-b border-gray-800">
-              <History className="w-4 h-4 text-indigo-400 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="text-xs text-gray-200 font-semibold">Run History</p>
-                <p className="text-[10px] text-gray-500 truncate">
-                  {historyRuns.length > 0
-                    ? `${historyRuns.length} runs for current pipeline context`
-                    : "No runs yet for current filter"}
-                </p>
-              </div>
-              <button
-                onClick={() => setHistoryExpanded(v => !v)}
-                className="px-2 py-1 rounded-md border border-gray-700 text-[11px] text-gray-300 hover:bg-gray-800 transition-colors"
-              >
-                {historyExpanded ? "Minimize" : "Expand"}
-              </button>
-              {historyExpanded && (
-                <button
-                  onClick={() => setHistoryExpanded(false)}
-                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                  title="Close history panel"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-            {historyExpanded && (
-              <div className="h-[calc(100%-3rem)] overflow-y-auto p-2 space-y-2">
-                {historyRuns.length === 0 && (
-                  <p className="text-xs text-gray-600 italic px-1 py-2">No runs found.</p>
-                )}
-                {historyRuns.map(run => (
-                  (() => {
-                    const expanded = !!expandedHistoryRunIds[run.id];
-                    const timeline = runTimelineById.get(run.id);
-                    const runStatus = String(run.status || "").toLowerCase();
-                    const runStatusClass = runStatus === "done"
-                      ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                      : runStatus === "error"
-                        ? "text-red-300 border-red-700/50 bg-red-950/40"
-                        : "text-orange-300 border-orange-700/50 bg-orange-950/40";
-                    return (
-                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-3 py-2">
-                        <div className="flex items-center gap-3">
-                          <button
-                            onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
-                            className="min-w-0 flex-1 flex items-center gap-2 text-left hover:opacity-90 transition-opacity"
-                            title={expanded ? "Collapse run details" : "Expand run details"}
-                          >
-                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform", expanded && "rotate-90")} />
-                            <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
-                            <span className="text-[11px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
-                          </button>
-                          <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border", runStatusClass)}>
-                            {run.status}
-                          </span>
-                          <span className="text-[10px] text-gray-500 shrink-0">{relativeTime(run.started_at)}</span>
-                          {run.call_id && (
-                            <span className="text-[10px] text-gray-500 shrink-0 font-mono">call {run.call_id}</span>
-                          )}
-                        </div>
-
-                        {expanded && (
-                          <div className="mt-2 ml-3 pl-3 border-l border-gray-800 space-y-2">
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
-                              <div className="rounded border border-gray-800 bg-gray-900 px-2 py-1">
-                                <p className="text-gray-500">Run started</p>
-                                <p className="text-gray-200">{timeline?.runStartedLabel || "—"}</p>
-                              </div>
-                              <div className="rounded border border-gray-800 bg-gray-900 px-2 py-1">
-                                <p className="text-gray-500">Run finished</p>
-                                <p className="text-gray-200">{timeline?.runFinishedLabel || "—"}</p>
-                              </div>
-                              <div className="rounded border border-gray-800 bg-gray-900 px-2 py-1">
-                                <p className="text-gray-500">Run duration</p>
-                                <p className="text-gray-200">{timeline?.runDurationLabel || "—"}</p>
-                              </div>
-                            </div>
-
-                            {!timeline || timeline.rows.length === 0 ? (
-                              <p className="text-[11px] text-gray-500 italic">No step execution data.</p>
-                            ) : (
-                              <div className="space-y-2">
-                                {timeline.rows.map((row) => (
-                                  <div key={`${run.id}-step-${row.stepIndex}`} className="rounded-lg border border-gray-800 bg-gray-950 p-2">
-                                    <div className="flex items-center gap-2">
-                                      <p className="text-[10px] text-gray-500 shrink-0">
-                                        Step {row.stepIndex + 1}{row.stageIndex != null ? ` · Stage ${row.stageIndex + 1}` : ""}
-                                      </p>
-                                      <p className="text-[11px] text-gray-200 font-medium truncate flex-1">{row.elementName}</p>
-                                      <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border", row.statusClass)}>
-                                        {row.statusLabel}
-                                      </span>
-                                    </div>
-                                    <div className="mt-1 text-[10px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
-                                      <span>start: {formatRunAbsoluteTime(row.startTime)}</span>
-                                      <span>end: {formatRunAbsoluteTime(row.endTime)}</span>
-                                      <span>duration: {row.durationLabel}</span>
-                                      {row.model && <span>model: {row.model}</span>}
-                                    </div>
-                                    {row.inputSources.length > 0 && (
-                                      <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                                        <span className="text-[10px] text-gray-500">inputs:</span>
-                                        {row.inputSources.map((src, idx) => (
-                                          <span key={`${run.id}-step-${row.stepIndex}-in-${idx}`} className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-700/40 bg-cyan-950/30 text-cyan-300">
-                                            {src}
-                                          </span>
-                                        ))}
-                                      </div>
-                                    )}
-                                    {row.outputs.length > 0 && (
-                                      <div className="mt-1 flex flex-wrap items-center gap-1">
-                                        <span className="text-[10px] text-gray-500">outputs:</span>
-                                        {row.outputs.map((outLabel, idx) => (
-                                          <span key={`${run.id}-step-${row.stepIndex}-out-${idx}`} className="text-[10px] px-1.5 py-0.5 rounded border border-violet-700/40 bg-violet-950/30 text-violet-300">
-                                            {outLabel}
-                                          </span>
-                                        ))}
-                                      </div>
-                                    )}
-                                    {row.errorMsg && (
-                                      <p className="mt-1.5 text-[10px] text-red-300 whitespace-pre-wrap">{row.errorMsg}</p>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()
-                ))}
-              </div>
-            )}
-          </div>
         </div>
 
       </div>
