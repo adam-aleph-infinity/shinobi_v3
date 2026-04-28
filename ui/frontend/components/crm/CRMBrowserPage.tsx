@@ -119,22 +119,17 @@ export type CRMBrowserPageProps = {
   artifactMode?: boolean;
   title?: string;
   subtitle?: string;
+  pairPickerMode?: boolean;
 };
 
 export default function CRMBrowserPage({
   artifactMode = false,
   title = "CRM Browser",
   subtitle = "Browse agent-customer pairs across all CRMs",
+  pairPickerMode = false,
 }: CRMBrowserPageProps) {
   const ctx = useAppCtx();
   const artifactsEnabled = !!artifactMode;
-  const [pairPickerMode, setPairPickerMode] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const qs = new URLSearchParams(window.location.search);
-    setPairPickerMode(qs.get("embedded") === "1" && qs.get("mode") === "pick_pair");
-  }, []);
 
   // ── Filters (persisted to sessionStorage) — start from safe defaults; restored post-mount
   const [agentFilter, _setAgentFilter]         = useState("");
@@ -637,7 +632,12 @@ export default function CRMBrowserPage({
 
   function toggleRow(id: string) {
     if (pairPickerMode) {
-      setSelectedIds(new Set([id]));
+      const pair = displayPairs.find((p) => p.id === id);
+      if (pair) {
+        selectPair(pair);
+      } else {
+        setSelectedIds(new Set([id]));
+      }
       return;
     }
     setSelectedIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
