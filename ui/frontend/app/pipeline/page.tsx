@@ -1309,6 +1309,42 @@ function PipelineCanvas() {
   }, [allPipelines]);
 
   const normalizeCallId = (raw: string | null | undefined) => String(raw || "").trim().toLowerCase();
+  const parseDurationSeconds = (raw: unknown): number | null => {
+    if (raw == null) return null;
+    if (typeof raw === "number" && Number.isFinite(raw)) return Math.max(0, raw);
+    const s = String(raw).trim();
+    if (!s) return null;
+    if (/^\d+(\.\d+)?$/.test(s)) return Math.max(0, Number(s));
+    if (/^(\d{1,2}:)?\d{1,2}:\d{1,2}$/.test(s)) {
+      const parts = s.split(":").map((p) => Number(p));
+      if (parts.some((n) => !Number.isFinite(n))) return null;
+      if (parts.length === 3) return Math.max(0, parts[0] * 3600 + parts[1] * 60 + parts[2]);
+      if (parts.length === 2) return Math.max(0, parts[0] * 60 + parts[1]);
+    }
+    return null;
+  };
+  const formatDurationLabel = (seconds: number | null | undefined): string => {
+    if (seconds == null || !Number.isFinite(seconds)) return "";
+    const total = Math.max(0, Math.round(seconds));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+  const parseDateEpoch = (raw: string | null | undefined): number | null => {
+    const s = String(raw || "").trim();
+    if (!s) return null;
+    const epoch = Date.parse(s);
+    return Number.isFinite(epoch) ? epoch : null;
+  };
+  const formatDateLabel = (raw: string | null | undefined): string => {
+    const s = String(raw || "").trim();
+    if (!s) return "Unknown date";
+    const epoch = Date.parse(s);
+    if (!Number.isFinite(epoch)) return s;
+    return new Date(epoch).toLocaleString();
+  };
 
   const selectedPipeline = useMemo(
     () => allPipelines.find(p => p.id === pipelineId) ?? null,
@@ -1343,7 +1379,7 @@ function PipelineCanvas() {
       merged.set(key, {
         date: String(c?.date || ""),
         has_audio: !!String(c?.record_path || "").trim(),
-        duration_s: Number.isFinite(Number(c?.duration)) ? Number(c?.duration) : null,
+        duration_s: parseDurationSeconds(c?.duration),
       });
     });
     Object.entries(callDates ?? {}).forEach(([cid, meta]) => {
@@ -1376,7 +1412,19 @@ function PipelineCanvas() {
       merged.set(callId, { date: "", has_audio: false, duration_s: null });
     }
     const entries = Array.from(merged.entries());
-    entries.sort((a, b) => String(b[1]?.date || "").localeCompare(String(a[1]?.date || "")));
+    entries.sort((a, b) => {
+      const ta = parseDateEpoch(a[1]?.date);
+      const tb = parseDateEpoch(b[1]?.date);
+      if (ta != null && tb != null && ta !== tb) return ta - tb; // oldest -> newest
+      if (ta != null && tb == null) return -1;
+      if (ta == null && tb != null) return 1;
+      const ca = String(a[0] || "").trim();
+      const cb = String(b[0] || "").trim();
+      const na = Number(ca);
+      const nb = Number(cb);
+      if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+      return ca.localeCompare(cb);
+    });
     return entries;
   }, [pairCalls, callDates, transcriptCalls, pipelineArtifactStatus, callId]);
 
@@ -4228,8 +4276,8 @@ function PipelineCanvas() {
                                 })}
                               </div>
                               <p className="text-[10px] text-gray-500 truncate">
-                                {meta?.date ? new Date(meta.date).toLocaleString() : "Unknown date"}
-                                {typeof meta?.duration_s === "number" && Number.isFinite(meta.duration_s) ? ` · ${Math.round(meta.duration_s)}s` : ""}
+                                {formatDateLabel(meta?.date)}
+                                {formatDurationLabel(meta?.duration_s) ? ` · ${formatDurationLabel(meta?.duration_s)}` : ""}
                               </p>
                             </button>
                           );
