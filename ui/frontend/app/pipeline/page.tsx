@@ -203,15 +203,35 @@ interface PipelineRunRecord {
   started_at: string | null;
   finished_at: string | null;
   status: string;
+  canvas_json?: string;
   steps_json: string;
+  log_json?: string;
 }
 
+interface PipelineRunStepInputSource {
+  key?: string;
+  source?: string;
+}
+interface PipelineRunStepCachedLocation {
+  type?: string;
+  id?: string;
+  created_at?: string | null;
+}
 interface PipelineRunStep {
   agent_id?: string;
   agent_name?: string;
   model?: string;
   status?: string;
   state?: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  execution_time_s?: number | null;
+  cache_mode?: string;
+  input_ready?: boolean;
+  input_sources?: PipelineRunStepInputSource[];
+  cached_locations?: PipelineRunStepCachedLocation[];
+  input_token_est?: number;
+  output_token_est?: number;
   content?: string;
   error_msg?: string;
 }
@@ -1242,6 +1262,7 @@ function PipelineCanvas() {
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
   const [historyExpanded, setHistoryExpanded] = useState(true);
+  const [expandedHistoryRunIds, setExpandedHistoryRunIds] = useState<Record<string, boolean>>({});
   const [showCallsPanel, setShowCallsPanel] = useState(false);
   const [showCrmPanel, setShowCrmPanel] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
@@ -1612,6 +1633,194 @@ function PipelineCanvas() {
     if (selectedCacheRunId && historyRuns.some((r) => r.id === selectedCacheRunId)) return;
     setSelectedCacheRunId(historyRuns[0].id);
   }, [selectedCacheRunId, historyRuns, runContextMode]);
+
+  const formatRunAbsoluteTime = useCallback((iso: string | null | undefined): string => {
+    const raw = String(iso || "").trim();
+    if (!raw) return "—";
+    const ts = Date.parse(raw);
+    if (!Number.isFinite(ts)) return raw;
+    return new Date(ts).toLocaleString();
+  }, []);
+
+  const runTimelineById = useMemo(() => {
+    type StepTimelineRow = {
+      stepIndex: number;
+      stageIndex: number | null;
+      elementName: string;
+      status: "finished" | "cached" | "running" | "failed" | "not_run";
+      statusLabel: string;
+      statusClass: string;
+      model: string;
+      startTime: string | null;
+      endTime: string | null;
+      durationSeconds: number | null;
+      durationLabel: string;
+      inputSources: string[];
+      outputs: string[];
+      errorMsg: string;
+    };
+    type RunTimeline = {
+      runStartedLabel: string;
+      runFinishedLabel: string;
+      runDurationLabel: string;
+      rows: StepTimelineRow[];
+    };
+
+    const parseIsoMs = (iso: string | null | undefined): number | null => {
+      const raw = String(iso || "").trim();
+      if (!raw) return null;
+      const ts = Date.parse(raw);
+      return Number.isFinite(ts) ? ts : null;
+    };
+
+    const out = new Map<string, RunTimeline>();
+    for (const run of historyRuns) {
+      const steps = parsedRunStepsById.get(run.id) ?? [];
+      let procNodesOrdered: Array<{ id: string; label: string; stageIndex: number | null }> = [];
+      let outputsByProcId: Record<string, string[]> = {};
+
+      try {
+        const canvasRaw = JSON.parse(String(run.canvas_json || "{}"));
+        const canvasNodes = Array.isArray(canvasRaw?.nodes) ? canvasRaw.nodes : [];
+        const canvasEdges = Array.isArray(canvasRaw?.edges) ? canvasRaw.edges : [];
+        const processingAll = canvasNodes
+          .filter((n: any) => n && n.type === "processing")
+          .sort((a: any, b: any) => {
+            const sa = Number((a?.data?.stageIndex ?? 0));
+            const sb = Number((b?.data?.stageIndex ?? 0));
+            if (sa !== sb) return sa - sb;
+            const xa = Number((a?.position?.x ?? 0));
+            const xb = Number((b?.position?.x ?? 0));
+            return xa - xb;
+          });
+        const processingWithAgent = processingAll.filter((n: any) => String(n?.data?.agentId || "").trim());
+        const processing = processingWithAgent.length >= steps.length ? processingWithAgent : processingAll;
+
+        procNodesOrdered = processing.map((n: any) => ({
+          id: String(n?.id || ""),
+          label: String(n?.data?.label || n?.data?.agentName || "Processing"),
+          stageIndex: Number.isFinite(Number(n?.data?.stageIndex)) ? Number(n?.data?.stageIndex) : null,
+        }));
+
+        const outputNodeLabelById: Record<string, string> = {};
+        canvasNodes
+          .filter((n: any) => n && n.type === "output")
+          .forEach((n: any) => {
+            const id = String(n?.id || "");
+            if (!id) return;
+            const lbl = String(n?.data?.label || "").trim();
+            const sub = String(n?.data?.subType || "").trim();
+            outputNodeLabelById[id] = lbl || sub || "Artifact";
+          });
+
+        const procSet = new Set(procNodesOrdered.map((p) => p.id));
+        outputsByProcId = {};
+        canvasEdges.forEach((e: any) => {
+          const src = String(e?.source || "");
+          const tgt = String(e?.target || "");
+          if (!src || !tgt || !procSet.has(src)) return;
+          const outLabel = outputNodeLabelById[tgt];
+          if (!outLabel) return;
+          (outputsByProcId[src] ??= []).push(outLabel);
+        });
+      } catch {
+        procNodesOrdered = [];
+        outputsByProcId = {};
+      }
+
+      const rows: StepTimelineRow[] = [];
+      const total = Math.max(steps.length, procNodesOrdered.length);
+      for (let i = 0; i < total; i += 1) {
+        const step = (steps[i] || {}) as PipelineRunStep;
+        const proc = procNodesOrdered[i];
+        const rawState = String(step.state || step.status || "").trim().toLowerCase();
+        const hasCache = Array.isArray(step.cached_locations) && step.cached_locations.length > 0;
+        const isFailed = ["failed", "error", "fail"].includes(rawState);
+        const isRunning = ["running", "loading", "started"].includes(rawState);
+        const isCompleted = ["completed", "done", "pass", "success"].includes(rawState);
+
+        let status: StepTimelineRow["status"] = "not_run";
+        if (isFailed) status = "failed";
+        else if (isRunning) status = "running";
+        else if (hasCache || rawState.includes("cache")) status = "cached";
+        else if (isCompleted) status = "finished";
+        else status = "not_run";
+
+        const statusMeta = {
+          finished: {
+            label: "finished",
+            className: "text-emerald-300 border-emerald-700/50 bg-emerald-950/40",
+          },
+          cached: {
+            label: "cached",
+            className: "text-amber-300 border-amber-700/50 bg-amber-950/40",
+          },
+          running: {
+            label: "running",
+            className: "text-orange-300 border-orange-700/50 bg-orange-950/40",
+          },
+          failed: {
+            label: "failed",
+            className: "text-red-300 border-red-700/50 bg-red-950/40",
+          },
+          not_run: {
+            label: "not run",
+            className: "text-gray-300 border-gray-700/60 bg-gray-900/60",
+          },
+        }[status];
+
+        const startIso = String(step.start_time || "").trim() || null;
+        const endIso = String(step.end_time || "").trim() || null;
+        let durationSeconds: number | null = null;
+        if (typeof step.execution_time_s === "number" && Number.isFinite(step.execution_time_s)) {
+          durationSeconds = Math.max(0, Number(step.execution_time_s));
+        } else {
+          const startMs = parseIsoMs(startIso);
+          const endMs = parseIsoMs(endIso);
+          if (startMs != null && endMs != null && endMs >= startMs) {
+            durationSeconds = Math.max(0, (endMs - startMs) / 1000);
+          }
+        }
+
+        const inputs = (Array.isArray(step.input_sources) ? step.input_sources : [])
+          .map((src) => String(src?.source || src?.key || "").trim())
+          .filter(Boolean);
+        const outputs = proc?.id ? (outputsByProcId[proc.id] || []) : [];
+
+        rows.push({
+          stepIndex: i,
+          stageIndex: proc?.stageIndex ?? null,
+          elementName: String(proc?.label || step.agent_name || step.agent_id || `Step ${i + 1}`),
+          status,
+          statusLabel: statusMeta.label,
+          statusClass: statusMeta.className,
+          model: String(step.model || ""),
+          startTime: startIso,
+          endTime: endIso,
+          durationSeconds,
+          durationLabel: durationSeconds != null ? formatDurationLabel(durationSeconds) : "—",
+          inputSources: inputs,
+          outputs,
+          errorMsg: String(step.error_msg || ""),
+        });
+      }
+
+      const runStartMs = parseIsoMs(run.started_at);
+      const runEndMs = parseIsoMs(run.finished_at);
+      const runDurationLabel =
+        runStartMs != null && runEndMs != null && runEndMs >= runStartMs
+          ? formatDurationLabel((runEndMs - runStartMs) / 1000)
+          : "—";
+
+      out.set(run.id, {
+        runStartedLabel: formatRunAbsoluteTime(run.started_at),
+        runFinishedLabel: formatRunAbsoluteTime(run.finished_at),
+        runDurationLabel,
+        rows,
+      });
+    }
+    return out;
+  }, [historyRuns, parsedRunStepsById, formatDurationLabel, formatRunAbsoluteTime]);
 
   const cacheUrl = useMemo(() => {
     if (!pipelineId || !salesAgent || !customer) return null;
@@ -4563,23 +4772,106 @@ function PipelineCanvas() {
                   <p className="text-xs text-gray-600 italic px-1 py-2">No runs found.</p>
                 )}
                 {historyRuns.map(run => (
-                  <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2 flex items-center gap-3">
-                    <span className={cn(
-                      "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border",
-                      run.status === "done"
-                        ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                        : run.status === "error"
-                          ? "text-red-300 border-red-700/50 bg-red-950/40"
-                          : "text-orange-300 border-orange-700/50 bg-orange-950/40",
-                    )}>
-                      {run.status}
-                    </span>
-                    <span className="text-[11px] text-gray-200 font-medium truncate flex-1">{run.pipeline_name}</span>
-                    <span className="text-[10px] text-gray-500 shrink-0">{relativeTime(run.started_at)}</span>
-                    {run.call_id && (
-                      <span className="text-[10px] text-gray-500 shrink-0 font-mono">call {run.call_id}</span>
-                    )}
-                  </div>
+                  (() => {
+                    const expanded = !!expandedHistoryRunIds[run.id];
+                    const timeline = runTimelineById.get(run.id);
+                    const runStatus = String(run.status || "").toLowerCase();
+                    const runStatusClass = runStatus === "done"
+                      ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
+                      : runStatus === "error"
+                        ? "text-red-300 border-red-700/50 bg-red-950/40"
+                        : "text-orange-300 border-orange-700/50 bg-orange-950/40";
+                    return (
+                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2">
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
+                            className="min-w-0 flex-1 flex items-center gap-2 text-left hover:opacity-90 transition-opacity"
+                            title={expanded ? "Collapse run details" : "Expand run details"}
+                          >
+                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform", expanded && "rotate-90")} />
+                            <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
+                            <span className="text-[11px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
+                          </button>
+                          <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border", runStatusClass)}>
+                            {run.status}
+                          </span>
+                          <span className="text-[10px] text-gray-500 shrink-0">{relativeTime(run.started_at)}</span>
+                          {run.call_id && (
+                            <span className="text-[10px] text-gray-500 shrink-0 font-mono">call {run.call_id}</span>
+                          )}
+                        </div>
+
+                        {expanded && (
+                          <div className="mt-2 ml-3 pl-3 border-l border-gray-800 space-y-2">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
+                              <div className="rounded border border-gray-800 bg-gray-900/60 px-2 py-1">
+                                <p className="text-gray-500">Run started</p>
+                                <p className="text-gray-200">{timeline?.runStartedLabel || "—"}</p>
+                              </div>
+                              <div className="rounded border border-gray-800 bg-gray-900/60 px-2 py-1">
+                                <p className="text-gray-500">Run finished</p>
+                                <p className="text-gray-200">{timeline?.runFinishedLabel || "—"}</p>
+                              </div>
+                              <div className="rounded border border-gray-800 bg-gray-900/60 px-2 py-1">
+                                <p className="text-gray-500">Run duration</p>
+                                <p className="text-gray-200">{timeline?.runDurationLabel || "—"}</p>
+                              </div>
+                            </div>
+
+                            {!timeline || timeline.rows.length === 0 ? (
+                              <p className="text-[11px] text-gray-500 italic">No step execution data.</p>
+                            ) : (
+                              <div className="space-y-2">
+                                {timeline.rows.map((row) => (
+                                  <div key={`${run.id}-step-${row.stepIndex}`} className="rounded-lg border border-gray-800 bg-gray-950/70 p-2">
+                                    <div className="flex items-center gap-2">
+                                      <p className="text-[10px] text-gray-500 shrink-0">
+                                        Step {row.stepIndex + 1}{row.stageIndex != null ? ` · Stage ${row.stageIndex + 1}` : ""}
+                                      </p>
+                                      <p className="text-[11px] text-gray-200 font-medium truncate flex-1">{row.elementName}</p>
+                                      <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border", row.statusClass)}>
+                                        {row.statusLabel}
+                                      </span>
+                                    </div>
+                                    <div className="mt-1 text-[10px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
+                                      <span>start: {formatRunAbsoluteTime(row.startTime)}</span>
+                                      <span>end: {formatRunAbsoluteTime(row.endTime)}</span>
+                                      <span>duration: {row.durationLabel}</span>
+                                      {row.model && <span>model: {row.model}</span>}
+                                    </div>
+                                    {row.inputSources.length > 0 && (
+                                      <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                                        <span className="text-[10px] text-gray-500">inputs:</span>
+                                        {row.inputSources.map((src, idx) => (
+                                          <span key={`${run.id}-step-${row.stepIndex}-in-${idx}`} className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-700/40 bg-cyan-950/30 text-cyan-300">
+                                            {src}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {row.outputs.length > 0 && (
+                                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                                        <span className="text-[10px] text-gray-500">outputs:</span>
+                                        {row.outputs.map((outLabel, idx) => (
+                                          <span key={`${run.id}-step-${row.stepIndex}-out-${idx}`} className="text-[10px] px-1.5 py-0.5 rounded border border-violet-700/40 bg-violet-950/30 text-violet-300">
+                                            {outLabel}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {row.errorMsg && (
+                                      <p className="mt-1.5 text-[10px] text-red-300 whitespace-pre-wrap">{row.errorMsg}</p>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ))}
               </div>
             )}
