@@ -141,46 +141,12 @@ interface PipelineDef {
   canvas?: { nodes: any[]; edges: any[]; stages: string[] };
 }
 
-interface NavAgentOption {
-  agent: string;
-  count: number;
-}
-
 interface NavCustomerOption {
   customer: string;
   call_count: number;
 }
 
 type CallDatesMap = Record<string, { date: string; has_audio: boolean }>;
-
-interface FinalTranscriptCall {
-  call_id: string;
-  final_path?: string | null;
-  smoothed_path?: string | null;
-  voted_path?: string | null;
-  pipeline_final_files?: Array<{ path?: string; name?: string }>;
-}
-
-interface PipelineArtifactState {
-  processed: boolean;
-  complete: boolean;
-  step_count: number;
-  total_steps: number;
-  artifact_count?: number;
-  artifact_total?: number;
-  artifact_complete?: boolean;
-  artifact_types?: string[];
-  last_at?: string | null;
-}
-
-interface PipelineArtifactStatus {
-  pipeline_id: string;
-  sales_agent: string;
-  customer: string;
-  pair: PipelineArtifactState;
-  calls: Record<string, PipelineArtifactState>;
-  generated_at: string;
-}
 
 interface CachedStepResult {
   agent_id: string;
@@ -1128,7 +1094,6 @@ function PipelineCanvas() {
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
-  const { data: navAgents } = useSWR<NavAgentOption[]>("/api/crm/nav/agents", fetcher);
   const {
     data: navCustomers,
     isValidating: navCustomersValidating,
@@ -1140,12 +1105,6 @@ function PipelineCanvas() {
   const { data: callDates } = useSWR<CallDatesMap>(
     salesAgent && customer
       ? `/api/crm/call-dates?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
-      : null,
-    fetcher,
-  );
-  const { data: transcriptCalls } = useSWR<FinalTranscriptCall[]>(
-    salesAgent && customer
-      ? `/api/final-transcript/calls?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
       : null,
     fetcher,
   );
@@ -1230,18 +1189,16 @@ function PipelineCanvas() {
   const [runError, setRunError] = useState("");
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
-  const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(true);
   const [showCallsPanel, setShowCallsPanel] = useState(false);
   const [showCrmPanel, setShowCrmPanel] = useState(false);
-  const [runLogsMounted, setRunLogsMounted] = useState(false);
-  const [runLogsVisible, setRunLogsVisible] = useState(false);
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [logsCollapsed, setLogsCollapsed] = useState(false);
+  const [runLogLines, setRunLogLines] = useState<string[]>([]);
   const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
-  const [callTranscriptText, setCallTranscriptText] = useState("");
-  const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
-  const [callTranscriptError, setCallTranscriptError] = useState("");
 
   useEffect(() => {
     return () => {
@@ -1251,8 +1208,8 @@ function PipelineCanvas() {
 
   useEffect(() => {
     if (!running) return;
-    setRunLogsMounted(true);
-    setRunLogsVisible(true);
+    setLogsExpanded(true);
+    setLogsCollapsed(false);
   }, [running]);
 
   const agentUsageByPipeline = useMemo(() => {
@@ -1311,46 +1268,20 @@ function PipelineCanvas() {
     return entries;
   }, [callDates]);
 
-  const selectedTranscriptCall = useMemo(() => {
-    const wanted = normalizeCallId(callId);
-    if (!wanted) return null;
-    return (transcriptCalls ?? []).find((c) => normalizeCallId(c.call_id) === wanted) ?? null;
-  }, [transcriptCalls, callId]);
-
-  const transcriptCallMapByNorm = useMemo(() => {
-    const out = new Map<string, FinalTranscriptCall>();
-    for (const c of (transcriptCalls ?? [])) {
-      const key = normalizeCallId(c.call_id);
-      if (!key || out.has(key)) continue;
-      out.set(key, c);
-    }
-    return out;
-  }, [transcriptCalls]);
-
   const crmPanelUrl = useMemo(() => {
-    return "/crm?embedded=1&mode=pick_pair";
-  }, []);
-  const statusCallIds = useMemo(
-    () => callOptions.map(([cid]) => cid).join(","),
-    [callOptions],
-  );
-  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
-    activePipelineId && salesAgent && customer
-      ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/artifact-status?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}${statusCallIds ? `&call_ids=${encodeURIComponent(statusCallIds)}` : ""}`
-      : null,
-    fetcher,
-  );
-  const pipelineCallMap = pipelineArtifactStatus?.calls ?? {};
-  const pipelineCallMapByNorm = useMemo(() => {
-    const out: Record<string, PipelineArtifactState> = {};
-    Object.entries(pipelineCallMap).forEach(([k, v]) => {
-      const norm = normalizeCallId(k);
-      if (!norm || out[norm]) return;
-      out[norm] = v;
-    });
-    return out;
-  }, [pipelineCallMap]);
-
+    const qp = new URLSearchParams({ embedded: "1", mode: "pick_pair" });
+    if (salesAgent) qp.set("agent", salesAgent);
+    if (customer) qp.set("customer", customer);
+    return `/crm?${qp.toString()}`;
+  }, [salesAgent, customer]);
+  const callsPanelUrl = useMemo(() => {
+    const qp = new URLSearchParams({ embedded: "1", mode: "pick_call" });
+    if (salesAgent) qp.set("agent", salesAgent);
+    if (customer) qp.set("customer", customer);
+    if (callId) qp.set("call_id", callId);
+    if (activePipelineId) qp.set("pipeline_id", activePipelineId);
+    return `/calls?${qp.toString()}`;
+  }, [salesAgent, customer, callId, activePipelineId]);
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onMessage = (event: MessageEvent) => {
@@ -1378,6 +1309,7 @@ function PipelineCanvas() {
           setCustomer(nextCustomer, nextAgent);
         }
         setCallId(nextCallId);
+        if (nextCallId) setShowCallsPanel(false);
       }
     };
     window.addEventListener("message", onMessage);
@@ -1399,61 +1331,11 @@ function PipelineCanvas() {
     }
   }, [callId, callOptions, setCallId]);
 
-  useEffect(() => {
-    if (!showCallsPanel) return;
-    if (!salesAgent || !customer || !callId) {
-      setCallTranscriptText("");
-      setCallTranscriptError("");
-      setCallTranscriptLoading(false);
-      return;
-    }
-
-    const preferredPath =
-      selectedTranscriptCall?.final_path
-      || selectedTranscriptCall?.smoothed_path
-      || selectedTranscriptCall?.voted_path
-      || selectedTranscriptCall?.pipeline_final_files?.[0]?.path
-      || "";
-
-    if (!preferredPath) {
-      setCallTranscriptText("");
-      setCallTranscriptError("No transcript found for this call.");
-      setCallTranscriptLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    setCallTranscriptLoading(true);
-    setCallTranscriptError("");
-
-    fetch(`/api/final-transcript/content?path=${encodeURIComponent(preferredPath)}`)
-      .then((r) => r.text())
-      .then((txt) => {
-        if (cancelled) return;
-        setCallTranscriptText(String(txt || ""));
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setCallTranscriptText("");
-        setCallTranscriptError("Error loading transcript.");
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setCallTranscriptLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
-
   const runsUrl = useMemo(() => {
     if (!pipelineId) return null;
     const qp = new URLSearchParams({ pipeline_id: pipelineId, limit: "100" });
-    if (salesAgent) qp.set("sales_agent", salesAgent);
-    if (customer) qp.set("customer", customer);
     return `/api/history/runs?${qp.toString()}`;
-  }, [pipelineId, salesAgent, customer]);
+  }, [pipelineId]);
   const { data: runsData, mutate: mutateRuns } = useSWR<PipelineRunRecord[]>(
     runsUrl,
     fetcher,
@@ -1462,12 +1344,15 @@ function PipelineCanvas() {
 
   const historyRuns = useMemo(() => {
     const list = runsData ?? [];
-    if (runNeedsCall && callId) {
-      const wanted = normalizeCallId(callId);
-      return list.filter(r => normalizeCallId(r.call_id) === wanted);
-    }
-    return list;
-  }, [runsData, runNeedsCall, callId]);
+    return list.filter((r) => {
+      if (salesAgent && r.sales_agent !== salesAgent) return false;
+      if (customer && r.customer !== customer) return false;
+      if (runNeedsCall && callId) {
+        return normalizeCallId(r.call_id) === normalizeCallId(callId);
+      }
+      return true;
+    });
+  }, [runsData, salesAgent, customer, runNeedsCall, callId]);
 
   const cacheRunOptions = useMemo(
     () =>
@@ -2743,6 +2628,15 @@ function PipelineCanvas() {
     return summary;
   }
 
+  const appendRunLog = useCallback((line: string) => {
+    const ts = new Date().toLocaleTimeString();
+    const formatted = `[${ts}] ${line}`;
+    setRunLogLines((prev) => {
+      const next = [...prev, formatted];
+      return next.length > 800 ? next.slice(next.length - 800) : next;
+    });
+  }, []);
+
   async function runPipeline() {
     if (!pipelineId) {
       showToast("Select and save a pipeline first", false);
@@ -2772,6 +2666,10 @@ function PipelineCanvas() {
     );
     setStepStatuses(freshStatuses);
     setSelectedNodeId(null);
+    setLogsExpanded(true);
+    setLogsCollapsed(false);
+    setRunLogLines([]);
+    appendRunLog(`Run started for ${salesAgent} · ${customer}${runNeedsCall ? ` · call ${callId}` : ""}`);
 
     try {
       const res = await fetch(`/api/pipelines/${pipelineId}/run`, {
@@ -2793,6 +2691,10 @@ function PipelineCanvas() {
 
       const summary = await readPipelineSSE(res, (type, evt, stepIdx) => {
         if (stepIdx == null) return;
+        const stepName = runtimeGraph.stepToProcNodeIds[stepIdx] || `step_${stepIdx + 1}`;
+        if (type === "step_start") appendRunLog(`${stepName}: started`);
+        if (type === "step_cached") appendRunLog(`${stepName}: cache hit`);
+        if (type === "step_done") appendRunLog(`${stepName}: done`);
         if (type === "step_start") {
           setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "loading" : s)));
         }
@@ -2805,6 +2707,7 @@ function PipelineCanvas() {
         if (type === "error" && evt?.step != null) {
           setStepStatuses(prev => prev.map((s, i) => (i === evt.step ? "error" : s)));
           setRunError(prev => prev || String(evt?.msg || "Pipeline run ended with an error"));
+          appendRunLog(`ERROR at step ${evt.step + 1}: ${String(evt?.msg || "unknown error")}`);
         }
       });
 
@@ -2812,8 +2715,10 @@ function PipelineCanvas() {
         setRunError(prev => prev || (summary.sawError
           ? "Pipeline ended with an error."
           : "Pipeline stream ended before completion."));
+        appendRunLog("Pipeline ended before completion");
       } else if (!summary.sawError) {
         showToast("Pipeline run completed", true);
+        appendRunLog("Pipeline run completed");
       }
       mutateCache();
       mutateRuns();
@@ -2821,6 +2726,7 @@ function PipelineCanvas() {
       if (e?.name !== "AbortError") {
         setRunError(e?.message || "Pipeline run failed");
         showToast(e?.message || "Pipeline run failed", false);
+        appendRunLog(`Run failed: ${String(e?.message || "unknown error")}`);
       }
     } finally {
       setRunning(false);
@@ -2832,6 +2738,7 @@ function PipelineCanvas() {
     runAbortRef.current?.abort();
     setRunning(false);
     setRunError("Run stopped by user.");
+    appendRunLog("Run stopped by user");
     try {
       await fetch(`/api/pipelines/${pipelineId}/stop`, {
         method: "POST",
@@ -3813,6 +3720,10 @@ function PipelineCanvas() {
     setSelectedNodeId(null);
   };
   const openCallsOverlay = () => {
+    if (!salesAgent || !customer) {
+      showToast("Select sales agent + customer first", false);
+      return;
+    }
     setShowCallsPanel(true);
     setShowCrmPanel(false);
     setSelectedNodeId(null);
@@ -3832,78 +3743,41 @@ function PipelineCanvas() {
           className="flex-1 min-w-[180px] bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
         />
 
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
+        <button
+          type="button"
+          onClick={openCrmOverlay}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
+          title="Pick sales agent + customer from CRM"
+        >
           <Users className="w-3 h-3 text-indigo-400 shrink-0" />
-          <select
-            value={salesAgent}
-            onFocus={openCrmOverlay}
-            onChange={e => {
-              setSalesAgent(e.target.value);
-              openCrmOverlay();
-            }}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px]"
-          >
-            <option value="">{navAgents ? "Sales agent…" : "Loading agents…"}</option>
-            {(navAgents ?? []).map(a => (
-              <option key={a.agent} value={a.agent}>{a.agent} ({a.count})</option>
-            ))}
-          </select>
-        </div>
+          <span className="text-[11px] text-gray-200 truncate">{salesAgent || "Sales agent…"}</span>
+        </button>
 
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
+        <button
+          type="button"
+          onClick={openCrmOverlay}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
+          title="Pick customer from CRM"
+        >
           <User className="w-3 h-3 text-cyan-400 shrink-0" />
-          <select
-            value={customer}
-            onFocus={openCrmOverlay}
-            onChange={e => {
-              setCustomer(e.target.value);
-              openCrmOverlay();
-            }}
-            disabled={!salesAgent}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[150px] disabled:opacity-50"
-          >
-            <option value="">{salesAgent ? "Customer…" : "Select sales agent first"}</option>
-            {(navCustomers ?? []).map(c => (
-              <option key={c.customer} value={c.customer}>{c.customer} ({c.call_count})</option>
-            ))}
-          </select>
-        </div>
+          <span className="text-[11px] text-gray-200 truncate">
+            {customer || (salesAgent ? "Customer…" : "Select agent first")}
+          </span>
+        </button>
 
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
+        <button
+          type="button"
+          onClick={openCallsOverlay}
+          disabled={!runNeedsCall}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[190px] disabled:opacity-50"
+          title="Open calls browser"
+        >
           <PhoneCall className="w-3 h-3 text-amber-400 shrink-0" />
-          <input
-            list="pipeline-call-id-options"
-            value={callId}
-            onFocus={openCallsOverlay}
-            onChange={e => {
-              setCallId(e.target.value.trim());
-              openCallsOverlay();
-            }}
-            disabled={!salesAgent || !customer || !runNeedsCall}
-            placeholder={!runNeedsCall
-              ? "Per-pair scope"
-              : (salesAgent && customer ? "Call ID…" : "Select agent + customer")}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[170px] disabled:opacity-50"
-          />
-          <button
-            type="button"
-            onClick={openCallsOverlay}
-            disabled={!salesAgent || !customer}
-            className="p-1 rounded border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
-            title="Open Calls panel"
-          >
-            <ChevronRight className="w-3 h-3" />
-          </button>
-          <datalist id="pipeline-call-id-options">
-            {callOptions.map(([cid, meta]) => (
-              <option
-                key={cid}
-                value={cid}
-                label={meta?.date ? new Date(meta.date).toLocaleDateString() : "Unknown date"}
-              />
-            ))}
-          </datalist>
-        </div>
+          <span className="text-[11px] text-gray-200 truncate">
+            {!runNeedsCall ? "Per-pair scope" : (callId ? `Call ${callId}` : "Call ID…")}
+          </span>
+          <ChevronRight className="w-3 h-3 text-gray-500 ml-auto" />
+        </button>
 
         <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
           <History className="w-3 h-3 text-indigo-400 shrink-0" />
@@ -3960,6 +3834,25 @@ function PipelineCanvas() {
         >
           {running ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
           {running ? "Stop" : "Run"}
+        </button>
+        <button
+          onClick={() => {
+            setLogsExpanded((prev) => {
+              const next = !prev;
+              if (next) setLogsCollapsed(false);
+              return next;
+            });
+          }}
+          className={cn(
+            "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs transition-colors shrink-0",
+            logsExpanded
+              ? "border-indigo-700 text-indigo-300 bg-indigo-950/40 hover:bg-indigo-950/60"
+              : "border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800",
+          )}
+          title="Toggle run logs panel"
+        >
+          <History className="w-3 h-3" />
+          Logs
         </button>
 
         {runError && (
@@ -4203,7 +4096,7 @@ function PipelineCanvas() {
 
           {showCallsPanel && (
             <div
-              className="absolute inset-0 z-40 flex flex-col relative border border-indigo-800/40 bg-gray-950/76 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)]"
+              className="absolute inset-0 z-40 border border-indigo-800/40 bg-gray-950/78 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] relative"
               style={{ animation: "canvasPopupIn 180ms ease-out" }}
             >
               <button
@@ -4213,108 +4106,11 @@ function PipelineCanvas() {
               >
                 <X className="w-5 h-5" />
               </button>
-              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
-                <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-white font-semibold truncate">Calls</p>
-                  <p className="text-[10px] text-gray-500 truncate">
-                    {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
-                  </p>
-                </div>
-              </div>
-              <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12">
-                <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
-                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
-                    <p className="text-[11px] font-semibold text-gray-200">Call IDs</p>
-                  </div>
-                  <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                    {callOptions.length === 0 && (
-                      <p className="text-xs text-gray-500 italic px-1 py-2">
-                        Select sales agent + customer to load calls.
-                      </p>
-                    )}
-                    {callOptions.map(([cid, meta]) => {
-                      const selected = normalizeCallId(cid) === normalizeCallId(callId);
-                      const txCall = transcriptCallMapByNorm.get(normalizeCallId(cid));
-                      const hasTranscript = !!(
-                        txCall?.final_path
-                        || txCall?.smoothed_path
-                        || txCall?.voted_path
-                        || txCall?.pipeline_final_files?.[0]?.path
-                      );
-                      const callArtifacts = pipelineCallMapByNorm[normalizeCallId(cid)];
-                      const hasArtifacts = !!(
-                        ((callArtifacts?.artifact_types ?? []).length > 0)
-                        || ((callArtifacts?.artifact_count ?? 0) > 0)
-                      );
-                      return (
-                        <button
-                          key={cid}
-                          onClick={() => setCallId(cid)}
-                          className={cn(
-                            "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
-                            selected
-                              ? "border-amber-600/70 bg-amber-900/30"
-                              : "border-gray-800 bg-gray-900/60 hover:bg-gray-800/80",
-                          )}
-                        >
-                          <div className="flex items-center gap-1.5">
-                            <p className="text-xs font-mono text-gray-100 truncate flex-1">{cid}</p>
-                            {hasTranscript && (
-                              <span
-                                title="Transcript available"
-                                className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
-                              >
-                                <FileText className="h-3 w-3" />
-                              </span>
-                            )}
-                            {!!activePipelineId && hasArtifacts && (
-                              <span
-                                title="Cached artifacts available for selected pipeline"
-                                className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-violet-700/60 bg-violet-900/35 text-violet-300"
-                              >
-                                <Bot className="h-3 w-3" />
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[10px] text-gray-500 truncate">
-                            {meta?.date ? new Date(meta.date).toLocaleString() : "Unknown date"}
-                          </p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-                <section className="lg:col-span-8 min-h-0 flex flex-col">
-                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
-                    <p className="text-[11px] font-semibold text-gray-200">Transcript</p>
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-hidden">
-                    {!callId ? (
-                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-                        Select a Call ID to view transcript.
-                      </div>
-                    ) : callTranscriptLoading ? (
-                      <div className="h-full flex items-center justify-center gap-2 text-gray-400 text-sm">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Loading transcript…
-                      </div>
-                    ) : callTranscriptError ? (
-                      <div className="h-full flex items-center justify-center text-red-300 text-sm px-4 text-center">
-                        {callTranscriptError}
-                      </div>
-                    ) : callTranscriptText ? (
-                      <div className="h-full p-2">
-                        <TranscriptViewer content={callTranscriptText} format="txt" className="h-full" />
-                      </div>
-                    ) : (
-                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-                        No transcript content.
-                      </div>
-                    )}
-                  </div>
-                </section>
-              </div>
+              <iframe
+                title="Calls Browser"
+                src={callsPanelUrl}
+                className="w-full h-full border-0 bg-gray-900"
+              />
             </div>
           )}
 
@@ -4338,47 +4134,45 @@ function PipelineCanvas() {
             </div>
           )}
 
-          {runLogsMounted && (
-            <>
-              <div
-                className={cn(
-                  "absolute inset-y-0 right-0 z-20 w-[min(38%,900px)] min-w-[400px] border-l border-indigo-800/35 bg-gray-950/90 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.72)] flex flex-col transition-transform duration-200 relative",
-                  runLogsVisible ? "translate-x-0" : "translate-x-full pointer-events-none",
-                )}
-                style={runLogsVisible ? { animation: "canvasPopupIn 180ms ease-out" } : undefined}
-              >
-                <button
-                  onClick={() => setRunLogsVisible(false)}
-                  className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
-                  title="Hide logs"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-                <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
-                  <History className="w-4 h-4 text-indigo-400 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs text-white font-semibold truncate">Run Logs</p>
-                    <p className="text-[10px] text-gray-500 truncate">
-                      Full Logs view (all filters and controls)
-                    </p>
-                  </div>
+          {logsExpanded && (
+            <div className={cn(
+              "absolute right-3 bottom-3 z-20 rounded-xl border border-indigo-800/35 bg-gray-950/95 shadow-2xl overflow-hidden transition-all duration-200",
+              logsCollapsed ? "w-[420px] h-12" : "w-[min(42vw,760px)] h-72",
+            )}>
+              <div className="h-12 px-3 flex items-center gap-2 border-b border-gray-800">
+                <History className="w-4 h-4 text-indigo-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-gray-200 font-semibold">Run Logs</p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {running ? "Pipeline executing…" : (runLogLines.length ? `${runLogLines.length} events` : "No run events yet")}
+                  </p>
                 </div>
-                <iframe
-                  title="Run Logs"
-                  src="/logs?embedded=1"
-                  className="w-full h-[calc(100%-3rem)] border-0 bg-gray-900"
-                />
-              </div>
-              {!runLogsVisible && (
                 <button
-                  onClick={() => setRunLogsVisible(true)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 z-20 rounded-l-lg rounded-r border border-gray-700 bg-gray-950/95 text-gray-300 hover:text-white hover:bg-gray-900 px-2 py-2 transition-colors"
-                  title="Show logs"
+                  onClick={() => setLogsCollapsed(v => !v)}
+                  className="px-2 py-1 rounded-md border border-gray-700 text-[11px] text-gray-300 hover:bg-gray-800 transition-colors"
+                >
+                  {logsCollapsed ? "Expand" : "Minimize"}
+                </button>
+                <button
+                  onClick={() => setLogsExpanded(false)}
+                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+                  title="Close logs panel"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
+              </div>
+              {!logsCollapsed && (
+                <div className="h-[calc(100%-3rem)] overflow-y-auto p-2">
+                  {runLogLines.length === 0 ? (
+                    <p className="text-xs text-gray-600 italic px-1 py-2">Run logs will appear here.</p>
+                  ) : (
+                    <pre className="text-[11px] leading-5 text-gray-200 font-mono whitespace-pre-wrap break-words">
+                      {runLogLines.join("\n")}
+                    </pre>
+                  )}
+                </div>
               )}
-            </>
+            </div>
           )}
 
           {showBundleImport && (
@@ -4516,10 +4310,16 @@ function PipelineCanvas() {
             </div>
           )}
 
-          <div className={cn(
-            "absolute left-3 right-3 bottom-3 z-20 rounded-xl border border-gray-800 bg-gray-950/95 shadow-2xl transition-all duration-200 overflow-hidden",
-            historyExpanded ? "h-72" : "h-12",
-          )}>
+          <div
+            className={cn(
+              "absolute bottom-3 z-20 rounded-xl border border-gray-800 bg-gray-950/95 shadow-2xl transition-all duration-200 overflow-hidden",
+              historyExpanded ? "h-72" : "h-12",
+            )}
+            style={{
+              left: 12,
+              right: logsExpanded && !logsCollapsed ? "calc(min(42vw, 760px) + 16px)" : 12,
+            }}
+          >
             <div className="h-12 px-3 flex items-center gap-2 border-b border-gray-800">
               <History className="w-4 h-4 text-indigo-400 shrink-0" />
               <div className="min-w-0 flex-1">
