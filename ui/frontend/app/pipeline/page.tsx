@@ -2154,14 +2154,28 @@ function PipelineCanvas() {
     }
     const next = Array.from({ length: stepCount }, () => "pending" as RuntimeStatus);
     const nextInputReady = Array.from({ length: stepCount }, () => false);
-    if (runContextMode === "historical" && selectedCacheRun) {
-      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+    const sourceRunId =
+      runContextMode === "historical"
+        ? String(selectedCacheRun?.id || "").trim()
+        : String(currentRunId || "").trim();
+    if (sourceRunId && !parsedRunStepsById.has(sourceRunId)) {
+      // Keep current in-memory status until runs cache catches up.
+      return;
+    }
+    if (sourceRunId) {
+      const runSteps = parsedRunStepsById.get(sourceRunId) ?? [];
       runSteps.forEach((row, idx) => {
         if (idx >= next.length || !row) return;
         const rawState = String(row.state || row.status || "").toLowerCase();
         if (!rawState) return;
-        if (["done", "completed", "pass", "success"].includes(rawState)) next[idx] = "done";
-        else if (["cached", "cache_hit"].includes(rawState)) next[idx] = "cached";
+        const hasCachedLocations = Array.isArray((row as any).cached_locations)
+          ? ((row as any).cached_locations as any[]).length > 0
+          : !!(row as any).cached_locations;
+        if (["cached", "cache_hit"].includes(rawState) || (rawState === "completed" && hasCachedLocations)) {
+          next[idx] = "cached";
+        } else if (["done", "completed", "pass", "success"].includes(rawState)) {
+          next[idx] = "done";
+        }
         else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
         else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
@@ -2176,6 +2190,7 @@ function PipelineCanvas() {
     applyRuntimeStatusMap,
     runContextMode,
     selectedCacheRun,
+    currentRunId,
     parsedRunStepsById,
   ]);
 
