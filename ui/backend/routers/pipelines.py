@@ -2321,6 +2321,7 @@ class PipelineRunRequest(BaseModel):
     sales_agent: str = ""
     customer: str = ""
     call_id: str = ""
+    context_call_id: str = ""  # optional input-resolution scope call id
     run_id: str = ""  # continue/append within an existing run id when provided
     force: bool = False
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
@@ -4200,6 +4201,7 @@ async def run_pipeline(
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
         cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
+        input_scope_call_id = str(req.context_call_id or "").strip() or str(req.call_id or "").strip()
 
         # ── Create history run record ────────────────────────────────────────
         recent = log_buffer.get_recent(1)
@@ -4241,9 +4243,15 @@ async def run_pipeline(
             f"Pipeline run started: {pipeline_name}",
             level="stage",
             status="running",
-            data={"run_id": run_id, "steps_total": len(steps)},
+            data={
+                "run_id": run_id,
+                "steps_total": len(steps),
+                "input_scope_call_id": input_scope_call_id,
+            },
             client_local_time=client_local_time,
         )
+        if input_scope_call_id and input_scope_call_id != str(req.call_id or "").strip():
+            log_buffer.emit(f"[PIPELINE] ℹ Input scope call context: {input_scope_call_id} · {cid_short}")
         _default_run_steps = [
             {
                 "agent_id":         s.get("agent_id", ""),
@@ -5356,11 +5364,15 @@ async def run_pipeline(
                         _ref_id: Optional[str],
                         _manual_inputs: dict[str, str],
                         _input_key: str,
+                        _merged_scope: str,
+                        _merged_until_call_id: str,
                     ) -> str:
                         with Session(_db_engine) as _ldb:
                             return _resolve_input(
-                                _source, _ref_id, req.sales_agent, req.customer, req.call_id,
+                                _source, _ref_id, req.sales_agent, req.customer, input_scope_call_id,
                                 _manual_inputs, _ldb, input_key=_input_key,
+                                merged_scope=_merged_scope,
+                                merged_until_call_id=_merged_until_call_id,
                             )
                     for inp in runtime_agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
@@ -5368,10 +5380,12 @@ async def run_pipeline(
                             overrides.get(key, inp.get("source", "manual"))
                         )
                         ref_id = inp.get("agent_id")
+                        merged_scope = str(inp.get("merged_scope") or "auto")
+                        merged_until_call_id = str(inp.get("merged_until_call_id") or "")
                         try:
                             text = await loop.run_in_executor(
                                 None,
-                                lambda s=source, a=ref_id, m=manual_inputs, k=key: _resolve_input_worker(s, a, m, k),
+                                lambda s=source, a=ref_id, m=manual_inputs, k=key, ms=merged_scope, mc=merged_until_call_id: _resolve_input_worker(s, a, m, k, ms, mc),
                             )
                             resolved[key] = text
                         except Exception as exc:
@@ -5508,7 +5522,7 @@ async def run_pipeline(
                                 _ldb._agent_run_ctx = {
                                     "sales_agent": req.sales_agent,
                                     "customer": req.customer,
-                                    "call_id": req.call_id,
+                                    "call_id": input_scope_call_id,
                                     "source_for_key": source_for_key,
                                 }
                                 return _resolve_provider_file_refs(model, file_inputs, _ldb)
@@ -5544,7 +5558,7 @@ async def run_pipeline(
                                     _ldb._agent_run_ctx = {
                                         "sales_agent": req.sales_agent,
                                         "customer": req.customer,
-                                        "call_id": req.call_id,
+                                        "call_id": input_scope_call_id,
                                         "source_for_key": source_for_key,
                                     }
                                     c, t = _llm_call_anthropic_files_streaming(
@@ -5583,7 +5597,7 @@ async def run_pipeline(
                                     _ldb._agent_run_ctx = {
                                         "sales_agent": req.sales_agent,
                                         "customer": req.customer,
-                                        "call_id": req.call_id,
+                                        "call_id": input_scope_call_id,
                                         "source_for_key": source_for_key,
                                     }
                                     return _llm_call_with_files(
@@ -5782,7 +5796,7 @@ async def run_pipeline(
                                 _par_db._agent_run_ctx = {
                                     "sales_agent": req.sales_agent,
                                     "customer": req.customer,
-                                    "call_id": req.call_id,
+                                    "call_id": input_scope_call_id,
                                     "source_for_key": _source_for_key,
                                 }
 
@@ -5816,9 +5830,13 @@ async def run_pipeline(
                                         _par_ov.get(_k, _inp.get("source", "manual"))
                                     )
                                     _rid = _inp.get("agent_id")
+                                    _ms  = str(_inp.get("merged_scope") or "auto")
+                                    _mc  = str(_inp.get("merged_until_call_id") or "")
                                     _par_resolved[_k] = _resolve_input(
-                                        _src, _rid, req.sales_agent, req.customer, req.call_id, _par_mi, _par_db,
+                                        _src, _rid, req.sales_agent, req.customer, input_scope_call_id, _par_mi, _par_db,
                                         input_key=_k,
+                                        merged_scope=_ms,
+                                        merged_until_call_id=_mc,
                                     )
                                 _par_input_ready = True
 

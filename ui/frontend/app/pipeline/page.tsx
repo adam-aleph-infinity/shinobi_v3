@@ -3825,6 +3825,7 @@ function PipelineCanvas() {
           sales_agent: salesAgent,
           customer,
           call_id: runNeedsCall ? callId : "",
+          context_call_id: callId || "",
           run_id: continueRunId,
           force,
           resume_partial: resumePartial,
