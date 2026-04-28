@@ -871,6 +871,17 @@ def _inject_file_reference_block(
     return block
 
 
+def _format_file_refs_for_log(file_refs: dict[str, str], limit: int = 8) -> str:
+    items = list((file_refs or {}).items())
+    if not items:
+        return "none"
+    head = items[: max(1, limit)]
+    text = ", ".join(f"{k}={v}" for k, v in head)
+    if len(items) > limit:
+        text += f", …(+{len(items) - limit} more)"
+    return text
+
+
 def _append_once(base: str, block: str) -> str:
     cur = str(base or "")
     add = str(block or "").strip()
@@ -1530,7 +1541,9 @@ def _get_or_upload_gemini(
     if mem_file_id:
         try:
             f = genai.get_file(mem_file_id)
-            log_buffer.emit(f"[FILE] ✓ gemini:{mem_file_id} ({source} · {cid_short}) [memory]")
+            log_buffer.emit(
+                f"[FILE] ✓ gemini:{mem_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [memory]"
+            )
             return f
         except Exception:
             pass
@@ -1544,7 +1557,9 @@ def _get_or_upload_gemini(
     if existing and (existing.expires_at is None or existing.expires_at > now):
         try:
             f = genai.get_file(existing.provider_file_id)
-            log_buffer.emit(f"[FILE] ✓ gemini:{existing.provider_file_id} ({source} · {cid_short})")
+            log_buffer.emit(
+                f"[FILE] ✓ gemini:{existing.provider_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [db]"
+            )
             _memory_cache_set("gemini", purpose, chash, existing.provider_file_id, existing.expires_at)
             return f  # ✓ reused cached file
         except Exception:
@@ -1556,7 +1571,9 @@ def _get_or_upload_gemini(
         mime_type="text/plain",
         display_name=f"{source}_{customer}_{call_id or 'pair'}.txt",
     )
-    log_buffer.emit(f"[FILE] ↑ gemini:{f.name} ({source} · {cid_short})")
+    log_buffer.emit(
+        f"[FILE] ↑ gemini:{f.name} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short})"
+    )
 
     record = UF(
         id=str(uuid.uuid4()),
@@ -1603,7 +1620,9 @@ def _get_or_upload_anthropic(
     if mem_file_id:
         try:
             client.beta.files.retrieve(mem_file_id, betas=["files-api-2025-04-14"])
-            log_buffer.emit(f"[FILE] ✓ anthropic:{mem_file_id} ({source} · {cid_short}) [memory]")
+            log_buffer.emit(
+                f"[FILE] ✓ anthropic:{mem_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [memory]"
+            )
             return mem_file_id
         except Exception:
             pass
@@ -1618,7 +1637,9 @@ def _get_or_upload_anthropic(
         try:
             client.beta.files.retrieve(existing.provider_file_id,
                                         betas=["files-api-2025-04-14"])
-            log_buffer.emit(f"[FILE] ✓ anthropic:{existing.provider_file_id} ({source} · {cid_short})")
+            log_buffer.emit(
+                f"[FILE] ✓ anthropic:{existing.provider_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [db]"
+            )
             _memory_cache_set("anthropic", purpose, chash, existing.provider_file_id)
             return existing.provider_file_id  # ✓ reused
         except Exception:
@@ -1630,7 +1651,9 @@ def _get_or_upload_anthropic(
         betas=["files-api-2025-04-14"],
     )
     file_id = resp.id
-    log_buffer.emit(f"[FILE] ↑ anthropic:{file_id} ({source} · {cid_short})")
+    log_buffer.emit(
+        f"[FILE] ↑ anthropic:{file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short})"
+    )
 
     record = UF(
         id=str(uuid.uuid4()),
@@ -1680,7 +1703,9 @@ def _get_or_upload_openai(
             base_url = "https://api.x.ai/v1" if provider == "grok" else None
             verify_timeout_s = float(os.environ.get("OPENAI_UPLOAD_TIMEOUT_S", os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "30")))
             OpenAI(api_key=api_key, base_url=base_url, timeout=verify_timeout_s).files.retrieve(mem_file_id)
-            log_buffer.emit(f"[FILE] ✓ {provider}:{mem_file_id} ({source} · {cid_short}) [memory]")
+            log_buffer.emit(
+                f"[FILE] ✓ {provider}:{mem_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [memory]"
+            )
             return mem_file_id, upload_content
         except Exception:
             pass
@@ -1693,7 +1718,9 @@ def _get_or_upload_openai(
     existing = db.exec(existing_stmt.order_by(UF.created_at.desc())).first()
 
     if existing:
-        log_buffer.emit(f"[FILE] ✓ {provider}:{existing.provider_file_id} ({source} · {cid_short})")
+        log_buffer.emit(
+            f"[FILE] ✓ {provider}:{existing.provider_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [db]"
+        )
         _memory_cache_set(provider, purpose, chash, existing.provider_file_id)
         return existing.provider_file_id, upload_content
 
@@ -1709,9 +1736,13 @@ def _get_or_upload_openai(
             purpose=purpose,
         )
         file_id = resp.id
-        log_buffer.emit(f"[FILE] ↑ {provider}:{file_id} ({source} · {cid_short})")
+        log_buffer.emit(
+            f"[FILE] ↑ {provider}:{file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short})"
+        )
     except Exception as exc:
-        log_buffer.emit(f"[FILE] ⚠ {provider} upload failed ({source} · {cid_short}): {exc} — tracking locally as {file_id}")
+        log_buffer.emit(
+            f"[FILE] ⚠ {provider} upload failed key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}): {exc} — tracking locally as {file_id}"
+        )
 
     # If uploading a user_data file, delete any stale assistants-purpose records for
     # the same content so they don't appear as duplicates in the Provider Files view.
@@ -1868,6 +1899,9 @@ def _llm_call_anthropic_files(
     }
 
     response = client.beta.messages.create(**kwargs)
+    resp_id = str(getattr(response, "id", "") or "").strip()
+    if resp_id:
+        log_buffer.emit(f"[LLM] {model} — Anthropic message_id={resp_id}")
     text = "\n\n".join(
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
@@ -1976,6 +2010,8 @@ def _llm_call_openai_responses_files(
             "openai", api_key, db,
         )
         file_ids[k] = fid
+    if file_ids:
+        log_buffer.emit(f"[LLM] {model} — file refs resolved: {_format_file_refs_for_log(file_ids)}")
 
     if inline_inputs:
         log_buffer.emit(
@@ -2004,6 +2040,8 @@ def _llm_call_openai_responses_files(
         log_buffer.emit(
             f"[LLM] {model} — deduped {duplicate_count} duplicate file reference(s)"
         )
+    if unique_file_ids:
+        log_buffer.emit(f"[LLM] {model} — file_ids attached: {', '.join(unique_file_ids)}")
 
     content: list = []
     for fid in unique_file_ids:
@@ -2169,6 +2207,10 @@ def _llm_call_openai_responses_files(
             time.sleep(sleep_s)
             continue
 
+        resp_id = str(data.get("id") or "").strip()
+        if resp_id:
+            log_buffer.emit(f"[LLM] {model} — OpenAI response_id={resp_id}")
+
         text, thinking = _extract_text_and_thinking(data)
         if not text:
             last_err = RuntimeError("OpenAI Responses API returned empty output")
@@ -2221,6 +2263,8 @@ def _llm_call_grok_responses_files(
             "grok", api_key, db,
         )
         file_ids[k] = fid
+    if file_ids:
+        log_buffer.emit(f"[LLM] {model} — file refs resolved: {_format_file_refs_for_log(file_ids)}")
 
     if inline_inputs:
         log_buffer.emit(
@@ -2245,6 +2289,8 @@ def _llm_call_grok_responses_files(
         log_buffer.emit(
             f"[LLM] {model} — deduped {duplicate_count} duplicate file reference(s)"
         )
+    if unique_file_ids:
+        log_buffer.emit(f"[LLM] {model} — file_ids attached: {', '.join(unique_file_ids)}")
 
     content: list[dict[str, Any]] = []
     for fid in unique_file_ids:
@@ -2399,6 +2445,10 @@ def _llm_call_grok_responses_files(
             )
             time.sleep(sleep_s)
             continue
+
+        resp_id = str(data.get("id") or "").strip()
+        if resp_id:
+            log_buffer.emit(f"[LLM] {model} — xAI response_id={resp_id}")
 
         text, thinking = _extract_text_and_thinking(data)
         if not text:
