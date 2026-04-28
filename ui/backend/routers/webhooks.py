@@ -346,7 +346,9 @@ async def _trigger_pipeline_run(
     pipeline_id: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    base_url = str(request.base_url).rstrip("/")
+    base_url = str(settings.crm_webhook_internal_base_url or "").strip().rstrip("/")
+    if not base_url:
+        base_url = str(request.base_url).rstrip("/")
     endpoint = f"{base_url}/pipelines/{pipeline_id}/run"
 
     run_id = ""
