@@ -237,7 +237,7 @@ interface PipelineRunStep {
 }
 
 interface StepCacheDisplay {
-  source: "latest_cache" | "selected_run";
+  source: "latest_cache" | "selected_run" | "current_run";
   runId?: string;
   createdAt?: string | null;
   agentName?: string;
@@ -2017,22 +2017,45 @@ function PipelineCanvas() {
   const getStepCacheDisplay = useCallback(
     (stepIndex: number): StepCacheDisplay | null => {
       if (stepIndex < 0) return null;
-      if (!selectedCacheRun) return null;
-      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
-      const s = runSteps[stepIndex];
-      if (!s) return null;
-      return {
-        source: "selected_run",
-        runId: selectedCacheRun.id,
-        createdAt: selectedCacheRun.finished_at || selectedCacheRun.started_at,
-        agentName: String(s.agent_name || ""),
-        model: String(s.model || ""),
-        status: String(s.state || s.status || ""),
-        errorMsg: String(s.error_msg || ""),
-        content: String(s.content || ""),
+      const buildFromRun = (
+        runId: string,
+        source: StepCacheDisplay["source"],
+        createdAt?: string | null,
+      ): StepCacheDisplay | null => {
+        const runSteps = parsedRunStepsById.get(runId) ?? [];
+        const s = runSteps[stepIndex];
+        if (!s) return null;
+        return {
+          source,
+          runId,
+          createdAt,
+          agentName: String(s.agent_name || ""),
+          model: String(s.model || ""),
+          status: String(s.state || s.status || ""),
+          errorMsg: String(s.error_msg || ""),
+          content: String(s.content || ""),
+        };
       };
+
+      if (runContextMode === "historical") {
+        if (!selectedCacheRun) return null;
+        return buildFromRun(
+          selectedCacheRun.id,
+          "selected_run",
+          selectedCacheRun.finished_at || selectedCacheRun.started_at,
+        );
+      }
+
+      const rid = String(currentRunId || "").trim();
+      if (!rid) return null;
+      const runMeta = historyRuns.find((r) => String(r.id) === rid);
+      return buildFromRun(
+        rid,
+        "current_run",
+        runMeta?.finished_at || runMeta?.started_at || null,
+      );
     },
-    [selectedCacheRun, parsedRunStepsById],
+    [runContextMode, selectedCacheRun, parsedRunStepsById, currentRunId, historyRuns],
   );
 
   // Refs for fresh state in callbacks (avoid stale closures)
@@ -4052,10 +4075,15 @@ function PipelineCanvas() {
 
   function renderCacheRunSelector() {
     if (runContextMode !== "historical") {
+      const rid = String(currentRunId || "").trim();
       return (
         <div className="space-y-1">
           <label className="block text-[9px] text-gray-500">Run Context</label>
-          <p className="text-[10px] text-gray-500">New run mode (no historical results selected).</p>
+          <p className="text-[10px] text-gray-500">
+            {rid
+              ? `New run mode · showing current run ${rid.slice(0, 8)}`
+              : "New run mode (no historical results selected)."}
+          </p>
         </div>
       );
     }
@@ -4344,15 +4372,13 @@ function PipelineCanvas() {
                       </p>
                       {renderResultViewToggle()}
                     </div>
-                    {runContextMode !== "historical" ? (
-                      <p className="text-[11px] text-gray-500">
-                        Switch to Historical run to inspect the last processed agent response.
-                      </p>
-                    ) : stepCache ? (
+                    {stepCache ? (
                       <>
                         <p className="text-[10px] text-gray-500">
                           {stepCache.source === "selected_run"
                             ? `Run ${String(stepCache.runId || "").slice(0, 8)}`
+                            : stepCache.source === "current_run"
+                              ? `Current run ${String(stepCache.runId || "").slice(0, 8)}`
                             : "Latest cache"}
                           {stepCache.createdAt ? ` · ${new Date(stepCache.createdAt).toLocaleString()}` : ""}
                         </p>
@@ -4363,7 +4389,7 @@ function PipelineCanvas() {
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">
-                        No agent response found for this step in the selected run.
+                        No agent response found for this step in the current context.
                       </p>
                     )}
                   </div>
@@ -4610,23 +4636,23 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  {runContextMode !== "historical" ? (
-                    <p className="text-[11px] text-gray-500">
-                      Switch to Historical run to inspect the processed artifact.
-                    </p>
-                  ) : !ioCacheTarget ? (
+                  {!ioCacheTarget ? (
                     <p className="text-[11px] text-gray-500">
                       Connect this artifact to a processing node to resolve its result.
                     </p>
                   ) : (() => {
                     const cache = getStepCacheDisplay(ioCacheTarget.stepIndex);
                     if (!cache) {
-                      return <p className="text-[10px] text-gray-500">No artifact result for this step in the selected run.</p>;
+                      return <p className="text-[10px] text-gray-500">No artifact result for this step in the current context.</p>;
                     }
                     return (
                       <>
                         <p className="text-[10px] text-gray-500">
-                          {cache.source === "selected_run" ? `Run ${String(cache.runId || "").slice(0, 8)}` : "Latest cache"}
+                          {cache.source === "selected_run"
+                            ? `Run ${String(cache.runId || "").slice(0, 8)}`
+                            : cache.source === "current_run"
+                              ? `Current run ${String(cache.runId || "").slice(0, 8)}`
+                              : "Latest cache"}
                           {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
                         </p>
                         {cache.errorMsg && (
