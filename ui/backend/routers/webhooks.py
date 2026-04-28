@@ -1,11 +1,14 @@
 import asyncio
 import hmac
 import json
+import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func as _sql_func, or_ as _sql_or
 from sqlmodel import Session, select
@@ -20,6 +23,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
+_WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
 
 
 class CallEndedWebhookPayload(BaseModel):
@@ -35,6 +39,7 @@ class CallEndedWebhookPayload(BaseModel):
 
 class CallEndedWebhookConfig(BaseModel):
     enabled: bool = True
+    ingest_only: bool = True
     trigger_pipeline: bool = True
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = Field(default_factory=dict)
@@ -47,6 +52,7 @@ class CallEndedWebhookConfig(BaseModel):
 def _default_call_ended_config() -> dict[str, Any]:
     return {
         "enabled": True,
+        "ingest_only": True,
         "trigger_pipeline": True,
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
@@ -73,6 +79,7 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         base.update(raw)
     base["enabled"] = bool(base.get("enabled", True))
+    base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
     base["default_pipeline_id"] = str(base.get("default_pipeline_id") or "").strip()
     base["transcription_model"] = str(base.get("transcription_model") or "gpt-5.4").strip() or "gpt-5.4"
@@ -125,6 +132,59 @@ def _save_call_ended_config(cfg: dict[str, Any]) -> dict[str, Any]:
     norm = _normalize_call_ended_config(cfg)
     _CALL_ENDED_CONFIG_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
     return norm
+
+
+def _safe_file_part(value: str, default: str = "unknown") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw).strip("._-")
+    if not cleaned:
+        return default
+    return cleaned[:80]
+
+
+def _event_file_name(webhook_type: str, call_id: str, account_id: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    w = _safe_file_part(webhook_type, "webhook")
+    c = _safe_file_part(call_id, "call")
+    a = _safe_file_part(account_id, "account")
+    return f"{ts}_{w}_{a}_{c}_{uuid.uuid4().hex[:10]}.json"
+
+
+def _persist_webhook_event(
+    *,
+    webhook_type: str,
+    compat_mode: str,
+    payload: dict[str, Any],
+    request: Request,
+) -> dict[str, Any]:
+    _WEBHOOK_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    call_id = str(payload.get("call_id") or "")
+    account_id = str(payload.get("account_id") or "")
+    event_id = str(uuid.uuid4())
+    file_name = _event_file_name(webhook_type, call_id, account_id)
+    file_path = _WEBHOOK_INBOX_DIR / file_name
+
+    event = {
+        "event_id": event_id,
+        "received_at": now_iso,
+        "webhook_type": webhook_type,
+        "compat_mode": compat_mode or "",
+        "method": str(request.method or ""),
+        "path": str(request.url.path or ""),
+        "source_ip": str(getattr(request.client, "host", "") or ""),
+        "content_type": str(request.headers.get("content-type") or ""),
+        "payload": payload,
+    }
+    file_path.write_text(json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {
+        "event_id": event_id,
+        "stored_at": now_iso,
+        "file": str(file_path),
+    }
 
 
 def _extract_webhook_token(request: Request, payload: CallEndedWebhookPayload) -> str:
@@ -458,16 +518,62 @@ def set_call_ended_config(req: CallEndedWebhookConfig, request: Request) -> dict
     return _save_call_ended_config(req.model_dump())
 
 
-@router.post("/call-ended")
-async def handle_call_ended_webhook(
+@router.get("/events")
+def list_webhook_events(
+    request: Request,
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    _assert_webhook_admin_auth(request)
+    _WEBHOOK_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(_WEBHOOK_INBOX_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    out: list[dict[str, Any]] = []
+    for fp in files:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        out.append(
+            {
+                "event_id": str(data.get("event_id") or ""),
+                "received_at": str(data.get("received_at") or ""),
+                "webhook_type": str(data.get("webhook_type") or ""),
+                "call_id": str(payload.get("call_id") or ""),
+                "account_id": str(payload.get("account_id") or ""),
+                "agent": str(payload.get("agent") or ""),
+                "file": str(fp),
+            }
+        )
+    return {"ok": True, "count": len(out), "events": out}
+
+
+async def _handle_call_webhook(
     payload: CallEndedWebhookPayload,
     request: Request,
     db: Session = Depends(get_session),
+    webhook_type: str = "call-ended",
+    compat_mode: str = "",
 ) -> dict[str, Any]:
     _assert_webhook_auth(request, payload)
     cfg = _load_call_ended_config()
     if not cfg.get("enabled", True):
         raise HTTPException(status_code=403, detail="Call-ended webhook flow is disabled in config.")
+
+    stored = _persist_webhook_event(
+        webhook_type=webhook_type,
+        compat_mode=compat_mode,
+        payload=payload.model_dump(),
+        request=request,
+    )
+    if bool(cfg.get("ingest_only", True)):
+        return {
+            "ok": True,
+            "webhook_type": webhook_type,
+            "compat_mode": compat_mode or "",
+            "ingest_only": True,
+            "stored": stored,
+            "message": "Webhook payload received and saved. Runtime execution is disabled (ingest_only=true).",
+        }
 
     pair = _resolve_pair(db, payload)
     if payload.customer and str(payload.customer).strip():
@@ -552,7 +658,10 @@ async def handle_call_ended_webhook(
 
     return {
         "ok": True,
-        "webhook_type": "call-ended",
+        "webhook_type": webhook_type,
+        "compat_mode": compat_mode or "",
+        "ingest_only": False,
+        "stored": stored,
         "received": {
             "call_id": call_id,
             "account_id": pair["account_id"],
@@ -564,6 +673,21 @@ async def handle_call_ended_webhook(
         "transcription": transcription_info,
         "pipeline": pipeline_info,
     }
+
+
+@router.post("/call-ended")
+async def handle_call_ended_webhook(
+    payload: CallEndedWebhookPayload,
+    request: Request,
+    db: Session = Depends(get_session),
+) -> dict[str, Any]:
+    return await _handle_call_webhook(
+        payload=payload,
+        request=request,
+        db=db,
+        webhook_type="call-ended",
+        compat_mode="json",
+    )
 
 
 @router.post("/call-updated")
@@ -594,7 +718,10 @@ async def handle_call_updated_webhook_form(
         customer=customer,
         token=token,
     )
-    result = await handle_call_ended_webhook(payload=payload, request=request, db=db)
-    result["webhook_type"] = "call-updated"
-    result["compat_mode"] = "form-urlencoded"
-    return result
+    return await _handle_call_webhook(
+        payload=payload,
+        request=request,
+        db=db,
+        webhook_type="call-updated",
+        compat_mode="form-urlencoded",
+    )

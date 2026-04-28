@@ -1,5 +1,6 @@
 {
   "enabled": true,
+  "ingest_only": true,
   "trigger_pipeline": true,
   "default_pipeline_id": "",
   "pipeline_by_agent": {},
