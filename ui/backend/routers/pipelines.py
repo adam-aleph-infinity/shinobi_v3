@@ -5905,6 +5905,23 @@ async def run_pipeline(
                                     _par_log = f"{len(_par_fi)} file(s)"
                                 log_buffer.emit(f"[LLM] {_par_model} — {_par_log} input · {cid_short}")
 
+                                _par_ref_preview = ""
+                                try:
+                                    _par_ref_map = _resolve_provider_file_refs(_par_model, _par_fi, _par_db)
+                                    if _par_ref_map:
+                                        _par_ref_preview = ", ".join(
+                                            f"{k}={v}" for k, v in list(_par_ref_map.items())[:6]
+                                        )
+                                        if len(_par_ref_map) > 6:
+                                            _par_ref_preview += f", …(+{len(_par_ref_map)-6} more)"
+                                        log_buffer.emit(
+                                            f"[PIPELINE] Step {par_idx + 1} file refs: {_par_ref_preview} · {cid_short}"
+                                        )
+                                except Exception as _par_ref_exc:
+                                    log_buffer.emit(
+                                        f"[PIPELINE] ⚠ Step {par_idx + 1} file ref resolution failed: {_par_ref_exc} · {cid_short}"
+                                    )
+
                                 _par_t0 = time.time()
                                 _par_content, _par_thinking = _llm_call_with_files(
                                     _par_sysp, _par_ut, _par_fi, _par_ii, _par_model, _par_temp, _par_db,
@@ -5940,6 +5957,7 @@ async def run_pipeline(
                                     "agent_name": _par_aname,
                                     "input_fingerprint": _par_fp,
                                     "input_ready": _par_input_ready,
+                                    "file_refs_preview": _par_ref_preview,
                                 }
                         except Exception as exc:
                             return {
@@ -6055,6 +6073,12 @@ async def run_pipeline(
                         elif _rst == "done":
                             _rc  = _res["content"]
                             _ret = _res["exec_time_s"]
+                            _file_refs_preview = str(_res.get("file_refs_preview") or "").strip()
+                            if _file_refs_preview:
+                                yield _sse("progress", {
+                                    "step": _ri,
+                                    "msg": f"Step {_ri + 1} file refs: {_file_refs_preview}",
+                                })
                             _persist_structured_artifact(
                                 _step_idx=_ri,
                                 _content=_rc,
