@@ -129,19 +129,22 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
   };
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40">
+    <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40 relative pr-5">
+      {onToggle && (
+        <button
+          onClick={onToggle}
+          className="absolute right-0 top-0 h-full w-5 border-l border-gray-800 bg-gray-900/95 text-gray-500 hover:text-white hover:bg-gray-800 transition-colors flex items-center justify-center"
+          title="Collapse sidebar"
+          aria-label="Collapse sidebar"
+        >
+          <PanelLeftClose className="w-4 h-4" />
+        </button>
+      )}
       {/* Logo */}
       <div className="p-4 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-2">
           <Image src="/shinobilookintothefuture.png" alt="Shinobi" width={120} height={32}
             className="object-contain" style={{ maxHeight: 32 }} />
-          {onToggle && (
-            <button onClick={onToggle}
-              className="ml-auto p-1 rounded text-gray-600 hover:text-gray-400 transition-colors"
-              title="Collapse sidebar">
-              <PanelLeftClose className="w-4 h-4" />
-            </button>
-          )}
         </div>
         {isDevelopmentHost && (
           <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">

@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { usePathname } from "next/navigation";
 
 const SIDEBAR_WIDTH = 224;
+const TONGUE_BAR_WIDTH = 24;
 const COPILOT_DEFAULT_WIDTH = 304;
 const COPILOT_MIN_WIDTH = 280;
 const COPILOT_MAX_WIDTH = 520;
@@ -132,8 +133,9 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {mounted && collapsed && (
         <button
           onClick={toggleSidebar}
-          className="fixed top-4 left-4 z-50 p-1.5 rounded-md bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
+          className="fixed top-0 left-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 hover:text-white hover:bg-gray-800 transition-colors flex items-center justify-center"
           title="Show sidebar"
+          aria-label="Show sidebar"
         >
           <PanelLeftOpen className="w-4 h-4" />
         </button>
@@ -143,9 +145,10 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {mounted && copilotCollapsed && (
         <button
           onClick={toggleCopilot}
-          className="fixed top-4 z-50 p-1.5 rounded-md bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
-          style={{ left: collapsed ? 56 : SIDEBAR_WIDTH + 8 }}
+          className="fixed top-0 z-50 h-screen w-6 bg-gray-900/95 border-r border-gray-800 text-gray-500 hover:text-white hover:bg-gray-800 transition-colors flex items-center justify-center"
+          style={{ left: collapsed ? TONGUE_BAR_WIDTH : SIDEBAR_WIDTH }}
           title="Show copilot panel"
+          aria-label="Show copilot panel"
         >
           <PanelLeftOpen className="w-4 h-4" />
         </button>

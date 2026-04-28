@@ -221,6 +221,15 @@ interface StepCacheDisplay {
   content: string;
 }
 
+type RunContextMode = "new" | "historical";
+type ResultViewMode = "rendered" | "raw";
+
+interface InputPreviewState {
+  loading: boolean;
+  content: string;
+  error: string;
+}
+
 interface PipelineBundle {
   bundle_version: number;
   bundle_id: string;
@@ -1226,7 +1235,10 @@ function PipelineCanvas() {
   const [showCrmPanel, setShowCrmPanel] = useState(false);
   const [runLogsMounted, setRunLogsMounted] = useState(false);
   const [runLogsVisible, setRunLogsVisible] = useState(false);
+  const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
+  const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
+  const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
   const [callTranscriptText, setCallTranscriptText] = useState("");
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
@@ -1484,15 +1496,21 @@ function PipelineCanvas() {
   }, [historyRuns]);
 
   const selectedCacheRun = useMemo(
-    () => historyRuns.find((r) => r.id === selectedCacheRunId) ?? null,
-    [historyRuns, selectedCacheRunId],
+    () => (runContextMode === "historical"
+      ? historyRuns.find((r) => r.id === selectedCacheRunId) ?? null
+      : null),
+    [historyRuns, selectedCacheRunId, runContextMode],
   );
 
   useEffect(() => {
-    if (!selectedCacheRunId) return;
-    if (historyRuns.some((r) => r.id === selectedCacheRunId)) return;
-    setSelectedCacheRunId("");
-  }, [selectedCacheRunId, historyRuns]);
+    if (runContextMode !== "historical") return;
+    if (!historyRuns.length) {
+      setSelectedCacheRunId("");
+      return;
+    }
+    if (selectedCacheRunId && historyRuns.some((r) => r.id === selectedCacheRunId)) return;
+    setSelectedCacheRunId(historyRuns[0].id);
+  }, [selectedCacheRunId, historyRuns, runContextMode]);
 
   const cacheUrl = useMemo(() => {
     if (!pipelineId || !salesAgent || !customer) return null;
@@ -1500,40 +1518,27 @@ function PipelineCanvas() {
     if (runNeedsCall && !runCallId) return null;
     return `/api/pipelines/${pipelineId}/results?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(runCallId)}`;
   }, [pipelineId, salesAgent, customer, runNeedsCall, callId]);
-  const { data: cachedResults, mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
+  const { mutate: mutateCache } = useSWR<CachedStepResult[]>(cacheUrl, fetcher);
 
   const getStepCacheDisplay = useCallback(
     (stepIndex: number): StepCacheDisplay | null => {
       if (stepIndex < 0) return null;
-
-      if (selectedCacheRun) {
-        const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
-        const s = runSteps[stepIndex];
-        if (s) {
-          return {
-            source: "selected_run",
-            runId: selectedCacheRun.id,
-            createdAt: selectedCacheRun.finished_at || selectedCacheRun.started_at,
-            agentName: String(s.agent_name || ""),
-            model: String(s.model || ""),
-            status: String(s.state || s.status || ""),
-            errorMsg: String(s.error_msg || ""),
-            content: String(s.content || ""),
-          };
-        }
-      }
-
-      const latest = (cachedResults ?? [])[stepIndex]?.result;
-      if (!latest) return null;
+      if (!selectedCacheRun) return null;
+      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+      const s = runSteps[stepIndex];
+      if (!s) return null;
       return {
-        source: "latest_cache",
-        createdAt: latest.created_at,
-        agentName: latest.agent_name || "",
-        status: "cached",
-        content: String(latest.content || ""),
+        source: "selected_run",
+        runId: selectedCacheRun.id,
+        createdAt: selectedCacheRun.finished_at || selectedCacheRun.started_at,
+        agentName: String(s.agent_name || ""),
+        model: String(s.model || ""),
+        status: String(s.state || s.status || ""),
+        errorMsg: String(s.error_msg || ""),
+        content: String(s.content || ""),
       };
     },
-    [cachedResults, selectedCacheRun, parsedRunStepsById],
+    [selectedCacheRun, parsedRunStepsById],
   );
 
   // Refs for fresh state in callbacks (avoid stale closures)
@@ -1614,12 +1619,21 @@ function PipelineCanvas() {
       return;
     }
     const next = Array.from({ length: stepCount }, () => "pending" as RuntimeStatus);
-    (cachedResults ?? []).forEach((row, idx) => {
-      if (idx < next.length && row?.result) next[idx] = "cached";
-    });
+    if (runContextMode === "historical" && selectedCacheRun) {
+      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+      runSteps.forEach((row, idx) => {
+        if (idx >= next.length || !row) return;
+        const rawState = String(row.state || row.status || "").toLowerCase();
+        if (!rawState) return;
+        if (["done", "completed", "pass", "success"].includes(rawState)) next[idx] = "done";
+        else if (["cached", "cache_hit"].includes(rawState)) next[idx] = "cached";
+        else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
+        else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
+      });
+    }
     setStepStatuses(next);
     applyRuntimeStatusMap(next);
-  }, [cachedResults, runtimeGraph.stepToProcNodeIds, running, applyRuntimeStatusMap]);
+  }, [runtimeGraph.stepToProcNodeIds, running, applyRuntimeStatusMap, runContextMode, selectedCacheRun, parsedRunStepsById]);
 
   useEffect(() => {
     applyRuntimeStatusMap(stepStatuses);
@@ -2896,16 +2910,185 @@ function PipelineCanvas() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNodeId, allAgents.length]);
 
+  useEffect(() => {
+    setResultViewMode("rendered");
+  }, [selectedNodeId]);
+
+  const previewCallId = useMemo(() => {
+    if (runContextMode === "historical") {
+      const fromRun = String(selectedCacheRun?.call_id || "").trim();
+      if (fromRun) return fromRun;
+    }
+    return String(callId || "").trim();
+  }, [runContextMode, selectedCacheRun?.call_id, callId]);
+
+  const fetchInputPreviewForSource = useCallback(async (source: string) => {
+    const src = String(source || "").trim();
+    if (!src) return;
+
+    if (!salesAgent || !customer) {
+      setInputPreviewBySource((prev) => ({
+        ...prev,
+        [src]: { loading: false, content: "", error: "Select sales agent + customer first." },
+      }));
+      return;
+    }
+
+    setInputPreviewBySource((prev) => ({
+      ...prev,
+      [src]: { loading: true, content: "", error: "" },
+    }));
+
+    try {
+      const params = new URLSearchParams({
+        source: src,
+        sales_agent: salesAgent,
+        customer,
+      });
+      if (previewCallId) params.set("call_id", previewCallId);
+      const res = await fetch(`/api/universal-agents/raw-input?${params.toString()}`);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const content = String(data?.content || "");
+      setInputPreviewBySource((prev) => ({
+        ...prev,
+        [src]: { loading: false, content, error: "" },
+      }));
+    } catch (e: any) {
+      setInputPreviewBySource((prev) => ({
+        ...prev,
+        [src]: { loading: false, content: "", error: `Could not load input preview: ${e?.message || "fetch failed"}` },
+      }));
+    }
+  }, [salesAgent, customer, previewCallId]);
+
+  useEffect(() => {
+    setInputPreviewBySource({});
+    if (!selectedNode || !selKind) return;
+
+    const wantedSources = new Set<string>();
+    if (selKind === "input") {
+      const src = String((selectedNode.data as PipelineNodeData).inputSource || "").trim();
+      if (src) wantedSources.add(src);
+    } else if (selKind === "processing") {
+      edges
+        .filter((e) => e.target === selectedNode.id)
+        .forEach((e) => {
+          const srcNode = nodes.find((n) => n.id === e.source);
+          if (!srcNode || srcNode.type !== "input") return;
+          const src = String((srcNode.data as PipelineNodeData).inputSource || "").trim();
+          if (src) wantedSources.add(src);
+        });
+    }
+
+    Array.from(wantedSources).forEach((src) => {
+      void fetchInputPreviewForSource(src);
+    });
+  }, [selectedNode, selKind, edges, nodes, fetchInputPreviewForSource]);
+
+  function renderResultViewToggle() {
+    return (
+      <div className="inline-flex rounded-md border border-gray-700 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setResultViewMode("rendered")}
+          className={cn(
+            "px-2 py-0.5 text-[10px] transition-colors",
+            resultViewMode === "rendered"
+              ? "bg-indigo-900/50 text-indigo-300"
+              : "bg-gray-900 text-gray-500 hover:text-gray-300",
+          )}
+          title="Rendered view"
+        >
+          Rendered
+        </button>
+        <button
+          type="button"
+          onClick={() => setResultViewMode("raw")}
+          className={cn(
+            "px-2 py-0.5 text-[10px] transition-colors border-l border-gray-700",
+            resultViewMode === "raw"
+              ? "bg-indigo-900/50 text-indigo-300"
+              : "bg-gray-900 text-gray-500 hover:text-gray-300",
+          )}
+          title="Raw view"
+        >
+          Raw
+        </button>
+      </div>
+    );
+  }
+
+  function renderResultContent(content: string, sourceHint = "") {
+    const text = String(content || "");
+    if (!text.trim()) {
+      return <p className="text-[10px] text-gray-500">No content.</p>;
+    }
+    if (resultViewMode === "raw") {
+      return (
+        <pre className="w-full max-h-80 overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+          {text}
+        </pre>
+      );
+    }
+
+    const hint = sourceHint.toLowerCase();
+    if (hint.includes("transcript")) {
+      return (
+        <div className="h-80 border border-gray-700 rounded-lg overflow-hidden bg-gray-900">
+          <TranscriptViewer content={text} format="txt" className="h-full" />
+        </div>
+      );
+    }
+
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return (
+          <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 divide-y divide-gray-800">
+            {Object.entries(parsed).map(([k, v]) => (
+              <div key={k} className="px-2 py-1">
+                <p className="text-[10px] text-gray-500">{k}</p>
+                <p className="text-[11px] text-gray-200 whitespace-pre-wrap break-words">
+                  {typeof v === "string" ? v : JSON.stringify(v)}
+                </p>
+              </div>
+            ))}
+          </div>
+        );
+      }
+    } catch {
+      // not json
+    }
+
+    return (
+      <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 text-[11px] text-gray-200 whitespace-pre-wrap break-words leading-relaxed">
+        {text}
+      </div>
+    );
+  }
+
   function renderCacheRunSelector() {
+    if (runContextMode !== "historical") {
+      return (
+        <div className="space-y-1">
+          <label className="block text-[9px] text-gray-500">Run Context</label>
+          <p className="text-[10px] text-gray-500">New run mode (no historical results selected).</p>
+        </div>
+      );
+    }
     return (
       <div className="space-y-1">
-        <label className="block text-[9px] text-gray-500">Cached Result</label>
+        <label className="block text-[9px] text-gray-500">Historical Run</label>
         <select
           value={selectedCacheRunId}
           onChange={(e) => setSelectedCacheRunId(e.target.value)}
           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-500"
         >
-          <option value="">Latest cache (default)</option>
+          <option value="">Select run…</option>
           {cacheRunOptions.map((opt) => (
             <option key={opt.id} value={opt.id}>
               {opt.label}
@@ -3210,10 +3393,62 @@ function PipelineCanvas() {
                   </PropertiesSection>
                 )}
 
-                <PropertiesSection title="Cached Value">
+                <PropertiesSection title="Effective Inputs">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[10px] text-gray-500">
+                        Based on current top-panel context ({salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"})
+                      </p>
+                      {renderResultViewToggle()}
+                    </div>
+                    {Array.from(new Set(
+                      edges
+                        .filter((e) => e.target === selectedNode.id)
+                        .map((e) => nodes.find((n) => n.id === e.source))
+                        .filter((n): n is Node => !!n && n.type === "input")
+                        .map((n) => String((n.data as PipelineNodeData).inputSource || "").trim())
+                        .filter(Boolean),
+                    )).length === 0 ? (
+                      <p className="text-[11px] text-gray-500">No input sources connected to this step.</p>
+                    ) : (
+                      Array.from(new Set(
+                        edges
+                          .filter((e) => e.target === selectedNode.id)
+                          .map((e) => nodes.find((n) => n.id === e.source))
+                          .filter((n): n is Node => !!n && n.type === "input")
+                          .map((n) => String((n.data as PipelineNodeData).inputSource || "").trim())
+                          .filter(Boolean),
+                      )).map((src) => {
+                        const preview = inputPreviewBySource[src];
+                        return (
+                          <div key={src} className="rounded-lg border border-gray-800 bg-gray-900/50 p-2 space-y-1.5">
+                            <p className="text-[10px] text-cyan-300 font-medium">{src}</p>
+                            {preview?.loading ? (
+                              <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Loading input preview…
+                              </div>
+                            ) : preview?.error ? (
+                              <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>
+                            ) : (
+                              renderResultContent(preview?.content || "", src)
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </PropertiesSection>
+
+                <PropertiesSection title="Processed Result">
                   <div className="space-y-2">
                     {renderCacheRunSelector()}
-                    {stepCache ? (
+                    <div className="flex items-center justify-end">{renderResultViewToggle()}</div>
+                    {runContextMode !== "historical" ? (
+                      <p className="text-[11px] text-gray-500">
+                        New run mode selected. Pick a historical run in the top bar to inspect processed results.
+                      </p>
+                    ) : stepCache ? (
                       <>
                         <p className="text-[10px] text-gray-500">
                           {stepCache.source === "selected_run"
@@ -3230,16 +3465,11 @@ function PipelineCanvas() {
                             {stepCache.errorMsg}
                           </p>
                         )}
-                        <textarea
-                          readOnly
-                          value={stepCache.content || ""}
-                          rows={20}
-                          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono resize-y"
-                        />
+                        {renderResultContent(stepCache.content || "")}
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">
-                        No cached artifact for this step in the selected context.
+                        No processed artifact found for this step in the selected historical run.
                       </p>
                     )}
                   </div>
@@ -3343,6 +3573,38 @@ function PipelineCanvas() {
                       </button>
                     );
                   })}
+                </div>
+              </PropertiesSection>
+            )}
+
+            {selKind === "input" && (
+              <PropertiesSection title="Effective Input">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-gray-500">
+                      Context: {salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"}
+                    </p>
+                    {renderResultViewToggle()}
+                  </div>
+                  {(() => {
+                    const src = String(selData.inputSource || "").trim();
+                    const preview = src ? inputPreviewBySource[src] : null;
+                    if (!src) {
+                      return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
+                    }
+                    if (preview?.loading) {
+                      return (
+                        <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Loading input preview…
+                        </div>
+                      );
+                    }
+                    if (preview?.error) {
+                      return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
+                    }
+                    return renderResultContent(preview?.content || "", src);
+                  })()}
                 </div>
               </PropertiesSection>
             )}
@@ -3485,12 +3747,17 @@ function PipelineCanvas() {
               </div>
             </PropertiesSection>
 
-            <PropertiesSection title="Cached Values">
+            <PropertiesSection title="Processed Results">
               <div className="space-y-2">
                 {renderCacheRunSelector()}
-                {ioCacheTargets.length === 0 ? (
+                <div className="flex items-center justify-end">{renderResultViewToggle()}</div>
+                {runContextMode !== "historical" ? (
                   <p className="text-[11px] text-gray-500">
-                    No connected processing step to resolve cached content for this element.
+                    New run mode selected. Pick a historical run in the top bar to inspect processed results.
+                  </p>
+                ) : ioCacheTargets.length === 0 ? (
+                  <p className="text-[11px] text-gray-500">
+                    No connected processing step to resolve run results for this element.
                   </p>
                 ) : (
                   ioCacheTargets.map((target) => {
@@ -3518,16 +3785,11 @@ function PipelineCanvas() {
                                 {cache.errorMsg}
                               </p>
                             )}
-                            <textarea
-                              readOnly
-                              value={cache.content || ""}
-                              rows={10}
-                              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono resize-y"
-                            />
+                            {renderResultContent(cache.content || "")}
                           </>
                         ) : (
                           <p className="text-[10px] text-gray-500">
-                            No cached content for this step in the selected run/context.
+                            No processed content for this step in the selected run.
                           </p>
                         )}
                       </div>
@@ -3641,6 +3903,32 @@ function PipelineCanvas() {
               />
             ))}
           </datalist>
+        </div>
+
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
+          <History className="w-3 h-3 text-indigo-400 shrink-0" />
+          <select
+            value={runContextMode}
+            onChange={(e) => setRunContextMode(e.target.value as RunContextMode)}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[115px]"
+            title="Pick run context mode for node side-panels"
+          >
+            <option value="new">New run</option>
+            <option value="historical">Historical run</option>
+          </select>
+          {runContextMode === "historical" && (
+            <select
+              value={selectedCacheRunId}
+              onChange={(e) => setSelectedCacheRunId(e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[190px]"
+              title="Select historical run id"
+            >
+              <option value="">{historyRuns.length ? "Select run…" : "No runs found"}</option>
+              {cacheRunOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>{opt.label}</option>
+              ))}
+            </select>
+          )}
         </div>
         <span className="text-[10px] px-2 py-1 rounded-lg border border-gray-800 text-gray-400 bg-gray-950/40 shrink-0">
           Scope: {runNeedsCall ? "per call" : "per pair"}
