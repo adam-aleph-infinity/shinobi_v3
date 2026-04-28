@@ -754,7 +754,7 @@ function NodeCard({
   runButtonDisabled?: boolean;
   onRunStep?: () => void;
 }) {
-  const hasStepRun = typeof runStepIndex === "number" && runStepIndex >= 0;
+  const hasStepRun = (!!onRunStep) || (typeof runStepIndex === "number" && runStepIndex >= 0);
   const ringColor =
     kind === "input"      ? "ring-blue-400/50" :
     kind === "processing" ? "ring-indigo-400/50" :
@@ -791,7 +791,11 @@ function NodeCard({
               }}
               disabled={runButtonDisabled || !onRunStep}
               className="h-5 min-w-[24px] rounded border border-indigo-700/60 bg-indigo-900/50 px-1 text-[10px] font-bold text-indigo-200 hover:bg-indigo-800/60 disabled:opacity-35 disabled:cursor-not-allowed"
-              title={`Run this step only (Step ${runStepIndex + 1})`}
+              title={
+                typeof runStepIndex === "number"
+                  ? `Run this step only (Step ${runStepIndex + 1})`
+                  : "Run from this input"
+              }
             >
               ▶
             </button>
@@ -2240,6 +2244,7 @@ function PipelineCanvas() {
     runtimeGraph.stepToProcNodeIds.forEach((nodeId, idx) => {
       procStepIndexByNodeId[nodeId] = idx;
     });
+    const inputStepIndicesByNodeId: Record<string, number[]> = {};
     const outputStepIndexByNodeId: Record<string, number> = {};
     const incomingByNode: Record<string, string[]> = {};
     edges.forEach((e) => {
@@ -2252,6 +2257,13 @@ function PipelineCanvas() {
         if (srcProc != null) outputStepIndexByNodeId[n.id] = procStepIndexByNodeId[srcProc];
       }
     }
+    Object.entries(runtimeGraph.inputToProcNodeIds).forEach(([inputNodeId, procNodeIds]) => {
+      const idxs = procNodeIds
+        .map((pid) => procStepIndexByNodeId[pid])
+        .filter((idx): idx is number => Number.isFinite(idx))
+        .sort((a, b) => a - b);
+      if (idxs.length) inputStepIndicesByNodeId[inputNodeId] = idxs;
+    });
 
     const runButtonDisabled = running || !pipelineId || !salesAgent || !customer || (runNeedsCall && !callId);
     return nodes.map((n) => {
@@ -2262,16 +2274,21 @@ function PipelineCanvas() {
       } else if (n.type === "output") {
         runStepIndex = outputStepIndexByNodeId[n.id] ?? null;
       } else if (n.type === "input") {
-        // Inputs are data sources, not executable pipeline steps.
-        runStepIndex = null;
+        const idxs = inputStepIndicesByNodeId[n.id] || [];
+        runStepIndex = idxs.length ? idxs[0] : null;
       }
+      const inputRunIndices = n.type === "input" ? (inputStepIndicesByNodeId[n.id] || []) : [];
+      const onRunStepHandler =
+        n.type === "input"
+          ? (inputRunIndices.length ? () => runInputNodeStep(inputRunIndices) : undefined)
+          : (runStepIndex != null ? () => runNodeStep(runStepIndex) : undefined);
       return {
         ...n,
         data: {
           ...base,
           runStepIndex,
           runButtonDisabled,
-          onRunStep: runStepIndex != null ? () => runNodeStep(runStepIndex) : undefined,
+          onRunStep: onRunStepHandler,
         } satisfies PipelineNodeData,
       };
     });
@@ -2285,6 +2302,7 @@ function PipelineCanvas() {
     customer,
     runNeedsCall,
     callId,
+    runtimeGraph.inputToProcNodeIds,
   ]);
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
@@ -3543,6 +3561,32 @@ function PipelineCanvas() {
     void runPipeline("default", {
       executeStepIndices: [targetStepIndex],
       forceStepIndices: [targetStepIndex],
+      force: false,
+      resumePartial: true,
+      continueRunId: preferredRunId,
+    });
+  }
+
+  function runInputNodeStep(targetStepIndices: number[]) {
+    const executeStepIndices = Array.from(
+      new Set((targetStepIndices || [])
+        .map((i) => Number(i))
+        .filter((i) => Number.isFinite(i) && i >= 0)
+        .map((i) => Math.floor(i))),
+    ).sort((a, b) => a - b);
+    if (!executeStepIndices.length) {
+      showToast("No connected consumer step found for this input", false);
+      return;
+    }
+    if (running) {
+      showToast("A run is already in progress", false);
+      return;
+    }
+    const preferredRunId = String(
+      (runContextMode === "historical" ? selectedCacheRun?.id : "") || currentRunId || "",
+    ).trim();
+    void runPipeline("default", {
+      executeStepIndices,
       force: false,
       resumePartial: true,
       continueRunId: preferredRunId,
