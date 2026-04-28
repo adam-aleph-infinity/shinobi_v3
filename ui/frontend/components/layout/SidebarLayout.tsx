@@ -110,7 +110,6 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
   const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
   const contentOffset = sidebarOffset + copilotOffset;
-  const contentWidth = `calc(100vw - ${contentOffset}px)`;
   const isPipelinePage = pathname === "/pipeline";
   const showContextBar = pathname !== "/pipeline";
 
@@ -195,10 +194,10 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {/* Main content — always same structure so React doesn't remount children */}
       <div
         className={cn(
-          "h-screen transition-[margin,width] duration-200 overflow-x-hidden",
+          "fixed top-0 bottom-0 right-0 transition-[left] duration-200 overflow-x-hidden",
           resizingCopilot && "transition-none",
         )}
-        style={{ marginLeft: contentOffset, width: contentWidth }}
+        style={{ left: contentOffset }}
       >
         <div className="h-full flex flex-col">
           {mounted && showContextBar && (
