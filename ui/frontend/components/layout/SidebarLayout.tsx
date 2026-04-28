@@ -180,10 +180,10 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {/* Main content — always same structure so React doesn't remount children */}
       <div
         className={cn(
-          "fixed top-0 h-screen transition-[width,left] duration-200 overflow-hidden",
+          "h-screen transition-[margin,width] duration-200 overflow-x-hidden",
           resizingCopilot && "transition-none",
         )}
-        style={{ left: contentOffset, width: contentWidth }}
+        style={{ marginLeft: contentOffset, width: contentWidth }}
       >
         <div className="h-full flex flex-col">
           {mounted && showContextBar && (
