@@ -148,6 +148,35 @@ interface NavCustomerOption {
 
 type CallDatesMap = Record<string, { date: string; has_audio: boolean }>;
 
+interface FinalTranscriptCall {
+  call_id: string;
+  final_path?: string | null;
+  smoothed_path?: string | null;
+  voted_path?: string | null;
+  pipeline_final_files?: Array<{ path?: string; name?: string }>;
+}
+
+interface PipelineArtifactState {
+  processed: boolean;
+  complete: boolean;
+  step_count: number;
+  total_steps: number;
+  artifact_count?: number;
+  artifact_total?: number;
+  artifact_complete?: boolean;
+  artifact_types?: string[];
+  last_at?: string | null;
+}
+
+interface PipelineArtifactStatus {
+  pipeline_id: string;
+  sales_agent: string;
+  customer: string;
+  pair: PipelineArtifactState;
+  calls: Record<string, PipelineArtifactState>;
+  generated_at: string;
+}
+
 interface CachedStepResult {
   agent_id: string;
   result: { id: string; content: string; agent_name: string; created_at: string } | null;
@@ -1108,6 +1137,12 @@ function PipelineCanvas() {
       : null,
     fetcher,
   );
+  const { data: transcriptCalls } = useSWR<FinalTranscriptCall[]>(
+    salesAgent && customer
+      ? `/api/final-transcript/calls?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
 
@@ -1199,6 +1234,9 @@ function PipelineCanvas() {
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
+  const [callTranscriptText, setCallTranscriptText] = useState("");
+  const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
+  const [callTranscriptError, setCallTranscriptError] = useState("");
 
   useEffect(() => {
     return () => {
@@ -1268,20 +1306,50 @@ function PipelineCanvas() {
     return entries;
   }, [callDates]);
 
+  const selectedTranscriptCall = useMemo(() => {
+    const wanted = normalizeCallId(callId);
+    if (!wanted) return null;
+    return (transcriptCalls ?? []).find((c) => normalizeCallId(c.call_id) === wanted) ?? null;
+  }, [transcriptCalls, callId]);
+
+  const transcriptCallMapByNorm = useMemo(() => {
+    const out = new Map<string, FinalTranscriptCall>();
+    for (const c of (transcriptCalls ?? [])) {
+      const key = normalizeCallId(c.call_id);
+      if (!key || out.has(key)) continue;
+      out.set(key, c);
+    }
+    return out;
+  }, [transcriptCalls]);
+
+  const statusPipelineId = pipelineId || activePipelineId;
+  const statusCallIds = useMemo(
+    () => callOptions.map(([cid]) => cid).join(","),
+    [callOptions],
+  );
+  const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
+    statusPipelineId && salesAgent && customer
+      ? `/api/pipelines/${encodeURIComponent(statusPipelineId)}/artifact-status?sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}${statusCallIds ? `&call_ids=${encodeURIComponent(statusCallIds)}` : ""}`
+      : null,
+    fetcher,
+  );
+  const pipelineCallMapByNorm = useMemo(() => {
+    const out: Record<string, PipelineArtifactState> = {};
+    const callMap = pipelineArtifactStatus?.calls ?? {};
+    Object.entries(callMap).forEach(([k, v]) => {
+      const norm = normalizeCallId(k);
+      if (!norm || out[norm]) return;
+      out[norm] = v;
+    });
+    return out;
+  }, [pipelineArtifactStatus]);
+
   const crmPanelUrl = useMemo(() => {
     const qp = new URLSearchParams({ embedded: "1", mode: "pick_pair" });
     if (salesAgent) qp.set("agent", salesAgent);
     if (customer) qp.set("customer", customer);
     return `/crm?${qp.toString()}`;
   }, [salesAgent, customer]);
-  const callsPanelUrl = useMemo(() => {
-    const qp = new URLSearchParams({ embedded: "1", mode: "pick_call" });
-    if (salesAgent) qp.set("agent", salesAgent);
-    if (customer) qp.set("customer", customer);
-    if (callId) qp.set("call_id", callId);
-    if (activePipelineId) qp.set("pipeline_id", activePipelineId);
-    return `/calls?${qp.toString()}`;
-  }, [salesAgent, customer, callId, activePipelineId]);
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onMessage = (event: MessageEvent) => {
@@ -1330,6 +1398,54 @@ function PipelineCanvas() {
       setCallId("");
     }
   }, [callId, callOptions, setCallId]);
+
+  useEffect(() => {
+    if (!showCallsPanel) return;
+    if (!salesAgent || !customer || !callId) {
+      setCallTranscriptText("");
+      setCallTranscriptError("");
+      setCallTranscriptLoading(false);
+      return;
+    }
+
+    const preferredPath =
+      selectedTranscriptCall?.final_path
+      || selectedTranscriptCall?.smoothed_path
+      || selectedTranscriptCall?.voted_path
+      || selectedTranscriptCall?.pipeline_final_files?.[0]?.path
+      || "";
+
+    if (!preferredPath) {
+      setCallTranscriptText("");
+      setCallTranscriptError("No transcript found for this call.");
+      setCallTranscriptLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setCallTranscriptLoading(true);
+    setCallTranscriptError("");
+
+    fetch(`/api/final-transcript/content?path=${encodeURIComponent(preferredPath)}`)
+      .then((r) => r.text())
+      .then((txt) => {
+        if (cancelled) return;
+        setCallTranscriptText(String(txt || ""));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCallTranscriptText("");
+        setCallTranscriptError("Error loading transcript.");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setCallTranscriptLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
 
   const runsUrl = useMemo(() => {
     if (!pipelineId) return null;
@@ -4095,42 +4211,157 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div
-              className="absolute inset-0 z-40 border border-indigo-800/40 bg-gray-950/78 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] relative"
-              style={{ animation: "canvasPopupIn 180ms ease-out" }}
-            >
+            <div className="absolute inset-0 z-40 bg-black/55 backdrop-blur-[2px] p-4 flex items-center justify-center">
+              <div
+                className="relative w-[min(92vw,1360px)] h-[min(86vh,820px)] rounded-xl border border-indigo-800/45 bg-gray-950/95 shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden"
+                style={{ animation: "canvasPopupIn 180ms ease-out" }}
+              >
               <button
                 onClick={() => setShowCallsPanel(false)}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
+                className="absolute -top-5 left-1/2 -translate-x-1/2 z-30 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
                 title="Close Calls panel"
               >
-                <X className="w-5 h-5" />
+                <X className="w-6 h-6" />
               </button>
-              <iframe
-                title="Calls Browser"
-                src={callsPanelUrl}
-                className="w-full h-full border-0 bg-gray-900"
-              />
+              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-white font-semibold truncate">Calls</p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
+                  </p>
+                </div>
+              </div>
+              <div className="h-[calc(100%-3rem)] min-h-0 grid grid-cols-1 lg:grid-cols-12">
+                <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Call IDs</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                    {callOptions.length === 0 && (
+                      <p className="text-xs text-gray-500 italic px-1 py-2">
+                        Select sales agent + customer to load calls.
+                      </p>
+                    )}
+                    {callOptions.map(([cid, meta]) => {
+                      const selected = normalizeCallId(cid) === normalizeCallId(callId);
+                      const txCall = transcriptCallMapByNorm.get(normalizeCallId(cid));
+                      const hasTranscript = !!(
+                        txCall?.final_path
+                        || txCall?.smoothed_path
+                        || txCall?.voted_path
+                        || txCall?.pipeline_final_files?.[0]?.path
+                      );
+                      const callArtifacts = pipelineCallMapByNorm[normalizeCallId(cid)];
+                      const artifactTypes = Array.from(new Set((callArtifacts?.artifact_types ?? []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean)));
+                      return (
+                        <button
+                          key={cid}
+                          onClick={() => setCallId(cid)}
+                          className={cn(
+                            "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
+                            selected
+                              ? "border-amber-600/70 bg-amber-900/30"
+                              : "border-gray-800 bg-gray-900/60 hover:bg-gray-800/80",
+                          )}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs font-mono text-gray-100 truncate flex-1">{cid}</p>
+                            {hasTranscript && (
+                              <span
+                                title="Transcript available"
+                                className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
+                              >
+                                <FileText className="h-3 w-3" />
+                              </span>
+                            )}
+                            {artifactTypes.map((tp) => {
+                              const isPersona = tp.includes("persona") && !tp.includes("score");
+                              const isScore = tp.includes("score");
+                              const isNotes = tp.includes("note") && !tp.includes("compliance");
+                              const isCompliance = tp.includes("compliance") || tp.includes("violation");
+                              const Icon = isPersona ? User : isScore ? BadgeCheck : isNotes ? StickyNote : isCompliance ? ShieldCheck : Bot;
+                              const classes = isPersona
+                                ? "border-fuchsia-700/60 bg-fuchsia-900/35 text-fuchsia-300"
+                                : isScore
+                                  ? "border-amber-700/60 bg-amber-900/35 text-amber-300"
+                                  : isNotes
+                                    ? "border-indigo-700/60 bg-indigo-900/35 text-indigo-300"
+                                    : isCompliance
+                                      ? "border-emerald-700/60 bg-emerald-900/35 text-emerald-300"
+                                      : "border-violet-700/60 bg-violet-900/35 text-violet-300";
+                              return (
+                                <span
+                                  key={`${cid}-${tp}`}
+                                  title={`Artifact: ${tp}`}
+                                  className={cn("inline-flex h-5 w-5 items-center justify-center rounded-md border", classes)}
+                                >
+                                  <Icon className="h-3 w-3" />
+                                </span>
+                              );
+                            })}
+                          </div>
+                          <p className="text-[10px] text-gray-500 truncate">
+                            {meta?.date ? new Date(meta.date).toLocaleString() : "Unknown date"}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+                <section className="lg:col-span-8 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Transcript</p>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    {!callId ? (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        Select a Call ID to preview transcript.
+                      </div>
+                    ) : callTranscriptLoading ? (
+                      <div className="h-full flex items-center justify-center gap-2 text-gray-400 text-sm">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Loading transcript…
+                      </div>
+                    ) : callTranscriptError ? (
+                      <div className="h-full flex items-center justify-center text-red-300 text-sm px-4 text-center">
+                        {callTranscriptError}
+                      </div>
+                    ) : callTranscriptText ? (
+                      <div className="h-full p-2">
+                        <TranscriptViewer content={callTranscriptText} format="txt" className="h-full" />
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        No transcript content.
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+              </div>
             </div>
           )}
 
           {showCrmPanel && (
-            <div
-              className="absolute inset-0 z-40 border border-cyan-800/35 bg-gray-950/78 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.68)] relative"
-              style={{ animation: "canvasPopupIn 180ms ease-out" }}
-            >
+            <div className="absolute inset-0 z-40 bg-black/55 backdrop-blur-[2px] p-4 flex items-center justify-center">
+              <div
+                className="relative w-[min(92vw,1360px)] h-[min(86vh,820px)] rounded-xl border border-cyan-800/45 bg-gray-950/95 shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden"
+                style={{ animation: "canvasPopupIn 180ms ease-out" }}
+              >
               <button
                 onClick={() => setShowCrmPanel(false)}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
+                className="absolute -top-5 left-1/2 -translate-x-1/2 z-30 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
                 title="Close CRM panel"
               >
-                <X className="w-5 h-5" />
+                <X className="w-6 h-6" />
               </button>
               <iframe
                 title="CRM Browser"
                 src={crmPanelUrl}
                 className="w-full h-full border-0 bg-gray-900"
               />
+              </div>
             </div>
           )}
 
@@ -4283,18 +4514,18 @@ function PipelineCanvas() {
           )}
 
           {selectedNodeId && (
-            <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[2px] p-4 relative">
-              <button
-                onClick={() => setSelectedNodeId(null)}
-                className="absolute top-2 left-1/2 -translate-x-1/2 z-40 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
-                title="Close editor"
-              >
-                <X className="w-5 h-5" />
-              </button>
+            <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[2px] p-4 flex items-center justify-center">
               <div
-                className="w-full h-full rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden flex flex-col"
+                className="relative w-[min(92vw,1420px)] h-[min(88vh,860px)] rounded-xl border border-indigo-700/45 bg-gray-900/95 backdrop-blur-sm shadow-[0_32px_90px_rgba(0,0,0,0.72)] overflow-hidden flex flex-col"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
+              <button
+                onClick={() => setSelectedNodeId(null)}
+                className="absolute -top-5 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+                title="Close editor"
+              >
+                <X className="w-6 h-6" />
+              </button>
                 <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
                   <div className="min-w-0">
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Edit Element</p>
