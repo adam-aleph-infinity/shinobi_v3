@@ -5282,7 +5282,7 @@ async def run_pipeline(
 
                     # Resume-partial fast path: reuse latest step cache immediately,
                     # before potentially expensive input resolution/fingerprint work.
-                    if req.resume_partial and (not req.force) and step_idx not in req.force_step_indices:
+                    if (not req.prepare_input_only) and req.resume_partial and (not req.force) and step_idx not in req.force_step_indices:
                         _resume_cached = None
                         try:
                             with Session(_db_engine) as _s:
@@ -5790,7 +5790,7 @@ async def run_pipeline(
                                 }
 
                                 # Resume-partial fast path for parallel stages too.
-                                if req.resume_partial and (not req.force) and par_idx not in req.force_step_indices:
+                                if (not req.prepare_input_only) and req.resume_partial and (not req.force) and par_idx not in req.force_step_indices:
                                     _resume_cached = None
                                     try:
                                         _resume_cached = _lookup_step_cache_resume_only(_par_db, _par_aid, par_idx)

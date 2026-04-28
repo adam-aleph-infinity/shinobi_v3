@@ -3741,7 +3741,7 @@ function PipelineCanvas() {
     void runPipeline("default", {
       executeStepIndices,
       force: false,
-      resumePartial: true,
+      resumePartial: false,
       continueRunId: preferredRunId,
       prepareInputOnly: true,
     });
