@@ -147,6 +147,24 @@ def _extract_webhook_token(request: Request, payload: CallEndedWebhookPayload) -
     return ""
 
 
+def _extract_webhook_token_from_headers(request: Request) -> str:
+    configured_header = str(settings.crm_webhook_token_header or "x-webhook-token").strip().lower()
+    candidates = [
+        request.headers.get(configured_header, ""),
+        request.headers.get("x-webhook-token", ""),
+        request.headers.get("x-shinobi-webhook-token", ""),
+        request.headers.get("x-api-token", ""),
+    ]
+    auth = str(request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        candidates.append(auth[7:].strip())
+    for value in candidates:
+        token = str(value or "").strip()
+        if token:
+            return token
+    return ""
+
+
 def _assert_webhook_auth(request: Request, payload: CallEndedWebhookPayload) -> None:
     if not bool(settings.crm_webhook_enabled):
         raise HTTPException(status_code=403, detail="CRM webhook is disabled. Set CRM_WEBHOOK_ENABLED=true.")
@@ -162,6 +180,32 @@ def _assert_webhook_auth(request: Request, payload: CallEndedWebhookPayload) -> 
         )
 
     token = _extract_webhook_token(request, payload)
+    if not token or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid webhook token.")
+
+
+def _assert_webhook_admin_auth(request: Request) -> None:
+    """
+    Guard configuration endpoints under /api/webhooks/*.
+    These endpoints become publicly reachable once webhook path bypasses IAP.
+    """
+    if not bool(settings.crm_webhook_enabled):
+        raise HTTPException(status_code=403, detail="CRM webhook is disabled. Set CRM_WEBHOOK_ENABLED=true.")
+
+    expected = str(settings.crm_webhook_secret or "").strip()
+    require_secret = bool(settings.crm_webhook_require_secret)
+    if not expected and not require_secret:
+        raise HTTPException(
+            status_code=403,
+            detail="Webhook config endpoints require a configured secret.",
+        )
+    if not expected and require_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="CRM webhook secret is required but missing. Set CRM_WEBHOOK_SECRET.",
+        )
+
+    token = _extract_webhook_token_from_headers(request)
     if not token or not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="Invalid webhook token.")
 
@@ -403,12 +447,14 @@ async def _trigger_pipeline_run(
 
 
 @router.get("/call-ended/config")
-def get_call_ended_config() -> dict[str, Any]:
+def get_call_ended_config(request: Request) -> dict[str, Any]:
+    _assert_webhook_admin_auth(request)
     return _load_call_ended_config()
 
 
 @router.put("/call-ended/config")
-def set_call_ended_config(req: CallEndedWebhookConfig) -> dict[str, Any]:
+def set_call_ended_config(req: CallEndedWebhookConfig, request: Request) -> dict[str, Any]:
+    _assert_webhook_admin_auth(request)
     return _save_call_ended_config(req.model_dump())
 
 
