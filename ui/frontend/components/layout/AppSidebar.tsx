@@ -129,15 +129,15 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
   };
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40 relative pr-3">
+    <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40 relative pr-4">
       {onToggle && (
         <button
           onClick={onToggle}
-          className="absolute right-0 top-0 h-full w-3 border-l border-gray-800 bg-gray-900/95 text-gray-500 hover:text-white hover:bg-gray-800/95 transition-colors flex items-center justify-center"
+          className="absolute right-0 top-0 h-full w-4 border-l border-gray-800 bg-gray-900/95 text-gray-500 hover:text-white hover:bg-gray-800/95 transition-colors flex items-center justify-center"
           title="Hide main tools"
           aria-label="Hide main tools"
         >
-          <Home className="w-3.5 h-3.5" />
+          <Home className="w-4 h-4" />
         </button>
       )}
       {/* Logo */}

@@ -4202,7 +4202,14 @@ function PipelineCanvas() {
           )}
 
           {showCallsPanel && (
-            <div className="absolute inset-0 z-40 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col">
+            <div className="absolute inset-0 z-40 bg-gray-950/95 border border-gray-800 shadow-2xl flex flex-col relative">
+              <button
+                onClick={() => setShowCallsPanel(false)}
+                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
+                title="Close Calls panel"
+              >
+                <X className="w-5 h-5" />
+              </button>
               <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
                 <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
                 <div className="min-w-0 flex-1">
@@ -4211,13 +4218,6 @@ function PipelineCanvas() {
                     {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
                   </p>
                 </div>
-                <button
-                  onClick={() => setShowCallsPanel(false)}
-                  className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                  title="Close Calls panel"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
               </div>
               <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12">
                 <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
@@ -4316,13 +4316,13 @@ function PipelineCanvas() {
           )}
 
           {showCrmPanel && (
-            <div className="absolute inset-0 z-40 bg-gray-950 border border-gray-800 shadow-2xl">
+            <div className="absolute inset-0 z-40 bg-gray-950 border border-gray-800 shadow-2xl relative">
               <button
                 onClick={() => setShowCrmPanel(false)}
-                className="absolute top-2 right-2 z-10 p-1 rounded-md bg-gray-900/80 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
                 title="Close CRM panel"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-5 h-5" />
               </button>
               <iframe
                 title="CRM Browser"
@@ -4336,10 +4336,17 @@ function PipelineCanvas() {
             <>
               <div
                 className={cn(
-                  "absolute inset-y-0 right-0 z-20 w-[min(38%,900px)] min-w-[400px] border-l border-gray-800 bg-gray-950 shadow-2xl flex flex-col transition-transform duration-200",
+                  "absolute inset-y-0 right-0 z-20 w-[min(38%,900px)] min-w-[400px] border-l border-gray-800 bg-gray-950 shadow-2xl flex flex-col transition-transform duration-200 relative",
                   runLogsVisible ? "translate-x-0" : "translate-x-full pointer-events-none",
                 )}
               >
+                <button
+                  onClick={() => setRunLogsVisible(false)}
+                  className="absolute top-2 left-1/2 -translate-x-1/2 z-20 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
+                  title="Hide logs"
+                >
+                  <X className="w-5 h-5" />
+                </button>
                 <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
                   <History className="w-4 h-4 text-indigo-400 shrink-0" />
                   <div className="min-w-0 flex-1">
@@ -4348,13 +4355,6 @@ function PipelineCanvas() {
                       Full Logs view (all filters and controls)
                     </p>
                   </div>
-                  <button
-                    onClick={() => setRunLogsVisible(false)}
-                    className="p-1 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                    title="Hide logs"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
                 </div>
                 <iframe
                   title="Run Logs"
@@ -4476,7 +4476,14 @@ function PipelineCanvas() {
           )}
 
           {selectedNodeId && (
-            <div className="absolute inset-0 z-30 bg-black/45 p-4">
+            <div className="absolute inset-0 z-30 bg-black/45 p-4 relative">
+              <button
+                onClick={() => setSelectedNodeId(null)}
+                className="absolute top-2 left-1/2 -translate-x-1/2 z-40 h-10 w-10 rounded-full border border-red-400/70 bg-red-600/90 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-xl"
+                title="Close editor"
+              >
+                <X className="w-5 h-5" />
+              </button>
               <div className="w-full h-full rounded-xl border border-gray-700 bg-gray-900 shadow-2xl overflow-hidden flex flex-col">
                 <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
                   <div className="min-w-0">
@@ -4485,13 +4492,6 @@ function PipelineCanvas() {
                       {(selectedNode?.data as PipelineNodeData | undefined)?.label || "Element"}
                     </p>
                   </div>
-                  <button
-                    onClick={() => setSelectedNodeId(null)}
-                    className="p-1.5 rounded-md text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
-                    title="Close editor"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
                 </div>
                 <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>
                   {renderPanel()}

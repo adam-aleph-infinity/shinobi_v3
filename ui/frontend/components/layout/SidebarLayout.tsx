@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { usePathname } from "next/navigation";
 
 const SIDEBAR_WIDTH = 224;
-const TOGGLE_STRIP_WIDTH = 12;
+const TOGGLE_STRIP_WIDTH = 16;
 const COPILOT_DEFAULT_WIDTH = 304;
 const COPILOT_MIN_WIDTH = 280;
 const COPILOT_MAX_WIDTH = 520;
@@ -17,7 +17,7 @@ const MIN_CONTENT_WIDTH = 560;
 function clampCopilotWidth(raw: number, sidebarCollapsed: boolean): number {
   const hardClamped = Math.min(COPILOT_MAX_WIDTH, Math.max(COPILOT_MIN_WIDTH, raw));
   if (typeof window === "undefined") return hardClamped;
-  const sidebarSpace = sidebarCollapsed ? 0 : SIDEBAR_WIDTH;
+  const sidebarSpace = sidebarCollapsed ? TOGGLE_STRIP_WIDTH : SIDEBAR_WIDTH;
   const viewportMax = Math.max(COPILOT_MIN_WIDTH, window.innerWidth - sidebarSpace - MIN_CONTENT_WIDTH);
   return Math.min(hardClamped, viewportMax);
 }
@@ -86,7 +86,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     if (e.button !== 0) return;
     e.preventDefault();
 
-    const panelLeft = collapsed ? 0 : SIDEBAR_WIDTH;
+    const panelLeft = collapsed ? TOGGLE_STRIP_WIDTH : SIDEBAR_WIDTH;
     setResizingCopilot(true);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
@@ -107,12 +107,15 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     window.addEventListener("mouseup", onUp);
   };
 
-  const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
-  const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
+  const sidebarOffset = mounted ? (collapsed ? TOGGLE_STRIP_WIDTH : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
+  const copilotOffset = mounted ? (copilotCollapsed ? TOGGLE_STRIP_WIDTH : copilotWidth) : COPILOT_DEFAULT_WIDTH;
   const contentOffset = sidebarOffset + copilotOffset;
   const contentWidth = `calc(100vw - ${contentOffset}px)`;
   const isPipelinePage = pathname === "/pipeline";
   const showContextBar = pathname !== "/pipeline";
+  const contentStyle = isPipelinePage
+    ? { left: contentOffset, width: contentWidth }
+    : { marginLeft: contentOffset, width: contentWidth };
 
   if (embeddedMode) {
     return (
@@ -149,7 +152,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         <button
           onClick={toggleCopilot}
           className="fixed top-0 z-50 h-screen bg-gray-900/95 border-r border-gray-800 text-gray-500 hover:text-white hover:bg-gray-800/95 transition-colors flex items-center justify-center"
-          style={{ left: collapsed ? TOGGLE_STRIP_WIDTH : SIDEBAR_WIDTH, width: TOGGLE_STRIP_WIDTH }}
+          style={{ left: sidebarOffset, width: TOGGLE_STRIP_WIDTH }}
           title="Show copilot panel"
           aria-label="Show copilot panel"
         >
@@ -157,7 +160,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         </button>
       )}
       {mounted && !copilotCollapsed && (
-        <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: copilotWidth }}>
+        <div className="fixed top-0 h-screen z-30" style={{ left: sidebarOffset, width: copilotWidth }}>
           <CopilotDock onToggle={toggleCopilot} />
           <div className="absolute top-0 -right-1 h-full w-3 z-40">
             <button
@@ -180,11 +183,11 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       {/* Main content — always same structure so React doesn't remount children */}
       <div
         className={cn(
-          "transition-[margin,width] duration-200 overflow-x-hidden",
-          isPipelinePage ? "h-screen overflow-hidden" : "min-h-screen",
+          "transition-[margin,width,left] duration-200 overflow-x-hidden",
+          isPipelinePage ? "fixed top-0 h-screen overflow-hidden" : "min-h-screen",
           resizingCopilot && "transition-none",
         )}
-        style={{ marginLeft: contentOffset, width: contentWidth }}
+        style={contentStyle}
       >
         <div className="sticky top-0 z-30">
           {mounted && showContextBar && <ContextBar />}
