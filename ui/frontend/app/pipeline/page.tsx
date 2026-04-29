@@ -2881,7 +2881,8 @@ function PipelineCanvas() {
     const onMove = (ev: MouseEvent) => {
       if (!pipelinesPanelResizeRef.current.active) return;
       const { startX, startWidth } = pipelinesPanelResizeRef.current;
-      const delta = startX - ev.clientX;
+      // Pipelines panel lives on the left side; dragging the right edge right should widen it.
+      const delta = ev.clientX - startX;
       const next = Math.max(240, Math.min(640, Math.round(startWidth + delta)));
       setPipelinesPanelWidth(next);
     };
@@ -5692,97 +5693,11 @@ function PipelineCanvas() {
       {/* ── Main content ──────────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0">
 
-        {/* ── Left panel: Run history ─────────────────────────────────── */}
-        <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden order-1">
-          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
-            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Run History</p>
-            <p className="text-[9px] text-gray-700 mt-0.5">
-              {historyRuns.length > 0
-                ? `${historyRuns.length} runs for current context`
-                : "No runs yet for current filter"}
-            </p>
-          </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {historyRuns.length === 0 && (
-              <p className="text-xs text-gray-600 italic px-1 py-2">No runs found.</p>
-            )}
-            {historyRunDayGroups.map((group) => {
-              const dayCollapsed = !!collapsedHistoryDayIds[group.dayId];
-              return (
-                <div key={group.dayId} className="space-y-1.5">
-                  <button
-                    onClick={() => setCollapsedHistoryDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
-                    className="w-full flex items-center gap-1.5 px-1 py-1 rounded text-left hover:bg-gray-800/60 transition-colors"
-                    title={dayCollapsed ? "Expand day folder" : "Collapse day folder"}
-                  >
-                    <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", !dayCollapsed && "rotate-90")} />
-                    <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-wide truncate">{group.label}</span>
-                    <span className="ml-auto text-[9px] text-gray-600">{group.runs.length}</span>
-                  </button>
-                  {!dayCollapsed && group.runs.map((run) => {
-                    const expanded = !!expandedHistoryRunIds[run.id];
-                    const timeline = runTimelineById.get(run.id);
-                    const runStatus = String(run.status || "").toLowerCase();
-                    const runStatusClass = runStatus === "done"
-                      ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                      : runStatus === "error"
-                        ? "text-red-300 border-red-700/50 bg-red-950/40"
-                        : "text-orange-300 border-orange-700/50 bg-orange-950/40";
-                    return (
-                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-2 py-2">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
-                            className="min-w-0 flex-1 flex items-center gap-1.5 text-left hover:opacity-90 transition-opacity"
-                            title={expanded ? "Collapse run details" : "Expand run details"}
-                          >
-                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
-                            <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
-                            <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
-                          </button>
-                          <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
-                            {run.status}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-[9px] text-gray-500 truncate">
-                          {relativeTime(run.started_at)}{run.call_id ? ` · call ${run.call_id}` : ""}
-                        </p>
-                        {expanded && (
-                          <div className="mt-2 space-y-1.5">
-                            {!timeline || timeline.rows.length === 0 ? (
-                              <p className="text-[10px] text-gray-500 italic">No step execution data.</p>
-                            ) : (
-                              timeline.rows.map((row) => (
-                                <div key={`${run.id}-step-${row.stepIndex}`} className="rounded border border-gray-800 bg-gray-950 p-1.5">
-                                  <div className="flex items-center gap-1.5">
-                                    <p className="text-[9px] text-gray-500 shrink-0">S{row.stepIndex + 1}</p>
-                                    <p className="text-[10px] text-gray-200 truncate flex-1">{row.elementName}</p>
-                                    <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border", row.statusClass)}>
-                                      {row.statusLabel}
-                                    </span>
-                                  </div>
-                                  <p className="mt-1 text-[9px] text-gray-500 truncate">
-                                    {row.durationLabel}{row.model ? ` · ${row.model}` : ""}
-                                  </p>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        </aside>
-
-        {/* ── Right panel: Pipelines + elements ───────────────────────── */}
+        {/* ── Left panel: Pipelines + elements ────────────────────────── */}
         <aside
           className={cn(
-            "relative shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col overflow-hidden order-3 transition-all duration-200",
-            logsExpanded && !logsCollapsed && "w-0 border-l-0 opacity-0 pointer-events-none",
+            "relative shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden order-1 transition-all duration-200",
+            logsExpanded && !logsCollapsed && "w-0 border-r-0 opacity-0 pointer-events-none",
           )}
           style={{ width: logsExpanded && !logsCollapsed ? 0 : pipelinesPanelWidth }}
         >
@@ -5790,7 +5705,7 @@ function PipelineCanvas() {
             onMouseDown={beginResizePipelinesPanel}
             title="Resize pipelines panel"
             className={cn(
-              "absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-20 bg-transparent hover:bg-indigo-500/25",
+              "absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize z-20 bg-transparent hover:bg-indigo-500/25",
               canvasLocked && "pointer-events-none opacity-40",
             )}
           />
@@ -6564,6 +6479,92 @@ function PipelineCanvas() {
           )}
 
         </div>
+
+        {/* ── Right panel: Run history ────────────────────────────────── */}
+        <aside className="w-52 shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col overflow-hidden order-3">
+          <div className="px-3 py-2 border-b border-gray-800 shrink-0">
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Run History</p>
+            <p className="text-[9px] text-gray-700 mt-0.5">
+              {historyRuns.length > 0
+                ? `${historyRuns.length} runs for current context`
+                : "No runs yet for current filter"}
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 space-y-2">
+            {historyRuns.length === 0 && (
+              <p className="text-xs text-gray-600 italic px-1 py-2">No runs found.</p>
+            )}
+            {historyRunDayGroups.map((group) => {
+              const dayCollapsed = !!collapsedHistoryDayIds[group.dayId];
+              return (
+                <div key={group.dayId} className="space-y-1.5">
+                  <button
+                    onClick={() => setCollapsedHistoryDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
+                    className="w-full flex items-center gap-1.5 px-1 py-1 rounded text-left hover:bg-gray-800/60 transition-colors"
+                    title={dayCollapsed ? "Expand day folder" : "Collapse day folder"}
+                  >
+                    <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", !dayCollapsed && "rotate-90")} />
+                    <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-wide truncate">{group.label}</span>
+                    <span className="ml-auto text-[9px] text-gray-600">{group.runs.length}</span>
+                  </button>
+                  {!dayCollapsed && group.runs.map((run) => {
+                    const expanded = !!expandedHistoryRunIds[run.id];
+                    const timeline = runTimelineById.get(run.id);
+                    const runStatus = String(run.status || "").toLowerCase();
+                    const runStatusClass = runStatus === "done"
+                      ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
+                      : runStatus === "error"
+                        ? "text-red-300 border-red-700/50 bg-red-950/40"
+                        : "text-orange-300 border-orange-700/50 bg-orange-950/40";
+                    return (
+                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-2 py-2">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
+                            className="min-w-0 flex-1 flex items-center gap-1.5 text-left hover:opacity-90 transition-opacity"
+                            title={expanded ? "Collapse run details" : "Expand run details"}
+                          >
+                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
+                            <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
+                            <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
+                          </button>
+                          <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
+                            {run.status}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[9px] text-gray-500 truncate">
+                          {relativeTime(run.started_at)}{run.call_id ? ` · call ${run.call_id}` : ""}
+                        </p>
+                        {expanded && (
+                          <div className="mt-2 space-y-1.5">
+                            {!timeline || timeline.rows.length === 0 ? (
+                              <p className="text-[10px] text-gray-500 italic">No step execution data.</p>
+                            ) : (
+                              timeline.rows.map((row) => (
+                                <div key={`${run.id}-step-${row.stepIndex}`} className="rounded border border-gray-800 bg-gray-950 p-1.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <p className="text-[9px] text-gray-500 shrink-0">S{row.stepIndex + 1}</p>
+                                    <p className="text-[10px] text-gray-200 truncate flex-1">{row.elementName}</p>
+                                    <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border", row.statusClass)}>
+                                      {row.statusLabel}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-[9px] text-gray-500 truncate">
+                                    {row.durationLabel}{row.model ? ` · ${row.model}` : ""}
+                                  </p>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </aside>
 
       </div>
     </div>
