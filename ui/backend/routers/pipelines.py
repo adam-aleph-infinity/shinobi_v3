@@ -38,6 +38,8 @@ _AI_INTERNAL_PROMPTS_FILE = _AI_REGISTRY_DIR / "internal_prompt_templates.json"
 _AI_README_FILE = _AI_REGISTRY_DIR / "README.md"
 _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
+_WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
+_WEBHOOK_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
@@ -134,6 +136,83 @@ def _safe_template_format(template: str, values: dict[str, Any]) -> str:
         return str(template or "").format_map(_SafeDict(values))
     except Exception:
         return str(template or "")
+
+
+def _default_live_webhook_config() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "ingest_only": True,
+        "trigger_pipeline": True,
+        "default_pipeline_id": "",
+        "pipeline_by_agent": {},
+        "transcription_model": "gpt-5.4",
+        "transcription_timeout_s": int(settings.crm_webhook_transcription_timeout_s or 900),
+        "transcription_poll_interval_s": float(settings.crm_webhook_transcription_poll_interval_s or 2.0),
+        "run_payload": {
+            "resume_partial": True,
+        },
+    }
+
+
+def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
+    base = _default_live_webhook_config()
+    if isinstance(raw, dict):
+        base.update(raw)
+
+    base["enabled"] = bool(base.get("enabled", True))
+    base["ingest_only"] = bool(base.get("ingest_only", True))
+    base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
+    base["default_pipeline_id"] = str(base.get("default_pipeline_id") or "").strip()
+    base["transcription_model"] = str(base.get("transcription_model") or "gpt-5.4").strip() or "gpt-5.4"
+    try:
+        base["transcription_timeout_s"] = max(30, min(int(base.get("transcription_timeout_s") or 900), 3600))
+    except Exception:
+        base["transcription_timeout_s"] = 900
+    try:
+        base["transcription_poll_interval_s"] = max(
+            0.2,
+            min(float(base.get("transcription_poll_interval_s") or 2.0), 30.0),
+        )
+    except Exception:
+        base["transcription_poll_interval_s"] = 2.0
+
+    mapping = base.get("pipeline_by_agent")
+    if isinstance(mapping, dict):
+        norm_map: dict[str, str] = {}
+        for k, v in mapping.items():
+            kk = str(k or "").strip()
+            vv = str(v or "").strip()
+            if kk and vv:
+                norm_map[kk] = vv
+        base["pipeline_by_agent"] = norm_map
+    else:
+        base["pipeline_by_agent"] = {}
+
+    run_payload = base.get("run_payload")
+    base["run_payload"] = run_payload if isinstance(run_payload, dict) else {}
+    return base
+
+
+def _load_live_webhook_config() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _WEBHOOK_CONFIG_FILE.exists():
+        cfg = _default_live_webhook_config()
+        _WEBHOOK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        return cfg
+    try:
+        raw = json.loads(_WEBHOOK_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    cfg = _normalize_live_webhook_config(raw)
+    _WEBHOOK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    return cfg
+
+
+def _save_live_webhook_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    norm = _normalize_live_webhook_config(cfg)
+    _WEBHOOK_CONFIG_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
+    return norm
 
 
 _CALL_ID_PRESERVATION_PERSONA = """
@@ -2336,6 +2415,22 @@ class PipelineStopRequest(BaseModel):
     call_id: str = ""
 
 
+class LiveWebhookConfigIn(BaseModel):
+    enabled: bool = True
+    ingest_only: bool = True
+    trigger_pipeline: bool = True
+    default_pipeline_id: str = ""
+    pipeline_by_agent: dict[str, str] = {}
+    run_payload: dict[str, Any] = {}
+
+
+class LiveWebhookQuickSetIn(BaseModel):
+    pipeline_id: str = ""
+    enabled: bool = True
+    listen_all_webhooks: bool = True
+    clear_agent_mappings: bool = True
+
+
 @router.get("/{pipeline_id}/results")
 def get_pipeline_results(
     pipeline_id: str,
@@ -4043,6 +4138,107 @@ def get_pipeline_state(
         return data
     except Exception:
         return None
+
+
+@router.get("/live-webhook/config")
+def get_live_webhook_config():
+    cfg = _load_live_webhook_config()
+    return {
+        "enabled": bool(cfg.get("enabled", True)),
+        "ingest_only": bool(cfg.get("ingest_only", True)),
+        "trigger_pipeline": bool(cfg.get("trigger_pipeline", True)),
+        "default_pipeline_id": str(cfg.get("default_pipeline_id") or "").strip(),
+        "pipeline_by_agent": cfg.get("pipeline_by_agent") if isinstance(cfg.get("pipeline_by_agent"), dict) else {},
+        "run_payload": cfg.get("run_payload") if isinstance(cfg.get("run_payload"), dict) else {},
+        "transcription_model": str(cfg.get("transcription_model") or "gpt-5.4"),
+        "transcription_timeout_s": int(cfg.get("transcription_timeout_s") or 900),
+        "transcription_poll_interval_s": float(cfg.get("transcription_poll_interval_s") or 2.0),
+    }
+
+
+@router.put("/live-webhook/config")
+def set_live_webhook_config(req: LiveWebhookConfigIn):
+    incoming = req.model_dump()
+    incoming["default_pipeline_id"] = str(incoming.get("default_pipeline_id") or "").strip()
+
+    default_pid = str(incoming.get("default_pipeline_id") or "").strip()
+    if default_pid:
+        _find_file(default_pid)
+
+    mapping = incoming.get("pipeline_by_agent")
+    if isinstance(mapping, dict):
+        for _agent, pid in list(mapping.items()):
+            pid_s = str(pid or "").strip()
+            if not pid_s:
+                continue
+            _find_file(pid_s)
+
+    cfg = _load_live_webhook_config()
+    cfg.update(incoming)
+    saved = _save_live_webhook_config(cfg)
+    return {
+        "ok": True,
+        "config": {
+            "enabled": bool(saved.get("enabled", True)),
+            "ingest_only": bool(saved.get("ingest_only", True)),
+            "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
+            "pipeline_by_agent": (
+                saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
+            ),
+            "run_payload": saved.get("run_payload") if isinstance(saved.get("run_payload"), dict) else {},
+            "transcription_model": str(saved.get("transcription_model") or "gpt-5.4"),
+            "transcription_timeout_s": int(saved.get("transcription_timeout_s") or 900),
+            "transcription_poll_interval_s": float(saved.get("transcription_poll_interval_s") or 2.0),
+        },
+    }
+
+
+@router.put("/live-webhook/quick-set")
+def quick_set_live_webhook(req: LiveWebhookQuickSetIn):
+    pipeline_id = str(req.pipeline_id or "").strip()
+    if req.enabled and not pipeline_id:
+        raise HTTPException(status_code=400, detail="pipeline_id is required when enabling live webhook execution.")
+    if pipeline_id:
+        _find_file(pipeline_id)
+
+    cfg = _load_live_webhook_config()
+    cfg["enabled"] = bool(req.enabled)
+    cfg["trigger_pipeline"] = True
+    cfg["ingest_only"] = not bool(req.enabled)
+    cfg["default_pipeline_id"] = pipeline_id if req.enabled else ""
+
+    if bool(req.listen_all_webhooks) and bool(req.clear_agent_mappings):
+        cfg["pipeline_by_agent"] = {}
+
+    run_payload = cfg.get("run_payload")
+    if not isinstance(run_payload, dict):
+        run_payload = {}
+    run_payload.setdefault("resume_partial", True)
+    cfg["run_payload"] = run_payload
+
+    saved = _save_live_webhook_config(cfg)
+    return {
+        "ok": True,
+        "message": (
+            f"Live webhook enabled for all calls using pipeline {pipeline_id}"
+            if req.enabled
+            else "Live webhook disabled (ingest-only mode)."
+        ),
+        "config": {
+            "enabled": bool(saved.get("enabled", True)),
+            "ingest_only": bool(saved.get("ingest_only", True)),
+            "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
+            "pipeline_by_agent": (
+                saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
+            ),
+            "run_payload": saved.get("run_payload") if isinstance(saved.get("run_payload"), dict) else {},
+            "transcription_model": str(saved.get("transcription_model") or "gpt-5.4"),
+            "transcription_timeout_s": int(saved.get("transcription_timeout_s") or 900),
+            "transcription_poll_interval_s": float(saved.get("transcription_poll_interval_s") or 2.0),
+        },
+    }
 
 
 @router.get("/{pipeline_id}/live-webhook/wait")

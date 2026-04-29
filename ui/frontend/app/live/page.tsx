@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
 import { Activity, CheckCircle2, Clock3, Loader2, RefreshCcw, Search, Workflow } from "lucide-react";
@@ -30,6 +30,18 @@ interface PipelineRunRecord {
   canvas_json?: string;
   steps_json: string;
   log_json?: string;
+}
+
+interface LiveWebhookConfig {
+  enabled: boolean;
+  ingest_only: boolean;
+  trigger_pipeline: boolean;
+  default_pipeline_id: string;
+  pipeline_by_agent: Record<string, string>;
+  run_payload: Record<string, unknown>;
+  transcription_model: string;
+  transcription_timeout_s: number;
+  transcription_poll_interval_s: number;
 }
 
 type SortKey = "started_at" | "finished_at" | "pipeline_name" | "sales_agent" | "customer" | "status" | "call_id";
@@ -81,8 +93,17 @@ export default function LivePage() {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<SortKey>("started_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [livePipelineId, setLivePipelineId] = useState("");
+  const [liveSaving, setLiveSaving] = useState(false);
+  const [liveMessage, setLiveMessage] = useState("");
+  const [liveMessageError, setLiveMessageError] = useState(false);
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
+  const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
+    "/api/pipelines/live-webhook/config",
+    fetcher,
+    { refreshInterval: 7000 },
+  );
 
   const runsUrl = useMemo(() => {
     const qp = new URLSearchParams();
@@ -111,6 +132,86 @@ export default function LivePage() {
     }
     return Array.from(uniq).sort((a, b) => a.localeCompare(b));
   }, [runs]);
+
+  const pipelineNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const p of pipelines ?? []) {
+      map[String(p.id || "")] = String(p.name || p.id || "");
+    }
+    return map;
+  }, [pipelines]);
+
+  const liveIsActive = Boolean(liveCfg?.enabled) && !Boolean(liveCfg?.ingest_only) && Boolean(liveCfg?.default_pipeline_id);
+  const activeLivePipelineName = pipelineNameById[String(liveCfg?.default_pipeline_id || "")] || String(liveCfg?.default_pipeline_id || "");
+
+  useEffect(() => {
+    if (!liveCfg) return;
+    setLivePipelineId(String(liveCfg.default_pipeline_id || ""));
+  }, [liveCfg?.default_pipeline_id]);
+
+  const enableLiveForAllWebhooks = async () => {
+    const pid = String(livePipelineId || "").trim();
+    if (!pid) {
+      setLiveMessageError(true);
+      setLiveMessage("Select a pipeline first.");
+      return;
+    }
+    setLiveSaving(true);
+    setLiveMessage("");
+    try {
+      const res = await fetch("/api/pipelines/live-webhook/quick-set", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pipeline_id: pid,
+          enabled: true,
+          listen_all_webhooks: true,
+          clear_agent_mappings: true,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setLiveMessageError(false);
+      setLiveMessage(`Live enabled. All incoming webhooks now trigger: ${pipelineNameById[pid] || pid}`);
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to enable live webhook pipeline."));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
+
+  const disableLiveExecution = async () => {
+    setLiveSaving(true);
+    setLiveMessage("");
+    try {
+      const res = await fetch("/api/pipelines/live-webhook/quick-set", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pipeline_id: "",
+          enabled: false,
+          listen_all_webhooks: true,
+          clear_agent_mappings: false,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setLiveMessageError(false);
+      setLiveMessage("Live execution disabled (webhooks still ingested and saved).");
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to disable live execution."));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
 
   const filteredRuns = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -189,6 +290,68 @@ export default function LivePage() {
       </div>
 
       <div className="px-5 py-3 border-b border-gray-800 bg-gray-950/80 shrink-0 space-y-2">
+        <div className="rounded-xl border border-gray-700/70 bg-gray-900/70 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={cn(
+                "text-[10px] px-2 py-0.5 rounded border font-semibold",
+                liveIsActive
+                  ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/50"
+                  : "text-amber-300 border-amber-700/50 bg-amber-950/40",
+              )}
+            >
+              {liveIsActive ? "LIVE ACTIVE" : "INGEST ONLY"}
+            </span>
+            <span className="text-xs text-gray-300">
+              {liveIsActive
+                ? `Listening to all CRM webhooks and executing pipeline: ${activeLivePipelineName || "unknown"}`
+                : "Webhooks are currently saved only (no pipeline execution)."}
+            </span>
+          </div>
+          <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-2 items-center">
+            <select
+              value={livePipelineId}
+              onChange={(e) => setLivePipelineId(e.target.value)}
+              className="px-2 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-gray-100"
+              disabled={liveSaving}
+            >
+              <option value="">Select pipeline for LIVE webhook execution…</option>
+              {(pipelines ?? []).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={enableLiveForAllWebhooks}
+              disabled={liveSaving}
+              className={cn(
+                "px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors",
+                liveSaving
+                  ? "opacity-60 cursor-wait border-gray-700 text-gray-400"
+                  : "border-emerald-700/60 text-emerald-300 hover:bg-emerald-950/40",
+              )}
+            >
+              {liveSaving ? "Saving…" : "Enable Live"}
+            </button>
+            <button
+              onClick={disableLiveExecution}
+              disabled={liveSaving}
+              className={cn(
+                "px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors",
+                liveSaving
+                  ? "opacity-60 cursor-wait border-gray-700 text-gray-400"
+                  : "border-amber-700/60 text-amber-300 hover:bg-amber-950/40",
+              )}
+            >
+              Disable Live
+            </button>
+          </div>
+          {liveMessage ? (
+            <p className={cn("mt-1 text-[11px]", liveMessageError ? "text-red-300" : "text-emerald-300")}>
+              {liveMessage}
+            </p>
+          ) : null}
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
           <select
             value={pipelineId}
