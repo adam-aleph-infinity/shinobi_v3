@@ -69,6 +69,11 @@ function isCompletedRun(status: string): boolean {
   return s === "done" || s === "completed" || s === "error" || s === "failed" || s === "stopped" || s === "cancelled";
 }
 
+function isQueuedRun(status: string): boolean {
+  const s = String(status || "").toLowerCase();
+  return s === "queued";
+}
+
 function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "local" {
   const v = String(origin || "").trim().toLowerCase();
   if (v === "webhook" || v === "production") return "webhook";
@@ -271,8 +276,20 @@ export default function LivePage() {
     });
   }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo]);
 
-  const runningRuns = useMemo(() => filteredRuns.filter((r) => !isCompletedRun(r.status)), [filteredRuns]);
+  const queuedRuns = useMemo(() => filteredRuns.filter((r) => isQueuedRun(r.status)), [filteredRuns]);
+  const runningRuns = useMemo(
+    () => filteredRuns.filter((r) => !isCompletedRun(r.status) && !isQueuedRun(r.status)),
+    [filteredRuns],
+  );
   const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
+  const queuedProductionRuns = useMemo(
+    () => queuedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
+    [queuedRuns],
+  );
+  const queuedTestRuns = useMemo(
+    () => queuedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
+    [queuedRuns],
+  );
   const runningProductionRuns = useMemo(
     () => runningRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
     [runningRuns],
@@ -387,7 +404,7 @@ export default function LivePage() {
         <div className="flex items-center gap-2">
           <Activity className="w-5 h-5 text-emerald-400" />
           <h1 className="text-lg font-semibold text-white">Live</h1>
-          <span className="text-xs text-gray-500">Running + completed pipeline runs</span>
+          <span className="text-xs text-gray-500">Queued, running + completed pipeline runs</span>
         </div>
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-8 gap-2">
           <label className="text-[11px] text-gray-400 flex flex-col gap-1">
@@ -501,7 +518,7 @@ export default function LivePage() {
             Loading live runs…
           </div>
         ) : (
-          <div className="h-full grid grid-cols-1 xl:grid-cols-[300px_1fr_1fr] gap-0">
+          <div className="h-full grid grid-cols-1 2xl:grid-cols-[300px_1fr_1fr_1fr] gap-0">
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
@@ -540,6 +557,38 @@ export default function LivePage() {
                     {liveMessage}
                   </p>
                 ) : null}
+              </div>
+            </section>
+
+            <section className="min-h-0 border-r border-gray-800 flex flex-col">
+              <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
+                <Clock3 className="w-4 h-4 text-sky-400" />
+                <p className="text-sm font-semibold text-gray-100">Queued</p>
+                <span className="text-xs text-gray-500">{queuedRuns.length}</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                {queuedRuns.length === 0 ? (
+                  <p className="text-xs text-gray-600 italic">No queued runs.</p>
+                ) : (
+                  <>
+                    <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
+                      PRODUCTION · webhook ({queuedProductionRuns.length})
+                    </div>
+                    {queuedProductionRuns.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic px-1">No production runs.</p>
+                    ) : (
+                      queuedProductionRuns.map(renderRunCard)
+                    )}
+                    <div className="pt-2 text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
+                      TEST · local ({queuedTestRuns.length})
+                    </div>
+                    {queuedTestRuns.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic px-1">No test runs.</p>
+                    ) : (
+                      queuedTestRuns.map(renderRunCard)
+                    )}
+                  </>
+                )}
               </div>
             </section>
 
