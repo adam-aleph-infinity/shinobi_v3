@@ -143,6 +143,7 @@ def _default_live_webhook_config() -> dict[str, Any]:
         "enabled": True,
         "ingest_only": True,
         "trigger_pipeline": True,
+        "live_pipeline_ids": [],
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
         "transcription_model": "gpt-5.4",
@@ -162,6 +163,19 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
     base["enabled"] = bool(base.get("enabled", True))
     base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
+    live_ids = base.get("live_pipeline_ids")
+    if isinstance(live_ids, list):
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for v in live_ids:
+            pid = str(v or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            dedup.append(pid)
+        base["live_pipeline_ids"] = dedup
+    else:
+        base["live_pipeline_ids"] = []
     base["default_pipeline_id"] = str(base.get("default_pipeline_id") or "").strip()
     base["transcription_model"] = str(base.get("transcription_model") or "gpt-5.4").strip() or "gpt-5.4"
     try:
@@ -2419,6 +2433,7 @@ class LiveWebhookConfigIn(BaseModel):
     enabled: bool = True
     ingest_only: bool = True
     trigger_pipeline: bool = True
+    live_pipeline_ids: list[str] = []
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = {}
     run_payload: dict[str, Any] = {}
@@ -4147,6 +4162,7 @@ def get_live_webhook_config():
         "enabled": bool(cfg.get("enabled", True)),
         "ingest_only": bool(cfg.get("ingest_only", True)),
         "trigger_pipeline": bool(cfg.get("trigger_pipeline", True)),
+        "live_pipeline_ids": cfg.get("live_pipeline_ids") if isinstance(cfg.get("live_pipeline_ids"), list) else [],
         "default_pipeline_id": str(cfg.get("default_pipeline_id") or "").strip(),
         "pipeline_by_agent": cfg.get("pipeline_by_agent") if isinstance(cfg.get("pipeline_by_agent"), dict) else {},
         "run_payload": cfg.get("run_payload") if isinstance(cfg.get("run_payload"), dict) else {},
@@ -4160,10 +4176,15 @@ def get_live_webhook_config():
 def set_live_webhook_config(req: LiveWebhookConfigIn):
     incoming = req.model_dump()
     incoming["default_pipeline_id"] = str(incoming.get("default_pipeline_id") or "").strip()
+    raw_live_ids = incoming.get("live_pipeline_ids")
+    live_ids = [str(v or "").strip() for v in raw_live_ids] if isinstance(raw_live_ids, list) else []
+    incoming["live_pipeline_ids"] = [pid for pid in live_ids if pid]
 
     default_pid = str(incoming.get("default_pipeline_id") or "").strip()
     if default_pid:
         _find_file(default_pid)
+    for pid in incoming.get("live_pipeline_ids", []):
+        _find_file(pid)
 
     mapping = incoming.get("pipeline_by_agent")
     if isinstance(mapping, dict):
@@ -4182,6 +4203,7 @@ def set_live_webhook_config(req: LiveWebhookConfigIn):
             "enabled": bool(saved.get("enabled", True)),
             "ingest_only": bool(saved.get("ingest_only", True)),
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
             "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
             "pipeline_by_agent": (
                 saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
@@ -4207,6 +4229,7 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn):
     cfg["trigger_pipeline"] = True
     cfg["ingest_only"] = not bool(req.enabled)
     cfg["default_pipeline_id"] = pipeline_id if req.enabled else ""
+    cfg["live_pipeline_ids"] = [pipeline_id] if (req.enabled and pipeline_id) else []
 
     if bool(req.listen_all_webhooks) and bool(req.clear_agent_mappings):
         cfg["pipeline_by_agent"] = {}
@@ -4229,6 +4252,7 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn):
             "enabled": bool(saved.get("enabled", True)),
             "ingest_only": bool(saved.get("ingest_only", True)),
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
             "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
             "pipeline_by_agent": (
                 saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}

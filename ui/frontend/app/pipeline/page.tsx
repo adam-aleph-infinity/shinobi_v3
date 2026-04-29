@@ -290,6 +290,7 @@ interface PipelineRunExecOptions {
 
 interface PipelineOpenRunPayload {
   source?: string;
+  locked?: boolean;
   run_id?: string;
   pipeline_id?: string;
   pipeline_name?: string;
@@ -1535,6 +1536,7 @@ function PipelineCanvas() {
   const [liveTriggeredAt, setLiveTriggeredAt] = useState("");
   const liveCursorRef = useRef(0);
   const liveWaitAbortRef = useRef<AbortController | null>(null);
+  const [canvasLocked, setCanvasLocked] = useState(false);
   const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
   const [currentRunId, setCurrentRunId] = useState("");
@@ -2484,7 +2486,7 @@ function PipelineCanvas() {
       if (idxs.length) inputStepIndicesByNodeId[inputNodeId] = idxs;
     });
 
-    const runButtonDisabled = running || !pipelineId || !salesAgent || !customer || (runNeedsCall && !callId);
+    const runButtonDisabled = canvasLocked || running || !pipelineId || !salesAgent || !customer || (runNeedsCall && !callId);
     return nodes.map((n) => {
       const base = n.data as PipelineNodeData;
       let runStepIndex: number | null = null;
@@ -2498,9 +2500,11 @@ function PipelineCanvas() {
       }
       const inputRunIndices = n.type === "input" ? (inputStepIndicesByNodeId[n.id] || []) : [];
       const onRunStepHandler =
-        n.type === "input"
-          ? (inputRunIndices.length ? () => runInputNodeStep(inputRunIndices) : undefined)
-          : (runStepIndex != null ? () => runNodeStep(runStepIndex) : undefined);
+        canvasLocked
+          ? undefined
+          : n.type === "input"
+            ? (inputRunIndices.length ? () => runInputNodeStep(inputRunIndices) : undefined)
+            : (runStepIndex != null ? () => runNodeStep(runStepIndex) : undefined);
       return {
         ...n,
         data: {
@@ -2516,6 +2520,7 @@ function PipelineCanvas() {
     edges,
     runtimeGraph.stepToProcNodeIds,
     running,
+    canvasLocked,
     pipelineId,
     salesAgent,
     customer,
@@ -2526,6 +2531,7 @@ function PipelineCanvas() {
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
+    if (canvasLocked) return;
     const processed = changes.map(c => {
       if (c.type === "position" && c.position) {
         const node = nodesRef.current.find(n => n.id === c.id);
@@ -2543,10 +2549,11 @@ function PipelineCanvas() {
       return c;
     });
     onNodesChange(processed as NodeChange[]);
-  }, [onNodesChange]);
+  }, [onNodesChange, canvasLocked]);
 
   // Snap processing/output nodes to the nearest same-type lane on drag end
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
+    if (canvasLocked) return;
     const kind = node.type as NodeKind;
     if (kind === "input") {
       // Y is locked during drag; just snap X to nearest slot
@@ -2579,7 +2586,7 @@ function PipelineCanvas() {
         ? { ...n, position: { x: snapX, y: snapY }, data: { ...(n.data as PipelineNodeData), stageIndex: newStageIndex } }
         : n
     ));
-  }, [setNodes]);
+  }, [setNodes, canvasLocked]);
 
   // Validates connections drawn manually by the user
   const isValidConnectionFn = useCallback((conn: Connection | Edge): boolean => {
@@ -2604,6 +2611,7 @@ function PipelineCanvas() {
   }, []);
 
   const onConnect = useCallback((conn: Connection) => {
+    if (canvasLocked) return;
     // Compatibility check: output → processing edge
     const srcNode = nodesRef.current.find(n => n.id === conn.source);
     const tgtNode = nodesRef.current.find(n => n.id === conn.target);
@@ -2630,7 +2638,7 @@ function PipelineCanvas() {
       markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
       style:     { stroke: "#818cf8", strokeWidth: 2 },
     }, es));
-  }, [setEdges, allAgents]);
+  }, [setEdges, allAgents, canvasLocked]);
 
   function showToast(msg: string, ok = false) {
     setToast({ ok, msg });
@@ -2644,6 +2652,7 @@ function PipelineCanvas() {
     subType: string,
     dropPos?: { x: number; y: number },
   ) => {
+    if (canvasLocked) return;
     const currentNodes  = nodesRef.current;
     const currentEdges  = edgesRef.current;
     const currentStages = stagesRef.current;
@@ -2748,7 +2757,7 @@ function PipelineCanvas() {
     setNodes(ns => [...(repositionFn ? repositionFn(ns) : ns), newNode]);
     if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
     setSelectedNodeId(id);
-  }, [setNodes, setEdges, setStages]);
+  }, [setNodes, setEdges, setStages, canvasLocked]);
 
   // ── Drag from palette ─────────────────────────────────────────────────────
 
@@ -2759,12 +2768,13 @@ function PipelineCanvas() {
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
+    if (canvasLocked) return;
     const kind    = e.dataTransfer.getData("application/nodeKind")    as NodeKind | "";
     const subType = e.dataTransfer.getData("application/nodeSubType") as string   | "";
     if (!kind) return;
     const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     addNodeToCanvas(kind, subType, pos);
-  }, [screenToFlowPosition, addNodeToCanvas]);
+  }, [screenToFlowPosition, addNodeToCanvas, canvasLocked]);
 
   // ── Node interactions ─────────────────────────────────────────────────────
 
@@ -2775,18 +2785,21 @@ function PipelineCanvas() {
   const onPaneClick = useCallback(() => setSelectedNodeId(null), []);
 
   function updateNodeData(id: string, patch: Partial<PipelineNodeData>) {
+    if (canvasLocked) return;
     setNodes(ns => ns.map(n =>
       n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
     ));
   }
 
   function deleteNode(id: string) {
+    if (canvasLocked) return;
     setNodes(ns => ns.filter(n => n.id !== id));
     setEdges(es => es.filter(e => e.source !== id && e.target !== id));
     if (selectedNodeId === id) setSelectedNodeId(null);
   }
 
   function handleAddStage() {
+    if (canvasLocked) return;
     if (stagesRef.current.length >= MAX_TOTAL_STAGES) return;
     const next: NodeKind[] = [...stagesRef.current, "processing", "output"];
     setStages(next);
@@ -2794,6 +2807,7 @@ function PipelineCanvas() {
   }
 
   function handleRemoveStage() {
+    if (canvasLocked) return;
     const currentStages = stagesRef.current;
     if (currentStages.length <= INIT_STAGES.length) return;
 
@@ -2825,6 +2839,7 @@ function PipelineCanvas() {
   }
 
   function handleClear() {
+    if (canvasLocked) return;
     runAbortRef.current?.abort();
     setRunning(false);
     setRunError("");
@@ -2840,6 +2855,7 @@ function PipelineCanvas() {
   }
 
   async function handleDeletePipeline(pid: string) {
+    if (canvasLocked) return;
     const pl = allPipelines.find(p => p.id === pid);
     if (!pl) return;
     if (!window.confirm(`Delete pipeline "${pl.name}"? This cannot be undone.`)) return;
@@ -2854,6 +2870,7 @@ function PipelineCanvas() {
   }
 
   async function createPipelineFolder() {
+    if (canvasLocked) return;
     const raw = window.prompt("Folder name");
     const name = (raw ?? "").trim();
     if (!name) return;
@@ -2870,6 +2887,7 @@ function PipelineCanvas() {
   }
 
   async function movePipelineToFolder(pid: string, folder: string) {
+    if (canvasLocked) return;
     const res = await fetch(`/api/pipelines/${pid}/folder`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -2885,6 +2903,7 @@ function PipelineCanvas() {
   }
 
   async function handleDuplicatePipeline(pid: string) {
+    if (canvasLocked) return;
     const pl = allPipelines.find(p => p.id === pid);
     if (!pl) return;
     try {
@@ -3130,6 +3149,7 @@ function PipelineCanvas() {
   }
 
   async function importPresets() {
+    if (canvasLocked) return;
     try {
       await fetch("/api/universal-agents/import-presets", { method: "POST" });
       mutate("/api/universal-agents");
@@ -3167,6 +3187,7 @@ function PipelineCanvas() {
   }
 
   async function handleImportPipelineBundle() {
+    if (canvasLocked) return;
     const raw = bundleImportText.trim();
     if (!raw) {
       showToast("Paste a bundle JSON first", false);
@@ -3225,6 +3246,7 @@ function PipelineCanvas() {
   }
 
   async function handleSavePipeline() {
+    if (canvasLocked) return;
     if (!pipelineName.trim()) { showToast("Enter a pipeline name first", false); return; }
     const validationErr = validatePipeline(nodes, edges);
     if (validationErr) { showToast(validationErr, false); return; }
@@ -3390,6 +3412,7 @@ function PipelineCanvas() {
   }
 
   async function handleSaveAgent() {
+    if (canvasLocked) return;
     if (!selectedNodeId || !agentDraft) return;
     const nd = (nodes.find(n => n.id === selectedNodeId)?.data as PipelineNodeData | undefined);
     if (!nd?.agentId) return;
@@ -3472,6 +3495,7 @@ function PipelineCanvas() {
 
   // Create a new blank agent on the backend and attach it to the selected node
   async function handleCreateAgent() {
+    if (canvasLocked) return;
     if (!selectedNodeId) return;
     const draft = {
       name: "New Agent", description: "", agent_class: "general",
@@ -3499,6 +3523,7 @@ function PipelineCanvas() {
 
   // Remove the agent association from this canvas node (agent stays in backend)
   function handleDetachAgent() {
+    if (canvasLocked) return;
     if (!selectedNodeId) return;
     updateNodeData(selectedNodeId, { agentId: "", agentClass: "", agentName: "" });
     setAgentDraft({ name: "", description: "", agent_class: "", model: "gpt-5.4",
@@ -3509,6 +3534,7 @@ function PipelineCanvas() {
 
   // Permanently delete the agent from the backend, then detach from node
   async function handleDeleteAgent() {
+    if (canvasLocked) return;
     if (!selectedNodeId) return;
     const nd = nodes.find(n => n.id === selectedNodeId)?.data as PipelineNodeData | undefined;
     if (!nd?.agentId) return;
@@ -4028,6 +4054,9 @@ function PipelineCanvas() {
     const targetPipelineId = String(pendingOpenRunPayload.pipeline_id || "").trim();
     const targetPipelineName = String(pendingOpenRunPayload.pipeline_name || "").trim();
     const targetRunId = String(pendingOpenRunPayload.run_id || "").trim();
+    const lockRequested = !!pendingOpenRunPayload.locked || String(pendingOpenRunPayload.source || "").trim() === "live_page";
+
+    setCanvasLocked(lockRequested);
 
     if (targetAgent && targetCustomer) {
       setCustomer(targetCustomer, targetAgent);
@@ -4047,6 +4076,8 @@ function PipelineCanvas() {
       setRunContextMode("historical");
       setSelectedCacheRunId(targetRunId);
       setCurrentRunId(targetRunId);
+    } else if (lockRequested) {
+      setRunContextMode("historical");
     }
 
     setPendingOpenRunPayload(null);
@@ -4389,6 +4420,134 @@ function PipelineCanvas() {
             ↖
           </div>
           <p className="text-sm font-medium text-gray-600">Click a node on the canvas to edit its properties</p>
+        </div>
+      );
+    }
+
+    if (canvasLocked) {
+      const processingStepIndex = selKind === "processing"
+        ? runtimeGraph.stepToProcNodeIds.indexOf(selectedNode.id)
+        : -1;
+      const processingCache = processingStepIndex >= 0 ? getStepCacheDisplay(processingStepIndex) : null;
+      const outputProducerNode = (() => {
+        if (selKind !== "output") return null;
+        const incoming = edges.find(e => e.target === selectedNode.id);
+        if (!incoming) return null;
+        const src = nodes.find(n => n.id === incoming.source);
+        if (!src || src.type !== "processing") return null;
+        return src;
+      })();
+      const outputStepIndex = outputProducerNode
+        ? runtimeGraph.stepToProcNodeIds.indexOf(outputProducerNode.id)
+        : -1;
+      const outputCache = outputStepIndex >= 0 ? getStepCacheDisplay(outputStepIndex) : null;
+
+      return (
+        <div className="h-full min-h-0 p-3">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
+            <div className="lg:col-span-5 min-h-0 overflow-y-auto pr-1 space-y-3">
+              <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
+                <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
+                <div className="min-w-0">
+                  <p className="text-[10px] text-white/60 uppercase tracking-widest font-bold">
+                    {selKind === "output" ? "artifact" : selKind}
+                  </p>
+                  <p className="text-sm font-bold text-white truncate">{String(selData.label || "Element")}</p>
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 space-y-1.5">
+                <p className="text-[10px] text-gray-500">Locked live run view</p>
+                <p className="text-[11px] text-gray-300">
+                  Editing is disabled. You can inspect outputs and runtime state only.
+                </p>
+                {selKind === "processing" && processingStepIndex >= 0 && (
+                  <p className="text-[10px] text-gray-500">Step {processingStepIndex + 1}</p>
+                )}
+                {selKind === "output" && outputStepIndex >= 0 && (
+                  <p className="text-[10px] text-gray-500">Producer Step {outputStepIndex + 1}</p>
+                )}
+                {selKind === "input" && (
+                  <p className="text-[10px] text-gray-500">Source: {String(selData.inputSource || "—")}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="lg:col-span-7 min-h-0 overflow-y-auto space-y-2.5">
+              <PropertiesSection title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}>
+                <div className="space-y-2">
+                  {selKind !== "input" ? renderCacheRunSelector() : null}
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-gray-500">
+                      {selKind === "processing"
+                        ? (processingStepIndex >= 0 ? `Step ${processingStepIndex + 1}` : "Not in execution path")
+                        : selKind === "output"
+                          ? (outputStepIndex >= 0 ? `Step ${outputStepIndex + 1}` : "No producer connected")
+                          : `Context: ${salesAgent || "agent"} · ${customer || "customer"} · ${previewCallId || "no call"}`}
+                    </p>
+                    {renderResultViewToggle()}
+                  </div>
+
+                  {selKind === "input" ? (() => {
+                    const src = String(selData.inputSource || "").trim();
+                    const preview = src ? inputPreviewBySource[src] : null;
+                    if (!src) return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
+                    if (preview?.loading) {
+                      return (
+                        <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Loading input preview…
+                        </div>
+                      );
+                    }
+                    if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
+                    return renderResultContent(preview?.content || "", src);
+                  })() : null}
+
+                  {selKind === "processing" ? (
+                    processingCache ? (
+                      <>
+                        <p className="text-[10px] text-gray-500">
+                          {processingCache.source === "selected_run"
+                            ? `Run ${String(processingCache.runId || "").slice(0, 8)}`
+                            : processingCache.source === "current_run"
+                              ? `Current run ${String(processingCache.runId || "").slice(0, 8)}`
+                              : "Latest cache"}
+                          {processingCache.createdAt ? ` · ${new Date(processingCache.createdAt).toLocaleString()}` : ""}
+                        </p>
+                        {processingCache.errorMsg && (
+                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">{processingCache.errorMsg}</p>
+                        )}
+                        {renderResultContent(processingCache.content || "")}
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-gray-500">No agent response found for this step in the current context.</p>
+                    )
+                  ) : null}
+
+                  {selKind === "output" ? (
+                    outputCache ? (
+                      <>
+                        <p className="text-[10px] text-gray-500">
+                          {outputCache.source === "selected_run"
+                            ? `Run ${String(outputCache.runId || "").slice(0, 8)}`
+                            : outputCache.source === "current_run"
+                              ? `Current run ${String(outputCache.runId || "").slice(0, 8)}`
+                              : "Latest cache"}
+                          {outputCache.createdAt ? ` · ${new Date(outputCache.createdAt).toLocaleString()}` : ""}
+                        </p>
+                        {outputCache.errorMsg && (
+                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">{outputCache.errorMsg}</p>
+                        )}
+                        {renderResultContent(outputCache.content || "")}
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-gray-500">No artifact result found for this step in the current context.</p>
+                    )
+                  ) : null}
+                </div>
+              </PropertiesSection>
+            </div>
+          </div>
         </div>
       );
     }
@@ -5073,12 +5232,19 @@ function PipelineCanvas() {
           value={pipelineName}
           onChange={e => setPipelineName(e.target.value)}
           placeholder="Name your pipeline…"
+          disabled={canvasLocked}
           className="flex-1 min-w-[180px] bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
         />
+        {canvasLocked && (
+          <span className="text-[10px] px-2 py-1 rounded-lg border border-amber-700/60 bg-amber-950/40 text-amber-300 shrink-0">
+            LOCKED VIEW
+          </span>
+        )}
 
         <button
           type="button"
           onClick={openCrmOverlay}
+          disabled={canvasLocked}
           className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
           title="Pick sales agent + customer from CRM"
         >
@@ -5089,6 +5255,7 @@ function PipelineCanvas() {
         <button
           type="button"
           onClick={openCrmOverlay}
+          disabled={canvasLocked}
           className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
           title="Pick customer from CRM"
         >
@@ -5101,6 +5268,7 @@ function PipelineCanvas() {
         <button
           type="button"
           onClick={openCallsOverlay}
+          disabled={canvasLocked}
           className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[190px]"
           title="Open calls browser"
         >
@@ -5118,6 +5286,7 @@ function PipelineCanvas() {
           <select
             value={runContextMode}
             onChange={(e) => setRunContextMode(e.target.value as RunContextMode)}
+            disabled={canvasLocked}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[115px]"
             title="Pick run context mode for node side-panels"
           >
@@ -5128,6 +5297,7 @@ function PipelineCanvas() {
             <select
               value={selectedCacheRunId}
               onChange={(e) => setSelectedCacheRunId(e.target.value)}
+              disabled={canvasLocked}
               className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[190px]"
               title="Select historical run id"
             >
@@ -5151,6 +5321,7 @@ function PipelineCanvas() {
         {pipelineId && (
           <button
             onClick={() => isActivePipeline ? setActivePipeline("", "") : setActivePipeline(pipelineId, pipelineName)}
+            disabled={canvasLocked}
             title={isActivePipeline ? "Deactivate this pipeline" : "Set as active pipeline for all executions"}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors shrink-0
               ${isActivePipeline
@@ -5163,6 +5334,7 @@ function PipelineCanvas() {
         <button
           type="button"
           onClick={() => {
+            if (canvasLocked) return;
             if (liveModeEnabled) {
               showToast("Disable Live mode before changing scope", false);
               return;
@@ -5184,6 +5356,7 @@ function PipelineCanvas() {
         <button
           type="button"
           onClick={() => {
+            if (canvasLocked) return;
             if (liveModeEnabled) {
               setLiveModeEnabled(false);
               setLiveWebhookStatus("off");
@@ -5207,7 +5380,7 @@ function PipelineCanvas() {
             setLogsExpanded(true);
             setLogsCollapsed(false);
           }}
-          disabled={!liveModeEnabled && !liveModeReady}
+          disabled={canvasLocked || (!liveModeEnabled && !liveModeReady)}
           className={cn(
             "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
             liveStatusTone,
@@ -5227,6 +5400,7 @@ function PipelineCanvas() {
 
         <button
           onClick={() => {
+            if (canvasLocked) return;
             if (running) {
               void stopPipeline();
               return;
@@ -5237,7 +5411,7 @@ function PipelineCanvas() {
             }
             void runPipeline("default");
           }}
-          disabled={!pipelineId || pipelineSaving || (!salesAgent || !customer) || (runNeedsCall && !callId)}
+          disabled={canvasLocked || !pipelineId || pipelineSaving || (!salesAgent || !customer) || (runNeedsCall && !callId)}
           className={cn(
             "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
             running
@@ -5281,11 +5455,13 @@ function PipelineCanvas() {
         )}
 
         <button onClick={importPresets} title="Import agent presets"
+          disabled={canvasLocked}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0">
           <Download className="w-3 h-3" /> Presets
         </button>
         <button
           onClick={handleCopyPipelineBundle}
+          disabled={canvasLocked}
           title="Copy full pipeline bundle (workflow + agents)"
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
         >
@@ -5293,21 +5469,23 @@ function PipelineCanvas() {
         </button>
         <button
           onClick={() => setShowBundleImport(true)}
+          disabled={canvasLocked}
           title="Paste bundle from another environment"
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
         >
           <ClipboardPaste className="w-3 h-3" /> Paste Bundle
         </button>
         <button onClick={handleSave}
+          disabled={canvasLocked}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-emerald-400 hover:border-emerald-800 text-xs transition-colors shrink-0">
           <Check className="w-3 h-3" /> Validate
         </button>
-        <button onClick={handleSavePipeline} disabled={pipelineSaving}
+        <button onClick={handleSavePipeline} disabled={canvasLocked || pipelineSaving}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-60 shrink-0">
           {pipelineSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
           Save
         </button>
-        <button onClick={handleClear} title="Clear canvas / new pipeline"
+        <button onClick={handleClear} disabled={canvasLocked} title="Clear canvas / new pipeline"
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors shrink-0">
           <Trash2 className="w-3 h-3" /> Clear
         </button>
@@ -5416,10 +5594,12 @@ function PipelineCanvas() {
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
               <div className="flex items-center gap-1">
                 <button onClick={createPipelineFolder} title="New folder"
+                  disabled={canvasLocked}
                   className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
                   <Layers className="w-3 h-3" />
                 </button>
                 <button onClick={handleClear} title="New pipeline"
+                  disabled={canvasLocked}
                   className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
                   <Plus className="w-3 h-3" />
                 </button>
@@ -5437,6 +5617,7 @@ function PipelineCanvas() {
                     onDragOver={e => { e.preventDefault(); setDragOverPipelineFolder(section.key); }}
                     onDragLeave={() => setDragOverPipelineFolder(null)}
                     onDrop={async e => {
+                      if (canvasLocked) return;
                       e.preventDefault();
                       const pid = e.dataTransfer.getData("application/x-pipeline-id");
                       setDragOverPipelineFolder(null);
@@ -5455,13 +5636,16 @@ function PipelineCanvas() {
                         <button
                           draggable
                           onDragStart={e => {
+                            if (canvasLocked) return;
                             e.dataTransfer.setData("application/x-pipeline-id", p.id);
                             e.dataTransfer.effectAllowed = "move";
                           }}
                           onClick={async () => {
+                            if (canvasLocked) return;
                             const fullPl = await fetch(`/api/pipelines/${p.id}`).then(r => r.json());
                             loadPipelineToCanvas(p.id, { id: fullPl.id, name: fullPl.name, folder: fullPl.folder ?? "", steps: fullPl.steps ?? [], canvas: fullPl.canvas });
                           }}
+                          disabled={canvasLocked}
                           className={`flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
                             ${pipelineId === p.id
                               ? "bg-indigo-900/40 text-white"
@@ -5471,12 +5655,14 @@ function PipelineCanvas() {
                         </button>
                         <button
                           onClick={() => handleDuplicatePipeline(p.id)}
+                          disabled={canvasLocked}
                           title="Duplicate pipeline"
                           className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all">
                           <Copy className="w-3 h-3" />
                         </button>
                         <button
                           onClick={() => handleDeletePipeline(p.id)}
+                          disabled={canvasLocked}
                           title="Delete pipeline"
                           className="shrink-0 p-1 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all">
                           <Trash2 className="w-3 h-3" />
@@ -5548,12 +5734,14 @@ function PipelineCanvas() {
               <div className="flex items-center gap-2">
                 {stages.length > INIT_STAGES.length && (
                   <button onClick={handleRemoveStage}
+                    disabled={canvasLocked}
                     className="text-[10px] text-red-500 hover:text-red-400 font-semibold transition-colors">
                     - Layer
                   </button>
                 )}
                 {stages.length < MAX_TOTAL_STAGES && (
                   <button onClick={handleAddStage}
+                    disabled={canvasLocked}
                     className="text-[10px] text-indigo-500 hover:text-indigo-400 font-semibold transition-colors">
                     + Layer
                   </button>
@@ -5585,12 +5773,14 @@ function PipelineCanvas() {
             onConnect={onConnect}
             onNodeDragStop={onNodeDragStop}
             isValidConnection={isValidConnectionFn}
+            nodesDraggable={!canvasLocked}
+            nodesConnectable={!canvasLocked}
             panOnDrag={false}
             panOnScroll={false}
             zoomOnScroll={false}
             zoomOnPinch={false}
             zoomOnDoubleClick={false}
-            deleteKeyCode="Delete"
+            deleteKeyCode={canvasLocked ? null : "Delete"}
             proOptions={{ hideAttribution: true }}
             className="bg-gray-900 relative z-10"
           >
@@ -6048,27 +6238,35 @@ function PipelineCanvas() {
                 <div className="h-full w-full rounded-[inherit] overflow-hidden flex flex-col">
                   <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
                     <div className="min-w-0">
-                      <input
-                        value={
-                          selKind === "processing" && agentDraft
+                      {canvasLocked ? (
+                        <div className="w-[min(58vw,680px)] max-w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-sm text-white font-semibold truncate">
+                          {selKind === "processing" && agentDraft
                             ? agentDraft.name
-                            : String((selectedNode?.data as PipelineNodeData | undefined)?.label || "Element")
-                        }
-                        onChange={(e) => {
-                          if (!selectedNode) return;
-                          const next = e.target.value;
-                          const nodeData = selectedNode.data as PipelineNodeData;
-                          if (selKind === "processing" && agentDraft) {
-                            setAgentDraft((prev) => (prev ? { ...prev, name: next } : prev));
+                            : String((selectedNode?.data as PipelineNodeData | undefined)?.label || "Element")}
+                        </div>
+                      ) : (
+                        <input
+                          value={
+                            selKind === "processing" && agentDraft
+                              ? agentDraft.name
+                              : String((selectedNode?.data as PipelineNodeData | undefined)?.label || "Element")
                           }
-                          updateNodeData(selectedNode.id, {
-                            label: next,
-                            ...(selKind === "processing" && nodeData.agentId ? { agentName: next } : {}),
-                          });
-                        }}
-                        className="w-[min(58vw,680px)] max-w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-sm text-white font-semibold outline-none focus:border-indigo-500"
-                        placeholder="Element name"
-                      />
+                          onChange={(e) => {
+                            if (!selectedNode) return;
+                            const next = e.target.value;
+                            const nodeData = selectedNode.data as PipelineNodeData;
+                            if (selKind === "processing" && agentDraft) {
+                              setAgentDraft((prev) => (prev ? { ...prev, name: next } : prev));
+                            }
+                            updateNodeData(selectedNode.id, {
+                              label: next,
+                              ...(selKind === "processing" && nodeData.agentId ? { agentName: next } : {}),
+                            });
+                          }}
+                          className="w-[min(58vw,680px)] max-w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-sm text-white font-semibold outline-none focus:border-indigo-500"
+                          placeholder="Element name"
+                        />
+                      )}
                     </div>
                   </div>
                   <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
-import { Activity, CheckCircle2, Clock3, Loader2, RefreshCcw, Search, Workflow } from "lucide-react";
+import { Activity, CheckCircle2, ChevronRight, Clock3, Loader2, RefreshCcw, Search, Workflow } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { parseServerDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -36,6 +36,7 @@ interface LiveWebhookConfig {
   enabled: boolean;
   ingest_only: boolean;
   trigger_pipeline: boolean;
+  live_pipeline_ids: string[];
   default_pipeline_id: string;
   pipeline_by_agent: Record<string, string>;
   run_payload: Record<string, unknown>;
@@ -94,9 +95,11 @@ export default function LivePage() {
   const [sortBy, setSortBy] = useState<SortKey>("started_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [livePipelineId, setLivePipelineId] = useState("");
+  const [liveSelectedPipelineIds, setLiveSelectedPipelineIds] = useState<string[]>([]);
   const [liveSaving, setLiveSaving] = useState(false);
   const [liveMessage, setLiveMessage] = useState("");
   const [liveMessageError, setLiveMessageError] = useState(false);
+  const [collapsedCompletedDayIds, setCollapsedCompletedDayIds] = useState<Record<string, boolean>>({});
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
   const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
@@ -120,7 +123,7 @@ export default function LivePage() {
   }, [pipelineId, salesAgent, customer, crmUrl, dateFrom, dateTo, sortBy, sortDir]);
 
   const { data: runsData, isLoading, mutate } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: 1500,
   });
 
   const runs = runsData ?? [];
@@ -141,13 +144,78 @@ export default function LivePage() {
     return map;
   }, [pipelines]);
 
-  const liveIsActive = Boolean(liveCfg?.enabled) && !Boolean(liveCfg?.ingest_only) && Boolean(liveCfg?.default_pipeline_id);
-  const activeLivePipelineName = pipelineNameById[String(liveCfg?.default_pipeline_id || "")] || String(liveCfg?.default_pipeline_id || "");
+  const activeLivePipelineIds = useMemo(() => {
+    const cfgIds = Array.isArray(liveCfg?.live_pipeline_ids) ? liveCfg!.live_pipeline_ids : [];
+    const cleaned = cfgIds.map((v) => String(v || "").trim()).filter(Boolean);
+    if (cleaned.length) return cleaned;
+    const fallback = String(liveCfg?.default_pipeline_id || "").trim();
+    return fallback ? [fallback] : [];
+  }, [liveCfg?.live_pipeline_ids, liveCfg?.default_pipeline_id]);
+  const liveIsActive = Boolean(liveCfg?.enabled) && !Boolean(liveCfg?.ingest_only) && activeLivePipelineIds.length > 0;
+  const activeLivePipelineNames = activeLivePipelineIds.map((pid) => pipelineNameById[pid] || pid);
 
   useEffect(() => {
     if (!liveCfg) return;
-    setLivePipelineId(String(liveCfg.default_pipeline_id || ""));
-  }, [liveCfg?.default_pipeline_id]);
+    const ids = Array.isArray(liveCfg.live_pipeline_ids)
+      ? liveCfg.live_pipeline_ids.map((v) => String(v || "").trim()).filter(Boolean)
+      : [];
+    const fallback = String(liveCfg.default_pipeline_id || "").trim();
+    const next = ids.length ? ids : (fallback ? [fallback] : []);
+    setLiveSelectedPipelineIds(next);
+    setLivePipelineId(next[0] || "");
+  }, [liveCfg?.live_pipeline_ids, liveCfg?.default_pipeline_id]);
+
+  const applyLivePipelineSelection = async (pipelineIds: string[]) => {
+    const cleaned = Array.from(new Set((pipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
+    setLiveSaving(true);
+    setLiveMessage("");
+    try {
+      const res = await fetch("/api/pipelines/live-webhook/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          ingest_only: cleaned.length === 0,
+          trigger_pipeline: true,
+          live_pipeline_ids: cleaned,
+          default_pipeline_id: cleaned[0] || "",
+          pipeline_by_agent: {},
+          run_payload: { resume_partial: true },
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setLiveMessageError(false);
+      setLiveMessage(
+        cleaned.length
+          ? `Live enabled for ${cleaned.length} pipeline(s).`
+          : "Live disabled (ingest-only mode).",
+      );
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to update live pipeline selection."));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
+
+  const toggleLivePipelineChecked = async (pipelineIdToToggle: string) => {
+    const pid = String(pipelineIdToToggle || "").trim();
+    if (!pid) return;
+    const currentlyOn = liveSelectedPipelineIds.includes(pid);
+    const action = currentlyOn ? "disable" : "enable";
+    const name = pipelineNameById[pid] || pid;
+    const ok = window.confirm(`Are you sure you want to ${action} LIVE webhook execution for "${name}"?`);
+    if (!ok) return;
+    const next = currentlyOn
+      ? liveSelectedPipelineIds.filter((v) => v !== pid)
+      : [...liveSelectedPipelineIds, pid];
+    setLiveSelectedPipelineIds(next);
+    await applyLivePipelineSelection(next);
+  };
 
   const enableLiveForAllWebhooks = async () => {
     const pid = String(livePipelineId || "").trim();
@@ -156,61 +224,18 @@ export default function LivePage() {
       setLiveMessage("Select a pipeline first.");
       return;
     }
-    setLiveSaving(true);
-    setLiveMessage("");
-    try {
-      const res = await fetch("/api/pipelines/live-webhook/quick-set", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pipeline_id: pid,
-          enabled: true,
-          listen_all_webhooks: true,
-          clear_agent_mappings: true,
-        }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
-      }
-      setLiveMessageError(false);
-      setLiveMessage(`Live enabled. All incoming webhooks now trigger: ${pipelineNameById[pid] || pid}`);
-      await mutateLiveCfg();
-    } catch (e: any) {
-      setLiveMessageError(true);
-      setLiveMessage(String(e?.message || "Failed to enable live webhook pipeline."));
-    } finally {
-      setLiveSaving(false);
-    }
+    const ok = window.confirm(`Are you sure you want to enable LIVE webhook execution for "${pipelineNameById[pid] || pid}"?`);
+    if (!ok) return;
+    const next = liveSelectedPipelineIds.includes(pid) ? liveSelectedPipelineIds : [...liveSelectedPipelineIds, pid];
+    setLiveSelectedPipelineIds(next);
+    await applyLivePipelineSelection(next);
   };
 
   const disableLiveExecution = async () => {
-    setLiveSaving(true);
-    setLiveMessage("");
-    try {
-      const res = await fetch("/api/pipelines/live-webhook/quick-set", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pipeline_id: "",
-          enabled: false,
-          listen_all_webhooks: true,
-          clear_agent_mappings: false,
-        }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
-      }
-      setLiveMessageError(false);
-      setLiveMessage("Live execution disabled (webhooks still ingested and saved).");
-      await mutateLiveCfg();
-    } catch (e: any) {
-      setLiveMessageError(true);
-      setLiveMessage(String(e?.message || "Failed to disable live execution."));
-    } finally {
-      setLiveSaving(false);
-    }
+    const ok = window.confirm("Are you sure you want to disable LIVE webhook execution for all pipelines?");
+    if (!ok) return;
+    setLiveSelectedPipelineIds([]);
+    await applyLivePipelineSelection([]);
   };
 
   const filteredRuns = useMemo(() => {
@@ -228,6 +253,29 @@ export default function LivePage() {
 
   const runningRuns = useMemo(() => filteredRuns.filter((r) => !isCompletedRun(r.status)), [filteredRuns]);
   const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
+  const completedRunsByDay = useMemo(() => {
+    const byDay = new Map<string, PipelineRunRecord[]>();
+    for (const run of completedRuns) {
+      const d = parseServerDate(run.finished_at || run.started_at);
+      const dayId = d
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+        : "unknown";
+      const arr = byDay.get(dayId) || [];
+      arr.push(run);
+      byDay.set(dayId, arr);
+    }
+    const groups = Array.from(byDay.entries()).map(([dayId, dayRuns]) => ({
+      dayId,
+      label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
+      runs: [...dayRuns].sort((a, b) => {
+        const ta = parseServerDate(a.finished_at || a.started_at)?.getTime() ?? 0;
+        const tb = parseServerDate(b.finished_at || b.started_at)?.getTime() ?? 0;
+        return tb - ta;
+      }),
+    }));
+    groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
+    return groups;
+  }, [completedRuns]);
 
   const openRunInCanvas = (run: PipelineRunRecord) => {
     setCustomer(run.customer || "", run.sales_agent || "");
@@ -235,6 +283,7 @@ export default function LivePage() {
     setActivePipeline(run.pipeline_id || "", run.pipeline_name || "");
     const payload = {
       source: "live_page",
+      locked: true,
       run_id: run.id,
       pipeline_id: run.pipeline_id,
       pipeline_name: run.pipeline_name,
@@ -304,8 +353,8 @@ export default function LivePage() {
             </span>
             <span className="text-xs text-gray-300">
               {liveIsActive
-                ? `Listening to all CRM webhooks and executing pipeline: ${activeLivePipelineName || "unknown"}`
-                : "Webhooks are currently saved only (no pipeline execution)."}
+                ? `Listening to all CRM webhooks and executing: ${activeLivePipelineNames.join(", ")}`
+              : "Webhooks are currently saved only (no pipeline execution)."}
             </span>
           </div>
           <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-2 items-center">
@@ -449,7 +498,43 @@ export default function LivePage() {
             Loading live runs…
           </div>
         ) : (
-          <div className="h-full grid grid-cols-1 xl:grid-cols-2 gap-0">
+          <div className="h-full grid grid-cols-1 xl:grid-cols-[300px_1fr_1fr] gap-0">
+            <section className="min-h-0 border-r border-gray-800 flex flex-col">
+              <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
+                <Workflow className="w-4 h-4 text-emerald-400" />
+                <p className="text-sm font-semibold text-gray-100">Live Pipelines</p>
+                <span className="text-xs text-gray-500">{(pipelines ?? []).length}</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
+                {(pipelines ?? []).map((p) => {
+                  const checked = liveSelectedPipelineIds.includes(String(p.id || ""));
+                  return (
+                    <label
+                      key={p.id}
+                      className={cn(
+                        "w-full flex items-center gap-2 text-xs rounded-lg border px-2 py-2 cursor-pointer transition-colors",
+                        checked
+                          ? "border-emerald-700/60 bg-emerald-950/30 text-emerald-200"
+                          : "border-gray-800 bg-gray-900 text-gray-300 hover:bg-gray-800",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={liveSaving}
+                        onChange={() => { void toggleLivePipelineChecked(String(p.id || "")); }}
+                        className="accent-emerald-500"
+                      />
+                      <span className="truncate">{p.name}</span>
+                    </label>
+                  );
+                })}
+                {(pipelines ?? []).length === 0 && (
+                  <p className="text-[11px] text-gray-500 italic">No pipelines found.</p>
+                )}
+              </div>
+            </section>
+
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Clock3 className="w-4 h-4 text-amber-400" />
@@ -470,9 +555,30 @@ export default function LivePage() {
                 <span className="text-xs text-gray-500">{completedRuns.length}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                {completedRuns.length === 0
-                  ? <p className="text-xs text-gray-600 italic">No completed runs.</p>
-                  : completedRuns.map(renderRunCard)}
+                {completedRuns.length === 0 && (
+                  <p className="text-xs text-gray-600 italic">No completed runs.</p>
+                )}
+                {completedRunsByDay.map((group) => {
+                  const collapsed = !!collapsedCompletedDayIds[group.dayId];
+                  return (
+                    <div key={group.dayId} className="space-y-1.5">
+                      <button
+                        onClick={() => setCollapsedCompletedDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
+                        className="w-full flex items-center gap-2 px-2 py-1 rounded border border-gray-800 bg-gray-900/70 hover:bg-gray-800 text-left"
+                        title={collapsed ? "Expand date folder" : "Collapse date folder"}
+                      >
+                        <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform", !collapsed && "rotate-90")} />
+                        <span className="text-[11px] text-gray-300 font-semibold">{group.label}</span>
+                        <span className="ml-auto text-[10px] text-gray-500">{group.runs.length}</span>
+                      </button>
+                      {!collapsed && (
+                        <div className="space-y-2 pl-2">
+                          {group.runs.map(renderRunCard)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </section>
           </div>

@@ -24,6 +24,8 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
 _WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
+_WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
+_WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
 
 
 class CallEndedWebhookPayload(BaseModel):
@@ -41,6 +43,7 @@ class CallEndedWebhookConfig(BaseModel):
     enabled: bool = True
     ingest_only: bool = True
     trigger_pipeline: bool = True
+    live_pipeline_ids: list[str] = Field(default_factory=list)
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = Field(default_factory=dict)
     transcription_model: str = "gpt-5.4"
@@ -54,6 +57,7 @@ def _default_call_ended_config() -> dict[str, Any]:
         "enabled": True,
         "ingest_only": True,
         "trigger_pipeline": True,
+        "live_pipeline_ids": [],
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
         "transcription_model": "gpt-5.4",
@@ -81,6 +85,19 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
     base["enabled"] = bool(base.get("enabled", True))
     base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
+    live_ids = base.get("live_pipeline_ids")
+    if isinstance(live_ids, list):
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for v in live_ids:
+            pid = str(v or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            dedup.append(pid)
+        base["live_pipeline_ids"] = dedup
+    else:
+        base["live_pipeline_ids"] = []
     base["default_pipeline_id"] = str(base.get("default_pipeline_id") or "").strip()
     base["transcription_model"] = str(base.get("transcription_model") or "gpt-5.4").strip() or "gpt-5.4"
     try:
@@ -432,6 +449,21 @@ def _resolve_pipeline_id(cfg: dict[str, Any], payload_agent: str, resolved_agent
     return str(cfg.get("default_pipeline_id") or "").strip()
 
 
+def _resolve_live_pipeline_ids(cfg: dict[str, Any]) -> list[str]:
+    raw = cfg.get("live_pipeline_ids")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in raw:
+        pid = str(v or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        out.append(pid)
+    return out
+
+
 def _assert_pipeline_exists(pipeline_id: str) -> None:
     if not pipeline_id:
         raise HTTPException(status_code=400, detail="Missing pipeline_id mapping.")
@@ -625,11 +657,19 @@ async def _handle_call_webhook(
         "triggered": False,
         "pipeline_id": "",
         "run_id": "",
+        "pipelines": [],
     }
     if bool(cfg.get("trigger_pipeline", True)):
-        pipeline_id = _resolve_pipeline_id(cfg, payload.agent, pair["agent"])
-        if pipeline_id:
-            _assert_pipeline_exists(pipeline_id)
+        configured_live_ids = _resolve_live_pipeline_ids(cfg)
+        target_pipeline_ids: list[str] = []
+        if configured_live_ids:
+            target_pipeline_ids = configured_live_ids
+        else:
+            mapped_id = _resolve_pipeline_id(cfg, payload.agent, pair["agent"])
+            if mapped_id:
+                target_pipeline_ids = [mapped_id]
+
+        if target_pipeline_ids:
             run_payload = {
                 "sales_agent": pair["agent"],
                 "customer": pair["customer"],
@@ -640,19 +680,41 @@ async def _handle_call_webhook(
             if isinstance(cfg_run_payload, dict):
                 for k, v in cfg_run_payload.items():
                     run_payload[str(k)] = v
-            run_result = await _trigger_pipeline_run(
-                request=request,
-                pipeline_id=pipeline_id,
-                payload=run_payload,
-            )
-            pipeline_info.update(
-                {
-                    "triggered": True,
+
+            pipeline_runs: list[dict[str, Any]] = []
+            for idx, pipeline_id in enumerate(target_pipeline_ids):
+                entry: dict[str, Any] = {
                     "pipeline_id": pipeline_id,
-                    "run_id": str(run_result.get("run_id") or ""),
-                    "trigger_result": run_result,
+                    "triggered": False,
+                    "run_id": "",
                 }
-            )
+                try:
+                    _assert_pipeline_exists(pipeline_id)
+                    run_result = await _trigger_pipeline_run(
+                        request=request,
+                        pipeline_id=pipeline_id,
+                        payload=run_payload,
+                    )
+                    entry.update(
+                        {
+                            "triggered": True,
+                            "run_id": str(run_result.get("run_id") or ""),
+                            "trigger_result": run_result,
+                        }
+                    )
+                except Exception as e:
+                    entry["error"] = str(getattr(e, "detail", "") or str(e) or "pipeline trigger failed")
+                pipeline_runs.append(entry)
+
+                # Preserve previous single-pipeline response fields for compatibility.
+                if idx == 0:
+                    pipeline_info["pipeline_id"] = pipeline_id
+                    pipeline_info["run_id"] = str(entry.get("run_id") or "")
+                    if entry.get("trigger_result"):
+                        pipeline_info["trigger_result"] = entry.get("trigger_result")
+
+            pipeline_info["pipelines"] = pipeline_runs
+            pipeline_info["triggered"] = any(bool(x.get("triggered")) for x in pipeline_runs)
         else:
             pipeline_info["message"] = "No pipeline mapping found for this agent."
 
@@ -688,6 +750,115 @@ async def handle_call_ended_webhook(
         webhook_type="call-ended",
         compat_mode="json",
     )
+
+
+# ── Catch-all test listener ────────────────────────────────────────────────────
+
+@router.post("/test/open")
+async def open_test_session(duration_minutes: int = 60) -> dict[str, Any]:
+    """Open a test capture session. All pings to /webhooks/test/capture will be saved."""
+    _WEBHOOK_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    expires_at = now.timestamp() + duration_minutes * 60
+    session = {
+        "opened_at": now.isoformat(),
+        "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
+        "duration_minutes": duration_minutes,
+    }
+    _WEBHOOK_TEST_SESSION_FILE.write_text(json.dumps(session, indent=2), encoding="utf-8")
+    return {"ok": True, "message": f"Test capture open for {duration_minutes} minutes.", **session}
+
+
+@router.post("/test/close")
+async def close_test_session() -> dict[str, Any]:
+    """Close the test capture session."""
+    if _WEBHOOK_TEST_SESSION_FILE.exists():
+        _WEBHOOK_TEST_SESSION_FILE.unlink()
+    return {"ok": True, "message": "Test capture session closed."}
+
+
+@router.get("/test/results")
+async def get_test_results() -> dict[str, Any]:
+    """List all captured webhook payloads from the current/last session."""
+    _WEBHOOK_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(_WEBHOOK_TEST_DIR.glob("capture_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    results = []
+    for fp in files:
+        try:
+            results.append(json.loads(fp.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    session = {}
+    if _WEBHOOK_TEST_SESSION_FILE.exists():
+        try:
+            session = json.loads(_WEBHOOK_TEST_SESSION_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"ok": True, "count": len(results), "session": session, "captures": results}
+
+
+@router.api_route("/test/capture", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+@router.api_route("/test/capture/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def catch_all_test_capture(request: Request, path: str = "") -> dict[str, Any]:
+    """Catch-all endpoint — saves full request (headers, body, query params) to webhook_test/."""
+    _WEBHOOK_TEST_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Check session is open
+    if _WEBHOOK_TEST_SESSION_FILE.exists():
+        try:
+            session = json.loads(_WEBHOOK_TEST_SESSION_FILE.read_text(encoding="utf-8"))
+            expires_at = datetime.fromisoformat(session["expires_at"])
+            if datetime.now(timezone.utc) > expires_at:
+                return {"ok": False, "error": "Test capture session has expired. Call /webhooks/test/open to reopen."}
+        except Exception:
+            pass
+    else:
+        return {"ok": False, "error": "No active test session. Call POST /webhooks/test/open first."}
+
+    # Read raw body
+    try:
+        raw_body = await request.body()
+        body_str = raw_body.decode("utf-8", errors="replace")
+    except Exception:
+        body_str = ""
+
+    # Try to parse body as JSON or form
+    body_parsed: Any = None
+    content_type = str(request.headers.get("content-type") or "")
+    if "application/json" in content_type:
+        try:
+            body_parsed = json.loads(body_str)
+        except Exception:
+            body_parsed = body_str
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            body_parsed = dict(form)
+        except Exception:
+            body_parsed = body_str
+    else:
+        body_parsed = body_str
+
+    now = datetime.now(timezone.utc)
+    capture_id = uuid.uuid4().hex[:12]
+    capture = {
+        "capture_id": capture_id,
+        "received_at": now.isoformat(),
+        "method": str(request.method),
+        "path": str(request.url.path),
+        "extra_path": path or "",
+        "query_params": dict(request.query_params),
+        "headers": dict(request.headers),
+        "content_type": content_type,
+        "body_raw": body_str,
+        "body_parsed": body_parsed,
+        "source_ip": str(getattr(request.client, "host", "") or ""),
+    }
+
+    fname = f"capture_{now.strftime('%Y%m%dT%H%M%S')}_{capture_id}.json"
+    (_WEBHOOK_TEST_DIR / fname).write_text(json.dumps(capture, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return {"ok": True, "capture_id": capture_id, "saved_to": f"webhook_test/{fname}"}
 
 
 @router.post("/call-updated")
