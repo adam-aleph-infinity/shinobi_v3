@@ -94,6 +94,12 @@ export default function LivePage() {
   const [liveMessage, setLiveMessage] = useState("");
   const [liveMessageError, setLiveMessageError] = useState(false);
   const [collapsedCompletedDayIds, setCollapsedCompletedDayIds] = useState<Record<string, boolean>>({});
+  const [filterRunType, setFilterRunType] = useState<"all" | "webhook" | "local">("all");
+  const [filterPipelineId, setFilterPipelineId] = useState("");
+  const [filterAgent, setFilterAgent] = useState("");
+  const [filterCustomer, setFilterCustomer] = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo, setFilterDateTo] = useState("");
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
   const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
@@ -117,6 +123,37 @@ export default function LivePage() {
     }
     return map;
   }, [pipelines]);
+
+  const pipelineFilterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const run of runs) {
+      const pid = String(run.pipeline_id || "").trim();
+      if (!pid) continue;
+      const nm = String(run.pipeline_name || pipelineNameById[pid] || pid).trim();
+      map.set(pid, nm || pid);
+    }
+    return Array.from(map.entries())
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [runs, pipelineNameById]);
+
+  const salesAgentFilterOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const run of runs) {
+      const name = String(run.sales_agent || "").trim();
+      if (name) set.add(name);
+    }
+    return Array.from(set.values()).sort((a, b) => a.localeCompare(b));
+  }, [runs]);
+
+  const customerFilterOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const run of runs) {
+      const name = String(run.customer || "").trim();
+      if (name) set.add(name);
+    }
+    return Array.from(set.values()).sort((a, b) => a.localeCompare(b));
+  }, [runs]);
 
   useEffect(() => {
     if (!liveCfg) return;
@@ -180,8 +217,26 @@ export default function LivePage() {
     await applyLivePipelineSelection(next);
   };
 
-  const runningRuns = useMemo(() => runs.filter((r) => !isCompletedRun(r.status)), [runs]);
-  const completedRuns = useMemo(() => runs.filter((r) => isCompletedRun(r.status)), [runs]);
+  const filteredRuns = useMemo(() => {
+    const fromTs = filterDateFrom ? new Date(`${filterDateFrom}T00:00:00`).getTime() : null;
+    const toTs = filterDateTo ? new Date(`${filterDateTo}T23:59:59`).getTime() : null;
+    return runs.filter((run) => {
+      if (filterRunType !== "all" && normalizeRunOrigin(run.run_origin) !== filterRunType) return false;
+      if (filterPipelineId && String(run.pipeline_id || "").trim() !== filterPipelineId) return false;
+      if (filterAgent && String(run.sales_agent || "").trim() !== filterAgent) return false;
+      if (filterCustomer && String(run.customer || "").trim() !== filterCustomer) return false;
+      if (fromTs !== null || toTs !== null) {
+        const ts = parseServerDate(run.finished_at || run.started_at)?.getTime();
+        if (!ts) return false;
+        if (fromTs !== null && ts < fromTs) return false;
+        if (toTs !== null && ts > toTs) return false;
+      }
+      return true;
+    });
+  }, [runs, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo]);
+
+  const runningRuns = useMemo(() => filteredRuns.filter((r) => !isCompletedRun(r.status)), [filteredRuns]);
+  const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
   const runningProductionRuns = useMemo(
     () => runningRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
     [runningRuns],
@@ -244,6 +299,15 @@ export default function LivePage() {
     router.push("/pipeline");
   };
 
+  const clearRunFilters = () => {
+    setFilterRunType("all");
+    setFilterPipelineId("");
+    setFilterAgent("");
+    setFilterCustomer("");
+    setFilterDateFrom("");
+    setFilterDateTo("");
+  };
+
   const renderRunCard = (run: PipelineRunRecord) => (
     <button
       key={run.id}
@@ -288,6 +352,89 @@ export default function LivePage() {
           <Activity className="w-5 h-5 text-emerald-400" />
           <h1 className="text-lg font-semibold text-white">Live</h1>
           <span className="text-xs text-gray-500">Running + completed pipeline runs</span>
+        </div>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-7 gap-2">
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            Run Type
+            <select
+              value={filterRunType}
+              onChange={(e) => setFilterRunType(e.target.value as "all" | "webhook" | "local")}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            >
+              <option value="all">All</option>
+              <option value="webhook">Production (webhook)</option>
+              <option value="local">Test (local)</option>
+            </select>
+          </label>
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            Pipeline
+            <select
+              value={filterPipelineId}
+              onChange={(e) => setFilterPipelineId(e.target.value)}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            >
+              <option value="">All pipelines</option>
+              {pipelineFilterOptions.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            Agent
+            <select
+              value={filterAgent}
+              onChange={(e) => setFilterAgent(e.target.value)}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            >
+              <option value="">All agents</option>
+              {salesAgentFilterOptions.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            Customer
+            <select
+              value={filterCustomer}
+              onChange={(e) => setFilterCustomer(e.target.value)}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            >
+              <option value="">All customers</option>
+              {customerFilterOptions.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            Date From
+            <input
+              type="date"
+              value={filterDateFrom}
+              onChange={(e) => setFilterDateFrom(e.target.value)}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            />
+          </label>
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            Date To
+            <input
+              type="date"
+              value={filterDateTo}
+              onChange={(e) => setFilterDateTo(e.target.value)}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            />
+          </label>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] text-gray-400">Actions</span>
+            <button
+              onClick={clearRunFilters}
+              className="h-8 rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 transition-colors"
+            >
+              Clear filters
+            </button>
+          </div>
+        </div>
+        <div className="mt-2 text-[11px] text-gray-500">
+          Showing {filteredRuns.length} of {runs.length} runs
         </div>
       </div>
 
