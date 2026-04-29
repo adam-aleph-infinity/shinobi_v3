@@ -44,10 +44,21 @@ interface LiveWebhookConfig {
   transcription_model: string;
   transcription_timeout_s: number;
   transcription_poll_interval_s: number;
+  backfill_historical_transcripts: boolean;
+  backfill_timeout_s: number;
+  max_live_running: number;
+  auto_retry_enabled: boolean;
+  retry_max_attempts: number;
+  retry_delay_s: number;
+  retry_on_server_error: boolean;
+  retry_on_rate_limit: boolean;
+  retry_on_timeout: boolean;
 }
 
 function statusTone(status: string): string {
   const s = String(status || "").toLowerCase();
+  if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
+  if (s === "retrying") return "text-violet-200 border-violet-700/50 bg-violet-950/40";
   if (s === "done" || s === "completed") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
   if (s === "error" || s === "failed") return "text-red-300 border-red-700/50 bg-red-950/40";
   return "text-amber-300 border-amber-700/50 bg-amber-950/40";
@@ -100,6 +111,17 @@ export default function LivePage() {
   const [filterCustomer, setFilterCustomer] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+  const [settingMaxLiveRunning, setSettingMaxLiveRunning] = useState(5);
+  const [settingAutoRetry, setSettingAutoRetry] = useState(true);
+  const [settingRetryMaxAttempts, setSettingRetryMaxAttempts] = useState(2);
+  const [settingRetryDelay, setSettingRetryDelay] = useState(45);
+  const [settingRetryOnServerError, setSettingRetryOnServerError] = useState(true);
+  const [settingRetryOnRateLimit, setSettingRetryOnRateLimit] = useState(true);
+  const [settingRetryOnTimeout, setSettingRetryOnTimeout] = useState(true);
+  const [settingBackfillEnabled, setSettingBackfillEnabled] = useState(true);
+  const [settingBackfillTimeout, setSettingBackfillTimeout] = useState(5400);
+  const [settingSaving, setSettingSaving] = useState(false);
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
   const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
@@ -163,7 +185,70 @@ export default function LivePage() {
     const fallback = String(liveCfg.default_pipeline_id || "").trim();
     const next = ids.length ? ids : (fallback ? [fallback] : []);
     setLiveSelectedPipelineIds(next);
-  }, [liveCfg?.live_pipeline_ids, liveCfg?.default_pipeline_id]);
+    setSettingMaxLiveRunning(Number(liveCfg.max_live_running || 5));
+    setSettingAutoRetry(Boolean(liveCfg.auto_retry_enabled ?? true));
+    setSettingRetryMaxAttempts(Number(liveCfg.retry_max_attempts || 2));
+    setSettingRetryDelay(Number(liveCfg.retry_delay_s || 45));
+    setSettingRetryOnServerError(Boolean(liveCfg.retry_on_server_error ?? true));
+    setSettingRetryOnRateLimit(Boolean(liveCfg.retry_on_rate_limit ?? true));
+    setSettingRetryOnTimeout(Boolean(liveCfg.retry_on_timeout ?? true));
+    setSettingBackfillEnabled(Boolean(liveCfg.backfill_historical_transcripts ?? true));
+    setSettingBackfillTimeout(Number(liveCfg.backfill_timeout_s || 5400));
+  }, [
+    liveCfg?.live_pipeline_ids,
+    liveCfg?.default_pipeline_id,
+    liveCfg?.max_live_running,
+    liveCfg?.auto_retry_enabled,
+    liveCfg?.retry_max_attempts,
+    liveCfg?.retry_delay_s,
+    liveCfg?.retry_on_server_error,
+    liveCfg?.retry_on_rate_limit,
+    liveCfg?.retry_on_timeout,
+    liveCfg?.backfill_historical_transcripts,
+    liveCfg?.backfill_timeout_s,
+  ]);
+
+  const saveLiveExecutionSettings = async () => {
+    const cleaned = Array.from(new Set((liveSelectedPipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
+    setSettingSaving(true);
+    setLiveMessage("");
+    try {
+      const res = await fetch("/api/pipelines/live-webhook/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          ingest_only: cleaned.length === 0,
+          trigger_pipeline: true,
+          live_pipeline_ids: cleaned,
+          default_pipeline_id: cleaned[0] || "",
+          pipeline_by_agent: {},
+          run_payload: { resume_partial: true },
+          max_live_running: Math.max(1, Math.min(64, Number(settingMaxLiveRunning || 5))),
+          auto_retry_enabled: !!settingAutoRetry,
+          retry_max_attempts: Math.max(0, Math.min(10, Number(settingRetryMaxAttempts || 0))),
+          retry_delay_s: Math.max(5, Math.min(3600, Number(settingRetryDelay || 45))),
+          backfill_historical_transcripts: !!settingBackfillEnabled,
+          backfill_timeout_s: Math.max(120, Math.min(21600, Number(settingBackfillTimeout || 5400))),
+          retry_on_server_error: !!settingRetryOnServerError,
+          retry_on_rate_limit: !!settingRetryOnRateLimit,
+          retry_on_timeout: !!settingRetryOnTimeout,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setLiveMessageError(false);
+      setLiveMessage("Live execution settings saved.");
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to save live execution settings."));
+    } finally {
+      setSettingSaving(false);
+    }
+  };
 
   const applyLivePipelineSelection = async (pipelineIds: string[]) => {
     const cleaned = Array.from(new Set((pipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
@@ -181,6 +266,15 @@ export default function LivePage() {
           default_pipeline_id: cleaned[0] || "",
           pipeline_by_agent: {},
           run_payload: { resume_partial: true },
+          max_live_running: Math.max(1, Math.min(64, Number(settingMaxLiveRunning || liveCfg?.max_live_running || 5))),
+          auto_retry_enabled: !!settingAutoRetry,
+          retry_max_attempts: Math.max(0, Math.min(10, Number(settingRetryMaxAttempts || 2))),
+          retry_delay_s: Math.max(5, Math.min(3600, Number(settingRetryDelay || 45))),
+          backfill_historical_transcripts: !!settingBackfillEnabled,
+          backfill_timeout_s: Math.max(120, Math.min(21600, Number(settingBackfillTimeout || 5400))),
+          retry_on_server_error: !!settingRetryOnServerError,
+          retry_on_rate_limit: !!settingRetryOnRateLimit,
+          retry_on_timeout: !!settingRetryOnTimeout,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -221,6 +315,13 @@ export default function LivePage() {
     const fromTs = filterDateFrom ? new Date(`${filterDateFrom}T00:00:00`).getTime() : null;
     const toTs = filterDateTo ? new Date(`${filterDateTo}T23:59:59`).getTime() : null;
     return runs.filter((run) => {
+      if (filterStatus) {
+        const rs = String(run.status || "").toLowerCase();
+        const fs = filterStatus.toLowerCase();
+        if (fs === "success" && !["done", "completed"].includes(rs)) return false;
+        else if (fs === "failed" && !["failed", "error"].includes(rs)) return false;
+        else if (!["success", "failed"].includes(fs) && rs !== fs) return false;
+      }
       if (filterRunType !== "all" && normalizeRunOrigin(run.run_origin) !== filterRunType) return false;
       if (filterPipelineId && String(run.pipeline_id || "").trim() !== filterPipelineId) return false;
       if (filterAgent && String(run.sales_agent || "").trim() !== filterAgent) return false;
@@ -233,7 +334,7 @@ export default function LivePage() {
       }
       return true;
     });
-  }, [runs, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo]);
+  }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo]);
 
   const runningRuns = useMemo(() => filteredRuns.filter((r) => !isCompletedRun(r.status)), [filteredRuns]);
   const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
@@ -305,6 +406,7 @@ export default function LivePage() {
     setFilterCustomer("");
     setFilterDateFrom("");
     setFilterDateTo("");
+    setFilterStatus("");
   };
 
   const renderRunCard = (run: PipelineRunRecord) => (
@@ -352,7 +454,7 @@ export default function LivePage() {
           <h1 className="text-lg font-semibold text-white">Live</h1>
           <span className="text-xs text-gray-500">Running + completed pipeline runs</span>
         </div>
-        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-7 gap-2">
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-8 gap-2">
           <label className="text-[11px] text-gray-400 flex flex-col gap-1">
             Run Type
             <select
@@ -376,6 +478,26 @@ export default function LivePage() {
               {pipelineFilterOptions.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
+            </select>
+          </label>
+          <label className="text-[11px] text-gray-400 flex flex-col gap-1">
+            State
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              className="h-8 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+            >
+              <option value="">All states</option>
+              <option value="queued">queued</option>
+              <option value="running">running</option>
+              <option value="retrying">retrying</option>
+              <option value="success">success</option>
+              <option value="done">done</option>
+              <option value="completed">completed</option>
+              <option value="error">error</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+              <option value="stopped">stopped</option>
             </select>
           </label>
           <label className="text-[11px] text-gray-400 flex flex-col gap-1">
@@ -483,6 +605,105 @@ export default function LivePage() {
                     {liveMessage}
                   </p>
                 ) : null}
+                <div className="mt-3 pt-3 border-t border-gray-800/80 space-y-2">
+                  <p className="text-[11px] font-semibold text-gray-200">Execution Settings</p>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Max live running
+                    <input
+                      type="number"
+                      min={1}
+                      max={64}
+                      value={settingMaxLiveRunning}
+                      onChange={(e) => setSettingMaxLiveRunning(Number(e.target.value || 5))}
+                      className="w-20 h-7 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Auto retry
+                    <input
+                      type="checkbox"
+                      checked={settingAutoRetry}
+                      onChange={(e) => setSettingAutoRetry(e.target.checked)}
+                      className="accent-indigo-500"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Retry attempts
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={settingRetryMaxAttempts}
+                      onChange={(e) => setSettingRetryMaxAttempts(Number(e.target.value || 0))}
+                      className="w-20 h-7 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Retry delay (s)
+                    <input
+                      type="number"
+                      min={5}
+                      max={3600}
+                      value={settingRetryDelay}
+                      onChange={(e) => setSettingRetryDelay(Number(e.target.value || 45))}
+                      className="w-20 h-7 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Retry on server error (5xx)
+                    <input
+                      type="checkbox"
+                      checked={settingRetryOnServerError}
+                      onChange={(e) => setSettingRetryOnServerError(e.target.checked)}
+                      className="accent-indigo-500"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Retry on rate limit (429/TPM)
+                    <input
+                      type="checkbox"
+                      checked={settingRetryOnRateLimit}
+                      onChange={(e) => setSettingRetryOnRateLimit(e.target.checked)}
+                      className="accent-indigo-500"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Retry on timeout/network
+                    <input
+                      type="checkbox"
+                      checked={settingRetryOnTimeout}
+                      onChange={(e) => setSettingRetryOnTimeout(e.target.checked)}
+                      className="accent-indigo-500"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Backfill historical transcripts
+                    <input
+                      type="checkbox"
+                      checked={settingBackfillEnabled}
+                      onChange={(e) => setSettingBackfillEnabled(e.target.checked)}
+                      className="accent-indigo-500"
+                    />
+                  </label>
+                  <label className="text-[11px] text-gray-400 flex items-center justify-between gap-2">
+                    Backfill timeout (s)
+                    <input
+                      type="number"
+                      min={120}
+                      max={21600}
+                      value={settingBackfillTimeout}
+                      onChange={(e) => setSettingBackfillTimeout(Number(e.target.value || 5400))}
+                      className="w-20 h-7 rounded border border-gray-700 bg-gray-900 px-2 text-xs text-gray-100"
+                    />
+                  </label>
+                  <button
+                    onClick={() => { void saveLiveExecutionSettings(); }}
+                    disabled={settingSaving || liveSaving}
+                    className="w-full h-8 rounded border border-indigo-700 bg-indigo-900/40 hover:bg-indigo-900/60 disabled:opacity-60 text-xs text-indigo-200 transition-colors"
+                  >
+                    {settingSaving ? "Saving…" : "Save settings"}
+                  </button>
+                </div>
               </div>
             </section>
 

@@ -149,6 +149,15 @@ def _default_live_webhook_config() -> dict[str, Any]:
         "transcription_model": "gpt-5.4",
         "transcription_timeout_s": int(settings.crm_webhook_transcription_timeout_s or 900),
         "transcription_poll_interval_s": float(settings.crm_webhook_transcription_poll_interval_s or 2.0),
+        "backfill_historical_transcripts": True,
+        "backfill_timeout_s": 5400,
+        "max_live_running": 5,
+        "auto_retry_enabled": True,
+        "retry_max_attempts": 2,
+        "retry_delay_s": 45,
+        "retry_on_server_error": True,
+        "retry_on_rate_limit": True,
+        "retry_on_timeout": True,
         "run_payload": {
             "resume_partial": True,
         },
@@ -189,6 +198,27 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
         )
     except Exception:
         base["transcription_poll_interval_s"] = 2.0
+    base["backfill_historical_transcripts"] = bool(base.get("backfill_historical_transcripts", True))
+    try:
+        base["backfill_timeout_s"] = max(120, min(int(base.get("backfill_timeout_s") or 5400), 21600))
+    except Exception:
+        base["backfill_timeout_s"] = 5400
+    try:
+        base["max_live_running"] = max(1, min(int(base.get("max_live_running") or 5), 64))
+    except Exception:
+        base["max_live_running"] = 5
+    base["auto_retry_enabled"] = bool(base.get("auto_retry_enabled", True))
+    try:
+        base["retry_max_attempts"] = max(0, min(int(base.get("retry_max_attempts") or 2), 10))
+    except Exception:
+        base["retry_max_attempts"] = 2
+    try:
+        base["retry_delay_s"] = max(5, min(int(base.get("retry_delay_s") or 45), 3600))
+    except Exception:
+        base["retry_delay_s"] = 45
+    base["retry_on_server_error"] = bool(base.get("retry_on_server_error", True))
+    base["retry_on_rate_limit"] = bool(base.get("retry_on_rate_limit", True))
+    base["retry_on_timeout"] = bool(base.get("retry_on_timeout", True))
 
     mapping = base.get("pipeline_by_agent")
     if isinstance(mapping, dict):
@@ -2484,6 +2514,15 @@ class LiveWebhookConfigIn(BaseModel):
     live_pipeline_ids: list[str] = []
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = {}
+    backfill_historical_transcripts: bool = True
+    backfill_timeout_s: int = 5400
+    max_live_running: int = 5
+    auto_retry_enabled: bool = True
+    retry_max_attempts: int = 2
+    retry_delay_s: int = 45
+    retry_on_server_error: bool = True
+    retry_on_rate_limit: bool = True
+    retry_on_timeout: bool = True
     run_payload: dict[str, Any] = {}
 
 
@@ -4217,6 +4256,15 @@ def get_live_webhook_config():
         "transcription_model": str(cfg.get("transcription_model") or "gpt-5.4"),
         "transcription_timeout_s": int(cfg.get("transcription_timeout_s") or 900),
         "transcription_poll_interval_s": float(cfg.get("transcription_poll_interval_s") or 2.0),
+        "backfill_historical_transcripts": bool(cfg.get("backfill_historical_transcripts", True)),
+        "backfill_timeout_s": int(cfg.get("backfill_timeout_s") or 5400),
+        "max_live_running": int(cfg.get("max_live_running") or 5),
+        "auto_retry_enabled": bool(cfg.get("auto_retry_enabled", True)),
+        "retry_max_attempts": int(cfg.get("retry_max_attempts") or 2),
+        "retry_delay_s": int(cfg.get("retry_delay_s") or 45),
+        "retry_on_server_error": bool(cfg.get("retry_on_server_error", True)),
+        "retry_on_rate_limit": bool(cfg.get("retry_on_rate_limit", True)),
+        "retry_on_timeout": bool(cfg.get("retry_on_timeout", True)),
     }
 
 
@@ -4260,6 +4308,15 @@ def set_live_webhook_config(req: LiveWebhookConfigIn):
             "transcription_model": str(saved.get("transcription_model") or "gpt-5.4"),
             "transcription_timeout_s": int(saved.get("transcription_timeout_s") or 900),
             "transcription_poll_interval_s": float(saved.get("transcription_poll_interval_s") or 2.0),
+            "backfill_historical_transcripts": bool(saved.get("backfill_historical_transcripts", True)),
+            "backfill_timeout_s": int(saved.get("backfill_timeout_s") or 5400),
+            "max_live_running": int(saved.get("max_live_running") or 5),
+            "auto_retry_enabled": bool(saved.get("auto_retry_enabled", True)),
+            "retry_max_attempts": int(saved.get("retry_max_attempts") or 2),
+            "retry_delay_s": int(saved.get("retry_delay_s") or 45),
+            "retry_on_server_error": bool(saved.get("retry_on_server_error", True)),
+            "retry_on_rate_limit": bool(saved.get("retry_on_rate_limit", True)),
+            "retry_on_timeout": bool(saved.get("retry_on_timeout", True)),
         },
     }
 
@@ -4309,6 +4366,15 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn):
             "transcription_model": str(saved.get("transcription_model") or "gpt-5.4"),
             "transcription_timeout_s": int(saved.get("transcription_timeout_s") or 900),
             "transcription_poll_interval_s": float(saved.get("transcription_poll_interval_s") or 2.0),
+            "backfill_historical_transcripts": bool(saved.get("backfill_historical_transcripts", True)),
+            "backfill_timeout_s": int(saved.get("backfill_timeout_s") or 5400),
+            "max_live_running": int(saved.get("max_live_running") or 5),
+            "auto_retry_enabled": bool(saved.get("auto_retry_enabled", True)),
+            "retry_max_attempts": int(saved.get("retry_max_attempts") or 2),
+            "retry_delay_s": int(saved.get("retry_delay_s") or 45),
+            "retry_on_server_error": bool(saved.get("retry_on_server_error", True)),
+            "retry_on_rate_limit": bool(saved.get("retry_on_rate_limit", True)),
+            "retry_on_timeout": bool(saved.get("retry_on_timeout", True)),
         },
     }
 

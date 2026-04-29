@@ -35,7 +35,10 @@ from ui.backend.routers.universal_agents import router as universal_agents_route
 from ui.backend.routers.pipelines import router as pipelines_router
 from ui.backend.routers.history import router as history_router
 from ui.backend.routers.assistant import router as assistant_router
-from ui.backend.routers.webhooks import router as webhooks_router
+from ui.backend.routers.webhooks import (
+    router as webhooks_router,
+    ensure_live_dispatcher_started,
+)
 from ui.backend.services import log_buffer
 from ui.backend.version import APP_VERSION
 
@@ -427,6 +430,12 @@ async def on_startup():
             print(f"[startup] CRM financial reconcile failed: {e}")
 
     asyncio.create_task(_reconcile_crm_financials_bg())
+
+    # Start persistent live-webhook queue dispatcher.
+    try:
+        ensure_live_dispatcher_started()
+    except Exception as e:
+        print(f"[startup] live webhook dispatcher start failed: {e}")
 
     # Re-queue orphaned jobs from previous server runs
     loop = asyncio.get_running_loop()
