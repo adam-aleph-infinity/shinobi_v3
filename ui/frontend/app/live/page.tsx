@@ -30,6 +30,7 @@ interface PipelineRunRecord {
   canvas_json?: string;
   steps_json: string;
   log_json?: string;
+  run_origin?: string;
 }
 
 interface LiveWebhookConfig {
@@ -58,6 +59,12 @@ function statusTone(status: string): string {
 function isCompletedRun(status: string): boolean {
   const s = String(status || "").toLowerCase();
   return s === "done" || s === "completed" || s === "error" || s === "failed" || s === "stopped" || s === "cancelled";
+}
+
+function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "local" {
+  const v = String(origin || "").trim().toLowerCase();
+  if (v === "webhook" || v === "production") return "webhook";
+  return "local";
 }
 
 function relativeTime(isoStr: string | null | undefined): string {
@@ -143,16 +150,6 @@ export default function LivePage() {
     }
     return map;
   }, [pipelines]);
-
-  const activeLivePipelineIds = useMemo(() => {
-    const cfgIds = Array.isArray(liveCfg?.live_pipeline_ids) ? liveCfg!.live_pipeline_ids : [];
-    const cleaned = cfgIds.map((v) => String(v || "").trim()).filter(Boolean);
-    if (cleaned.length) return cleaned;
-    const fallback = String(liveCfg?.default_pipeline_id || "").trim();
-    return fallback ? [fallback] : [];
-  }, [liveCfg?.live_pipeline_ids, liveCfg?.default_pipeline_id]);
-  const liveIsActive = Boolean(liveCfg?.enabled) && !Boolean(liveCfg?.ingest_only) && activeLivePipelineIds.length > 0;
-  const activeLivePipelineNames = activeLivePipelineIds.map((pid) => pipelineNameById[pid] || pid);
 
   useEffect(() => {
     if (!liveCfg) return;
@@ -253,6 +250,14 @@ export default function LivePage() {
 
   const runningRuns = useMemo(() => filteredRuns.filter((r) => !isCompletedRun(r.status)), [filteredRuns]);
   const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
+  const runningProductionRuns = useMemo(
+    () => runningRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
+    [runningRuns],
+  );
+  const runningTestRuns = useMemo(
+    () => runningRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
+    [runningRuns],
+  );
   const completedRunsByDay = useMemo(() => {
     const byDay = new Map<string, PipelineRunRecord[]>();
     for (const run of completedRuns) {
@@ -264,15 +269,22 @@ export default function LivePage() {
       arr.push(run);
       byDay.set(dayId, arr);
     }
-    const groups = Array.from(byDay.entries()).map(([dayId, dayRuns]) => ({
-      dayId,
-      label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
-      runs: [...dayRuns].sort((a, b) => {
+    const groups = Array.from(byDay.entries()).map(([dayId, dayRuns]) => {
+      const sorted = [...dayRuns].sort((a, b) => {
         const ta = parseServerDate(a.finished_at || a.started_at)?.getTime() ?? 0;
         const tb = parseServerDate(b.finished_at || b.started_at)?.getTime() ?? 0;
         return tb - ta;
-      }),
-    }));
+      });
+      const productionRuns = sorted.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook");
+      const testRuns = sorted.filter((r) => normalizeRunOrigin(r.run_origin) === "local");
+      return {
+        dayId,
+        label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
+        runs: sorted,
+        productionRuns,
+        testRuns,
+      };
+    });
     groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
     return groups;
   }, [completedRuns]);
@@ -308,6 +320,15 @@ export default function LivePage() {
       title="Open this run in Pipeline canvas"
     >
       <div className="flex items-center gap-2 flex-wrap">
+        {normalizeRunOrigin(run.run_origin) === "webhook" ? (
+          <span className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-blue-200 border-blue-700/60 bg-blue-950/50">
+            PRODUCTION
+          </span>
+        ) : (
+          <span className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-fuchsia-200 border-fuchsia-700/60 bg-fuchsia-950/40">
+            TEST
+          </span>
+        )}
         <span className="text-[10px] font-mono text-indigo-300 bg-indigo-950/40 border border-indigo-800/40 px-1.5 py-0.5 rounded">
           {run.id.slice(0, 8)}
         </span>
@@ -340,24 +361,7 @@ export default function LivePage() {
 
       <div className="px-5 py-3 border-b border-gray-800 bg-gray-950/80 shrink-0 space-y-2">
         <div className="rounded-xl border border-gray-700/70 bg-gray-900/70 px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              className={cn(
-                "text-[10px] px-2 py-0.5 rounded border font-semibold",
-                liveIsActive
-                  ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/50"
-                  : "text-amber-300 border-amber-700/50 bg-amber-950/40",
-              )}
-            >
-              {liveIsActive ? "LIVE ACTIVE" : "INGEST ONLY"}
-            </span>
-            <span className="text-xs text-gray-300">
-              {liveIsActive
-                ? `Listening to all CRM webhooks and executing: ${activeLivePipelineNames.join(", ")}`
-              : "Webhooks are currently saved only (no pipeline execution)."}
-            </span>
-          </div>
-          <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-2 items-center">
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-2 items-center">
             <select
               value={livePipelineId}
               onChange={(e) => setLivePipelineId(e.target.value)}
@@ -542,9 +546,28 @@ export default function LivePage() {
                 <span className="text-xs text-gray-500">{runningRuns.length}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                {runningRuns.length === 0
-                  ? <p className="text-xs text-gray-600 italic">No running runs.</p>
-                  : runningRuns.map(renderRunCard)}
+                {runningRuns.length === 0 ? (
+                  <p className="text-xs text-gray-600 italic">No running runs.</p>
+                ) : (
+                  <>
+                    <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
+                      PRODUCTION · webhook ({runningProductionRuns.length})
+                    </div>
+                    {runningProductionRuns.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic px-1">No production runs.</p>
+                    ) : (
+                      runningProductionRuns.map(renderRunCard)
+                    )}
+                    <div className="pt-2 text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
+                      TEST · local ({runningTestRuns.length})
+                    </div>
+                    {runningTestRuns.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic px-1">No test runs.</p>
+                    ) : (
+                      runningTestRuns.map(renderRunCard)
+                    )}
+                  </>
+                )}
               </div>
             </section>
 
@@ -573,7 +596,23 @@ export default function LivePage() {
                       </button>
                       {!collapsed && (
                         <div className="space-y-2 pl-2">
-                          {group.runs.map(renderRunCard)}
+                          <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
+                            PRODUCTION · webhook ({group.productionRuns.length})
+                          </div>
+                          {group.productionRuns.length === 0 ? (
+                            <p className="text-[11px] text-gray-500 italic px-1">No production runs on this day.</p>
+                          ) : (
+                            group.productionRuns.map(renderRunCard)
+                          )}
+
+                          <div className="pt-1 text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
+                            TEST · local ({group.testRuns.length})
+                          </div>
+                          {group.testRuns.length === 0 ? (
+                            <p className="text-[11px] text-gray-500 italic px-1">No test runs on this day.</p>
+                          ) : (
+                            group.testRuns.map(renderRunCard)
+                          )}
                         </div>
                       )}
                     </div>

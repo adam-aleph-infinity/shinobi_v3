@@ -680,6 +680,8 @@ async def _handle_call_webhook(
             if isinstance(cfg_run_payload, dict):
                 for k, v in cfg_run_payload.items():
                     run_payload[str(k)] = v
+            # Mark webhook-triggered runs explicitly for UI/source separation.
+            run_payload["run_origin"] = "webhook"
 
             pipeline_runs: list[dict[str, Any]] = []
             for idx, pipeline_id in enumerate(target_pipeline_ids):

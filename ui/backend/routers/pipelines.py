@@ -2421,6 +2421,7 @@ class PipelineRunRequest(BaseModel):
     resume_partial: bool = False  # allow per-step cache fallback when exact fingerprint miss
     execute_step_indices: list[int] = []  # run only these step indices (0-based); empty = run all
     prepare_input_only: bool = False  # resolve selected step inputs only; do not execute model
+    run_origin: str = ""  # local | webhook (used for UI source separation)
 
 
 class PipelineStopRequest(BaseModel):
@@ -4422,6 +4423,13 @@ async def run_pipeline(
         pipeline_name = pipeline_def.get("name", "pipeline")
         cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
         input_scope_call_id = str(req.context_call_id or "").strip() or str(req.call_id or "").strip()
+        _requested_origin = str(req.run_origin or "").strip().lower()
+        if _requested_origin in {"webhook", "production"}:
+            run_origin = "webhook"
+        elif _requested_origin in {"local", "test"}:
+            run_origin = "local"
+        else:
+            run_origin = "local"
 
         # ── Create history run record ────────────────────────────────────────
         recent = log_buffer.get_recent(1)
@@ -4470,6 +4478,14 @@ async def run_pipeline(
             },
             client_local_time=client_local_time,
         )
+        execution_logs.append_event(
+            execution_session_id,
+            f"Run origin: {run_origin}",
+            level="info",
+            status="running",
+            data={"run_origin": run_origin},
+            client_local_time=client_local_time,
+        )
         if input_scope_call_id and input_scope_call_id != str(req.call_id or "").strip():
             log_buffer.emit(f"[PIPELINE] ℹ Input scope call context: {input_scope_call_id} · {cid_short}")
         _default_run_steps = [
@@ -4493,6 +4509,7 @@ async def run_pipeline(
                 "cache_mode":       "",
                 "note_id":          "",
                 "note_call_id":     "",
+                "run_origin":       run_origin,
             }
             for s in steps
         ]
@@ -4508,6 +4525,7 @@ async def run_pipeline(
                         _merged.update(_row or {})
                         # Keep agent_id aligned to current pipeline step definition.
                         _merged["agent_id"] = _base.get("agent_id", "")
+                        _merged["run_origin"] = _base.get("run_origin", run_origin)
                         run_steps.append(_merged)
             except Exception:
                 run_steps = _default_run_steps
