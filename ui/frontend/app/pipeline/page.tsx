@@ -27,6 +27,7 @@ import { SectionContent } from "@/components/shared/SectionCards";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
 const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v1";
+const PIPELINE_ACTIVE_RUNS_STORAGE_KEY = "shinobi.pipeline.active_runs.v1";
 const MAX_PERSISTED_RUN_LOG_BUCKETS = 40;
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
@@ -1268,18 +1269,22 @@ function SwimbarBackdrop({
 function PropertiesSection({
   title,
   defaultOpen = true,
+  className,
+  bodyClassName,
   children,
 }: {
   title: string;
   defaultOpen?: boolean;
+  className?: string;
+  bodyClassName?: string;
   children: React.ReactNode;
 }) {
   return (
-    <details open={defaultOpen} className="border border-gray-800 rounded-lg overflow-hidden">
+    <details open={defaultOpen} className={cn("border border-gray-800 rounded-lg overflow-hidden", className)}>
       <summary className="list-none cursor-pointer px-2.5 py-1.5 bg-gray-900/70 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
         {title}
       </summary>
-      <div className="p-2.5">{children}</div>
+      <div className={cn("p-2.5", bodyClassName)}>{children}</div>
     </details>
   );
 }
@@ -1447,6 +1452,50 @@ function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLog
   }
 }
 
+function inferRunCallIdFromRecord(run: PipelineRunRecord | null | undefined): string {
+  if (!run) return "";
+  const direct = String(run.call_id || "").trim();
+  if (direct) return direct;
+  try {
+    const parsed = JSON.parse(String(run.steps_json || "[]"));
+    if (Array.isArray(parsed)) {
+      for (const step of parsed) {
+        if (!step || typeof step !== "object") continue;
+        const obj = step as Record<string, any>;
+        const directCandidates = [
+          obj.call_id,
+          obj.context_call_id,
+          obj.input_scope_call_id,
+          obj.merged_until_call_id,
+        ];
+        for (const candidate of directCandidates) {
+          const value = String(candidate || "").trim();
+          if (value) return value;
+        }
+        const inputSources = Array.isArray(obj.input_sources) ? obj.input_sources : [];
+        for (const src of inputSources) {
+          if (!src || typeof src !== "object") continue;
+          const sourceCallId = String((src as Record<string, any>).call_id || "").trim();
+          if (sourceCallId) return sourceCallId;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  const lines = parseSavedRunLogLines(String(run.log_json || ""));
+  for (const line of lines) {
+    const text = String(line.text || "");
+    const m1 = text.match(/input\s+scope\s+call\s+context\s*:\s*([A-Za-z0-9_-]{3,})/i);
+    if (m1 && m1[1]) return String(m1[1]).trim();
+    const m2 = text.match(/\bcall[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{3,})\b/i);
+    if (m2 && m2[1]) return String(m2[1]).trim();
+    const m3 = text.match(/\bcall\s+([A-Za-z0-9_-]{3,})\b/i);
+    if (m3 && m3[1]) return String(m3[1]).trim();
+  }
+  return "";
+}
+
 type PersistedRunLogBucket = {
   lines: CanvasLogLine[];
   updated_at: number;
@@ -1534,6 +1583,34 @@ function restoreRunLogLines(contextKey: string, runId: string): CanvasLogLine[] 
     return store.by_context[ctx].lines;
   }
   return [];
+}
+
+function readActiveRunByContext(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PIPELINE_ACTIVE_RUNS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, string> = {};
+    Object.entries(parsed as Record<string, unknown>).forEach(([k, v]) => {
+      const key = String(k || "").trim();
+      const value = String(v || "").trim();
+      if (key && value) out[key] = value;
+    });
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeActiveRunByContext(next: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PIPELINE_ACTIVE_RUNS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
 }
 
 // ── Inner canvas ──────────────────────────────────────────────────────────────
@@ -1738,6 +1815,7 @@ function PipelineCanvas() {
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
   const [pendingOpenRunPayload, setPendingOpenRunPayload] = useState<PipelineOpenRunPayload | null>(null);
+  const [pendingRunCallId, setPendingRunCallId] = useState("");
   const pipelinesPanelResizeRef = useRef<{
     active: boolean;
     startX: number;
@@ -1979,6 +2057,19 @@ function PipelineCanvas() {
     if (customer) qp.set("customer", customer);
     return `/crm?${qp.toString()}`;
   }, [salesAgent, customer]);
+
+  const applySelectedCallId = useCallback((nextCallIdRaw: string) => {
+    const nextCallId = String(nextCallIdRaw || "").trim();
+    if (runContextMode === "historical") {
+      setRunContextMode("new");
+      setSelectedCacheRunId("");
+      setCurrentRunId("");
+      setCanvasLocked(false);
+    }
+    setPendingRunCallId("");
+    setCallId(nextCallId);
+  }, [runContextMode, setCallId]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onMessage = (event: MessageEvent) => {
@@ -2005,13 +2096,13 @@ function PipelineCanvas() {
         if (nextAgent && nextCustomer && (nextAgent !== salesAgent || nextCustomer !== customer)) {
           setCustomer(nextCustomer, nextAgent);
         }
-        setCallId(nextCallId);
+        applySelectedCallId(nextCallId);
         if (nextCallId) setShowCallsPanel(false);
       }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [customer, salesAgent, setCallId, setCustomer]);
+  }, [customer, salesAgent, setCustomer, applySelectedCallId]);
 
   useEffect(() => {
     if (!customer || !navCustomers) return;
@@ -2022,11 +2113,25 @@ function PipelineCanvas() {
   }, [customer, navCustomers, navCustomersValidating, navCustomersError, setCustomer]);
 
   useEffect(() => {
+    const wanted = String(pendingRunCallId || "").trim();
+    if (!wanted) return;
+    if (callId !== wanted) {
+      setCallId(wanted);
+      return;
+    }
+    if (callOptions.some(([cid]) => cid === wanted)) {
+      setPendingRunCallId("");
+    }
+  }, [pendingRunCallId, callId, callOptions, setCallId]);
+
+  useEffect(() => {
+    const pendingWanted = String(pendingRunCallId || "").trim();
+    if (pendingWanted) return;
     if (!callId) return;
     if (!callOptions.some(([cid]) => cid === callId)) {
       setCallId("");
     }
-  }, [callId, callOptions, setCallId]);
+  }, [callId, callOptions, setCallId, pendingRunCallId]);
 
   useEffect(() => {
     if (!showCallsPanel) return;
@@ -2226,6 +2331,41 @@ function PipelineCanvas() {
     if (selectedCacheRunId) return;
     setSelectedCacheRunId(historyRuns[0].id);
   }, [selectedCacheRunId, historyRuns, runContextMode]);
+
+  useEffect(() => {
+    if (runContextMode !== "new") return;
+    const ctx = String(runLogContextKey || "").trim();
+    if (!ctx) return;
+    const rid = String(currentRunId || "").trim();
+    const store = readActiveRunByContext();
+    if (!rid) return;
+    if (store[ctx] === rid) return;
+    store[ctx] = rid;
+    writeActiveRunByContext(store);
+  }, [runContextMode, runLogContextKey, currentRunId]);
+
+  useEffect(() => {
+    if (runContextMode !== "new") return;
+    if (running) return;
+    if (currentRunId) return;
+    const ctx = String(runLogContextKey || "").trim();
+    if (!ctx) return;
+    const store = readActiveRunByContext();
+    const restored = String(store[ctx] || "").trim();
+    if (!restored) return;
+    const row = (historyRuns.find((r) => String(r.id || "").trim() === restored)
+      ?? (runsData ?? []).find((r) => String(r.id || "").trim() === restored));
+    if (!row) return;
+    const st = String(row.status || "").toLowerCase().trim();
+    const active =
+      st === "running"
+      || st === "started"
+      || st === "preparing"
+      || st === "queued"
+      || st === "retrying";
+    if (!active) return;
+    setCurrentRunId(restored);
+  }, [runContextMode, running, currentRunId, runLogContextKey, historyRuns, runsData]);
 
   const formatRunAbsoluteTime = useCallback((iso: string | null | undefined): string => {
     const raw = String(iso || "").trim();
@@ -2741,18 +2881,22 @@ function PipelineCanvas() {
     setRunContextMode("historical");
     setSelectedCacheRunId(rid);
     setCurrentRunId(rid);
-    const runCallId = String(run.call_id || "").trim();
-    if (runCallId) setCallId(runCallId);
     const runAgent = String(run.sales_agent || "").trim();
     const runCustomer = String(run.customer || "").trim();
     if (runAgent && runCustomer && (runAgent !== salesAgent || runCustomer !== customer)) {
       setCustomer(runCustomer, runAgent);
+    }
+    const runCallId = inferRunCallIdFromRecord(run);
+    if (runCallId) {
+      setPendingRunCallId(runCallId);
+      setCallId(runCallId);
     }
   }, [
     runContextMode,
     selectedCacheRunId,
     exitHistoricalRunContext,
     setCallId,
+    setPendingRunCallId,
     salesAgent,
     customer,
     setCustomer,
@@ -2802,11 +2946,14 @@ function PipelineCanvas() {
         runStepIndex = idxs.length ? idxs[0] : null;
       }
       const inputRunIndices = n.type === "input" ? (inputStepIndicesByNodeId[n.id] || []) : [];
+      const inputSource = n.type === "input"
+        ? String((n.data as PipelineNodeData).inputSource || "").trim()
+        : "";
       const onRunStepHandler =
         canvasLocked
           ? undefined
           : n.type === "input"
-            ? (inputRunIndices.length ? () => runInputNodeStep(inputRunIndices) : undefined)
+            ? (inputRunIndices.length ? () => runInputNodeStep(inputRunIndices, inputSource) : undefined)
             : (runStepIndex != null ? () => runNodeStep(runStepIndex) : undefined);
       return {
         ...n,
@@ -4229,7 +4376,7 @@ function PipelineCanvas() {
         body: JSON.stringify({
           sales_agent: salesAgent,
           customer,
-          call_id: runNeedsCall ? callId : "",
+          call_id: callId || "",
           context_call_id: callId || "",
           run_id: continueRunId,
           force,
@@ -4389,7 +4536,7 @@ function PipelineCanvas() {
     });
   }
 
-  function runInputNodeStep(targetStepIndices: number[]) {
+  function runInputNodeStep(targetStepIndices: number[], inputSource = "") {
     const executeStepIndices = Array.from(
       new Set((targetStepIndices || [])
         .map((i) => Number(i))
@@ -4409,6 +4556,15 @@ function PipelineCanvas() {
     const preferredRunId = runContextMode === "historical"
       ? String(selectedCacheRun?.id || "").trim()
       : "";
+    const sourceNorm = String(inputSource || "").trim().toLowerCase();
+    if (sourceNorm === "merged_transcript") {
+      const runCall = String(callId || "").trim();
+      appendRunLog(
+        `Merged input recalculation requested${runCall ? ` for call ${runCall}` : ""}`,
+        "pipeline",
+      );
+      void fetchInputPreviewForSource("merged_transcript");
+    }
     void runPipeline("default", {
       executeStepIndices,
       force: false,
@@ -4431,7 +4587,7 @@ function PipelineCanvas() {
         body: JSON.stringify({
           sales_agent: salesAgent,
           customer,
-          call_id: runNeedsCall ? callId : "",
+          call_id: callId || "",
         }),
       });
     } catch {
@@ -4497,6 +4653,7 @@ function PipelineCanvas() {
       setCustomer(targetCustomer, targetAgent);
     }
     if (targetCallId) {
+      setPendingRunCallId(targetCallId);
       setCallId(targetCallId);
     }
 
@@ -4516,7 +4673,7 @@ function PipelineCanvas() {
     }
 
     setPendingOpenRunPayload(null);
-  }, [pendingOpenRunPayload, allPipelines, setCustomer, setCallId, setActivePipeline]);
+  }, [pendingOpenRunPayload, allPipelines, setCustomer, setCallId, setActivePipeline, setPendingRunCallId]);
 
   useEffect(() => {
     if (runContextMode !== "new") return;
@@ -4525,11 +4682,10 @@ function PipelineCanvas() {
   }, [runContextMode, pipelineId, salesAgent, customer, runNeedsCall, callId]);
 
   useEffect(() => {
-    if (!running) return;
     const fromLive = String(livePipelineState?.run_id || "").trim();
     if (!fromLive) return;
     setCurrentRunId((prev) => (prev === fromLive ? prev : fromLive));
-  }, [livePipelineState?.run_id, running]);
+  }, [livePipelineState?.run_id]);
 
   useEffect(() => {
     if (running) return;
@@ -4609,11 +4765,11 @@ function PipelineCanvas() {
 
   const previewCallId = useMemo(() => {
     if (runContextMode === "historical") {
-      const fromRun = String(selectedCacheRun?.call_id || "").trim();
+      const fromRun = inferRunCallIdFromRecord(selectedCacheRun);
       if (fromRun) return fromRun;
     }
     return String(callId || "").trim();
-  }, [runContextMode, selectedCacheRun?.call_id, callId]);
+  }, [runContextMode, selectedCacheRun, callId]);
 
   const fetchInputPreviewForSource = useCallback(async (source: string) => {
     const src = String(source || "").trim();
@@ -4660,6 +4816,9 @@ function PipelineCanvas() {
 
   useEffect(() => {
     setInputPreviewBySource({});
+  }, [salesAgent, customer]);
+
+  useEffect(() => {
     if (!selectedNode || !selKind) return;
 
     const wantedSources = new Set<string>();
@@ -4678,6 +4837,11 @@ function PipelineCanvas() {
     }
 
     Array.from(wantedSources).forEach((src) => {
+      // Merged preview is intentionally computed only when the merged input
+      // element is explicitly played.
+      if (src === "merged_transcript") {
+        return;
+      }
       void fetchInputPreviewForSource(src);
     });
   }, [selectedNode, selKind, edges, nodes, fetchInputPreviewForSource]);
@@ -5514,7 +5678,7 @@ function PipelineCanvas() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
           <div className={cn(
             "min-h-0 overflow-y-auto pr-1 space-y-4",
-            selKind === "input" ? "lg:col-span-4" : "lg:col-span-8",
+            selKind === "input" ? "lg:col-span-3" : "lg:col-span-8",
           )}>
             <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
               <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
@@ -5697,17 +5861,22 @@ function PipelineCanvas() {
 
           <div className={cn(
             "min-h-0 overflow-y-auto space-y-2.5",
-            selKind === "input" ? "lg:col-span-8" : "lg:col-span-4",
+            selKind === "input" ? "lg:col-span-9 h-full flex flex-col" : "lg:col-span-4",
           )}>
             {selKind === "input" && (
-              <PropertiesSection title="Input Data">
-                <div className="space-y-2 min-h-[56vh]">
-                  <div className="flex items-center justify-between gap-2">
+              <PropertiesSection
+                title="Input Data"
+                className="h-full flex flex-col"
+                bodyClassName="h-full min-h-0 flex flex-col"
+              >
+                <div className="space-y-2 h-full min-h-0 flex flex-col">
+                  <div className="flex items-center justify-between gap-2 shrink-0">
                     <p className="text-[10px] text-gray-500">
                       Context: {salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"}
                     </p>
                     {renderResultViewToggle()}
                   </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
                     const preview = src ? inputPreviewBySource[src] : null;
@@ -5723,6 +5892,7 @@ function PipelineCanvas() {
                     if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
                     return <RenderResultContent content={preview?.content || ""} sourceHint={src} />;
                   })()}
+                  </div>
                 </div>
               </PropertiesSection>
             )}
@@ -6394,7 +6564,7 @@ function PipelineCanvas() {
                           return (
                             <button
                               key={cid}
-                              onClick={() => setCallId(cid)}
+                              onClick={() => applySelectedCallId(cid)}
                               className={cn(
                                 "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
                                 selected
@@ -6984,7 +7154,10 @@ function PipelineCanvas() {
                           </span>
                         </div>
                         <p className="mt-1 text-[9px] text-gray-500 truncate">
-                          {relativeTime(run.started_at)}{run.call_id ? ` · call ${run.call_id}` : ""}
+                          {(() => {
+                            const runCallId = inferRunCallIdFromRecord(run);
+                            return `${relativeTime(run.started_at)}${runCallId ? ` · call ${runCallId}` : ""}`;
+                          })()}
                         </p>
                         {expanded && (
                           <div className="mt-2 space-y-1.5">

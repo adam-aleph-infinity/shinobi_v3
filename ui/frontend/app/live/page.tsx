@@ -194,6 +194,57 @@ function inferPhaseBadges(run: PipelineRunRecord): PhaseBadge[] {
   return [];
 }
 
+function inferRunCallId(run: PipelineRunRecord): string {
+  const direct = String(run.call_id || "").trim();
+  if (direct) return direct;
+  try {
+    const parsedSteps = JSON.parse(String(run.steps_json || "[]"));
+    if (Array.isArray(parsedSteps)) {
+      for (const step of parsedSteps) {
+        if (!step || typeof step !== "object") continue;
+        const obj = step as Record<string, any>;
+        const candidates = [
+          obj.call_id,
+          obj.context_call_id,
+          obj.input_scope_call_id,
+          obj.merged_until_call_id,
+        ];
+        for (const candidate of candidates) {
+          const value = String(candidate || "").trim();
+          if (value) return value;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  const raw = String(run.log_json || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    const lines = Array.isArray(parsed) ? parsed : [];
+    for (const item of lines) {
+      const txt = typeof item === "string"
+        ? item
+        : String((item && (item.text || item.msg || item.message)) || "");
+      const m1 = txt.match(/input\s+scope\s+call\s+context\s*:\s*([A-Za-z0-9_-]{3,})/i);
+      if (m1 && m1[1]) return String(m1[1]).trim();
+      const m2 = txt.match(/\bcall[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{3,})\b/i);
+      if (m2 && m2[1]) return String(m2[1]).trim();
+      const m3 = txt.match(/\bcall\s+([A-Za-z0-9_-]{3,})\b/i);
+      if (m3 && m3[1]) return String(m3[1]).trim();
+    }
+  } catch {
+    const m1 = raw.match(/input\s+scope\s+call\s+context\s*:\s*([A-Za-z0-9_-]{3,})/i);
+    if (m1 && m1[1]) return String(m1[1]).trim();
+    const m2 = raw.match(/\bcall[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{3,})\b/i);
+    if (m2 && m2[1]) return String(m2[1]).trim();
+    const m3 = raw.match(/\bcall\s+([A-Za-z0-9_-]{3,})\b/i);
+    if (m3 && m3[1]) return String(m3[1]).trim();
+  }
+  return "";
+}
+
 export default function LivePage() {
   const router = useRouter();
   const { setCustomer, setCallId, setActivePipeline } = useAppCtx();
@@ -478,8 +529,9 @@ export default function LivePage() {
   }, [completedRunsByDay]);
 
   const openRunInCanvas = (run: PipelineRunRecord) => {
+    const runCallId = inferRunCallId(run);
     setCustomer(run.customer || "", run.sales_agent || "");
-    setCallId(String(run.call_id || "").trim());
+    setCallId(runCallId);
     setActivePipeline(run.pipeline_id || "", run.pipeline_name || "");
     const payload = {
       source: "live_page",
@@ -488,7 +540,7 @@ export default function LivePage() {
       pipeline_name: run.pipeline_name,
       sales_agent: run.sales_agent,
       customer: run.customer,
-      call_id: run.call_id,
+      call_id: runCallId,
       requested_at: new Date().toISOString(),
     };
     try {
@@ -509,7 +561,9 @@ export default function LivePage() {
     setFilterStatus("");
   };
 
-  const renderRunCard = (run: PipelineRunRecord) => (
+  const renderRunCard = (run: PipelineRunRecord) => {
+    const runCallId = inferRunCallId(run);
+    return (
     <button
       key={run.id}
       onClick={() => openRunInCanvas(run)}
@@ -536,7 +590,7 @@ export default function LivePage() {
       </div>
       <div className="mt-1.5 text-[11px] text-gray-400 flex flex-wrap gap-x-3 gap-y-1">
         <span>{run.sales_agent || "—"} · {run.customer || "—"}</span>
-        <span>call {run.call_id || "—"}</span>
+        <span>call {runCallId || "—"}</span>
         <span>{relativeTime(run.started_at, nowMs)}</span>
         <span>{durationStr(run.started_at, run.finished_at, nowMs)}</span>
       </div>
@@ -561,6 +615,7 @@ export default function LivePage() {
       </div>
     </button>
   );
+  };
 
   return (
     <div className="h-full flex flex-col overflow-hidden">

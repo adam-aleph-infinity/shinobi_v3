@@ -71,10 +71,12 @@ type PipelineRunLite = {
   started_at?: string | null;
   status: string;
   steps_json: string;
+  log_json?: string;
 };
 
 type ParsedPipelineRun = PipelineRunLite & {
   parsed_steps: Array<Record<string, any>>;
+  inferred_call_id: string;
   is_success: boolean;
   started_key: number;
 };
@@ -117,6 +119,56 @@ function normalizeCallId(raw: string | null | undefined): string {
 
 function normalizeArtifactType(raw: string): string {
   return String(raw || "").trim().toLowerCase();
+}
+
+function inferRunCallId(run: PipelineRunLite, parsedSteps: Array<Record<string, any>>): string {
+  const direct = String(run.call_id || "").trim();
+  if (direct) return direct;
+  for (const step of parsedSteps) {
+    if (!step || typeof step !== "object") continue;
+    const candidates = [
+      step.call_id,
+      step.context_call_id,
+      step.input_scope_call_id,
+      step.merged_until_call_id,
+    ];
+    for (const c of candidates) {
+      const v = String(c || "").trim();
+      if (v) return v;
+    }
+    const inputSources = Array.isArray(step.input_sources) ? step.input_sources : [];
+    for (const src of inputSources) {
+      if (!src || typeof src !== "object") continue;
+      const v = String((src as Record<string, any>).call_id || "").trim();
+      if (v) return v;
+    }
+  }
+  const raw = String(run.log_json || "").trim();
+  if (!raw) return "";
+  const detect = (txt: string) => {
+    const m1 = txt.match(/input\s+scope\s+call\s+context\s*:\s*([A-Za-z0-9_-]{3,})/i);
+    if (m1 && m1[1]) return String(m1[1]).trim();
+    const m2 = txt.match(/\bcall[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{3,})\b/i);
+    if (m2 && m2[1]) return String(m2[1]).trim();
+    const m3 = txt.match(/\bcall\s+([A-Za-z0-9_-]{3,})\b/i);
+    if (m3 && m3[1]) return String(m3[1]).trim();
+    return "";
+  };
+  try {
+    const parsed = JSON.parse(raw);
+    const lines = Array.isArray(parsed) ? parsed : [];
+    for (const item of lines) {
+      const txt = typeof item === "string"
+        ? item
+        : String((item && (item.text || item.msg || item.message)) || "");
+      const found = detect(txt);
+      if (found) return found;
+    }
+  } catch {
+    const found = detect(raw);
+    if (found) return found;
+  }
+  return "";
 }
 
 function getArtifactIconMeta(type: string): {
@@ -225,6 +277,7 @@ export default function AgentDeepDiveView({
     selected_idx: 0,
   });
   const [artifactViewerMode, setArtifactViewerMode] = useState<"rendered" | "raw">("rendered");
+  const [fallbackArtifactsByCall, setFallbackArtifactsByCall] = useState<Record<string, CallArtifactItem[]>>({});
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher);
   const { data: pipelineDef } = useSWR<PipelineDef>(
@@ -479,9 +532,11 @@ export default function AgentDeepDiveView({
       }
       const s = normalizeRunStatus(run);
       const startedKey = run.started_at ? new Date(run.started_at).getTime() : 0;
+      const inferredCallId = inferRunCallId(run, parsedSteps);
       return {
         ...run,
         parsed_steps: parsedSteps,
+        inferred_call_id: inferredCallId,
         is_success: ["done", "completed", "success", "pass"].includes(s),
         started_key: Number.isFinite(startedKey) ? startedKey : 0,
       };
@@ -491,7 +546,7 @@ export default function AgentDeepDiveView({
   const finalRunsByCall = useMemo(() => {
     const byCall = new Map<string, ParsedPipelineRun[]>();
     parsedRuns.forEach((run) => {
-      const norm = normalizeCallId(run.call_id);
+      const norm = normalizeCallId(run.inferred_call_id || run.call_id);
       if (!norm) return;
       const bucket = byCall.get(norm) || [];
       bucket.push(run);
@@ -517,7 +572,7 @@ export default function AgentDeepDiveView({
     return map;
   }, [callsMerged]);
 
-  const callArtifactRows = useMemo<CallArtifactRow[]>(() => {
+  const baseCallArtifactRows = useMemo<CallArtifactRow[]>(() => {
     const normCallSet = new Set<string>();
     callMetaByNorm.forEach((_v, key) => normCallSet.add(key));
     finalRunsByCall.forEach((_v, key) => normCallSet.add(key));
@@ -526,6 +581,7 @@ export default function AgentDeepDiveView({
     normCallSet.forEach((norm) => {
       const meta = callMetaByNorm.get(norm);
       const run = finalRunsByCall.get(norm) || null;
+      const runCallId = String(run?.inferred_call_id || run?.call_id || norm);
       const artifacts: CallArtifactItem[] = [];
 
       if (run) {
@@ -536,7 +592,7 @@ export default function AgentDeepDiveView({
           if (!content.trim()) return;
           const artifactType = stepArtifactTypes[idx] || "unknown";
           artifacts.push({
-            call_id: run.call_id,
+            call_id: runCallId,
             run_id: run.id,
             run_status: run.status,
             run_started_at: String(run.started_at || ""),
@@ -558,7 +614,7 @@ export default function AgentDeepDiveView({
       });
 
       rows.push({
-        call_id: meta?.call_id || run?.call_id || norm,
+        call_id: meta?.call_id || runCallId || norm,
         date: String(meta?.date || run?.started_at || ""),
         duration_s: Number(meta?.duration_s || 0),
         final_run: run,
@@ -569,6 +625,116 @@ export default function AgentDeepDiveView({
     rows.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
     return rows;
   }, [callMetaByNorm, finalRunsByCall, stepArtifactTypes]);
+
+  useEffect(() => {
+    setFallbackArtifactsByCall({});
+  }, [activePipelineId, salesAgent, customer]);
+
+  const callsNeedingFallback = useMemo(() => {
+    const expectedArtifacts = Math.max(1, stepArtifactTypes.length);
+    const out: string[] = [];
+    for (const row of baseCallArtifactRows) {
+      const norm = normalizeCallId(row.call_id);
+      if (!norm) continue;
+      if (fallbackArtifactsByCall[norm] != null) continue;
+      if (row.artifacts.length >= expectedArtifacts) continue;
+      out.push(row.call_id);
+    }
+    return out;
+  }, [baseCallArtifactRows, fallbackArtifactsByCall, stepArtifactTypes.length]);
+
+  useEffect(() => {
+    if (!activePipelineId || !salesAgent || !customer) return;
+    if (!callsNeedingFallback.length) return;
+    let cancelled = false;
+
+    const run = async () => {
+      const chunk = callsNeedingFallback.slice(0, 24);
+      const fetched = await Promise.all(chunk.map(async (cid) => {
+        const qs = new URLSearchParams({
+          sales_agent: salesAgent,
+          customer,
+          call_id: String(cid || ""),
+        });
+        try {
+          const res = await fetch(`/api/pipelines/${encodeURIComponent(activePipelineId)}/call-artifacts?${qs.toString()}`);
+          if (!res.ok) return { cid, items: [] as CallArtifactItem[] };
+          const data = await res.json();
+          const list = Array.isArray(data?.artifacts) ? data.artifacts : [];
+          const items: CallArtifactItem[] = list.map((a: any, idx: number): CallArtifactItem => ({
+            call_id: String(cid || ""),
+            run_id: "",
+            run_status: "",
+            run_started_at: "",
+            step_idx: Number.isFinite(Number(a?.step_index)) ? Number(a.step_index) : idx,
+            artifact_type: String(a?.artifact_type || "unknown"),
+            artifact_label: String(a?.artifact_label || getArtifactIconMeta(String(a?.artifact_type || "")).label),
+            agent_name: String(a?.agent_name || ""),
+            model: String(a?.model || ""),
+            state: "completed",
+            content: String(a?.content || ""),
+          }))
+          .filter((x: CallArtifactItem) => String(x.content || "").trim().length > 0)
+          .sort((l: CallArtifactItem, r: CallArtifactItem) => {
+            const typeDelta = getArtifactTypeOrder(l.artifact_type) - getArtifactTypeOrder(r.artifact_type);
+            if (typeDelta !== 0) return typeDelta;
+            return l.step_idx - r.step_idx;
+          });
+          return { cid, items };
+        } catch {
+          return { cid, items: [] as CallArtifactItem[] };
+        }
+      }));
+
+      if (cancelled) return;
+      setFallbackArtifactsByCall((prev) => {
+        const next = { ...prev };
+        for (const row of fetched) {
+          next[normalizeCallId(row.cid)] = row.items;
+        }
+        return next;
+      });
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [activePipelineId, salesAgent, customer, callsNeedingFallback]);
+
+  const callArtifactRows = useMemo<CallArtifactRow[]>(() => {
+    return baseCallArtifactRows.map((row) => {
+      const fallback = fallbackArtifactsByCall[normalizeCallId(row.call_id)] || [];
+      if (!fallback.length) return row;
+      const runId = String(row.final_run?.id || "");
+      const runStatus = String(row.final_run?.status || "");
+      const runStartedAt = String(row.final_run?.started_at || "");
+      const merged = [...row.artifacts];
+      const seen = new Set<string>(
+        merged.map((it) => `${normalizeArtifactType(it.artifact_type)}:${it.step_idx}:${String(it.content || "").trim().slice(0, 64)}`),
+      );
+      fallback.forEach((it) => {
+        const key = `${normalizeArtifactType(it.artifact_type)}:${it.step_idx}:${String(it.content || "").trim().slice(0, 64)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        merged.push({
+          ...it,
+          run_id: runId || it.run_id,
+          run_status: runStatus || it.run_status,
+          run_started_at: runStartedAt || it.run_started_at,
+        });
+      });
+      merged.sort((a, b) => {
+        const typeDelta = getArtifactTypeOrder(a.artifact_type) - getArtifactTypeOrder(b.artifact_type);
+        if (typeDelta !== 0) return typeDelta;
+        return a.step_idx - b.step_idx;
+      });
+      return {
+        ...row,
+        artifacts: merged,
+      };
+    });
+  }, [baseCallArtifactRows, fallbackArtifactsByCall]);
 
   const artifactColumns = useMemo<string[]>(() => {
     const seen = new Set<string>();
