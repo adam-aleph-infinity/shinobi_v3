@@ -166,6 +166,7 @@ def list_runs(
     sort_by: str = Query("started_at"),
     sort_dir: str = Query("desc"),
     limit: int = Query(200, ge=1, le=2000),
+    compact: int = Query(0),
     mirror: int = Query(0),
     db: Session = Depends(get_session),
 ):
@@ -185,6 +186,7 @@ def list_runs(
             "sort_by": sort_by,
             "sort_dir": sort_dir,
             "limit": limit,
+            "compact": 1 if bool(compact) else 0,
         }
         timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
         try:
@@ -300,6 +302,50 @@ def list_runs(
         webhook_idx_loaded = True
 
     out_rows = []
+
+    def _compact_steps_json(raw: Any) -> str:
+        try:
+            parsed = json.loads(str(raw or "[]"))
+        except Exception:
+            return "[]"
+        if not isinstance(parsed, list):
+            return "[]"
+        compact_steps: list[dict[str, Any]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            compact_steps.append(
+                {
+                    "agent_name": str(item.get("agent_name") or ""),
+                    "state": str(item.get("state") or item.get("status") or ""),
+                    "start_time": item.get("start_time"),
+                    "end_time": item.get("end_time"),
+                }
+            )
+        return json.dumps(compact_steps, ensure_ascii=False)
+
+    def _compact_log_json(raw: Any) -> str:
+        try:
+            parsed = json.loads(str(raw or "[]"))
+        except Exception:
+            return "[]"
+        if not isinstance(parsed, list):
+            return "[]"
+        tail = parsed[-40:]
+        out: list[dict[str, Any]] = []
+        for item in tail:
+            if isinstance(item, dict):
+                out.append(
+                    {
+                        "ts": item.get("ts"),
+                        "text": item.get("text") or item.get("message") or item.get("msg"),
+                        "level": item.get("level"),
+                    }
+                )
+            else:
+                out.append({"text": str(item)})
+        return json.dumps(out, ensure_ascii=False)
+
     for r in rows:
         call_key = norm(r.call_id)
         pair_key = (norm(r.sales_agent), norm(r.customer))
@@ -335,24 +381,27 @@ def list_runs(
                 ):
                     run_origin = "webhook"
 
-        out_rows.append(
-            {
-                "id": r.id,
-                "pipeline_id": r.pipeline_id,
-                "pipeline_name": r.pipeline_name,
-                "sales_agent": r.sales_agent,
-                "customer": r.customer,
-                "call_id": r.call_id,
-                "crm_url": resolved_crm,
-                "started_at": r.started_at.isoformat() if r.started_at else None,
-                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-                "status": r.status,
-                "canvas_json": r.canvas_json,
-                "steps_json": r.steps_json,
-                "log_json": r.log_json,
-                "run_origin": run_origin,
-            }
-        )
+        row_payload = {
+            "id": r.id,
+            "pipeline_id": r.pipeline_id,
+            "pipeline_name": r.pipeline_name,
+            "sales_agent": r.sales_agent,
+            "customer": r.customer,
+            "call_id": r.call_id,
+            "crm_url": resolved_crm,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "status": r.status,
+            "canvas_json": r.canvas_json,
+            "steps_json": r.steps_json,
+            "log_json": r.log_json,
+            "run_origin": run_origin,
+        }
+        if bool(compact):
+            row_payload["canvas_json"] = ""
+            row_payload["steps_json"] = _compact_steps_json(r.steps_json)
+            row_payload["log_json"] = _compact_log_json(r.log_json)
+        out_rows.append(row_payload)
 
     crm_filter = str(crm_url or "").strip().lower()
     if crm_filter:

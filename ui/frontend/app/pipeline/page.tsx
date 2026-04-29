@@ -35,7 +35,7 @@ const MAX_PERSISTED_RUN_LOG_BUCKETS = 40;
 type NodeKind = "input" | "processing" | "output";  // "output" = artifact internally
 type ProcessSubType = "agent";
 type ArtifactSubType = "persona" | "persona_score" | "notes" | "notes_compliance";
-type RuntimeStatus = "pending" | "loading" | "cached" | "done" | "error";
+type RuntimeStatus = "pending" | "loading" | "cached" | "done" | "error" | "cancelled";
 
 interface Meta {
   label:  string;
@@ -89,6 +89,7 @@ const RUNTIME_META: Record<RuntimeStatus, { label: string; className: string; do
   cached:  { label: "Cached",  className: "text-amber-300 border-amber-700/60 bg-amber-950/50", dot: "bg-amber-400" },
   done:    { label: "Done",    className: "text-emerald-300 border-emerald-700/60 bg-emerald-950/50", dot: "bg-emerald-400" },
   error:   { label: "Error",   className: "text-red-300 border-red-700/60 bg-red-950/50", dot: "bg-red-400" },
+  cancelled: { label: "Cancelled", className: "text-slate-200 border-slate-600/70 bg-slate-900/70", dot: "bg-slate-300" },
 };
 
 // ── Universal agent types & constants ────────────────────────────────────────
@@ -898,11 +899,13 @@ function NodeCard({
     runtimeStatus === "done" ? "border-emerald-500" :
     runtimeStatus === "cached" ? "border-amber-500" :
     runtimeStatus === "error" ? "border-red-500" :
+    runtimeStatus === "cancelled" ? "border-slate-400" :
     meta.border;
   const runtimeGlow =
     runtimeStatus === "done" ? "shadow-[0_0_16px_rgba(34,197,94,0.25)]" :
     runtimeStatus === "cached" ? "shadow-[0_0_16px_rgba(245,158,11,0.25)]" :
     runtimeStatus === "error" ? "shadow-[0_0_16px_rgba(239,68,68,0.25)]" :
+    runtimeStatus === "cancelled" ? "shadow-[0_0_16px_rgba(148,163,184,0.22)]" :
     "";
   return (
     <div className="relative">
@@ -2193,7 +2196,7 @@ function PipelineCanvas() {
   );
 
   const historyRuns = useMemo(() => {
-    const list = runsData ?? [];
+    const list = Array.isArray(runsData) ? runsData : [];
     return list.filter((r) => {
       if (salesAgent && r.sales_agent !== salesAgent) return false;
       if (customer && r.customer !== customer) return false;
@@ -2297,7 +2300,8 @@ function PipelineCanvas() {
       }
       return;
     }
-    const runRow = (runsData ?? []).find((r) => String(r.id || "").trim() === activeRunId)
+    const runRows = Array.isArray(runsData) ? runsData : [];
+    const runRow = runRows.find((r) => String(r.id || "").trim() === activeRunId)
       ?? historyRuns.find((r) => String(r.id || "").trim() === activeRunId);
     if (runRow) {
       const parsed = parseSavedRunLogLines(runRow.log_json);
@@ -2354,7 +2358,7 @@ function PipelineCanvas() {
     const restored = String(store[ctx] || "").trim();
     if (!restored) return;
     const row = (historyRuns.find((r) => String(r.id || "").trim() === restored)
-      ?? (runsData ?? []).find((r) => String(r.id || "").trim() === restored));
+      ?? (Array.isArray(runsData) ? runsData : []).find((r) => String(r.id || "").trim() === restored));
     if (!row) return;
     const st = String(row.status || "").toLowerCase().trim();
     const active =
@@ -2380,7 +2384,7 @@ function PipelineCanvas() {
       stepIndex: number;
       stageIndex: number | null;
       elementName: string;
-      status: "finished" | "cached" | "running" | "failed" | "not_run";
+      status: "finished" | "cached" | "running" | "failed" | "cancelled" | "not_run";
       statusLabel: string;
       statusClass: string;
       model: string;
@@ -2469,11 +2473,13 @@ function PipelineCanvas() {
         const rawState = String(step.state || step.status || "").trim().toLowerCase();
         const hasCache = Array.isArray(step.cached_locations) && step.cached_locations.length > 0;
         const isFailed = ["failed", "error", "fail"].includes(rawState);
+        const isCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(rawState);
         const isRunning = ["running", "loading", "started"].includes(rawState);
         const isCompleted = ["completed", "done", "pass", "success"].includes(rawState);
 
         let status: StepTimelineRow["status"] = "not_run";
         if (isFailed) status = "failed";
+        else if (isCancelled) status = "cancelled";
         else if (isRunning) status = "running";
         else if (hasCache || rawState.includes("cache")) status = "cached";
         else if (isCompleted) status = "finished";
@@ -2495,6 +2501,10 @@ function PipelineCanvas() {
           failed: {
             label: "failed",
             className: "text-red-300 border-red-700/50 bg-red-950/40",
+          },
+          cancelled: {
+            label: "cancelled",
+            className: "text-slate-200 border-slate-700/50 bg-slate-900/50",
           },
           not_run: {
             label: "not run",
@@ -2728,6 +2738,7 @@ function PipelineCanvas() {
       });
       const hasInputReady = connected.some((s) => s.inputReady);
       if (connected.some((s) => s.status === "error")) runtimeByNodeId[inputId] = "error";
+      else if (connected.some((s) => s.status === "cancelled")) runtimeByNodeId[inputId] = "cancelled";
       else if (connected.some((s) => s.status === "done")) runtimeByNodeId[inputId] = "done";
       else if (connected.some((s) => s.status === "cached")) runtimeByNodeId[inputId] = "cached";
       else if (connected.some((s) => s.status === "loading" && s.inputReady)) runtimeByNodeId[inputId] = "done";
@@ -2784,6 +2795,7 @@ function PipelineCanvas() {
           next[idx] = "done";
         }
         else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
+        else if (["cancelled", "canceled", "aborted", "stopped"].includes(rawState)) next[idx] = "cancelled";
         else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
       });
@@ -4580,6 +4592,7 @@ function PipelineCanvas() {
     setRunning(false);
     setRunError("Run stopped by user.");
     appendRunLog("Run stopped by user", "warn");
+    setStepStatuses((prev) => prev.map((st) => (st === "loading" ? "cancelled" : st)));
     try {
       await fetch(`/api/pipelines/${pipelineId}/stop`, {
         method: "POST",
@@ -4593,6 +4606,7 @@ function PipelineCanvas() {
     } catch {
       // local abort already stopped UI
     }
+    mutateRuns();
     mutateLivePipelineState();
   }
 
@@ -6176,27 +6190,38 @@ function PipelineCanvas() {
         <button
           onClick={() => {
             if (canvasLocked) return;
-            if (running) {
-              void stopPipeline();
-              return;
-            }
             if (runContextMode === "historical") {
               setShowHistoricalRunModeDialog(true);
               return;
             }
             void runPipeline("default");
           }}
-          disabled={canvasLocked || !pipelineId || pipelineSaving || (!salesAgent || !customer) || (runNeedsCall && !callId)}
+          disabled={running || canvasLocked || !pipelineId || pipelineSaving || (!salesAgent || !customer) || (runNeedsCall && !callId)}
           className={cn(
             "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
-            running
-              ? "bg-red-900/30 border-red-700 text-red-300 hover:bg-red-900/50"
-              : "bg-emerald-900/30 border-emerald-700 text-emerald-300 hover:bg-emerald-900/50",
+            "bg-emerald-900/30 border-emerald-700 text-emerald-300 hover:bg-emerald-900/50",
+            running ? "opacity-45 cursor-not-allowed" : "",
           )}
-          title={running ? "Stop running pipeline" : "Run pipeline for selected context"}
+          title="Run pipeline for selected context"
         >
-          {running ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-          {running ? "Stop" : "Run"}
+          <Play className="w-3 h-3" />
+          Run
+        </button>
+        <button
+          onClick={() => {
+            if (canvasLocked || !running) return;
+            void stopPipeline();
+          }}
+          disabled={canvasLocked || !running}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0",
+            "bg-slate-900/50 border-slate-700 text-slate-200 hover:bg-slate-800/70",
+            !running ? "opacity-45 cursor-not-allowed" : "",
+          )}
+          title="Cancel current run"
+        >
+          <Square className="w-3 h-3" />
+          Cancel
         </button>
         <button
           onClick={() => {
@@ -7092,6 +7117,8 @@ function PipelineCanvas() {
                       ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
                       : runStatus === "error" || runStatus === "failed"
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
+                        : runStatus === "cancelled" || runStatus === "canceled"
+                          ? "text-slate-200 border-slate-700/50 bg-slate-900/50"
                         : runStatus === "queued"
                           ? "text-sky-200 border-sky-700/50 bg-sky-950/40"
                           : runStatus === "preparing"

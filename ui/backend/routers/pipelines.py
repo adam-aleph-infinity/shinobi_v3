@@ -3639,7 +3639,7 @@ async def stop_pipeline(
         task.cancel()
         cancelled = True
 
-    # Proactively mark state file as failed for per-pair UI so canvas unblocks quickly.
+    # Proactively mark state file as cancelled for per-pair UI so canvas unblocks quickly.
     # If the run coroutine is still alive, it will keep the same run_id and reconcile.
     try:
         path = _STATE_DIR / f"{_pair_key(pipeline_id, req.sales_agent, req.customer)}.json"
@@ -3648,9 +3648,10 @@ async def stop_pipeline(
             if data.get("status") == "running":
                 now_iso = datetime.utcnow().isoformat()
                 for s in data.get("steps", []):
-                    if s.get("state") == "running" or s.get("status") == "loading":
-                        s["state"] = "failed"
-                        s["status"] = "error"  # legacy compatibility
+                    st = str(s.get("state") or s.get("status") or "").strip().lower()
+                    if st in ("running", "loading", "started"):
+                        s["state"] = "cancelled"
+                        s["status"] = "cancelled"  # explicit status for UI mapping
                         s["end_time"] = now_iso
                         s["error_msg"] = "stopped by user"
                 node_states = data.get("node_states")
@@ -3661,9 +3662,9 @@ async def stop_pipeline(
                             continue
                         for node_id, raw_st in list(b.items()):
                             st = str(raw_st or "").lower()
-                            if st in ("running", "loading"):
-                                b[node_id] = "error"
-                data["status"] = "failed"
+                            if st in ("running", "loading", "started"):
+                                b[node_id] = "cancelled"
+                data["status"] = "cancelled"
                 data["updated_at"] = now_iso
                 path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -4524,7 +4525,9 @@ async def run_pipeline(
     steps = pipeline_def.get("steps", [])
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
 
-    run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
+    requested_call_id = str(req.call_id or "").strip()
+    effective_call_id = str(req.context_call_id or "").strip() or requested_call_id
+    run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, effective_call_id)
     client_local_time = request.headers.get("x-client-local-time", "")
     client_timezone = request.headers.get("x-client-timezone", "")
 
@@ -4607,8 +4610,8 @@ async def run_pipeline(
 
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
-        cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
-        input_scope_call_id = str(req.context_call_id or "").strip() or str(req.call_id or "").strip()
+        input_scope_call_id = effective_call_id
+        cid_short = f"…{input_scope_call_id[-8:]}" if input_scope_call_id else "pair"
         _requested_origin = str(req.run_origin or "").strip().lower()
         if _requested_origin in {"webhook", "production"}:
             run_origin = "webhook"
@@ -4640,7 +4643,7 @@ async def run_pipeline(
                 "run_slot": run_slot,
                 "sales_agent": req.sales_agent,
                 "customer": req.customer,
-                "call_id": req.call_id,
+                "call_id": input_scope_call_id,
                 "requested_run_id": requested_run_id,
                 "force": bool(req.force),
                 "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
@@ -4672,7 +4675,7 @@ async def run_pipeline(
             data={"run_origin": run_origin},
             client_local_time=client_local_time,
         )
-        if input_scope_call_id and input_scope_call_id != str(req.call_id or "").strip():
+        if input_scope_call_id and input_scope_call_id != requested_call_id:
             log_buffer.emit(f"[PIPELINE] ℹ Input scope call context: {input_scope_call_id} · {cid_short}")
         _default_run_steps = [
             {
@@ -4729,7 +4732,7 @@ async def run_pipeline(
                     _row.pipeline_name = pipeline_name
                     _row.sales_agent = req.sales_agent
                     _row.customer = req.customer
-                    _row.call_id = req.call_id
+                    _row.call_id = input_scope_call_id
                     _row.status = "running"
                     _row.canvas_json = json.dumps(pipeline_def.get("canvas", {}))
                     _row.steps_json = json.dumps(run_steps)
@@ -4743,7 +4746,7 @@ async def run_pipeline(
                     pipeline_name=pipeline_name,
                     sales_agent=req.sales_agent,
                     customer=req.customer,
-                    call_id=req.call_id,
+                    call_id=input_scope_call_id,
                     status="running",
                     canvas_json=json.dumps(pipeline_def.get("canvas", {})),
                     steps_json=json.dumps(run_steps),
@@ -4797,9 +4800,11 @@ async def run_pipeline(
         _artifact_ctx: dict[str, Optional[str]] = {"latest_persona_id": None}
 
         def _step_status_to_ui(_s: dict) -> str:
-            raw = (_s.get("state") or _s.get("status") or "waiting")
+            raw = str(_s.get("state") or _s.get("status") or "waiting").strip().lower()
             if raw in ("input_prepared", "prepared"):
                 return "pending"
+            if raw in ("cancelled", "canceled", "aborted", "stopped"):
+                return "cancelled"
             if raw in ("failed", "error"):
                 return "error"
             if raw in ("running", "loading"):
@@ -4809,9 +4814,11 @@ async def run_pipeline(
             return "pending"
 
         def _step_input_status(_s: dict) -> str:
-            raw = (_s.get("state") or _s.get("status") or "waiting")
+            raw = str(_s.get("state") or _s.get("status") or "waiting").strip().lower()
             if raw in ("input_prepared", "prepared"):
                 return "done" if _s.get("input_ready") else "pending"
+            if raw in ("cancelled", "canceled", "aborted", "stopped"):
+                return "cancelled"
             if raw in ("failed", "error"):
                 return "error"
             if raw in ("running", "loading"):
@@ -4850,6 +4857,8 @@ async def run_pipeline(
                 ]
                 if any(_s == "error" for _s in _statuses):
                     input_nodes[_node_id] = "error"
+                elif any(_s == "cancelled" for _s in _statuses):
+                    input_nodes[_node_id] = "cancelled"
                 elif any(_s == "done" for _s in _statuses):
                     input_nodes[_node_id] = "done"
                 elif any(_s == "cached" for _s in _statuses):
@@ -4923,9 +4932,9 @@ async def run_pipeline(
                     "sales_agent": req.sales_agent or "",
                     "customer": req.customer or "",
                 }
-                if req.call_id:
+                if input_scope_call_id:
                     _sql += "AND call_id = :call_id "
-                    _params["call_id"] = req.call_id
+                    _params["call_id"] = input_scope_call_id
                 else:
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
@@ -4957,8 +4966,8 @@ async def run_pipeline(
                     AR.pipeline_id == pipeline_id,
                     AR.pipeline_step_index == _step_idx,
                 )
-            if req.call_id:
-                _base = _base.where(AR.call_id == req.call_id)
+            if input_scope_call_id:
+                _base = _base.where(AR.call_id == input_scope_call_id)
             else:
                 _base = _base.where(AR.call_id == "")
 
@@ -4997,9 +5006,9 @@ async def run_pipeline(
                     "sales_agent": req.sales_agent or "",
                     "customer": req.customer or "",
                 }
-                if req.call_id:
+                if input_scope_call_id:
                     _sql += "AND call_id = :call_id "
-                    _params["call_id"] = req.call_id
+                    _params["call_id"] = input_scope_call_id
                 else:
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
@@ -5025,8 +5034,8 @@ async def run_pipeline(
                     AR.pipeline_id == pipeline_id,
                     AR.pipeline_step_index == _step_idx,
                 )
-            if req.call_id:
-                _base = _base.where(AR.call_id == req.call_id)
+            if input_scope_call_id:
+                _base = _base.where(AR.call_id == input_scope_call_id)
             else:
                 _base = _base.where(AR.call_id == "")
             return _sess.exec(_base.order_by(AR.created_at.desc())).first()
@@ -5069,9 +5078,9 @@ async def run_pipeline(
                         _ov.get(_k, _inp.get("source", "manual"))
                     )
                     if _src == "transcript":
-                        if req.call_id:
-                            if not _has_call_transcript(req.call_id):
-                                _missing_call_ids.add(req.call_id)
+                        if input_scope_call_id:
+                            if not _has_call_transcript(input_scope_call_id):
+                                _missing_call_ids.add(input_scope_call_id)
                         elif not _pair_has_any_transcript():
                             _needs_merged = True
                     elif _src == "merged_transcript":
@@ -5253,7 +5262,7 @@ async def run_pipeline(
                             agent_name=_agent_name,
                             sales_agent=req.sales_agent,
                             customer=req.customer,
-                            call_id=req.call_id,
+                            call_id=input_scope_call_id,
                             pipeline_id=pipeline_id,
                             pipeline_step_index=_pipeline_step_index,
                             input_fingerprint=_input_fingerprint,
@@ -5275,7 +5284,7 @@ async def run_pipeline(
                                 "agent_name": _agent_name,
                                 "sales_agent": req.sales_agent,
                                 "customer": req.customer,
-                                "call_id": req.call_id,
+                                "call_id": input_scope_call_id,
                                 "content": _content,
                                 "model": _model,
                                 "created_at": _created_at,
@@ -5301,7 +5310,7 @@ async def run_pipeline(
             """Upsert stable pipeline artifact metadata for per-call/per-pair cache visibility."""
             _raw = (
                 f"{pipeline_id}::{(req.sales_agent or '').strip().lower()}::"
-                f"{(req.customer or '').strip().lower()}::{req.call_id or ''}::{_step_idx}"
+                f"{(req.customer or '').strip().lower()}::{input_scope_call_id or ''}::{_step_idx}"
             )
             _id = hashlib.sha1(_raw.encode("utf-8")).hexdigest()
             _now = datetime.utcnow()
@@ -5323,7 +5332,7 @@ async def run_pipeline(
                             pipeline_id=pipeline_id,
                             sales_agent=req.sales_agent,
                             customer=req.customer,
-                            call_id=req.call_id or "",
+                            call_id=input_scope_call_id or "",
                             pipeline_step_index=_step_idx,
                             agent_id=_agent_id,
                             agent_name=_agent_name,
@@ -5495,7 +5504,7 @@ async def run_pipeline(
             _fp = _input_fingerprint or _hash_text(_content)[:24]
             _marker = f"pipeline:{pipeline_id}:{_step_idx}:{_fp}"
             _label = (_meta.get("label") or "").strip() or f"{pipeline_name} · {_agent_name}"
-            _call_id = req.call_id or f"pipeline:{run_id}:{_step_idx}"
+            _call_id = input_scope_call_id or f"pipeline:{run_id}:{_step_idx}"
 
             try:
                 if _sub_type == "persona":
@@ -6643,14 +6652,16 @@ async def run_pipeline(
             if cancel_msg == "run stopped by user":
                 now_iso = datetime.utcnow().isoformat()
                 for s in run_steps:
-                    if s.get("state") == "running":
-                        s["state"] = "failed"
+                    raw_st = str(s.get("state") or s.get("status") or "").strip().lower()
+                    if raw_st in ("running", "loading", "started"):
+                        s["state"] = "cancelled"
+                        s["status"] = "cancelled"
                         s["end_time"] = now_iso
                         s["error_msg"] = cancel_msg
-                run_final_status = "error"
-                log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
+                run_final_status = "cancelled"
+                log_buffer.emit(f"[PIPELINE] ◼ Cancelled: {pipeline_name} · {cid_short}")
                 _save_state(
-                    pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                    pipeline_id, run_id, req.sales_agent, req.customer, "cancelled", run_steps,
                     start_datetime=run_start_dt, node_states=_build_node_states(),
                 )
             else:
@@ -6703,8 +6714,8 @@ async def run_pipeline(
                                     AR.pipeline_id == pipeline_id,
                                     AR.pipeline_step_index == idx,
                                 )
-                                if req.call_id:
-                                    stale_stmt = stale_stmt.where(AR.call_id == req.call_id)
+                                if input_scope_call_id:
+                                    stale_stmt = stale_stmt.where(AR.call_id == input_scope_call_id)
                                 else:
                                     stale_stmt = stale_stmt.where(AR.call_id == "")
                                 fp = s.get("input_fingerprint", "")
@@ -6787,7 +6798,7 @@ async def run_pipeline(
                         "run_slot": run_slot,
                         "sales_agent": req.sales_agent,
                         "customer": req.customer,
-                        "call_id": req.call_id,
+                        "call_id": input_scope_call_id,
                         "final_status": run_final_status,
                         "steps_total": len(run_steps),
                         "status_counts": _status_counts,
