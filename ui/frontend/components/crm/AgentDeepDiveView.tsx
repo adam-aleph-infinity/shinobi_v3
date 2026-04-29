@@ -16,6 +16,7 @@ import {
   StickyNote,
   User,
   Users,
+  Workflow,
   X,
 } from "lucide-react";
 
@@ -521,22 +522,16 @@ export default function AgentDeepDiveView({
   };
 
   return (
-    <div className="relative h-[calc(100vh-3rem)] flex flex-col overflow-hidden">
-      <div className="flex items-center justify-between mb-3 shrink-0">
-        <div>
-          <h1 className="text-base font-bold text-white">{title}</h1>
-          <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>
-        </div>
-      </div>
-
-      <div className="flex flex-nowrap items-center gap-2 px-3 py-2 border border-gray-800 rounded-xl bg-gray-900/90 shrink-0 overflow-x-auto mb-3">
-        <BarChart3 className="w-4 h-4 text-indigo-400 shrink-0" />
-        <span className="text-xs font-semibold text-white shrink-0">Context</span>
+    <div className="relative h-full flex flex-col overflow-hidden bg-gray-950">
+      <div className="flex flex-nowrap items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900 shrink-0 overflow-x-auto">
+        <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
+        <span className="text-sm font-bold text-white shrink-0">{title}</span>
+        <span className="text-[10px] text-gray-500 shrink-0">{subtitle}</span>
 
         <button
           type="button"
           onClick={openCrmOverlay}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[180px]"
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
           title="Pick sales agent + customer from CRM"
         >
           <Users className="w-3 h-3 text-indigo-400 shrink-0" />
@@ -546,7 +541,7 @@ export default function AgentDeepDiveView({
         <button
           type="button"
           onClick={openCrmOverlay}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[180px]"
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
           title="Pick customer from CRM"
         >
           <User className="w-3 h-3 text-cyan-400 shrink-0" />
@@ -595,7 +590,7 @@ export default function AgentDeepDiveView({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+      <div className="flex-1 min-h-0 border border-gray-800 border-t-0 bg-gray-900 overflow-hidden">
         <div className="h-full overflow-auto">
           {!activePipelineId ? (
             <div className="h-full flex items-center justify-center text-gray-500 text-sm">
