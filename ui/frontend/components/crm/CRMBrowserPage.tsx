@@ -10,6 +10,7 @@ import {
 import { refreshCache } from "@/lib/api";
 import { useAppCtx } from "@/lib/app-context";
 import { logClientExecutionEvent } from "@/lib/execution-log";
+import AgentDeepDiveView from "@/components/crm/AgentDeepDiveView";
 
 const API = "/api";
 const fetcher = (url: string) => fetch(`${API}${url}`).then(r => r.json());
@@ -117,6 +118,7 @@ function FilterInput({ label, value, onChange, type = "text", step, placeholder 
 
 export type CRMBrowserPageProps = {
   artifactMode?: boolean;
+  deepDiveMode?: boolean;
   title?: string;
   subtitle?: string;
   pairPickerMode?: boolean;
@@ -124,10 +126,15 @@ export type CRMBrowserPageProps = {
 
 export default function CRMBrowserPage({
   artifactMode = false,
+  deepDiveMode = false,
   title = "CRM Browser",
   subtitle = "Browse agent-customer pairs across all CRMs",
   pairPickerMode = false,
 }: CRMBrowserPageProps) {
+  if (deepDiveMode) {
+    return <AgentDeepDiveView title={title} subtitle={subtitle} />;
+  }
+
   const ctx = useAppCtx();
   const artifactsEnabled = !!artifactMode;
 
