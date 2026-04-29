@@ -86,6 +86,8 @@ type CallArtifactItem = {
   run_id: string;
   run_status: string;
   run_started_at: string;
+  result_id: string;
+  result_created_at: string;
   step_idx: number;
   artifact_type: string;
   artifact_label: string;
@@ -581,6 +583,44 @@ export default function AgentDeepDiveView({
     return picked;
   }, [parsedRuns]);
 
+  const runById = useMemo(() => {
+    const out = new Map<string, ParsedPipelineRun>();
+    parsedRuns.forEach((run) => {
+      const rid = String(run.id || "").trim();
+      if (!rid) return;
+      out.set(rid, run);
+    });
+    return out;
+  }, [parsedRuns]);
+
+  const resultIdToRun = useMemo(() => {
+    const out = new Map<string, ParsedPipelineRun>();
+    const shouldReplace = (prev: ParsedPipelineRun | undefined, next: ParsedPipelineRun) => {
+      if (!prev) return true;
+      if (!!next.is_success !== !!prev.is_success) return !!next.is_success;
+      return next.started_key > prev.started_key;
+    };
+    parsedRuns.forEach((run) => {
+      run.parsed_steps.forEach((step) => {
+        const ids = new Set<string>();
+        const direct = String((step as any)?.agent_result_id || (step as any)?.result_id || "").trim();
+        if (direct) ids.add(direct);
+        const cached = Array.isArray((step as any)?.cached_locations) ? ((step as any).cached_locations as any[]) : [];
+        cached.forEach((loc) => {
+          if (!loc || typeof loc !== "object") return;
+          const locType = String((loc as Record<string, any>).type || "").trim().toLowerCase();
+          if (locType && locType !== "agent_result") return;
+          const locId = String((loc as Record<string, any>).id || "").trim();
+          if (locId) ids.add(locId);
+        });
+        ids.forEach((id) => {
+          if (shouldReplace(out.get(id), run)) out.set(id, run);
+        });
+      });
+    });
+    return out;
+  }, [parsedRuns]);
+
   const callMetaByNorm = useMemo(() => {
     const map = new Map<string, { call_id: string; date: string; duration_s: number }>();
     callsMerged.forEach((c) => {
@@ -609,12 +649,28 @@ export default function AgentDeepDiveView({
           const content = String(step?.content || "");
           if (!isCompletedStepState(state)) return;
           if (!content.trim()) return;
+          const cached = Array.isArray((step as any)?.cached_locations) ? ((step as any).cached_locations as any[]) : [];
+          let cachedResultId = "";
+          let cachedCreatedAt = "";
+          for (const loc of cached) {
+            if (!loc || typeof loc !== "object") continue;
+            const locType = String((loc as Record<string, any>).type || "").trim().toLowerCase();
+            if (locType && locType !== "agent_result") continue;
+            const locId = String((loc as Record<string, any>).id || "").trim();
+            if (locId && !cachedResultId) cachedResultId = locId;
+            const locCreated = String((loc as Record<string, any>).created_at || "").trim();
+            if (locCreated && !cachedCreatedAt) cachedCreatedAt = locCreated;
+            if (cachedResultId && cachedCreatedAt) break;
+          }
+          const stepResultId = String((step as any)?.agent_result_id || (step as any)?.result_id || cachedResultId || "").trim();
           const artifactType = stepArtifactTypes[idx] || "unknown";
           artifacts.push({
             call_id: runCallId,
             run_id: run.id,
             run_status: run.status,
             run_started_at: String(run.started_at || ""),
+            result_id: stepResultId,
+            result_created_at: cachedCreatedAt,
             step_idx: idx,
             artifact_type: artifactType,
             artifact_label: getArtifactIconMeta(artifactType).label,
@@ -687,7 +743,9 @@ export default function AgentDeepDiveView({
             call_id: String(cid || ""),
             run_id: "",
             run_status: "",
-            run_started_at: "",
+            run_started_at: String(a?.created_at || ""),
+            result_id: String(a?.result_id || ""),
+            result_created_at: String(a?.created_at || ""),
             step_idx: Number.isFinite(Number(a?.step_index)) ? Number(a.step_index) : idx,
             artifact_type: String(a?.artifact_type || "unknown"),
             artifact_label: String(a?.artifact_label || getArtifactIconMeta(String(a?.artifact_type || "")).label),
@@ -735,9 +793,29 @@ export default function AgentDeepDiveView({
     return baseCallArtifactRows.map((row) => {
       const fallback = fallbackArtifactsByCall[normalizeCallId(row.call_id)] || [];
       if (!fallback.length) return row;
-      const runId = String(row.final_run?.id || "");
-      const runStatus = String(row.final_run?.status || "");
-      const runStartedAt = String(row.final_run?.started_at || "");
+      let effectiveRun: ParsedPipelineRun | null = row.final_run;
+      if (!effectiveRun) {
+        for (const it of fallback) {
+          const fallbackRunId = String(it.run_id || "").trim();
+          if (fallbackRunId) {
+            const fromRunId = runById.get(fallbackRunId) || null;
+            if (fromRunId) {
+              effectiveRun = fromRunId;
+              break;
+            }
+          }
+          const resultId = String(it.result_id || "").trim();
+          if (!resultId) continue;
+          const fromResult = resultIdToRun.get(resultId) || null;
+          if (fromResult) {
+            effectiveRun = fromResult;
+            break;
+          }
+        }
+      }
+      const runId = String(effectiveRun?.id || row.final_run?.id || "");
+      const runStatus = String(effectiveRun?.status || row.final_run?.status || "");
+      const runStartedAt = String(effectiveRun?.started_at || row.final_run?.started_at || "");
       const merged = [...row.artifacts];
       const seen = new Set<string>(
         merged.map((it) => `${normalizeArtifactType(it.artifact_type)}:${it.step_idx}:${String(it.content || "").trim().slice(0, 64)}`),
@@ -760,10 +838,11 @@ export default function AgentDeepDiveView({
       });
       return {
         ...row,
+        final_run: effectiveRun || row.final_run,
         artifacts: merged,
       };
     });
-  }, [baseCallArtifactRows, fallbackArtifactsByCall]);
+  }, [baseCallArtifactRows, fallbackArtifactsByCall, resultIdToRun, runById]);
 
   const artifactColumns = useMemo<string[]>(() => {
     const seen = new Set<string>();
@@ -935,12 +1014,16 @@ export default function AgentDeepDiveView({
                             >
                               {row.final_run.id.slice(0, 8)}
                             </button>
+                          ) : row.artifacts.length ? (
+                            <span className="inline-flex items-center rounded border border-amber-700/60 bg-amber-900/35 px-2 py-0.5 text-[10px] font-medium text-amber-300">
+                              artifact-only
+                            </span>
                           ) : (
                             <span className="text-gray-600">—</span>
                           )}
                         </td>
                         <td className={cn("px-3 py-2 text-xs font-medium", runStatusClass(row.final_run?.status || ""))}>
-                          {row.final_run?.status || "no run"}
+                          {row.final_run?.status || (row.artifacts.length ? "artifact_only" : "no run")}
                         </td>
                         {artifactColumns.map((col) => {
                           const items = row.artifacts.filter((a) => normalizeArtifactType(a.artifact_type) === normalizeArtifactType(col));
