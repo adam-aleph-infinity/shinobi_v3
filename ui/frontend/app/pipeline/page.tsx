@@ -2413,6 +2413,8 @@ function PipelineCanvas() {
     const out = new Map<string, RunTimeline>();
     for (const run of historyRuns) {
       const steps = parsedRunStepsById.get(run.id) ?? [];
+      const runState = String(run.status || "").trim().toLowerCase();
+      const runIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(runState);
       let procNodesOrdered: Array<{ id: string; label: string; stageIndex: number | null }> = [];
       let outputsByProcId: Record<string, string[]> = {};
 
@@ -2484,6 +2486,12 @@ function PipelineCanvas() {
         else if (hasCache || rawState.includes("cache")) status = "cached";
         else if (isCompleted) status = "finished";
         else status = "not_run";
+
+        // If the overall run was cancelled, stale in-flight step states should
+        // no longer be presented as running in history/timeline.
+        if (runIsCancelled && status === "running") {
+          status = "cancelled";
+        }
 
         const statusMeta = {
           finished: {
@@ -2776,6 +2784,12 @@ function PipelineCanvas() {
       runContextMode === "historical"
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
+    const sourceRunStatus = String(
+      (runContextMode === "historical"
+        ? selectedCacheRun?.status
+        : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId)?.status) || "",
+    ).toLowerCase();
+    const sourceRunIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(sourceRunStatus);
     if (sourceRunId && !parsedRunStepsById.has(sourceRunId)) {
       // Keep current in-memory status until runs cache catches up.
       return;
@@ -2794,7 +2808,9 @@ function PipelineCanvas() {
         } else if (["done", "completed", "pass", "success"].includes(rawState)) {
           next[idx] = "done";
         }
-        else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
+        else if (["running", "loading", "started"].includes(rawState)) {
+          next[idx] = sourceRunIsCancelled ? "cancelled" : "loading";
+        }
         else if (["cancelled", "canceled", "aborted", "stopped"].includes(rawState)) next[idx] = "cancelled";
         else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
