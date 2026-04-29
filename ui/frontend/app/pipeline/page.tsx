@@ -4127,6 +4127,25 @@ function PipelineCanvas() {
       }
       if (!res.body) throw new Error("No response body");
 
+      const setInputRuntimeBySource = (sources: string[], status: RuntimeStatus) => {
+        const wanted = new Set(sources.map((s) => String(s || "").toLowerCase().trim()).filter(Boolean));
+        if (!wanted.size) return;
+        setNodes((prev) => {
+          let changed = false;
+          const next = prev.map((n) => {
+            if (n.type !== "input") return n;
+            const d = n.data as PipelineNodeData;
+            const src = String(d.inputSource || "").toLowerCase().trim();
+            if (!wanted.has(src)) return n;
+            const prevStatus = ((d.runtimeStatus as RuntimeStatus | undefined) ?? "pending");
+            if (prevStatus === status) return n;
+            changed = true;
+            return { ...n, data: { ...d, runtimeStatus: status } satisfies PipelineNodeData };
+          });
+          return changed ? next : prev;
+        });
+      };
+
       const summary = await readPipelineSSE(res, (type, evt, stepIdx) => {
         if (type === "pipeline_start") appendRunLog(`Pipeline started`, "pipeline");
         if (type === "pipeline_done") appendRunLog(`Pipeline finished`, "pipeline");
@@ -4134,7 +4153,27 @@ function PipelineCanvas() {
           const rid = String(evt.run_id || "").trim();
           if (rid) setCurrentRunId(rid);
         }
-        if (type === "progress" && evt?.msg) appendRunLog(String(evt.msg));
+        if (type === "progress" && evt?.msg) {
+          const msg = String(evt.msg || "");
+          appendRunLog(msg);
+          const low = msg.toLowerCase();
+          const mentionsAutoTx = low.includes("auto-transcription");
+
+          if (mentionsAutoTx && (low.includes("missing transcript inputs detected") || low.includes("auto-transcription running"))) {
+            if (low.includes("(merged)")) {
+              setInputRuntimeBySource(["merged_transcript"], "loading");
+            } else if (low.includes("(call)")) {
+              setInputRuntimeBySource(["transcript"], "loading");
+            } else {
+              setInputRuntimeBySource(["transcript", "merged_transcript"], "loading");
+            }
+          } else if (mentionsAutoTx && low.includes("ready")) {
+            const readyStatus: RuntimeStatus = runContextMode === "historical" ? "cached" : "done";
+            setInputRuntimeBySource(["transcript", "merged_transcript"], readyStatus);
+          } else if (mentionsAutoTx && (low.includes("failed") || low.includes("still missing") || low.includes("timed out"))) {
+            setInputRuntimeBySource(["transcript", "merged_transcript"], "error");
+          }
+        }
         const liveKey = Number.isFinite(stepIdx) ? stepIdx : -1;
         if (type === "stream" && evt?.text) {
           const chunk = String(evt.text || "");
