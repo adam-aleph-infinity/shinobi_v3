@@ -103,10 +103,11 @@ function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "loc
   return "local";
 }
 
-function relativeTime(isoStr: string | null | undefined, nowMs?: number): string {
+function relativeTime(isoStr: string | null | undefined, nowMs?: number | null): string {
   const dt = parseServerDate(isoStr);
   if (!dt) return "—";
-  const nowTs = typeof nowMs === "number" ? nowMs : Date.now();
+  if (typeof nowMs !== "number") return "—";
+  const nowTs = nowMs;
   const d = Math.floor((nowTs - dt.getTime()) / 1000);
   if (d < 60) return `${d}s ago`;
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
@@ -117,11 +118,13 @@ function relativeTime(isoStr: string | null | undefined, nowMs?: number): string
 function durationStr(
   startedAt: string | null | undefined,
   finishedAt: string | null | undefined,
-  nowMs?: number,
+  nowMs?: number | null,
 ): string {
   const s = parseServerDate(startedAt);
   if (!s) return "—";
-  const e = parseServerDate(finishedAt) ?? new Date(typeof nowMs === "number" ? nowMs : Date.now());
+  const finished = parseServerDate(finishedAt);
+  if (!finished && typeof nowMs !== "number") return "—";
+  const e = finished ?? new Date(nowMs as number);
   const ms = Math.max(0, e.getTime() - s.getTime());
   const sec = Math.floor(ms / 1000);
   if (sec < 60) return `${sec}s`;
@@ -280,9 +283,10 @@ export default function LivePage() {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
-  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [nowMs, setNowMs] = useState<number | null>(null);
 
   useEffect(() => {
+    setNowMs(Date.now());
     const ticker = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(ticker);
   }, []);

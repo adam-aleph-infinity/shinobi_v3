@@ -81,19 +81,22 @@ function BackendStatus() {
 }
 
 function SidebarClock() {
-  const [localNow, setLocalNow] = useState<Date>(new Date());
+  const [localNow, setLocalNow] = useState<Date | null>(null);
 
   useEffect(() => {
+    setLocalNow(new Date());
     const id = setInterval(() => setLocalNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  const localTime = localNow.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+  const localTime = localNow
+    ? localNow.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      })
+    : "--:--:--";
 
   return (
     <div className="text-[10px] font-mono text-gray-500 text-right leading-none">{localTime}</div>
