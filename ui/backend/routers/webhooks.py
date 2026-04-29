@@ -1398,7 +1398,10 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 if slots <= 0:
                     break
                 state = str(item.get("state") or "queued").strip().lower()
-                if state not in {"queued", "retrying", "preparing"}:
+                # Only dequeue items that are actually waiting.
+                # "preparing" items are already active and consume a slot.
+                # If a preparing item goes stale, it is first converted to queued above.
+                if state not in {"queued", "retrying"}:
                     continue
                 next_attempt = _parse_iso(item.get("next_attempt_at"))
                 if next_attempt and next_attempt > now:
