@@ -434,6 +434,20 @@ export default function LivePage() {
     return groups;
   }, [completedRuns]);
 
+  useEffect(() => {
+    setCollapsedCompletedDayIds((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const group of completedRunsByDay) {
+        if (next[group.dayId] == null) {
+          next[group.dayId] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [completedRunsByDay]);
+
   const openRunInCanvas = (run: PipelineRunRecord) => {
     setCustomer(run.customer || "", run.sales_agent || "");
     setCallId(String(run.call_id || "").trim());

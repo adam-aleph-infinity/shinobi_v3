@@ -26,6 +26,8 @@ import { SectionContent } from "@/components/shared/SectionCards";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
+const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v1";
+const MAX_PERSISTED_RUN_LOG_BUCKETS = 40;
 
 // ── Sub-type metadata ─────────────────────────────────────────────────────────
 
@@ -1445,6 +1447,95 @@ function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLog
   }
 }
 
+type PersistedRunLogBucket = {
+  lines: CanvasLogLine[];
+  updated_at: number;
+  run_id?: string;
+};
+
+type PersistedRunLogStore = {
+  by_run_id: Record<string, PersistedRunLogBucket>;
+  by_context: Record<string, PersistedRunLogBucket>;
+};
+
+function readPersistedRunLogStore(): PersistedRunLogStore {
+  if (typeof window === "undefined") return { by_run_id: {}, by_context: {} };
+  try {
+    const raw = window.localStorage.getItem(PIPELINE_RUN_LOGS_STORAGE_KEY);
+    if (!raw) return { by_run_id: {}, by_context: {} };
+    const parsed = JSON.parse(raw);
+    const byRun = (parsed?.by_run_id && typeof parsed.by_run_id === "object") ? parsed.by_run_id : {};
+    const byCtx = (parsed?.by_context && typeof parsed.by_context === "object") ? parsed.by_context : {};
+    return {
+      by_run_id: byRun as Record<string, PersistedRunLogBucket>,
+      by_context: byCtx as Record<string, PersistedRunLogBucket>,
+    };
+  } catch {
+    return { by_run_id: {}, by_context: {} };
+  }
+}
+
+function trimPersistedBuckets(buckets: Record<string, PersistedRunLogBucket>) {
+  const entries = Object.entries(buckets)
+    .sort((a, b) => Number((b[1]?.updated_at || 0)) - Number((a[1]?.updated_at || 0)));
+  if (entries.length <= MAX_PERSISTED_RUN_LOG_BUCKETS) return buckets;
+  const keep = new Set(entries.slice(0, MAX_PERSISTED_RUN_LOG_BUCKETS).map(([k]) => k));
+  const next: Record<string, PersistedRunLogBucket> = {};
+  for (const [k, v] of entries) {
+    if (!keep.has(k)) continue;
+    next[k] = v;
+  }
+  return next;
+}
+
+function writePersistedRunLogStore(store: PersistedRunLogStore) {
+  if (typeof window === "undefined") return;
+  try {
+    const payload: PersistedRunLogStore = {
+      by_run_id: trimPersistedBuckets(store.by_run_id || {}),
+      by_context: trimPersistedBuckets(store.by_context || {}),
+    };
+    window.localStorage.setItem(PIPELINE_RUN_LOGS_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function persistRunLogLines(contextKey: string, runId: string, lines: CanvasLogLine[]) {
+  if (typeof window === "undefined") return;
+  const ctx = String(contextKey || "").trim();
+  const rid = String(runId || "").trim();
+  const store = readPersistedRunLogStore();
+  if (!lines.length) {
+    if (ctx) delete store.by_context[ctx];
+    if (rid) delete store.by_run_id[rid];
+    writePersistedRunLogStore(store);
+    return;
+  }
+  const bucket: PersistedRunLogBucket = {
+    lines: [...lines],
+    updated_at: Date.now(),
+    run_id: rid || undefined,
+  };
+  if (ctx) store.by_context[ctx] = bucket;
+  if (rid) store.by_run_id[rid] = bucket;
+  writePersistedRunLogStore(store);
+}
+
+function restoreRunLogLines(contextKey: string, runId: string): CanvasLogLine[] {
+  if (typeof window === "undefined") return [];
+  const ctx = String(contextKey || "").trim();
+  const rid = String(runId || "").trim();
+  const store = readPersistedRunLogStore();
+  if (rid && store.by_run_id[rid]?.lines?.length) {
+    return store.by_run_id[rid].lines;
+  }
+  if (ctx && store.by_context[ctx]?.lines?.length) {
+    return store.by_context[ctx].lines;
+  }
+  return [];
+}
+
 // ── Inner canvas ──────────────────────────────────────────────────────────────
 
 let nodeSeq = 1;
@@ -1767,6 +1858,15 @@ function PipelineCanvas() {
   );
   const runScope = String(selectedPipeline?.scope || "per_call").toLowerCase();
   const runNeedsCall = runScope !== "per_pair";
+  const runLogContextKey = useMemo(
+    () => [
+      String(pipelineId || "").trim(),
+      String(salesAgent || "").trim(),
+      String(customer || "").trim(),
+      runNeedsCall ? String(callId || "").trim() : "",
+    ].join("|"),
+    [pipelineId, salesAgent, customer, runNeedsCall, callId],
+  );
 
   const liveStateUrl = useMemo(() => {
     if (!pipelineId || !salesAgent || !customer) return null;
@@ -2075,6 +2175,10 @@ function PipelineCanvas() {
   );
 
   useEffect(() => {
+    persistRunLogLines(runLogContextKey, currentRunId, runLogLines);
+  }, [runLogContextKey, currentRunId, runLogLines]);
+
+  useEffect(() => {
     if (running) return;
     const activeRunId = String(
       runContextMode === "historical"
@@ -2083,14 +2187,28 @@ function PipelineCanvas() {
     ).trim();
     if (!activeRunId) {
       if (runContextMode === "new") {
-        setRunLogLines([]);
+        const restored = restoreRunLogLines(runLogContextKey, "");
+        setRunLogLines(restored.length ? restored : []);
       }
       return;
     }
     const runRow = (runsData ?? []).find((r) => String(r.id || "").trim() === activeRunId)
       ?? historyRuns.find((r) => String(r.id || "").trim() === activeRunId);
-    if (!runRow) return;
-    setRunLogLines(parseSavedRunLogLines(runRow.log_json));
+    if (runRow) {
+      const parsed = parseSavedRunLogLines(runRow.log_json);
+      if (parsed.length) {
+        setRunLogLines(parsed);
+        return;
+      }
+    }
+    const restored = restoreRunLogLines(runLogContextKey, activeRunId);
+    if (restored.length) {
+      setRunLogLines(restored);
+      return;
+    }
+    if (runContextMode === "new") {
+      setRunLogLines([]);
+    }
   }, [
     running,
     runContextMode,
@@ -2099,6 +2217,7 @@ function PipelineCanvas() {
     currentRunId,
     historyRuns,
     runsData,
+    runLogContextKey,
   ]);
 
   useEffect(() => {
@@ -4412,6 +4531,23 @@ function PipelineCanvas() {
     setCurrentRunId((prev) => (prev === fromLive ? prev : fromLive));
   }, [livePipelineState?.run_id, running]);
 
+  useEffect(() => {
+    if (running) return;
+    if (runContextMode !== "new") return;
+    if (currentRunId) return;
+    const fromLive = String(livePipelineState?.run_id || "").trim();
+    if (!fromLive) return;
+    const liveStatus = String(livePipelineState?.status || "").toLowerCase().trim();
+    const isActiveLive =
+      liveStatus === "running"
+      || liveStatus === "started"
+      || liveStatus === "preparing"
+      || liveStatus === "queued"
+      || liveStatus === "retrying";
+    if (!isActiveLive) return;
+    setCurrentRunId(fromLive);
+  }, [running, runContextMode, currentRunId, livePipelineState?.run_id, livePipelineState?.status]);
+
   // Sync agentDraft when selected node changes — always init so prompts are visible immediately
   useEffect(() => {
     if (!selData || selKind !== "processing") { setAgentDraft(null); return; }
@@ -5376,7 +5512,10 @@ function PipelineCanvas() {
     return (
       <div className="h-full min-h-0 p-3">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
-          <div className="lg:col-span-8 min-h-0 overflow-y-auto pr-1 space-y-4">
+          <div className={cn(
+            "min-h-0 overflow-y-auto pr-1 space-y-4",
+            selKind === "input" ? "lg:col-span-4" : "lg:col-span-8",
+          )}>
             <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
               <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
               <div className="min-w-0">
@@ -5556,10 +5695,13 @@ function PipelineCanvas() {
             </button>
           </div>
 
-          <div className="lg:col-span-4 min-h-0 overflow-y-auto space-y-2.5">
+          <div className={cn(
+            "min-h-0 overflow-y-auto space-y-2.5",
+            selKind === "input" ? "lg:col-span-8" : "lg:col-span-4",
+          )}>
             {selKind === "input" && (
               <PropertiesSection title="Input Data">
-                <div className="space-y-2">
+                <div className="space-y-2 min-h-[56vh]">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] text-gray-500">
                       Context: {salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"}
