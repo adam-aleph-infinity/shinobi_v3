@@ -199,11 +199,12 @@ def get_customers(crm: str = Query(""), agent: str = Query("")):
 def calls_by_pair(
     agent: str = Query(...),
     customer: str = Query(""),
+    auto_sync: bool = Query(True, description="Auto-refresh missing calls for this pair before returning"),
+    max_refresh_pairs: int = Query(4, ge=1, le=20),
     db: Session = Depends(get_session),
 ):
-    """Return calls from local DB for an agent/customer pair — no live CRM fetch.
-    Resolves agent aliases so calls stored under any alias name are included.
-    Returns the same shape as /calls/{account_id} for drop-in compatibility."""
+    """Return calls for an agent/customer pair (alias-aware).
+    Prefers local files/DB; auto-syncs missing call sets from CRM when needed."""
     from sqlalchemy import or_
     from ui.backend.models.crm import CRMCall
     from ui.backend.services.crm_service import _load_aliases, _auto_detect_re_aliases
@@ -219,22 +220,111 @@ def calls_by_pair(
     else:
         cond = or_(*[CRMCall.agent == n for n in all_names])
 
-    stmt = select(CRMCall).where(cond)
+    # Determine relevant CRM account targets from crm_pair first.
+    pair_stmt = select(CRMPair)
+    if len(all_names) == 1:
+        pair_stmt = pair_stmt.where(CRMPair.agent == agent)
+    else:
+        pair_stmt = pair_stmt.where(or_(*[CRMPair.agent == n for n in all_names]))
     if customer:
-        stmt = stmt.where(CRMCall.customer == customer)
+        pair_stmt = pair_stmt.where(CRMPair.customer == customer)
+    pair_rows = db.exec(pair_stmt).all()
 
-    rows = db.exec(stmt.order_by(CRMCall.started_at)).all()
-    return [
-        {
-            "call_id":      r.call_id,
-            "date":         r.started_at or "",
-            "duration":     int(r.audio_duration_s if r.audio_duration_s is not None else (r.duration_s or 0)),
-            "record_path":  r.record_path or "",
-            "crm_url":      r.crm_url,
-            "account_id":   r.account_id,
-        }
-        for r in rows
-    ]
+    # Fall back to legacy crm_call rows if no pair rows are found.
+    if not pair_rows:
+        stmt = select(CRMCall).where(cond)
+        if customer:
+            stmt = stmt.where(CRMCall.customer == customer)
+        rows = db.exec(stmt.order_by(CRMCall.started_at)).all()
+        return [
+            {
+                "call_id":      r.call_id,
+                "date":         r.started_at or "",
+                "duration":     int(r.audio_duration_s if r.audio_duration_s is not None else (r.duration_s or 0)),
+                "record_path":  r.record_path or "",
+                "crm_url":      r.crm_url,
+                "account_id":   r.account_id,
+            }
+            for r in rows
+        ]
+
+    targets: list[tuple[str, str, str, int]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for p in pair_rows:
+        crm_url = str(p.crm_url or "").strip()
+        account_id = str(p.account_id or "").strip()
+        cust = str(p.customer or customer or "").strip()
+        if not crm_url or not account_id:
+            continue
+        key = (crm_url, account_id)
+        if key in seen_targets:
+            continue
+        seen_targets.add(key)
+        targets.append((crm_url, account_id, cust, int(p.call_count or 0)))
+
+    # Auto-heal: refresh only targets that are clearly missing local calls.
+    if auto_sync:
+        refreshed = 0
+        for crm_url, account_id, cust, expected_count in targets:
+            if refreshed >= int(max_refresh_pairs):
+                break
+            local_calls = crm_service.get_calls_local(crm_url=crm_url, agent=agent, customer=cust)
+            local_count = len(local_calls or [])
+            needs_refresh = False
+            if expected_count > 0:
+                # tolerate a tiny drift (1 call) to avoid unnecessary frequent refresh.
+                needs_refresh = (local_count + 1) < expected_count
+            elif local_count == 0:
+                needs_refresh = True
+            if not needs_refresh:
+                continue
+            try:
+                crm_service.refresh_calls(
+                    account_id=account_id,
+                    crm_url=crm_url,
+                    agent=agent,
+                    customer=cust,
+                )
+                refreshed += 1
+            except Exception:
+                # best-effort; we'll still return whatever is available
+                pass
+
+    # Merge calls from all discovered account targets.
+    merged: dict[tuple[str, str], dict] = {}
+    for crm_url, account_id, cust, _expected_count in targets:
+        # Prefer calls.json (freshly refreshed) over legacy crm_call rows.
+        calls = crm_service.get_calls_local(crm_url=crm_url, agent=agent, customer=cust)
+        if not calls:
+            calls = crm_service.get_calls(
+                account_id=account_id,
+                crm_url=crm_url,
+                agent=agent,
+                customer=cust,
+            )
+        for c in calls or []:
+            cid = str(c.get("call_id", c.get("id", ""))).strip()
+            if not cid:
+                continue
+            key = (crm_url, cid)
+            started_at = str(c.get("started_at", c.get("date", "")) or "").strip()
+            duration_val = c.get("audio_duration_s", c.get("duration_s", c.get("duration", 0)))
+            try:
+                duration = int(float(duration_val or 0))
+            except Exception:
+                duration = 0
+            merged[key] = {
+                "call_id": cid,
+                "date": started_at,
+                "duration": duration,
+                "record_path": str(c.get("record_path", "")),
+                "crm_url": crm_url,
+                "account_id": account_id,
+            }
+
+    out = list(merged.values())
+    out.sort(key=lambda row: str(row.get("date") or ""))
+    return out
 
 
 @router.get("/calls/{account_id}")

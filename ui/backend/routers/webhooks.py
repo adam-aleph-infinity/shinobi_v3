@@ -316,7 +316,18 @@ def _upsert_pipeline_run_stub(
         pass
 
 
-def _count_running_pipeline_runs() -> int:
+def _count_running_pipeline_runs(active_queue_items: Optional[list[dict[str, Any]]] = None) -> int:
+    # Prefer queue-driven counting to avoid stale DB "running" rows blocking slots forever.
+    if isinstance(active_queue_items, list):
+        total = 0
+        for item in active_queue_items:
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state") or "").strip().lower()
+            # preparing consumes a live slot (transcription/backfill work is active).
+            if state in {"running", "preparing"}:
+                total += 1
+        return total
     try:
         with Session(_db_engine) as s:
             rows = s.exec(
@@ -878,6 +889,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     max_running = int(cfg.get("max_live_running") or 5)
     now = datetime.now(timezone.utc)
     preparing_stale_after_s = 90
+    running_stale_after_s = max(300, int(cfg.get("running_stale_after_s") or 900))
 
     async with _LIVE_QUEUE_LOCK:
         queue = _load_live_queue()
@@ -943,6 +955,51 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                     item["updated_at"] = _utc_now_iso()
                     changed = True
                     continue
+                # Recovery path: long-stuck "running"/"retrying" queue items are recycled.
+                if state in {"running", "retrying"}:
+                    updated_dt = _parse_iso(item.get("updated_at"))
+                    is_stale = (
+                        updated_dt is None
+                        or (now - updated_dt).total_seconds() >= running_stale_after_s
+                    )
+                    if is_stale:
+                        err_text = str(item.get("last_error") or "stale running item recovered")
+                        attempts = int(item.get("attempts") or 0)
+                        max_attempts = int(item.get("max_attempts") or int(cfg.get("retry_max_attempts") or 2))
+                        can_retry = bool(cfg.get("auto_retry_enabled", True)) and attempts < max_attempts
+                        if can_retry:
+                            item["state"] = "retrying"
+                            item["next_attempt_at"] = (
+                                now + timedelta(seconds=int(cfg.get("retry_delay_s") or 45))
+                            ).isoformat()
+                            item["last_error"] = err_text
+                            item["updated_at"] = _utc_now_iso()
+                            _upsert_pipeline_run_stub(
+                                run_id=run_id,
+                                pipeline_id=str(item.get("pipeline_id") or ""),
+                                pipeline_name=str(item.get("pipeline_name") or ""),
+                                sales_agent=str(item.get("sales_agent") or ""),
+                                customer=str(item.get("customer") or ""),
+                                call_id=str(item.get("call_id") or ""),
+                                status="retrying",
+                                log_line="Recovered stale running item; retry scheduled.",
+                            )
+                        else:
+                            item["state"] = "failed"
+                            item["last_error"] = err_text or "stale running item failed"
+                            item["updated_at"] = _utc_now_iso()
+                            _upsert_pipeline_run_stub(
+                                run_id=run_id,
+                                pipeline_id=str(item.get("pipeline_id") or ""),
+                                pipeline_name=str(item.get("pipeline_name") or ""),
+                                sales_agent=str(item.get("sales_agent") or ""),
+                                customer=str(item.get("customer") or ""),
+                                call_id=str(item.get("call_id") or ""),
+                                status="failed",
+                                log_line="Recovered stale running item; marked failed.",
+                            )
+                        changed = True
+                        continue
                 # Recovery path: a queue item can be left in "preparing" after restart/interruption.
                 # Re-queue it so dispatcher can attempt preflight again.
                 if state == "preparing":
@@ -967,7 +1024,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                         )
                         changed = True
 
-        running_count = _count_running_pipeline_runs()
+        running_count = _count_running_pipeline_runs(queue)
         slots = max(0, max_running - running_count)
         if slots <= 0:
             if changed:

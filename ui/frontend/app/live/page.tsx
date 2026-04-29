@@ -33,6 +33,11 @@ interface PipelineRunRecord {
   run_origin?: string;
 }
 
+interface PhaseBadge {
+  label: string;
+  tone: string;
+}
+
 interface LiveWebhookConfig {
   enabled: boolean;
   ingest_only: boolean;
@@ -72,7 +77,7 @@ function isCompletedRun(status: string): boolean {
 
 function isQueuedRun(status: string): boolean {
   const s = String(status || "").toLowerCase();
-  return s === "queued" || s === "preparing";
+  return s === "queued";
 }
 
 function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "local" {
@@ -100,6 +105,86 @@ function durationStr(startedAt: string | null | undefined, finishedAt: string | 
   if (sec < 60) return `${sec}s`;
   const min = Math.floor(sec / 60);
   return `${min}m ${sec % 60}s`;
+}
+
+function _safeJsonArray(raw: unknown): any[] {
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw || "[]") : raw;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function _phaseTone(label: string): string {
+  const k = String(label || "").toLowerCase();
+  if (k === "transcript") return "text-cyan-200 border-cyan-700/50 bg-cyan-950/40";
+  if (k === "merge") return "text-indigo-200 border-indigo-700/50 bg-indigo-950/40";
+  if (k === "input") return "text-blue-200 border-blue-700/50 bg-blue-950/40";
+  if (k === "output") return "text-emerald-200 border-emerald-700/50 bg-emerald-950/40";
+  if (k === "processing") return "text-amber-200 border-amber-700/50 bg-amber-950/40";
+  if (k === "retrying") return "text-violet-200 border-violet-700/50 bg-violet-950/40";
+  if (k === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
+  return "text-gray-200 border-gray-700/50 bg-gray-900/50";
+}
+
+function _phaseFromName(stepName: string, state: string): string {
+  const name = String(stepName || "").toLowerCase();
+  const st = String(state || "").toLowerCase();
+  if (name.includes("transcript") || name.includes("audio")) return "transcript";
+  if (name.includes("merge")) return "merge";
+  if (name.includes("input")) return "input";
+  if (name.includes("artifact") || name.includes("output")) return "output";
+  if (st.includes("input_prepared")) return "merge";
+  return "processing";
+}
+
+function inferPhaseBadges(run: PipelineRunRecord): PhaseBadge[] {
+  const status = String(run.status || "").toLowerCase();
+  if (status === "queued") return [{ label: "queued", tone: _phaseTone("queued") }];
+  if (status === "retrying") return [{ label: "retrying", tone: _phaseTone("retrying") }];
+
+  const logs = _safeJsonArray(run.log_json);
+  const steps = _safeJsonArray(run.steps_json);
+  const lastText = String((logs.length ? logs[logs.length - 1]?.text : "") || "").toLowerCase();
+
+  if (status === "preparing") {
+    if (lastText.includes("transcript") || lastText.includes("backfill") || lastText.includes("audio")) {
+      return [{ label: "transcript", tone: _phaseTone("transcript") }];
+    }
+    if (lastText.includes("merge")) {
+      return [{ label: "merge", tone: _phaseTone("merge") }];
+    }
+    if (lastText.includes("input")) {
+      return [{ label: "input", tone: _phaseTone("input") }];
+    }
+    return [{ label: "processing", tone: _phaseTone("processing") }];
+  }
+
+  if (!isCompletedRun(status)) {
+    const phases: string[] = [];
+    const seen = new Set<string>();
+    for (const step of steps) {
+      if (!step || typeof step !== "object") continue;
+      const st = String((step as any).state || (step as any).status || "").toLowerCase();
+      if (!st || st === "waiting" || st === "pending" || st === "done" || st === "completed" || st === "success") {
+        continue;
+      }
+      const phase = _phaseFromName(String((step as any).agent_name || ""), st);
+      if (!seen.has(phase)) {
+        seen.add(phase);
+        phases.push(phase);
+      }
+    }
+    if (phases.length === 0) {
+      if (lastText.includes("merge")) phases.push("merge");
+      else if (lastText.includes("input")) phases.push("input");
+      else if (lastText.includes("artifact") || lastText.includes("output")) phases.push("output");
+      else phases.push("processing");
+    }
+    return phases.map((label) => ({ label, tone: _phaseTone(label) }));
+  }
+  return [];
 }
 
 export default function LivePage() {
@@ -393,6 +478,22 @@ export default function LivePage() {
         <span>{relativeTime(run.started_at)}</span>
         <span>{durationStr(run.started_at, run.finished_at)}</span>
       </div>
+      {(() => {
+        const phases = inferPhaseBadges(run);
+        if (!phases.length) return null;
+        return (
+          <div className="mt-1.5 flex flex-col gap-1">
+            {phases.map((p, idx) => (
+              <span
+                key={`${run.id}-phase-${idx}-${p.label}`}
+                className={cn("inline-flex w-fit text-[10px] px-1.5 py-0.5 rounded border font-semibold", p.tone)}
+              >
+                {p.label}
+              </span>
+            ))}
+          </div>
+        );
+      })()}
       <div className="mt-1 text-[10px] text-gray-500 truncate">
         CRM: {run.crm_url || "unknown"}
       </div>
