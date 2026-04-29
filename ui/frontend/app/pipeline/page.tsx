@@ -2718,7 +2718,10 @@ function PipelineCanvas() {
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
     if (canvasLocked) return;
-    markElementMutation();
+    const shouldMarkDirty = changes.some((c) =>
+      c.type === "position" || c.type === "remove" || c.type === "add" || c.type === "replace"
+    );
+    if (shouldMarkDirty) markElementMutation();
     const processed = changes.map(c => {
       if (c.type === "position" && c.position) {
         const node = nodesRef.current.find(n => n.id === c.id);
@@ -2975,9 +2978,13 @@ function PipelineCanvas() {
 
   const onPaneClick = useCallback(() => setSelectedNodeId(null), []);
 
-  function updateNodeData(id: string, patch: Partial<PipelineNodeData>) {
+  function updateNodeData(
+    id: string,
+    patch: Partial<PipelineNodeData>,
+    opts?: { markDirty?: boolean },
+  ) {
     if (canvasLocked) return;
-    markElementMutation();
+    if (opts?.markDirty !== false) markElementMutation();
     setNodes(ns => ns.map(n =>
       n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
     ));
@@ -4409,7 +4416,7 @@ function PipelineCanvas() {
       setAgentSaved(false);
     }
     if (nodeClass !== inferred) {
-      updateNodeData(selectedNodeId, { agentClass: inferred });
+      updateNodeData(selectedNodeId, { agentClass: inferred }, { markDirty: false });
     }
   }, [
     selKind,
