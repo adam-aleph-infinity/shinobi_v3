@@ -111,7 +111,22 @@ type ArtifactViewerState = {
   selected_idx: number;
 };
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const fetcher = async (url: string) => {
+  const res = await fetch(url, { cache: "no-store" });
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error("Invalid JSON response");
+  }
+  if (!res.ok) {
+    const msg = String(data?.detail || data?.error || data?.message || `HTTP ${res.status}`);
+    throw new Error(msg);
+  }
+  return data;
+};
 
 function normalizeCallId(raw: string | null | undefined): string {
   return String(raw || "").trim().toLowerCase();
@@ -310,21 +325,25 @@ export default function AgentDeepDiveView({
       : null,
     fetcher,
   );
+  const pipelinesSafe: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
+  const pipelineRunsSafe: PipelineRunLite[] = Array.isArray(pipelineRuns) ? pipelineRuns : [];
+  const crmCallsSafe: CRMCallLite[] = Array.isArray(crmCalls) ? crmCalls : [];
+  const transcriptCallsSafe: FinalTranscriptCall[] = Array.isArray(transcriptCalls) ? transcriptCalls : [];
 
   const callIdsForStatus = useMemo(() => {
     const byNorm = new Map<string, string>();
-    (crmCalls ?? []).forEach((c) => {
+    crmCallsSafe.forEach((c) => {
       const raw = String(c.call_id || "").trim();
       const norm = normalizeCallId(raw);
       if (norm && !byNorm.has(norm)) byNorm.set(norm, raw);
     });
-    (transcriptCalls ?? []).forEach((t) => {
+    transcriptCallsSafe.forEach((t) => {
       const raw = String(t.call_id || "").trim();
       const norm = normalizeCallId(raw);
       if (norm && !byNorm.has(norm)) byNorm.set(norm, raw);
     });
     return Array.from(byNorm.values()).join(",");
-  }, [crmCalls, transcriptCalls]);
+  }, [crmCallsSafe, transcriptCallsSafe]);
 
   const { data: pipelineArtifactStatus } = useSWR<PipelineArtifactStatus>(
     activePipelineId && salesAgent && customer
@@ -346,7 +365,7 @@ export default function AgentDeepDiveView({
       string,
       { call_id: string; date: string; duration_s: number }
     >();
-    (crmCalls ?? []).forEach((c) => {
+    crmCallsSafe.forEach((c) => {
       const raw = String(c.call_id || "").trim();
       const norm = normalizeCallId(raw);
       if (!norm) return;
@@ -356,7 +375,7 @@ export default function AgentDeepDiveView({
         duration_s: Number(c.duration || 0),
       });
     });
-    (transcriptCalls ?? []).forEach((t) => {
+    transcriptCallsSafe.forEach((t) => {
       const raw = String(t.call_id || "").trim();
       const norm = normalizeCallId(raw);
       if (!norm || byNorm.has(norm)) return;
@@ -376,17 +395,17 @@ export default function AgentDeepDiveView({
     });
     list.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
     return list;
-  }, [crmCalls, transcriptCalls, callDates]);
+  }, [crmCallsSafe, transcriptCallsSafe, callDates]);
 
   const transcriptCallMapByNorm = useMemo(() => {
     const out = new Map<string, FinalTranscriptCall>();
-    for (const c of transcriptCalls ?? []) {
+    for (const c of transcriptCallsSafe) {
       const key = normalizeCallId(c.call_id);
       if (!key || out.has(key)) continue;
       out.set(key, c);
     }
     return out;
-  }, [transcriptCalls]);
+  }, [transcriptCallsSafe]);
 
   const pipelineCallMapByNorm = useMemo(() => {
     const out: Record<string, PipelineArtifactState> = {};
@@ -519,7 +538,7 @@ export default function AgentDeepDiveView({
   }, [pipelineDef]);
 
   const parsedRuns = useMemo<ParsedPipelineRun[]>(() => {
-    const rows = pipelineRuns ?? [];
+    const rows = pipelineRunsSafe;
     return rows.map((run) => {
       let parsedSteps: Array<Record<string, any>> = [];
       try {
@@ -541,7 +560,7 @@ export default function AgentDeepDiveView({
         started_key: Number.isFinite(startedKey) ? startedKey : 0,
       };
     });
-  }, [pipelineRuns]);
+  }, [pipelineRunsSafe]);
 
   const finalRunsByCall = useMemo(() => {
     const byCall = new Map<string, ParsedPipelineRun[]>();
@@ -649,8 +668,11 @@ export default function AgentDeepDiveView({
     let cancelled = false;
 
     const run = async () => {
-      const chunk = callsNeedingFallback.slice(0, 24);
-      const fetched = await Promise.all(chunk.map(async (cid) => {
+      const chunk = callsNeedingFallback.slice(0, 12);
+      const fetched: Array<{ cid: string; items: CallArtifactItem[] }> = [];
+      const concurrency = 4;
+
+      const fetchOne = async (cid: string) => {
         const qs = new URLSearchParams({
           sales_agent: salesAgent,
           customer,
@@ -684,7 +706,14 @@ export default function AgentDeepDiveView({
         } catch {
           return { cid, items: [] as CallArtifactItem[] };
         }
-      }));
+      };
+
+      for (let i = 0; i < chunk.length; i += concurrency) {
+        const batch = chunk.slice(i, i + concurrency);
+        const rows = await Promise.all(batch.map((cid) => fetchOne(cid)));
+        fetched.push(...rows);
+        if (cancelled) return;
+      }
 
       if (cancelled) return;
       setFallbackArtifactsByCall((prev) => {
@@ -834,13 +863,13 @@ export default function AgentDeepDiveView({
             value={activePipelineId || ""}
             onChange={(e) => {
               const id = String(e.target.value || "");
-              const p = (pipelines ?? []).find((x) => x.id === id);
+              const p = pipelinesSafe.find((x) => x.id === id);
               setActivePipeline(id, p?.name || "");
             }}
             className="h-7 rounded border border-gray-700 bg-gray-900 px-2 text-[11px] text-gray-200 min-w-[210px] max-w-[300px] truncate"
           >
             <option value="">Select pipeline…</option>
-            {(pipelines ?? []).map((p) => (
+            {pipelinesSafe.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
