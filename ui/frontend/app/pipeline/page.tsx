@@ -2886,6 +2886,30 @@ function PipelineCanvas() {
     mutate("/api/pipelines/folders");
   }
 
+  async function deletePipelineFolder(folder: string) {
+    if (canvasLocked) return;
+    const name = (folder ?? "").trim();
+    if (!name) return;
+    const list = pipelinesByFolder[name] ?? [];
+    const msg = list.length > 0
+      ? `Delete folder "${name}"? ${list.length} pipeline(s) inside will be moved to Unfiled.`
+      : `Delete folder "${name}"?`;
+    if (!window.confirm(msg)) return;
+    const res = await fetch("/api/pipelines/folders", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      showToast("Could not delete folder", false);
+      return;
+    }
+    if (pipelineFolder === name) setPipelineFolder("");
+    mutate("/api/pipelines");
+    mutate("/api/pipelines/folders");
+    showToast(`Folder "${name}" deleted`, true);
+  }
+
   async function movePipelineToFolder(pid: string, folder: string) {
     if (canvasLocked) return;
     const res = await fetch(`/api/pipelines/${pid}/folder`, {
@@ -5628,7 +5652,19 @@ function PipelineCanvas() {
                       "rounded-lg border p-1 transition-colors",
                       dragOverPipelineFolder === section.key ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
                     )}>
-                    <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest px-1.5 mb-0.5">{section.label}</p>
+                    <div className="flex items-center gap-1 px-1.5 mb-0.5">
+                      <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest flex-1">{section.label}</p>
+                      {section.key !== "" && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.key); }}
+                          disabled={canvasLocked}
+                          title="Delete folder (move pipelines to Unfiled)"
+                          className="shrink-0 p-0.5 text-gray-700 hover:text-red-400 transition-colors"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
                     {list.length === 0 ? (
                       <p className="text-[9px] text-gray-700 italic px-2 py-1">Drop pipelines here</p>
                     ) : list.map(p => (

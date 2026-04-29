@@ -704,6 +704,10 @@ class FolderIn(BaseModel):
     name: str
 
 
+class FolderDeleteIn(BaseModel):
+    name: str
+
+
 class FolderMoveIn(BaseModel):
     folder: str = ""
 
@@ -2019,6 +2023,34 @@ def create_pipeline_folder(req: FolderIn):
         raise HTTPException(400, "Folder name is required")
     _ensure_folder_exists(name)
     return {"ok": True, "folder": name}
+
+
+@router.delete("/folders")
+def delete_pipeline_folder(req: FolderDeleteIn):
+    target = _normalise_folder(req.name)
+    if not target:
+        raise HTTPException(400, "Folder name is required")
+
+    # Default/Unfiled is represented as empty folder and cannot be deleted.
+    if target.lower() in {"unfiled", "default"}:
+        raise HTTPException(400, "Default folder cannot be deleted")
+
+    moved = 0
+    for file in _DIR.glob("*.json"):
+        data = json.loads(file.read_text(encoding="utf-8"))
+        cur = _normalise_folder(str(data.get("folder", "") or ""))
+        if cur.lower() != target.lower():
+            continue
+        data["folder"] = ""
+        data["updated_at"] = datetime.utcnow().isoformat()
+        file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        moved += 1
+
+    folders = _load_folders()
+    folders = [f for f in folders if _normalise_folder(f).lower() != target.lower()]
+    _save_folders(folders)
+    _sync_ai_registry_pipelines()
+    return {"ok": True, "deleted_folder": target, "moved_to_default": moved}
 
 
 @router.post("")
