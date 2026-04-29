@@ -9,7 +9,7 @@ from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func as _sql_func, or_ as _sql_or
 from sqlmodel import Session, select
@@ -1962,11 +1962,14 @@ async def handle_call_updated_webhook(
             body = await request.json()
         except Exception:
             body = {}
-        # Unwrap {"payload": {...}} if present
-        if isinstance(body.get("payload"), dict):
-            raw = body["payload"]
-        elif isinstance(body, dict):
-            raw = body
+        if isinstance(body, dict):
+            # Unwrap {"payload": {...}} if present
+            if isinstance(body.get("payload"), dict):
+                raw = body["payload"]
+            else:
+                raw = body
+        else:
+            raw = {}
     else:
         # form-urlencoded fallback
         try:
@@ -1975,15 +1978,22 @@ async def handle_call_updated_webhook(
         except Exception:
             raw = {}
 
+    duration_val: Optional[int] = None
+    try:
+        if raw.get("duration") not in (None, "", "null"):
+            duration_val = int(str(raw.get("duration")).strip())
+    except Exception:
+        duration_val = None
+
     payload = CallEndedWebhookPayload(
-        call_id=str(raw.get("call_id") or ""),
-        account_id=str(raw.get("account_id") or ""),
-        agent=str(raw.get("agent") or ""),
-        record_path=str(raw.get("record_path") or ""),
-        duration=int(raw["duration"]) if raw.get("duration") else None,
-        crm_url=str(raw.get("crm_url") or ""),
-        customer=str(raw.get("customer") or ""),
-        token=str(raw.get("token") or ""),
+        call_id=str(raw.get("call_id") or "").strip(),
+        account_id=str(raw.get("account_id") or "").strip(),
+        agent=str(raw.get("agent") or "").strip(),
+        record_path=str(raw.get("record_path") or "").strip(),
+        duration=duration_val,
+        crm_url=str(raw.get("crm_url") or "").strip(),
+        customer=str(raw.get("customer") or "").strip(),
+        token=str(raw.get("token") or "").strip(),
     )
     return await _handle_call_webhook(
         payload=payload,
