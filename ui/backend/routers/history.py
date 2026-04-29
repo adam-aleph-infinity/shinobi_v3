@@ -171,45 +171,49 @@ def list_runs(
     db: Session = Depends(get_session),
 ):
     """Return recent pipeline runs, newest first."""
+    mirror_error: Optional[str] = None
     if bool(mirror) and _is_live_mirror_mode(request):
         base = str(settings.live_mirror_base_url or "").strip().rstrip("/")
-        url = f"{base}/api/history/runs"
-        params = {
-            "sales_agent": sales_agent,
-            "customer": customer,
-            "pipeline_id": pipeline_id,
-            "call_id": call_id,
-            "status": status,
-            "crm_url": crm_url,
-            "date_from": date_from,
-            "date_to": date_to,
-            "sort_by": sort_by,
-            "sort_dir": sort_dir,
-            "limit": limit,
-            "compact": 1 if bool(compact) else 0,
-        }
-        timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
-        try:
-            with httpx.Client(timeout=timeout_s, headers=_live_mirror_headers()) as client:
-                resp = client.get(url, params=params)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Live mirror request failed: {e}") from e
-        if resp.status_code >= 400:
-            detail = resp.text
+        if base:
+            url = f"{base}/api/history/runs"
+            params = {
+                "sales_agent": sales_agent,
+                "customer": customer,
+                "pipeline_id": pipeline_id,
+                "call_id": call_id,
+                "status": status,
+                "crm_url": crm_url,
+                "date_from": date_from,
+                "date_to": date_to,
+                "sort_by": sort_by,
+                "sort_dir": sort_dir,
+                "limit": limit,
+                "compact": 1 if bool(compact) else 0,
+            }
+            timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
             try:
-                parsed = resp.json()
-                if isinstance(parsed, dict):
-                    detail = str(parsed.get("detail") or parsed.get("error") or detail)
-            except Exception:
-                pass
-            raise HTTPException(status_code=resp.status_code, detail=f"Live mirror error: {detail}")
-        try:
-            data = resp.json()
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Live mirror returned invalid JSON: {e}") from e
-        if not isinstance(data, list):
-            raise HTTPException(status_code=502, detail="Live mirror returned invalid runs payload.")
-        return data
+                with httpx.Client(timeout=timeout_s, headers=_live_mirror_headers()) as client:
+                    resp = client.get(url, params=params)
+                if resp.status_code < 400:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        return data
+                    mirror_error = "Live mirror returned invalid runs payload type."
+                else:
+                    detail = resp.text
+                    try:
+                        parsed = resp.json()
+                        if isinstance(parsed, dict):
+                            detail = str(parsed.get("detail") or parsed.get("error") or detail)
+                    except Exception:
+                        pass
+                    mirror_error = f"Live mirror error: {detail}"
+            except Exception as e:
+                mirror_error = f"Live mirror request failed: {e}"
+        else:
+            mirror_error = "Live mirror is enabled but LIVE_MIRROR_BASE_URL is empty."
+        if mirror_error:
+            print(f"[history] mirror fallback to local runs: {mirror_error}")
 
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.crm import CRMCall, CRMPair
