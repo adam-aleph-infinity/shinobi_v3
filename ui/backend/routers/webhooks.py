@@ -1029,6 +1029,22 @@ def _recover_orphaned_live_queue_items(
         for item in queue
         if isinstance(item, dict)
     }
+    active_states = {"queued", "preparing", "running", "retrying"}
+    existing_active_keys: set[tuple[str, str, str, str]] = set()
+    for item in queue:
+        if not isinstance(item, dict):
+            continue
+        st = str(item.get("state") or "").strip().lower()
+        if st not in active_states:
+            continue
+        k = (
+            str(item.get("pipeline_id") or "").strip(),
+            str(item.get("sales_agent") or "").strip(),
+            str(item.get("customer") or "").strip(),
+            str(item.get("call_id") or "").strip(),
+        )
+        if all(k):
+            existing_active_keys.add(k)
     now_iso = _utc_now_iso()
     recovered = 0
 
@@ -1042,6 +1058,8 @@ def _recover_orphaned_live_queue_items(
     except Exception:
         rows = []
 
+    seen_active_keys = set(existing_active_keys)
+
     for row in rows or []:
         run_id = str(getattr(row, "id", "") or "").strip()
         if not run_id or run_id in existing_run_ids:
@@ -1051,6 +1069,41 @@ def _recover_orphaned_live_queue_items(
 
         row_status = str(getattr(row, "status", "") or "").strip().lower()
         if row_status not in {"queued", "preparing", "running", "retrying"}:
+            continue
+
+        row_key = (
+            str(getattr(row, "pipeline_id", "") or "").strip(),
+            str(getattr(row, "sales_agent", "") or "").strip(),
+            str(getattr(row, "customer", "") or "").strip(),
+            str(getattr(row, "call_id", "") or "").strip(),
+        )
+        if all(row_key) and row_key in seen_active_keys:
+            # Suppress duplicate active rows for the same logical run key so they
+            # do not keep reappearing in queue recovery cycles.
+            try:
+                with Session(_db_engine) as s:
+                    db_row = s.get(PipelineRun, run_id)
+                    if db_row and str(getattr(db_row, "status", "") or "").lower() in active_states:
+                        db_row.status = "cancelled"
+                        logs = []
+                        try:
+                            raw_logs = json.loads(str(getattr(db_row, "log_json", "") or "[]"))
+                            if isinstance(raw_logs, list):
+                                logs = raw_logs
+                        except Exception:
+                            logs = []
+                        logs.append(
+                            {
+                                "ts": _utc_now_iso(),
+                                "text": "Suppressed duplicate active webhook run during queue recovery.",
+                                "level": "pipeline",
+                            }
+                        )
+                        db_row.log_json = json.dumps(logs[-400:], ensure_ascii=False)
+                        s.add(db_row)
+                        s.commit()
+            except Exception:
+                pass
             continue
 
         queue_state = "queued" if row_status == "preparing" else row_status
@@ -1085,6 +1138,8 @@ def _recover_orphaned_live_queue_items(
                 "payload": payload,
             }
         )
+        if all(row_key):
+            seen_active_keys.add(row_key)
         existing_run_ids.add(run_id)
         recovered += 1
         if queue_state in {"queued", "retrying"}:
