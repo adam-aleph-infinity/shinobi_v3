@@ -877,6 +877,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
 
     max_running = int(cfg.get("max_live_running") or 5)
     now = datetime.now(timezone.utc)
+    preparing_stale_after_s = 90
 
     async with _LIVE_QUEUE_LOCK:
         queue = _load_live_queue()
@@ -935,6 +936,36 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                         item["last_error"] = err_text or str(item.get("last_error") or "Run failed")
                         item["updated_at"] = _utc_now_iso()
                     changed = True
+                    continue
+                # If a run already moved from preflight to active status, sync queue state.
+                if row_status in {"running", "retrying"} and state != row_status:
+                    item["state"] = row_status
+                    item["updated_at"] = _utc_now_iso()
+                    changed = True
+                    continue
+                # Recovery path: a queue item can be left in "preparing" after restart/interruption.
+                # Re-queue it so dispatcher can attempt preflight again.
+                if state == "preparing":
+                    updated_dt = _parse_iso(item.get("updated_at"))
+                    is_stale = (
+                        updated_dt is None
+                        or (now - updated_dt).total_seconds() >= preparing_stale_after_s
+                    )
+                    if is_stale:
+                        item["state"] = "queued"
+                        item["updated_at"] = _utc_now_iso()
+                        item["last_error"] = str(item.get("last_error") or "")
+                        _upsert_pipeline_run_stub(
+                            run_id=run_id,
+                            pipeline_id=str(item.get("pipeline_id") or ""),
+                            pipeline_name=str(item.get("pipeline_name") or ""),
+                            sales_agent=str(item.get("sales_agent") or ""),
+                            customer=str(item.get("customer") or ""),
+                            call_id=str(item.get("call_id") or ""),
+                            status="queued",
+                            log_line="Recovered stale preflight item; re-queued.",
+                        )
+                        changed = True
 
         running_count = _count_running_pipeline_runs()
         slots = max(0, max_running - running_count)
@@ -948,7 +979,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
             if slots <= 0:
                 break
             state = str(item.get("state") or "queued").strip().lower()
-            if state not in {"queued", "retrying"}:
+            if state not in {"queued", "retrying", "preparing"}:
                 continue
             next_attempt = _parse_iso(item.get("next_attempt_at"))
             if next_attempt and next_attempt > now:
@@ -974,7 +1005,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 sales_agent=str(item.get("sales_agent") or ""),
                 customer=str(item.get("customer") or ""),
                 call_id=str(item.get("call_id") or ""),
-                status="queued",
+                status="preparing",
                 log_line="Dequeued for preflight checks",
             )
             changed = True
@@ -989,7 +1020,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                         sales_agent=str(item.get("sales_agent") or ""),
                         customer=str(item.get("customer") or ""),
                         call_id=str(item.get("call_id") or ""),
-                        status="queued",
+                        status="preparing",
                         log_line="Backfilling historical transcripts (skipping existing)",
                     )
                     backfill = await _backfill_pair_transcripts(pair, cfg)
@@ -1004,7 +1035,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                         sales_agent=str(item.get("sales_agent") or ""),
                         customer=str(item.get("customer") or ""),
                         call_id=str(item.get("call_id") or ""),
-                        status="queued",
+                        status="preparing",
                         log_line=(
                             f"Backfill done: submitted {int(backfill.get('submitted') or 0)}, "
                             f"skipped {int(backfill.get('skipped') or 0)}."

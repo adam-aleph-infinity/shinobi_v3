@@ -6737,11 +6737,17 @@ function PipelineCanvas() {
                     const historicalSelected = runContextMode === "historical" && selectedCacheRunId === run.id;
                     const timeline = runTimelineById.get(run.id);
                     const runStatus = String(run.status || "").toLowerCase();
-                    const runStatusClass = runStatus === "done"
+                    const runStatusClass = runStatus === "done" || runStatus === "completed"
                       ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                      : runStatus === "error"
+                      : runStatus === "error" || runStatus === "failed"
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
-                        : "text-orange-300 border-orange-700/50 bg-orange-950/40";
+                        : runStatus === "queued"
+                          ? "text-sky-200 border-sky-700/50 bg-sky-950/40"
+                          : runStatus === "preparing"
+                            ? "text-cyan-200 border-cyan-700/50 bg-cyan-950/40"
+                            : runStatus === "retrying"
+                              ? "text-violet-200 border-violet-700/50 bg-violet-950/40"
+                              : "text-orange-300 border-orange-700/50 bg-orange-950/40";
                     return (
                       <div
                         key={run.id}

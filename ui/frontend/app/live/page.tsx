@@ -58,6 +58,7 @@ interface LiveWebhookConfig {
 function statusTone(status: string): string {
   const s = String(status || "").toLowerCase();
   if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
+  if (s === "preparing") return "text-cyan-200 border-cyan-700/50 bg-cyan-950/40";
   if (s === "retrying") return "text-violet-200 border-violet-700/50 bg-violet-950/40";
   if (s === "done" || s === "completed") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
   if (s === "error" || s === "failed") return "text-red-300 border-red-700/50 bg-red-950/40";
@@ -71,7 +72,7 @@ function isCompletedRun(status: string): boolean {
 
 function isQueuedRun(status: string): boolean {
   const s = String(status || "").toLowerCase();
-  return s === "queued";
+  return s === "queued" || s === "preparing";
 }
 
 function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "local" {
@@ -441,6 +442,7 @@ export default function LivePage() {
             >
               <option value="">All states</option>
               <option value="queued">queued</option>
+              <option value="preparing">preparing</option>
               <option value="running">running</option>
               <option value="retrying">retrying</option>
               <option value="success">success</option>
