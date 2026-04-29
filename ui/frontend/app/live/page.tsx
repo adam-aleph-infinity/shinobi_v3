@@ -8,7 +8,22 @@ import { useAppCtx } from "@/lib/app-context";
 import { parseServerDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const fetcher = async (url: string) => {
+  const res = await fetch(url, { cache: "no-store" });
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error("Invalid JSON response");
+  }
+  if (!res.ok) {
+    const msg = String(data?.detail || data?.error || data?.message || `HTTP ${res.status}`);
+    throw new Error(msg);
+  }
+  return data;
+};
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
 
 interface PipelineLite {
@@ -280,21 +295,22 @@ export default function LivePage() {
   );
   const liveReadOnly = !!liveCfg?.read_only;
 
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=600&mirror=1";
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=300&compact=1&mirror=1";
 
   const { data: runsData, isLoading } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
-    refreshInterval: 1500,
+    refreshInterval: 2500,
   });
 
-  const runs = runsData ?? [];
+  const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
+  const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
 
   const pipelineNameById = useMemo(() => {
     const map: Record<string, string> = {};
-    for (const p of pipelines ?? []) {
+    for (const p of pipelineList) {
       map[String(p.id || "")] = String(p.name || p.id || "");
     }
     return map;
-  }, [pipelines]);
+  }, [pipelineList]);
 
   const pipelineFilterOptions = useMemo(() => {
     const map = new Map<string, string>();
@@ -743,10 +759,10 @@ export default function LivePage() {
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
                 <p className="text-sm font-semibold text-gray-100">Live Pipelines</p>
-                <span className="text-xs text-gray-500">{(pipelines ?? []).length}</span>
+                <span className="text-xs text-gray-500">{pipelineList.length}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
-                {(pipelines ?? []).map((p) => {
+                {pipelineList.map((p) => {
                   const checked = liveSelectedPipelineIds.includes(String(p.id || ""));
                   return (
                     <label
@@ -769,7 +785,7 @@ export default function LivePage() {
                     </label>
                   );
                 })}
-                {(pipelines ?? []).length === 0 && (
+                {pipelineList.length === 0 && (
                   <p className="text-[11px] text-gray-500 italic">No pipelines found.</p>
                 )}
                 {liveMessage ? (
