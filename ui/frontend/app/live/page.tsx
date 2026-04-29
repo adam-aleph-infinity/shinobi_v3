@@ -203,6 +203,10 @@ export default function LivePage() {
   const [liveMessage, setLiveMessage] = useState("");
   const [liveMessageError, setLiveMessageError] = useState(false);
   const [collapsedCompletedDayIds, setCollapsedCompletedDayIds] = useState<Record<string, boolean>>({});
+  const [collapsedCompletedProductionDayIds, setCollapsedCompletedProductionDayIds] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [collapsedCompletedTestDayIds, setCollapsedCompletedTestDayIds] = useState<Record<string, boolean>>({});
   const [filterRunType, setFilterRunType] = useState<"all" | "webhook" | "local">("all");
   const [filterPipelineId, setFilterPipelineId] = useState("");
   const [filterAgent, setFilterAgent] = useState("");
@@ -436,6 +440,31 @@ export default function LivePage() {
 
   useEffect(() => {
     setCollapsedCompletedDayIds((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const group of completedRunsByDay) {
+        if (next[group.dayId] == null) {
+          next[group.dayId] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [completedRunsByDay]);
+
+  useEffect(() => {
+    setCollapsedCompletedProductionDayIds((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const group of completedRunsByDay) {
+        if (next[group.dayId] == null) {
+          next[group.dayId] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setCollapsedCompletedTestDayIds((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const group of completedRunsByDay) {
@@ -777,6 +806,8 @@ export default function LivePage() {
                 )}
                 {completedRunsByDay.map((group) => {
                   const collapsed = !!collapsedCompletedDayIds[group.dayId];
+                  const productionCollapsed = !!collapsedCompletedProductionDayIds[group.dayId];
+                  const testCollapsed = !!collapsedCompletedTestDayIds[group.dayId];
                   return (
                     <div key={group.dayId} className="space-y-1.5">
                       <button
@@ -790,22 +821,60 @@ export default function LivePage() {
                       </button>
                       {!collapsed && (
                         <div className="space-y-2 pl-2">
-                          <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
-                            PRODUCTION · webhook ({group.productionRuns.length})
-                          </div>
-                          {group.productionRuns.length === 0 ? (
-                            <p className="text-[11px] text-gray-500 italic px-1">No production runs on this day.</p>
-                          ) : (
-                            group.productionRuns.map(renderRunCard)
+                          <button
+                            onClick={() =>
+                              setCollapsedCompletedProductionDayIds((prev) => ({
+                                ...prev,
+                                [group.dayId]: !prev[group.dayId],
+                              }))}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-blue-800/50 bg-blue-950/30 hover:bg-blue-900/30 text-left"
+                            title={productionCollapsed ? "Expand production runs" : "Collapse production runs"}
+                          >
+                            <ChevronRight
+                              className={cn(
+                                "w-3.5 h-3.5 text-blue-300 transition-transform",
+                                !productionCollapsed && "rotate-90",
+                              )}
+                            />
+                            <span className="text-[10px] font-semibold text-blue-200">PRODUCTION · webhook</span>
+                            <span className="ml-auto text-[10px] text-blue-300">{group.productionRuns.length}</span>
+                          </button>
+                          {!productionCollapsed && (
+                            <>
+                              {group.productionRuns.length === 0 ? (
+                                <p className="text-[11px] text-gray-500 italic px-1">No production runs on this day.</p>
+                              ) : (
+                                group.productionRuns.map(renderRunCard)
+                              )}
+                            </>
                           )}
 
-                          <div className="pt-1 text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
-                            TEST · local ({group.testRuns.length})
-                          </div>
-                          {group.testRuns.length === 0 ? (
-                            <p className="text-[11px] text-gray-500 italic px-1">No test runs on this day.</p>
-                          ) : (
-                            group.testRuns.map(renderRunCard)
+                          <button
+                            onClick={() =>
+                              setCollapsedCompletedTestDayIds((prev) => ({
+                                ...prev,
+                                [group.dayId]: !prev[group.dayId],
+                              }))}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-fuchsia-800/50 bg-fuchsia-950/20 hover:bg-fuchsia-900/20 text-left"
+                            title={testCollapsed ? "Expand test runs" : "Collapse test runs"}
+                          >
+                            <ChevronRight
+                              className={cn(
+                                "w-3.5 h-3.5 text-fuchsia-300 transition-transform",
+                                !testCollapsed && "rotate-90",
+                              )}
+                            />
+                            <span className="text-[10px] font-semibold text-fuchsia-200">TEST · local</span>
+                            <span className="ml-auto text-[10px] text-fuchsia-300">{group.testRuns.length}</span>
+                          </button>
+                          {!testCollapsed && (
+                            <>
+                              {group.testRuns.length === 0 ? (
+                                <p className="text-[11px] text-gray-500 italic px-1">No test runs on this day.</p>
+                              ) : (
+                                group.testRuns.map(renderRunCard)
+                              )}
+                            </>
                           )}
                         </div>
                       )}
