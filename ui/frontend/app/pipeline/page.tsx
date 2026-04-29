@@ -22,6 +22,7 @@ import {
 import { useAppCtx } from "@/lib/app-context";
 import { cn } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
+import { SectionContent } from "@/components/shared/SectionCards";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
@@ -312,6 +313,12 @@ interface PipelineOpenRunPayload {
 interface InputPreviewState {
   loading: boolean;
   content: string;
+  error: string;
+}
+
+interface RenderedLlmCacheEntry {
+  status: "loading" | "ready" | "error";
+  markdown: string;
   error: string;
 }
 
@@ -1362,6 +1369,72 @@ function classifyCanvasLogLine(text: string): CanvasLogLine["level"] {
   return "info";
 }
 
+function quickHash(text: string): string {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `${text.length}:${(h >>> 0).toString(16)}`;
+}
+
+function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLogLine[] {
+  const raw = String(rawLogJson || "").trim();
+  if (!raw) return [];
+
+  const toTs = (value: unknown): string => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return new Date(value).toLocaleTimeString();
+    }
+    const s = String(value || "").trim();
+    if (!s) return "—";
+    const parsed = Date.parse(s);
+    return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString() : s;
+  };
+
+  const normalizeLevel = (value: unknown, text: string): CanvasLogLine["level"] => {
+    const v = String(value || "").trim().toLowerCase();
+    if (v === "llm" || v === "pipeline" || v === "error" || v === "warn" || v === "info") return v;
+    return classifyCanvasLogLine(text);
+  };
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return raw.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => ({
+        ts: "—",
+        text: line,
+        level: classifyCanvasLogLine(line),
+      }));
+    }
+    const out: CanvasLogLine[] = [];
+    parsed.forEach((item) => {
+      if (typeof item === "string") {
+        const text = item.trim();
+        if (!text) return;
+        out.push({ ts: "—", text, level: classifyCanvasLogLine(text) });
+        return;
+      }
+      if (!item || typeof item !== "object") return;
+      const obj = item as Record<string, unknown>;
+      const text = String(obj.text || obj.msg || obj.message || "").trim();
+      if (!text) return;
+      out.push({
+        ts: toTs(obj.ts || obj.time || obj.timestamp),
+        text,
+        level: normalizeLevel(obj.level, text),
+      });
+    });
+    return out;
+  } catch {
+    return raw.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => ({
+      ts: "—",
+      text: line,
+      level: classifyCanvasLogLine(line),
+    }));
+  }
+}
+
 // ── Inner canvas ──────────────────────────────────────────────────────────────
 
 let nodeSeq = 1;
@@ -1558,6 +1631,7 @@ function PipelineCanvas() {
   const [liveThinkingByStep, setLiveThinkingByStep] = useState<Record<number, string>>({});
   const [liveStreamByStep, setLiveStreamByStep] = useState<Record<number, string>>({});
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
+  const [renderedLlmCache, setRenderedLlmCache] = useState<Record<string, RenderedLlmCacheEntry>>({});
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
   const [callTranscriptText, setCallTranscriptText] = useState("");
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
@@ -1991,9 +2065,36 @@ function PipelineCanvas() {
   );
 
   useEffect(() => {
+    if (running) return;
+    const activeRunId = String(
+      runContextMode === "historical"
+        ? (selectedCacheRun?.id || selectedCacheRunId || currentRunId || "")
+        : (currentRunId || ""),
+    ).trim();
+    if (!activeRunId) {
+      if (runContextMode === "new") {
+        setRunLogLines([]);
+      }
+      return;
+    }
+    const runRow = (runsData ?? []).find((r) => String(r.id || "").trim() === activeRunId)
+      ?? historyRuns.find((r) => String(r.id || "").trim() === activeRunId);
+    if (!runRow) return;
+    setRunLogLines(parseSavedRunLogLines(runRow.log_json));
+  }, [
+    running,
+    runContextMode,
+    selectedCacheRun?.id,
+    selectedCacheRunId,
+    currentRunId,
+    historyRuns,
+    runsData,
+  ]);
+
+  useEffect(() => {
     if (runContextMode !== "historical") return;
     if (!historyRuns.length) return;
-    if (selectedCacheRunId && historyRuns.some((r) => r.id === selectedCacheRunId)) return;
+    if (selectedCacheRunId) return;
     setSelectedCacheRunId(historyRuns[0].id);
   }, [selectedCacheRunId, historyRuns, runContextMode]);
 
@@ -4427,8 +4528,68 @@ function PipelineCanvas() {
     return { text: current || original, unwrapped };
   }
 
-  function renderResultContent(content: string, sourceHint = "") {
+  const requestRenderedMarkdown = useCallback(async (cacheKey: string, baseText: string) => {
+    if (!cacheKey || !baseText.trim()) return;
+    setRenderedLlmCache((prev) => {
+      const existing = prev[cacheKey];
+      if (existing && (existing.status === "loading" || existing.status === "ready")) return prev;
+      return {
+        ...prev,
+        [cacheKey]: { status: "loading", markdown: "", error: "" },
+      };
+    });
+
+    try {
+      const maxChars = 60000;
+      const clipped = baseText.length > maxChars
+        ? `${baseText.slice(0, maxChars)}\n\n[TRUNCATED_FOR_RENDERING]`
+        : baseText;
+      const res = await fetch("/api/agent-comparison/reformat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: clipped, model: "gpt-4.1" }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      const markdown = String(body?.result || "").trim();
+      if (!markdown) throw new Error("Empty rendered markdown");
+      setRenderedLlmCache((prev) => ({
+        ...prev,
+        [cacheKey]: { status: "ready", markdown, error: "" },
+      }));
+    } catch (e: any) {
+      setRenderedLlmCache((prev) => ({
+        ...prev,
+        [cacheKey]: {
+          status: "error",
+          markdown: "",
+          error: String(e?.message || "LLM render failed"),
+        },
+      }));
+    }
+  }, []);
+
+  function RenderResultContent({ content, sourceHint = "" }: { content: string; sourceHint?: string }) {
     const text = String(content || "");
+    const hint = sourceHint.toLowerCase();
+    const unwrapped = unwrapResponseEnvelope(text);
+    const baseText = String(unwrapped.text || text || "").trim();
+    const cacheKey = useMemo(
+      () => `${hint || "content"}|${quickHash(baseText)}`,
+      [hint, baseText],
+    );
+    const cacheEntry = renderedLlmCache[cacheKey];
+    const shouldEnhanceWithLlm =
+      resultViewMode === "rendered"
+      && !hint.includes("transcript")
+      && baseText.length >= 120;
+
+    useEffect(() => {
+      if (!shouldEnhanceWithLlm) return;
+      if (cacheEntry && (cacheEntry.status === "loading" || cacheEntry.status === "ready")) return;
+      void requestRenderedMarkdown(cacheKey, baseText);
+    }, [cacheKey, baseText, cacheEntry, requestRenderedMarkdown, shouldEnhanceWithLlm]);
+
     if (!text.trim()) {
       return <p className="text-[10px] text-gray-500">No content.</p>;
     }
@@ -4439,8 +4600,6 @@ function PipelineCanvas() {
         </pre>
       );
     }
-
-    const hint = sourceHint.toLowerCase();
     if (hint.includes("transcript")) {
       return (
         <div className="h-80 border border-gray-700 rounded-lg overflow-hidden bg-gray-900">
@@ -4448,39 +4607,30 @@ function PipelineCanvas() {
         </div>
       );
     }
-
-    const unwrapped = unwrapResponseEnvelope(text);
-    if (unwrapped.unwrapped) {
-      return (
-        <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 text-[11px] text-gray-200 whitespace-pre-wrap break-words leading-relaxed">
-          {unwrapped.text}
-        </div>
-      );
+    if (!baseText) {
+      return <p className="text-[10px] text-gray-500">No content.</p>;
     }
 
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return (
-          <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 divide-y divide-gray-800">
-            {Object.entries(parsed).map(([k, v]) => (
-              <div key={k} className="px-2 py-1">
-                <p className="text-[10px] text-gray-500">{k}</p>
-                <p className="text-[11px] text-gray-200 whitespace-pre-wrap break-words">
-                  {typeof v === "string" ? v : JSON.stringify(v)}
-                </p>
-              </div>
-            ))}
-          </div>
-        );
-      }
-    } catch {
-      // not json
-    }
+    const renderedMarkdown = cacheEntry?.status === "ready" && cacheEntry.markdown.trim()
+      ? cacheEntry.markdown
+      : baseText;
 
     return (
-      <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 text-[11px] text-gray-200 whitespace-pre-wrap break-words leading-relaxed">
-        {text}
+      <div className="space-y-1.5">
+        {cacheEntry?.status === "loading" && (
+          <div className="flex items-center gap-1.5 text-[10px] text-indigo-300">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Enhancing rendered layout with LLM…
+          </div>
+        )}
+        {cacheEntry?.status === "error" && (
+          <p className="text-[10px] text-amber-300">
+            LLM render unavailable ({cacheEntry.error}). Showing local rendered view.
+          </p>
+        )}
+        <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5">
+          <SectionContent content={renderedMarkdown} format="markdown" />
+        </div>
       </div>
     );
   }
@@ -4697,7 +4847,7 @@ function PipelineCanvas() {
                       );
                     }
                     if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
-                    return renderResultContent(preview?.content || "", src);
+                    return <RenderResultContent content={preview?.content || ""} sourceHint={src} />;
                   })() : null}
 
                   {selKind === "processing" ? (
@@ -4714,7 +4864,7 @@ function PipelineCanvas() {
                         {processingCache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{processingCache.errorMsg}</p>
                         )}
-                        {renderResultContent(processingCache.content || "")}
+                        <RenderResultContent content={processingCache.content || ""} />
                         {renderStepRuntimeDiagnostics(processingCache, processingStepIndex)}
                       </>
                     ) : (
@@ -4736,7 +4886,7 @@ function PipelineCanvas() {
                         {outputCache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{outputCache.errorMsg}</p>
                         )}
-                        {renderResultContent(outputCache.content || "")}
+                        <RenderResultContent content={outputCache.content || ""} />
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">No artifact result found for this step in the current context.</p>
@@ -5068,7 +5218,7 @@ function PipelineCanvas() {
                         {stepCache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{stepCache.errorMsg}</p>
                         )}
-                        {renderResultContent(stepCache.content || "")}
+                        <RenderResultContent content={stepCache.content || ""} />
                         {renderStepRuntimeDiagnostics(stepCache, stepIndex)}
                       </>
                     ) : (
@@ -5198,7 +5348,7 @@ function PipelineCanvas() {
               <PropertiesSection title="Output Profile" defaultOpen={false}>
                 <div className="space-y-2">
                   <label className="block text-[9px] text-gray-500 mb-1">
-                    Select saved output profile from Agents & Artifacts
+                    Select saved output profile
                   </label>
                   <select
                     value={String(selData.outputProfileId || "")}
@@ -5304,7 +5454,7 @@ function PipelineCanvas() {
                       );
                     }
                     if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
-                    return renderResultContent(preview?.content || "", src);
+                    return <RenderResultContent content={preview?.content || ""} sourceHint={src} />;
                   })()}
                 </div>
               </PropertiesSection>
@@ -5342,7 +5492,7 @@ function PipelineCanvas() {
                         {cache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{cache.errorMsg}</p>
                         )}
-                        {renderResultContent(cache.content || "")}
+                        <RenderResultContent content={cache.content || ""} />
                       </>
                     );
                   })()}
