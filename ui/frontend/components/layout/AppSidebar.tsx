@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
+  FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch, History,
   User, ShieldCheck, Activity,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
@@ -20,13 +20,11 @@ const GROUPS = [
     items: [
       { href: "/crm",       icon: Users,    label: "CRM Browser" },
       { href: "/calls",     icon: FileText, label: "Calls" },
-      { href: "/artifacts", icon: Archive,  label: "Artifacts" },
     ],
   },
   {
     label: "Agents",
     items: [
-      { href: "/agents",   icon: Bot,       label: "Agents & Artifacts" },
       { href: "/pipeline", icon: GitBranch, label: "Pipeline Workflow" },
       { href: "/live",     icon: Activity,  label: "Live" },
       { href: "/history",  icon: History,   label: "Run History" },
@@ -37,9 +35,6 @@ const GROUPS = [
     items: [
       { href: "/agent-deep-dive",  icon: BarChart3,  label: "Agent Deep Dive" },
       { href: "/agent-dashboard",  icon: BarChart3,  label: "Agent Dashboard" },
-      { href: "/personas",         icon: FileText,   label: "Personas" },
-      { href: "/comparison",       icon: BarChart3,  label: "Compare Personas" },
-      { href: "/agent-comparison", icon: BarChart3,  label: "Compare Agents" },
     ],
   },
 ];
@@ -125,7 +120,7 @@ export default function AppSidebar() {
 
   const isActive = (href: string) => {
     // Exact match for paths that share a prefix with others
-    if (href === "/personas" || href === "/calls" || href === "/agents") return pathname === href;
+    if (href === "/calls") return pathname === href;
     return pathname.startsWith(href);
   };
 
