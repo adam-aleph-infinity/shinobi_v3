@@ -111,7 +111,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   };
 
   const isPipelinePage = pathname === "/pipeline";
-  const showContextBar = pathname !== "/pipeline";
+  const isLivePage = pathname === "/live";
+  const showContextBar = !(isPipelinePage || isLivePage);
   const sidebarPanelWidth = mounted && collapsed ? 0 : SIDEBAR_WIDTH;
   const copilotPanelWidth = mounted && copilotCollapsed ? 0 : copilotWidth;
 
