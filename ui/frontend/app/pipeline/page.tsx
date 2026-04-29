@@ -6755,11 +6755,26 @@ function PipelineCanvas() {
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
-                            className="min-w-0 flex-1 flex items-center gap-1.5 text-left hover:opacity-90 transition-opacity"
+                            className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-800 bg-gray-950/70 text-gray-500 hover:text-gray-300 hover:border-gray-700 transition-colors shrink-0"
                             title={expanded ? "Collapse run details" : "Expand run details"}
                           >
-                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
-                            <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
+                            <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", expanded && "rotate-90")} />
+                          </button>
+                          <button
+                            onClick={() => toggleRunContextFromHistory(run)}
+                            className={cn(
+                              "min-w-0 flex-1 flex items-center text-left rounded px-1.5 py-1 transition-colors",
+                              historicalSelected
+                                ? "bg-indigo-900/35 text-indigo-100"
+                                : "text-gray-200 hover:bg-gray-800/70",
+                            )}
+                            title={
+                              historicalSelected
+                                ? "Selected historical run. Click again to return to New run."
+                                : "Click to load this run on canvas"
+                            }
+                          >
+                            <span className="text-[10px] font-medium truncate">{run.pipeline_name}</span>
                           </button>
                           <button
                             onClick={() => toggleRunContextFromHistory(run)}
