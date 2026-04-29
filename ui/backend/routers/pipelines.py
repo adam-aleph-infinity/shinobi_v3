@@ -45,6 +45,12 @@ _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
 _RUN_SUBSCRIBERS: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+_CALL_ARTIFACTS_CACHE_LOCK = threading.Lock()
+_CALL_ARTIFACTS_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict[str, Any]]] = {}
+_CALL_ARTIFACTS_CACHE_TTL_S = 75.0
+_CALL_ARTIFACTS_CACHE_MAX = 600
+_MERGED_CALL_INDEX_CACHE_LOCK = threading.Lock()
+_MERGED_CALL_INDEX_CACHE: dict[str, tuple[int, list[tuple[str, str]], dict[str, list[str]], dict[str, float]]] = {}
 
 
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
@@ -2930,6 +2936,83 @@ def _is_global_section_title(title: str) -> bool:
     )
 
 
+def _get_cached_call_artifacts(
+    key: tuple[str, str, str, str, int],
+) -> Optional[dict[str, Any]]:
+    now = time.time()
+    with _CALL_ARTIFACTS_CACHE_LOCK:
+        hit = _CALL_ARTIFACTS_CACHE.get(key)
+        if not hit:
+            return None
+        expires_at, payload = hit
+        if expires_at <= now:
+            _CALL_ARTIFACTS_CACHE.pop(key, None)
+            return None
+        return payload
+
+
+def _set_cached_call_artifacts(
+    key: tuple[str, str, str, str, int],
+    payload: dict[str, Any],
+) -> None:
+    now = time.time()
+    with _CALL_ARTIFACTS_CACHE_LOCK:
+        _CALL_ARTIFACTS_CACHE[key] = (now + _CALL_ARTIFACTS_CACHE_TTL_S, payload)
+        if len(_CALL_ARTIFACTS_CACHE) > _CALL_ARTIFACTS_CACHE_MAX:
+            oldest = sorted(
+                _CALL_ARTIFACTS_CACHE.items(),
+                key=lambda item: float(item[1][0]),
+            )[: max(1, len(_CALL_ARTIFACTS_CACHE) - _CALL_ARTIFACTS_CACHE_MAX)]
+            for old_key, _ in oldest:
+                _CALL_ARTIFACTS_CACHE.pop(old_key, None)
+
+
+def _get_merged_call_index(
+    merged_path: os.PathLike[str] | str,
+) -> tuple[list[tuple[str, str]], dict[str, list[str]], dict[str, float]]:
+    path_str = str(merged_path)
+    try:
+        st = os.stat(path_str)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+    except Exception:
+        return [], {}, {}
+
+    with _MERGED_CALL_INDEX_CACHE_LOCK:
+        cached = _MERGED_CALL_INDEX_CACHE.get(path_str)
+        if cached and int(cached[0]) == mtime_ns:
+            return cached[1], cached[2], cached[3]
+
+    try:
+        with open(path_str, "r", encoding="utf-8", errors="replace") as fh:
+            merged_text = fh.read()
+    except Exception:
+        return [], {}, {}
+
+    merged_calls = _split_merged_calls(merged_text)
+    merged_call_tokens = {
+        str(cid).strip().lower(): _tokenize_match_text(txt)
+        for cid, txt in merged_calls
+        if str(cid).strip()
+    }
+    idf: dict[str, float] = {}
+    if merged_call_tokens:
+        df: dict[str, int] = {}
+        n_docs = len(merged_call_tokens)
+        for toks in merged_call_tokens.values():
+            for t in set(toks):
+                df[t] = df.get(t, 0) + 1
+        idf = {t: math.log((n_docs + 1) / (v + 1)) + 1.0 for t, v in df.items()}
+
+    with _MERGED_CALL_INDEX_CACHE_LOCK:
+        _MERGED_CALL_INDEX_CACHE[path_str] = (mtime_ns, merged_calls, merged_call_tokens, idf)
+        if len(_MERGED_CALL_INDEX_CACHE) > 120:
+            oldest_paths = list(_MERGED_CALL_INDEX_CACHE.keys())[:30]
+            for p in oldest_paths:
+                _MERGED_CALL_INDEX_CACHE.pop(p, None)
+
+    return merged_calls, merged_call_tokens, idf
+
+
 @router.get("/{pipeline_id}/call-artifacts")
 def get_pipeline_call_artifacts(
     pipeline_id: str,
@@ -2948,6 +3031,16 @@ def get_pipeline_call_artifacts(
     call_id_norm = call_id_raw.lower()
     if not call_id_norm:
         raise HTTPException(400, "call_id is required")
+    cache_key = (
+        str(pipeline_id or "").strip(),
+        str(sales_agent or "").strip().lower(),
+        str(customer or "").strip().lower(),
+        call_id_norm,
+        int(round(float(min_confidence) * 1000.0)),
+    )
+    cached_payload = _get_cached_call_artifacts(cache_key)
+    if cached_payload is not None:
+        return cached_payload
 
     _, pipeline_def = _find_file(pipeline_id)
     pipeline_scope = str(pipeline_def.get("scope") or "per_pair")
@@ -3072,28 +3165,8 @@ def get_pipeline_call_artifacts(
                 _build_and_save_merged_transcript(sales_agent, customer, force=True)
             except Exception:
                 pass
-        merged_text = ""
         if merged_path.exists():
-            try:
-                merged_text = merged_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                merged_text = ""
-        merged_calls = _split_merged_calls(merged_text)
-        merged_call_tokens = {
-            str(cid).strip().lower(): _tokenize_match_text(txt)
-            for cid, txt in merged_calls
-            if str(cid).strip()
-        }
-        if merged_call_tokens:
-            df: dict[str, int] = {}
-            n_docs = len(merged_call_tokens)
-            for toks in merged_call_tokens.values():
-                for t in set(toks):
-                    df[t] = df.get(t, 0) + 1
-            idf = {
-                t: math.log((n_docs + 1) / (v + 1)) + 1.0
-                for t, v in df.items()
-            }
+            merged_calls, merged_call_tokens, idf = _get_merged_call_index(merged_path)
 
     artifacts_out: list[dict[str, Any]] = []
     unassigned_out: list[dict[str, Any]] = []
@@ -3336,7 +3409,7 @@ def get_pipeline_call_artifacts(
 
     artifacts_out.sort(key=lambda x: int(x.get("step_index", 0)))
     unassigned_out.sort(key=lambda x: int(x.get("step_index", 0)))
-    return {
+    payload = {
         "pipeline_id": pipeline_id,
         "sales_agent": sales_agent,
         "customer": customer,
@@ -3347,6 +3420,8 @@ def get_pipeline_call_artifacts(
         "unassigned": unassigned_out,
         "generated_at": datetime.utcnow().isoformat(),
     }
+    _set_cached_call_artifacts(cache_key, payload)
+    return payload
 
 
 @router.get("/{pipeline_id}/artifact-status")
