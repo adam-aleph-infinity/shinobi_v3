@@ -879,37 +879,49 @@ async def catch_all_test_capture(request: Request, path: str = "") -> dict[str, 
 
 
 @router.post("/call-updated")
-async def handle_call_updated_webhook_form(
+async def handle_call_updated_webhook(
     request: Request,
     db: Session = Depends(get_session),
-    call_id: str = Form(...),
-    account_id: str = Form(...),
-    agent: str = Form(...),
-    record_path: str = Form(""),
-    duration: Optional[int] = Form(None),
-    crm_url: str = Form(""),
-    customer: str = Form(""),
-    token: str = Form(""),
 ) -> dict[str, Any]:
     """
-    Compatibility endpoint for CRM managers using:
-      POST /api/webhooks/call-updated
-      Content-Type: application/x-www-form-urlencoded
+    Flexible endpoint — accepts JSON (flat or wrapped in 'payload' key)
+    and form-urlencoded. Handles extra fields like brand_code gracefully.
     """
+    content_type = str(request.headers.get("content-type") or "").lower()
+    raw: dict[str, Any] = {}
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        # Unwrap {"payload": {...}} if present
+        if isinstance(body.get("payload"), dict):
+            raw = body["payload"]
+        elif isinstance(body, dict):
+            raw = body
+    else:
+        # form-urlencoded fallback
+        try:
+            form = await request.form()
+            raw = dict(form)
+        except Exception:
+            raw = {}
+
     payload = CallEndedWebhookPayload(
-        call_id=call_id,
-        account_id=account_id,
-        agent=agent,
-        record_path=record_path,
-        duration=duration,
-        crm_url=crm_url,
-        customer=customer,
-        token=token,
+        call_id=str(raw.get("call_id") or ""),
+        account_id=str(raw.get("account_id") or ""),
+        agent=str(raw.get("agent") or ""),
+        record_path=str(raw.get("record_path") or ""),
+        duration=int(raw["duration"]) if raw.get("duration") else None,
+        crm_url=str(raw.get("crm_url") or ""),
+        customer=str(raw.get("customer") or ""),
+        token=str(raw.get("token") or ""),
     )
     return await _handle_call_webhook(
         payload=payload,
         request=request,
         db=db,
         webhook_type="call-updated",
-        compat_mode="form-urlencoded",
+        compat_mode="json" if "application/json" in content_type else "form-urlencoded",
     )
