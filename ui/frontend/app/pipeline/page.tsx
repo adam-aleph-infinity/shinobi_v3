@@ -7225,6 +7225,15 @@ function PipelineCanvas() {
 // ── Page wrapper ──────────────────────────────────────────────────────────────
 
 export default function PipelinePage() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) {
+    return <div className="h-full w-full bg-gray-950" />;
+  }
+
   return (
     <div className="h-full w-full">
       <ReactFlowProvider>
