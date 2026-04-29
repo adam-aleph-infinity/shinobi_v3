@@ -197,6 +197,21 @@ def _persist_webhook_event(
         "payload": payload,
     }
     file_path.write_text(json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Also mirror to webhook_test/ if a test session is active and not expired
+    try:
+        if _WEBHOOK_TEST_SESSION_FILE.exists():
+            session = json.loads(_WEBHOOK_TEST_SESSION_FILE.read_text(encoding="utf-8"))
+            expires_at = datetime.fromisoformat(session["expires_at"])
+            if datetime.now(timezone.utc) <= expires_at:
+                _WEBHOOK_TEST_DIR.mkdir(parents=True, exist_ok=True)
+                test_fname = f"capture_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{event_id[:12]}.json"
+                (_WEBHOOK_TEST_DIR / test_fname).write_text(
+                    json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+    except Exception:
+        pass
+
     return {
         "event_id": event_id,
         "stored_at": now_iso,
