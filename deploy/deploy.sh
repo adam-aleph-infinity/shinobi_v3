@@ -18,14 +18,58 @@ gcloud compute ssh $VM_NAME \
     set -euo pipefail
     cd ~/shinobi_v3
 
+    PRESERVE_ROOT=/tmp/shinobi_runtime_preserve_\$(date +%Y%m%d_%H%M%S)
+    PRESERVE_PATHS=(
+      ui/data/_pipelines
+      ui/data/_pipelines_folders.json
+      ui/data/_universal_agents
+      ui/data/_notes_agents
+      ui/data/_persona_agents
+      ui/data/_fpa_analyzer_presets
+      ui/data/_fpa_generator_presets
+      ui/data/_fpa_scorer_presets
+      ui/data/_comparison_presets
+      ui/data/_note_rollups
+      ui/data/execution_logs
+      ui/data/job_logs
+      ui/data/_pipeline_states
+      ui/data/_artifact_prompt_schemas
+      ui/data/_webhooks
+      ui/data/webhook_test
+      ui/data/all_crm_agents_customers.json
+    )
+
+    echo '▶ Preserve runtime data...'
+    mkdir -p \"\$PRESERVE_ROOT\"
+    for p in \"\${PRESERVE_PATHS[@]}\"; do
+      if [ -d \"\$p\" ]; then
+        mkdir -p \"\$PRESERVE_ROOT/\$p\"
+        rsync -a \"\$p/\" \"\$PRESERVE_ROOT/\$p/\"
+      elif [ -f \"\$p\" ]; then
+        mkdir -p \"\$PRESERVE_ROOT/\$(dirname \"\$p\")\"
+        cp -f \"\$p\" \"\$PRESERVE_ROOT/\$p\"
+      fi
+    done
+
     echo '▶ Backup DB...'
     cp ui/database/shinobi.db /tmp/shinobi_db_backup_\$(date +%Y%m%d_%H%M%S).db 2>/dev/null || true
 
     echo '▶ Pull latest...'
     git fetch origin
-    git stash || true
+    git stash push --include-untracked -m \"pre-deploy \$(date +%Y-%m-%dT%H:%M:%S)\" || true
     git checkout $BRANCH
     git pull origin $BRANCH
+
+    echo '▶ Restore runtime data...'
+    for p in \"\${PRESERVE_PATHS[@]}\"; do
+      if [ -d \"\$PRESERVE_ROOT/\$p\" ]; then
+        mkdir -p \"\$p\"
+        rsync -a \"\$PRESERVE_ROOT/\$p/\" \"\$p/\"
+      elif [ -f \"\$PRESERVE_ROOT/\$p\" ]; then
+        mkdir -p \"\$(dirname \"\$p\")\"
+        cp -f \"\$PRESERVE_ROOT/\$p\" \"\$p\"
+      fi
+    done
 
     echo '▶ Install Python deps...'
     source .venv/bin/activate
@@ -51,6 +95,8 @@ gcloud compute ssh $VM_NAME \
       fi
       sleep 1
     done
+
+    rm -rf \"\$PRESERVE_ROOT\" 2>/dev/null || true
 
     echo '✓ Deploy complete'
   "
