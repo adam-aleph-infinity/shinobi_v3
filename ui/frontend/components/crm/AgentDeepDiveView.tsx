@@ -5,6 +5,7 @@ import useSWR from "swr";
 import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
+import { SectionContent } from "@/components/shared/SectionCards";
 import {
   BarChart3,
   Bot,
@@ -72,36 +73,46 @@ type PipelineRunLite = {
   steps_json: string;
 };
 
-type ScopeAgg = {
-  scope: string;
-  key: string;
-  runs: number;
-  done: number;
-  running: number;
-  error: number;
-  notes: number;
-  personas: number;
-  scores: number;
-  compliance: number;
-  other: number;
-  totalArtifacts: number;
-  lastRunAt: string;
+type ParsedPipelineRun = PipelineRunLite & {
+  parsed_steps: Array<Record<string, any>>;
+  is_success: boolean;
+  started_key: number;
+};
+
+type CallArtifactItem = {
+  call_id: string;
+  run_id: string;
+  run_status: string;
+  run_started_at: string;
+  step_idx: number;
+  artifact_type: string;
+  artifact_label: string;
+  agent_name: string;
+  model: string;
+  state: string;
+  content: string;
+};
+
+type CallArtifactRow = {
+  call_id: string;
+  date: string;
+  duration_s: number;
+  final_run: ParsedPipelineRun | null;
+  artifacts: CallArtifactItem[];
+};
+
+type ArtifactViewerState = {
+  open: boolean;
+  call_id: string;
+  artifact_type: string;
+  items: CallArtifactItem[];
+  selected_idx: number;
 };
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 function normalizeCallId(raw: string | null | undefined): string {
   return String(raw || "").trim().toLowerCase();
-}
-
-function classifyArtifactType(rawType: string): keyof Omit<ScopeAgg, "scope" | "key" | "runs" | "done" | "running" | "error" | "totalArtifacts" | "lastRunAt"> {
-  const t = String(rawType || "").trim().toLowerCase();
-  if (!t) return "other";
-  if ((t.includes("notes") || t.includes("note")) && !t.includes("compliance")) return "notes";
-  if (t.includes("persona") && !t.includes("score")) return "personas";
-  if (t.includes("score")) return "scores";
-  if (t.includes("compliance") || t.includes("violation")) return "compliance";
-  return "other";
 }
 
 function normalizeArtifactType(raw: string): string {
@@ -139,6 +150,54 @@ function formatDateLabel(raw?: string): string {
   });
 }
 
+function runStatusClass(statusRaw: string): string {
+  const s = String(statusRaw || "").trim().toLowerCase();
+  if (["done", "completed", "success", "pass"].includes(s)) return "text-emerald-300";
+  if (s === "running") return "text-amber-300";
+  if (s) return "text-red-300";
+  return "text-gray-500";
+}
+
+function isCompletedStepState(stateRaw: string): boolean {
+  const s = String(stateRaw || "").trim().toLowerCase();
+  return ["completed", "cached", "done"].includes(s);
+}
+
+function getArtifactTypeOrder(t: string): number {
+  const key = normalizeArtifactType(t);
+  if (key === "persona") return 1;
+  if (key === "persona_score") return 2;
+  if (key === "notes") return 3;
+  if (key === "notes_compliance") return 4;
+  return 100;
+}
+
+function normalizeRunStatus(run: PipelineRunLite | null | undefined): string {
+  return String(run?.status || "").trim().toLowerCase();
+}
+
+function pickRenderableArtifactText(raw: string): string {
+  let text = String(raw || "").trim();
+  if (!text) return "";
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object") break;
+      const obj = parsed as Record<string, any>;
+      const candidate =
+        (typeof obj.response === "string" && obj.response.trim())
+        || (typeof obj.results === "string" && obj.results.trim())
+        || (typeof obj.content === "string" && obj.content.trim())
+        || "";
+      if (!candidate) break;
+      text = candidate.trim();
+    } catch {
+      break;
+    }
+  }
+  return text;
+}
+
 export default function AgentDeepDiveView({
   title = "Agent Deep Dive",
   subtitle = "Artifact matrix by context scope",
@@ -148,7 +207,6 @@ export default function AgentDeepDiveView({
     customer,
     callId,
     activePipelineId,
-    activePipelineName,
     setCustomer,
     setCallId,
     setActivePipeline,
@@ -159,6 +217,14 @@ export default function AgentDeepDiveView({
   const [callTranscriptText, setCallTranscriptText] = useState("");
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
+  const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState>({
+    open: false,
+    call_id: "",
+    artifact_type: "",
+    items: [],
+    selected_idx: 0,
+  });
+  const [artifactViewerMode, setArtifactViewerMode] = useState<"rendered" | "raw">("rendered");
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher);
   const { data: pipelineDef } = useSWR<PipelineDef>(
@@ -166,7 +232,9 @@ export default function AgentDeepDiveView({
     fetcher,
   );
   const { data: pipelineRuns } = useSWR<PipelineRunLite[]>(
-    activePipelineId ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/runs?limit=500` : null,
+    activePipelineId && salesAgent && customer
+      ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/runs?limit=2500&sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
     fetcher,
     { refreshInterval: 10000 },
   );
@@ -397,118 +465,143 @@ export default function AgentDeepDiveView({
     });
   }, [pipelineDef]);
 
-  const runsComputed = useMemo(() => {
+  const parsedRuns = useMemo<ParsedPipelineRun[]>(() => {
     const rows = pipelineRuns ?? [];
     return rows.map((run) => {
-      let steps: any[] = [];
+      let parsedSteps: Array<Record<string, any>> = [];
       try {
         const parsed = JSON.parse(String(run.steps_json || "[]"));
-        if (Array.isArray(parsed)) steps = parsed;
+        if (Array.isArray(parsed)) {
+          parsedSteps = parsed.filter((s) => !!s && typeof s === "object") as Array<Record<string, any>>;
+        }
       } catch {
-        steps = [];
+        parsedSteps = [];
+      }
+      const s = normalizeRunStatus(run);
+      const startedKey = run.started_at ? new Date(run.started_at).getTime() : 0;
+      return {
+        ...run,
+        parsed_steps: parsedSteps,
+        is_success: ["done", "completed", "success", "pass"].includes(s),
+        started_key: Number.isFinite(startedKey) ? startedKey : 0,
+      };
+    });
+  }, [pipelineRuns]);
+
+  const finalRunsByCall = useMemo(() => {
+    const byCall = new Map<string, ParsedPipelineRun[]>();
+    parsedRuns.forEach((run) => {
+      const norm = normalizeCallId(run.call_id);
+      if (!norm) return;
+      const bucket = byCall.get(norm) || [];
+      bucket.push(run);
+      byCall.set(norm, bucket);
+    });
+
+    const picked = new Map<string, ParsedPipelineRun>();
+    byCall.forEach((runs, key) => {
+      const sorted = [...runs].sort((a, b) => b.started_key - a.started_key);
+      const success = sorted.find((r) => r.is_success);
+      picked.set(key, success || sorted[0]);
+    });
+    return picked;
+  }, [parsedRuns]);
+
+  const callMetaByNorm = useMemo(() => {
+    const map = new Map<string, { call_id: string; date: string; duration_s: number }>();
+    callsMerged.forEach((c) => {
+      const norm = normalizeCallId(c.call_id);
+      if (!norm || map.has(norm)) return;
+      map.set(norm, c);
+    });
+    return map;
+  }, [callsMerged]);
+
+  const callArtifactRows = useMemo<CallArtifactRow[]>(() => {
+    const normCallSet = new Set<string>();
+    callMetaByNorm.forEach((_v, key) => normCallSet.add(key));
+    finalRunsByCall.forEach((_v, key) => normCallSet.add(key));
+
+    const rows: CallArtifactRow[] = [];
+    normCallSet.forEach((norm) => {
+      const meta = callMetaByNorm.get(norm);
+      const run = finalRunsByCall.get(norm) || null;
+      const artifacts: CallArtifactItem[] = [];
+
+      if (run) {
+        run.parsed_steps.forEach((step, idx) => {
+          const state = String(step?.state || step?.status || "").trim().toLowerCase();
+          const content = String(step?.content || "");
+          if (!isCompletedStepState(state)) return;
+          if (!content.trim()) return;
+          const artifactType = stepArtifactTypes[idx] || "unknown";
+          artifacts.push({
+            call_id: run.call_id,
+            run_id: run.id,
+            run_status: run.status,
+            run_started_at: String(run.started_at || ""),
+            step_idx: idx,
+            artifact_type: artifactType,
+            artifact_label: getArtifactIconMeta(artifactType).label,
+            agent_name: String(step?.agent_name || step?.agent_id || ""),
+            model: String(step?.model || ""),
+            state,
+            content,
+          });
+        });
       }
 
-      const artifactCounters = {
-        notes: 0,
-        personas: 0,
-        scores: 0,
-        compliance: 0,
-        other: 0,
-        totalArtifacts: 0,
-      };
-
-      steps.forEach((step: any, idx: number) => {
-        const st = String(step?.state || "").trim().toLowerCase();
-        if (!["completed", "cached", "done"].includes(st)) return;
-        const artType = stepArtifactTypes[idx] || "unknown";
-        const key = classifyArtifactType(artType);
-        artifactCounters[key] += 1;
-        artifactCounters.totalArtifacts += 1;
+      artifacts.sort((a, b) => {
+        const typeDelta = getArtifactTypeOrder(a.artifact_type) - getArtifactTypeOrder(b.artifact_type);
+        if (typeDelta !== 0) return typeDelta;
+        return a.step_idx - b.step_idx;
       });
 
-      return {
-        run,
-        ...artifactCounters,
-      };
-    });
-  }, [pipelineRuns, stepArtifactTypes]);
-
-  const matrixRows = useMemo<ScopeAgg[]>(() => {
-    const normalize = (v: string) => String(v || "").trim().toLowerCase();
-    const runs = runsComputed;
-
-    const scopes = [
-      {
-        scope: "Sales Agent",
-        key: salesAgent || "All",
-        match: (r: PipelineRunLite) => !salesAgent || normalize(r.sales_agent) === normalize(salesAgent),
-      },
-      {
-        scope: "Customer",
-        key: customer || "All",
-        match: (r: PipelineRunLite) => !customer || normalize(r.customer) === normalize(customer),
-      },
-      {
-        scope: "Pipeline",
-        key: activePipelineName || activePipelineId || "None",
-        match: (_r: PipelineRunLite) => true,
-      },
-      {
-        scope: "Agent-Customer",
-        key: salesAgent && customer ? `${salesAgent} · ${customer}` : "Select agent + customer",
-        match: (r: PipelineRunLite) =>
-          (!salesAgent || normalize(r.sales_agent) === normalize(salesAgent))
-          && (!customer || normalize(r.customer) === normalize(customer)),
-      },
-      {
-        scope: "Agent-Pipeline",
-        key: salesAgent && activePipelineId ? `${salesAgent} · ${activePipelineName || activePipelineId}` : "Select agent + pipeline",
-        match: (r: PipelineRunLite) => !salesAgent || normalize(r.sales_agent) === normalize(salesAgent),
-      },
-      {
-        scope: "Customer-Pipeline",
-        key: customer && activePipelineId ? `${customer} · ${activePipelineName || activePipelineId}` : "Select customer + pipeline",
-        match: (r: PipelineRunLite) => !customer || normalize(r.customer) === normalize(customer),
-      },
-    ];
-
-    return scopes.map((scope) => {
-      const base: ScopeAgg = {
-        scope: scope.scope,
-        key: scope.key,
-        runs: 0,
-        done: 0,
-        running: 0,
-        error: 0,
-        notes: 0,
-        personas: 0,
-        scores: 0,
-        compliance: 0,
-        other: 0,
-        totalArtifacts: 0,
-        lastRunAt: "",
-      };
-
-      runs.forEach((x) => {
-        if (!scope.match(x.run)) return;
-        base.runs += 1;
-        const rs = String(x.run.status || "").trim().toLowerCase();
-        if (rs === "done" || rs === "completed" || rs === "success") base.done += 1;
-        else if (rs === "running") base.running += 1;
-        else base.error += 1;
-        base.notes += x.notes;
-        base.personas += x.personas;
-        base.scores += x.scores;
-        base.compliance += x.compliance;
-        base.other += x.other;
-        base.totalArtifacts += x.totalArtifacts;
-        const started = String(x.run.started_at || "");
-        if (started && (!base.lastRunAt || started > base.lastRunAt)) base.lastRunAt = started;
+      rows.push({
+        call_id: meta?.call_id || run?.call_id || norm,
+        date: String(meta?.date || run?.started_at || ""),
+        duration_s: Number(meta?.duration_s || 0),
+        final_run: run,
+        artifacts,
       });
-
-      return base;
     });
-  }, [runsComputed, salesAgent, customer, activePipelineId, activePipelineName]);
+
+    rows.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    return rows;
+  }, [callMetaByNorm, finalRunsByCall, stepArtifactTypes]);
+
+  const artifactColumns = useMemo<string[]>(() => {
+    const seen = new Set<string>();
+    callArtifactRows.forEach((row) => {
+      row.artifacts.forEach((a) => {
+        const key = normalizeArtifactType(a.artifact_type);
+        if (key) seen.add(key);
+      });
+    });
+    return Array.from(seen).sort((a, b) => {
+      const orderDelta = getArtifactTypeOrder(a) - getArtifactTypeOrder(b);
+      if (orderDelta !== 0) return orderDelta;
+      return a.localeCompare(b);
+    });
+  }, [callArtifactRows]);
+
+  const selectedArtifact = useMemo(() => {
+    if (!artifactViewer.open) return null;
+    if (artifactViewer.selected_idx < 0) return null;
+    return artifactViewer.items[artifactViewer.selected_idx] || null;
+  }, [artifactViewer]);
+
+  const openArtifactViewer = (callIdValue: string, artifactType: string, items: CallArtifactItem[]) => {
+    if (!items.length) return;
+    setArtifactViewer({
+      open: true,
+      call_id: callIdValue,
+      artifact_type: artifactType,
+      items,
+      selected_idx: 0,
+    });
+    setArtifactViewerMode("rendered");
+  };
 
   const openCrmOverlay = () => {
     setShowCrmPanel(true);
@@ -594,50 +687,219 @@ export default function AgentDeepDiveView({
         <div className="h-full overflow-auto">
           {!activePipelineId ? (
             <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-              Select a pipeline to view artifact cross-tab analytics.
+              Select a pipeline to view per-call artifacts from final successful runs.
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-gray-900 z-10 border-b border-gray-800">
-                <tr>
-                  <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Scope</th>
-                  <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Context Key</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Runs</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Done</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Running</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Error</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-indigo-300">Notes</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-fuchsia-300">Personas</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-amber-300">Scores</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-emerald-300">Compliance</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-violet-300">Other</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-white">Total Artifacts</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Last Run</th>
-                </tr>
-              </thead>
-              <tbody>
-                {matrixRows.map((row) => (
-                  <tr key={row.scope} className="border-b border-gray-800/60 hover:bg-gray-800/35">
-                    <td className="px-3 py-2 text-gray-100 font-medium">{row.scope}</td>
-                    <td className="px-3 py-2 text-gray-300 text-xs">{row.key}</td>
-                    <td className="px-3 py-2 text-right text-gray-300 font-mono text-xs">{row.runs}</td>
-                    <td className="px-3 py-2 text-right text-emerald-300 font-mono text-xs">{row.done}</td>
-                    <td className="px-3 py-2 text-right text-amber-300 font-mono text-xs">{row.running}</td>
-                    <td className="px-3 py-2 text-right text-red-300 font-mono text-xs">{row.error}</td>
-                    <td className="px-3 py-2 text-right text-indigo-300 font-mono text-xs">{row.notes}</td>
-                    <td className="px-3 py-2 text-right text-fuchsia-300 font-mono text-xs">{row.personas}</td>
-                    <td className="px-3 py-2 text-right text-amber-300 font-mono text-xs">{row.scores}</td>
-                    <td className="px-3 py-2 text-right text-emerald-300 font-mono text-xs">{row.compliance}</td>
-                    <td className="px-3 py-2 text-right text-violet-300 font-mono text-xs">{row.other}</td>
-                    <td className="px-3 py-2 text-right text-white font-mono text-xs">{row.totalArtifacts}</td>
-                    <td className="px-3 py-2 text-right text-gray-400 text-xs">{formatDateLabel(row.lastRunAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="h-full flex flex-col">
+              <div className="px-3 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-3">
+                <span className="text-[11px] text-gray-300">
+                  Showing <span className="text-white font-semibold">{callArtifactRows.length}</span> calls.
+                </span>
+                <span className="text-[11px] text-gray-500">
+                  Each row uses the latest successful run for that call (fallback: latest run).
+                </span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-gray-900 z-10 border-b border-gray-800">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Call ID</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Date</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Duration</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Final Run</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-400">Run Status</th>
+                      {artifactColumns.map((col) => {
+                        const meta = getArtifactIconMeta(col);
+                        const Icon = meta.icon;
+                        return (
+                          <th key={col} className="px-3 py-2 text-left text-xs font-semibold text-gray-400">
+                            <span className="inline-flex items-center gap-1">
+                              <Icon className="w-3 h-3" />
+                              {meta.label.replace(" artifact", "")}
+                            </span>
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {callArtifactRows.map((row) => (
+                      <tr key={row.call_id} className="border-b border-gray-800/60 hover:bg-gray-800/35">
+                        <td className="px-3 py-2 text-gray-100 font-mono text-xs">{row.call_id}</td>
+                        <td className="px-3 py-2 text-gray-300 text-xs">{formatDateLabel(row.date)}</td>
+                        <td className="px-3 py-2 text-gray-300 text-xs">
+                          {row.duration_s ? formatDuration(row.duration_s) : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-xs">
+                          {row.final_run ? (
+                            <button
+                              type="button"
+                              onClick={() => setCallId(row.call_id)}
+                              className="font-mono text-indigo-300 hover:text-indigo-200 transition-colors"
+                              title="Set active call"
+                            >
+                              {row.final_run.id.slice(0, 8)}
+                            </button>
+                          ) : (
+                            <span className="text-gray-600">—</span>
+                          )}
+                        </td>
+                        <td className={cn("px-3 py-2 text-xs font-medium", runStatusClass(row.final_run?.status || ""))}>
+                          {row.final_run?.status || "no run"}
+                        </td>
+                        {artifactColumns.map((col) => {
+                          const items = row.artifacts.filter((a) => normalizeArtifactType(a.artifact_type) === normalizeArtifactType(col));
+                          const meta = getArtifactIconMeta(col);
+                          const Icon = meta.icon;
+                          return (
+                            <td key={`${row.call_id}:${col}`} className="px-3 py-2 text-xs">
+                              {items.length ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openArtifactViewer(row.call_id, col, items)}
+                                  className={cn(
+                                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium hover:brightness-110 transition-all",
+                                    meta.className,
+                                  )}
+                                  title={`View ${items.length} artifact(s)`}
+                                >
+                                  <Icon className="w-3 h-3" />
+                                  {items.length}
+                                </button>
+                              ) : (
+                                <span className="text-gray-600">—</span>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                    {callArtifactRows.length === 0 && (
+                      <tr>
+                        <td colSpan={5 + Math.max(artifactColumns.length, 1)} className="px-3 py-8 text-center text-gray-500 text-sm">
+                          No call-level runs found for this pipeline and pair.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       </div>
+
+      {artifactViewer.open && (
+        <div className="absolute inset-0 z-40 bg-black p-3 flex items-center justify-center">
+          <div className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-violet-800 bg-gray-950 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible">
+            <button
+              onClick={() => setArtifactViewer((prev) => ({ ...prev, open: false }))}
+              className="absolute -top-6 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+              title="Close Artifact panel"
+            >
+              <X className="w-6 h-6" />
+            </button>
+            <div className="h-full w-full rounded-[inherit] overflow-hidden">
+              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <Bot className="w-4 h-4 text-violet-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-white font-semibold truncate">
+                    Artifacts · Call {artifactViewer.call_id}
+                  </p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {getArtifactIconMeta(artifactViewer.artifact_type).label} · {artifactViewer.items.length} item(s)
+                  </p>
+                </div>
+                <div className="inline-flex rounded-md border border-gray-800 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setArtifactViewerMode("rendered")}
+                    className={cn(
+                      "px-2.5 py-1 text-[10px] transition-colors",
+                      artifactViewerMode === "rendered" ? "bg-indigo-900/50 text-indigo-200" : "bg-gray-900 text-gray-400 hover:text-gray-200",
+                    )}
+                  >
+                    Rendered
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setArtifactViewerMode("raw")}
+                    className={cn(
+                      "px-2.5 py-1 text-[10px] border-l border-gray-800 transition-colors",
+                      artifactViewerMode === "raw" ? "bg-indigo-900/50 text-indigo-200" : "bg-gray-900 text-gray-400 hover:text-gray-200",
+                    )}
+                  >
+                    Raw
+                  </button>
+                </div>
+              </div>
+
+              <div className="h-[calc(100%-3rem)] min-h-0 grid grid-cols-1 lg:grid-cols-12">
+                <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Artifacts in Final Run</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                    {artifactViewer.items.map((item, idx) => {
+                      const selected = idx === artifactViewer.selected_idx;
+                      const iconMeta = getArtifactIconMeta(item.artifact_type);
+                      const Icon = iconMeta.icon;
+                      return (
+                        <button
+                          key={`${item.run_id}:${item.step_idx}:${idx}`}
+                          type="button"
+                          onClick={() => setArtifactViewer((prev) => ({ ...prev, selected_idx: idx }))}
+                          className={cn(
+                            "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
+                            selected ? "border-indigo-600/70 bg-indigo-900/30" : "border-gray-800 bg-gray-900 hover:bg-gray-800",
+                          )}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className={cn("inline-flex h-5 w-5 items-center justify-center rounded-md border", iconMeta.className)}>
+                              <Icon className="h-3 w-3" />
+                            </span>
+                            <p className="text-xs text-gray-100 font-medium truncate flex-1">Step {item.step_idx + 1}</p>
+                          </div>
+                          <p className="text-[10px] text-gray-500 mt-1 truncate">
+                            {item.agent_name || "Unknown agent"}{item.model ? ` · ${item.model}` : ""} · {item.state}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="lg:col-span-8 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center gap-2">
+                    <p className="text-[11px] font-semibold text-gray-200">Artifact Output</p>
+                    {selectedArtifact && (
+                      <p className="text-[10px] text-gray-500 truncate">
+                        Run {selectedArtifact.run_id.slice(0, 8)} · {selectedArtifact.run_status}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-auto p-3">
+                    {!selectedArtifact ? (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        Select an artifact from the list.
+                      </div>
+                    ) : artifactViewerMode === "raw" ? (
+                      <pre className="w-full h-full whitespace-pre-wrap break-words rounded-lg border border-gray-800 bg-gray-900/60 p-3 text-[11px] text-gray-200 overflow-auto">
+                        {String(selectedArtifact.content || "")}
+                      </pre>
+                    ) : (
+                      <SectionContent
+                        content={pickRenderableArtifactText(selectedArtifact.content)}
+                        format="markdown"
+                      />
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCallsPanel && (
         <div className="absolute inset-0 z-40 bg-black p-3 flex items-center justify-center">
