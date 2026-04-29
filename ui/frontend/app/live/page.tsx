@@ -282,7 +282,6 @@ export default function LivePage() {
     setActivePipeline(run.pipeline_id || "", run.pipeline_name || "");
     const payload = {
       source: "live_page",
-      locked: true,
       run_id: run.id,
       pipeline_id: run.pipeline_id,
       pipeline_name: run.pipeline_name,

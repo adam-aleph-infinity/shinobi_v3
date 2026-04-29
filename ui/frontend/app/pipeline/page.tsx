@@ -628,6 +628,7 @@ interface PipelineNodeData extends Record<string, unknown> {
   runStepIndex?: number | null;
   runButtonDisabled?: boolean;
   onRunStep?: () => void;
+  onMutate?: () => void;
   // agent node — linked backend agent
   agentId:    string;
   agentClass: string;
@@ -1027,11 +1028,14 @@ function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData;
         <span className="text-white/90 shrink-0">{SrcIcon ? <SrcIcon className="w-4 h-4" /> : m.icon}</span>
         <EditableNodeLabel
           value={String(data.label || "Input")}
-          onCommit={(next) => setNodes(ns => ns.map(n =>
-            n.id === id
-              ? { ...n, data: { ...(n.data as PipelineNodeData), label: next } }
-              : n
-          ))}
+          onCommit={(next) => {
+            data.onMutate?.();
+            setNodes(ns => ns.map(n =>
+              n.id === id
+                ? { ...n, data: { ...(n.data as PipelineNodeData), label: next } }
+                : n
+            ));
+          }}
         />
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl flex items-center justify-between gap-2">
@@ -1072,18 +1076,21 @@ function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNode
         </span>
         <EditableNodeLabel
           value={String(hasAgent ? (data.agentName as string) : data.label || "Agent")}
-          onCommit={(next) => setNodes(ns => ns.map(n =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...(n.data as PipelineNodeData),
-                    label: next,
-                    ...(hasAgent ? { agentName: next } : {}),
-                  },
-                }
-              : n
-          ))}
+          onCommit={(next) => {
+            data.onMutate?.();
+            setNodes(ns => ns.map(n =>
+              n.id === id
+                ? {
+                    ...n,
+                    data: {
+                      ...(n.data as PipelineNodeData),
+                      label: next,
+                      ...(hasAgent ? { agentName: next } : {}),
+                    },
+                  }
+                : n
+            ));
+          }}
         />
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl flex items-center justify-between gap-2">
@@ -1122,11 +1129,14 @@ function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData
         <span className="text-white/90 shrink-0">{m.icon}</span>
         <EditableNodeLabel
           value={String(data.label || "Output")}
-          onCommit={(next) => setNodes(ns => ns.map(n =>
-            n.id === id
-              ? { ...n, data: { ...(n.data as PipelineNodeData), label: next } }
-              : n
-          ))}
+          onCommit={(next) => {
+            data.onMutate?.();
+            setNodes(ns => ns.map(n =>
+              n.id === id
+                ? { ...n, data: { ...(n.data as PipelineNodeData), label: next } }
+                : n
+            ));
+          }}
         />
       </div>
       <div className="px-4 py-1.5 bg-gray-900 rounded-b-xl flex items-center justify-between gap-2">
@@ -2591,6 +2601,48 @@ function PipelineCanvas() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stages.length, setViewport]);
 
+  const exitHistoricalRunContext = useCallback((clearLogs = true) => {
+    if (runContextMode !== "historical") return;
+    setRunContextMode("new");
+    setSelectedCacheRunId("");
+    setCurrentRunId("");
+    setCanvasLocked(false);
+    if (clearLogs) setRunLogLines([]);
+  }, [runContextMode]);
+
+  const toggleRunContextFromHistory = useCallback((run: PipelineRunRecord) => {
+    const rid = String(run.id || "").trim();
+    if (!rid) return;
+    const isSame = runContextMode === "historical" && String(selectedCacheRunId || "") === rid;
+    if (isSame) {
+      exitHistoricalRunContext(true);
+      return;
+    }
+    setCanvasLocked(false);
+    setRunContextMode("historical");
+    setSelectedCacheRunId(rid);
+    setCurrentRunId(rid);
+    const runCallId = String(run.call_id || "").trim();
+    if (runCallId) setCallId(runCallId);
+    const runAgent = String(run.sales_agent || "").trim();
+    const runCustomer = String(run.customer || "").trim();
+    if (runAgent && runCustomer && (runAgent !== salesAgent || runCustomer !== customer)) {
+      setCustomer(runCustomer, runAgent);
+    }
+  }, [
+    runContextMode,
+    selectedCacheRunId,
+    exitHistoricalRunContext,
+    setCallId,
+    salesAgent,
+    customer,
+    setCustomer,
+  ]);
+
+  const markElementMutation = useCallback(() => {
+    if (runContextMode === "historical") exitHistoricalRunContext(false);
+  }, [runContextMode, exitHistoricalRunContext]);
+
   // Render only actual flow nodes; swimbars are drawn as a non-interactive backdrop.
   const allNodes = useMemo(() => {
     const procStepIndexByNodeId: Record<string, number> = {};
@@ -2644,6 +2696,7 @@ function PipelineCanvas() {
           runStepIndex,
           runButtonDisabled,
           onRunStep: onRunStepHandler,
+          onMutate: canvasLocked ? undefined : markElementMutation,
         } satisfies PipelineNodeData,
       };
     });
@@ -2659,11 +2712,13 @@ function PipelineCanvas() {
     runNeedsCall,
     callId,
     runtimeGraph.inputToProcNodeIds,
+    markElementMutation,
   ]);
 
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
     if (canvasLocked) return;
+    markElementMutation();
     const processed = changes.map(c => {
       if (c.type === "position" && c.position) {
         const node = nodesRef.current.find(n => n.id === c.id);
@@ -2681,11 +2736,12 @@ function PipelineCanvas() {
       return c;
     });
     onNodesChange(processed as NodeChange[]);
-  }, [onNodesChange, canvasLocked]);
+  }, [onNodesChange, canvasLocked, markElementMutation]);
 
   // Snap processing/output nodes to the nearest same-type lane on drag end
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
     if (canvasLocked) return;
+    markElementMutation();
     const kind = node.type as NodeKind;
     if (kind === "input") {
       // Y is locked during drag; just snap X to nearest slot
@@ -2718,7 +2774,7 @@ function PipelineCanvas() {
         ? { ...n, position: { x: snapX, y: snapY }, data: { ...(n.data as PipelineNodeData), stageIndex: newStageIndex } }
         : n
     ));
-  }, [setNodes, canvasLocked]);
+  }, [setNodes, canvasLocked, markElementMutation]);
 
   // Validates connections drawn manually by the user
   const isValidConnectionFn = useCallback((conn: Connection | Edge): boolean => {
@@ -2744,6 +2800,7 @@ function PipelineCanvas() {
 
   const onConnect = useCallback((conn: Connection) => {
     if (canvasLocked) return;
+    markElementMutation();
     // Compatibility check: output → processing edge
     const srcNode = nodesRef.current.find(n => n.id === conn.source);
     const tgtNode = nodesRef.current.find(n => n.id === conn.target);
@@ -2770,7 +2827,7 @@ function PipelineCanvas() {
       markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8", width: 18, height: 18 },
       style:     { stroke: "#818cf8", strokeWidth: 2 },
     }, es));
-  }, [setEdges, allAgents, canvasLocked]);
+  }, [setEdges, allAgents, canvasLocked, markElementMutation]);
 
   function showToast(msg: string, ok = false) {
     setToast({ ok, msg });
@@ -2785,6 +2842,7 @@ function PipelineCanvas() {
     dropPos?: { x: number; y: number },
   ) => {
     if (canvasLocked) return;
+    markElementMutation();
     const currentNodes  = nodesRef.current;
     const currentEdges  = edgesRef.current;
     const currentStages = stagesRef.current;
@@ -2889,7 +2947,7 @@ function PipelineCanvas() {
     setNodes(ns => [...(repositionFn ? repositionFn(ns) : ns), newNode]);
     if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
     setSelectedNodeId(id);
-  }, [setNodes, setEdges, setStages, canvasLocked]);
+  }, [setNodes, setEdges, setStages, canvasLocked, markElementMutation]);
 
   // ── Drag from palette ─────────────────────────────────────────────────────
 
@@ -2901,12 +2959,13 @@ function PipelineCanvas() {
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     if (canvasLocked) return;
+    markElementMutation();
     const kind    = e.dataTransfer.getData("application/nodeKind")    as NodeKind | "";
     const subType = e.dataTransfer.getData("application/nodeSubType") as string   | "";
     if (!kind) return;
     const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     addNodeToCanvas(kind, subType, pos);
-  }, [screenToFlowPosition, addNodeToCanvas, canvasLocked]);
+  }, [screenToFlowPosition, addNodeToCanvas, canvasLocked, markElementMutation]);
 
   // ── Node interactions ─────────────────────────────────────────────────────
 
@@ -2918,6 +2977,7 @@ function PipelineCanvas() {
 
   function updateNodeData(id: string, patch: Partial<PipelineNodeData>) {
     if (canvasLocked) return;
+    markElementMutation();
     setNodes(ns => ns.map(n =>
       n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
     ));
@@ -2925,6 +2985,7 @@ function PipelineCanvas() {
 
   function deleteNode(id: string) {
     if (canvasLocked) return;
+    markElementMutation();
     setNodes(ns => ns.filter(n => n.id !== id));
     setEdges(es => es.filter(e => e.source !== id && e.target !== id));
     if (selectedNodeId === id) setSelectedNodeId(null);
@@ -2932,6 +2993,7 @@ function PipelineCanvas() {
 
   function handleAddStage() {
     if (canvasLocked) return;
+    markElementMutation();
     if (stagesRef.current.length >= MAX_TOTAL_STAGES) return;
     const next: NodeKind[] = [...stagesRef.current, "processing", "output"];
     setStages(next);
@@ -2940,6 +3002,7 @@ function PipelineCanvas() {
 
   function handleRemoveStage() {
     if (canvasLocked) return;
+    markElementMutation();
     const currentStages = stagesRef.current;
     if (currentStages.length <= INIT_STAGES.length) return;
 
@@ -4261,7 +4324,7 @@ function PipelineCanvas() {
     const targetPipelineId = String(pendingOpenRunPayload.pipeline_id || "").trim();
     const targetPipelineName = String(pendingOpenRunPayload.pipeline_name || "").trim();
     const targetRunId = String(pendingOpenRunPayload.run_id || "").trim();
-    const lockRequested = !!pendingOpenRunPayload.locked || String(pendingOpenRunPayload.source || "").trim() === "live_page";
+    const lockRequested = !!pendingOpenRunPayload.locked;
 
     setCanvasLocked(lockRequested);
 
@@ -5078,6 +5141,7 @@ function PipelineCanvas() {
                                   key={cls}
                                   type="button"
                                   onClick={() => {
+                                    markElementMutation();
                                     setAgentDraft((f) => (f ? { ...f, agent_class: cls } : f));
                                     updateNodeData(selectedNode.id, { agentClass: cls });
                                     setAgentSaved(false);
@@ -5107,7 +5171,10 @@ function PipelineCanvas() {
                         </div>
                         <div>
                           <label className="block text-[9px] text-gray-500 mb-1">Model</label>
-                          <ModelSelect value={agentDraft.model} onChange={v => setAgentDraft(f => f ? { ...f, model: v } : f)} />
+                          <ModelSelect value={agentDraft.model} onChange={v => {
+                            markElementMutation();
+                            setAgentDraft(f => f ? { ...f, model: v } : f);
+                          }} />
                         </div>
                         <div>
                           <label className="block text-[9px] text-gray-500 mb-1">Temperature</label>
@@ -5117,7 +5184,10 @@ function PipelineCanvas() {
                             max={2}
                             step={0.1}
                             value={agentDraft.temperature}
-                            onChange={e => setAgentDraft(f => f ? { ...f, temperature: parseFloat(e.target.value) || 0 } : f)}
+                            onChange={e => {
+                              markElementMutation();
+                              setAgentDraft(f => f ? { ...f, temperature: parseFloat(e.target.value) || 0 } : f);
+                            }}
                             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
                           />
                         </div>
@@ -5130,7 +5200,10 @@ function PipelineCanvas() {
                               return (
                                 <button
                                   key={k}
-                                  onClick={() => setAgentDraft(f => f ? { ...f, output_format: k } : f)}
+                                  onClick={() => {
+                                    markElementMutation();
+                                    setAgentDraft(f => f ? { ...f, output_format: k } : f);
+                                  }}
                                   className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg border text-[9px] transition-all
                                     ${isSelected ? `${m.border} ${m.bg}` : "border-gray-800 bg-gray-900 hover:border-gray-700"}`}
                                 >
@@ -5170,7 +5243,10 @@ function PipelineCanvas() {
                     <PropertiesSection title="System Prompt">
                       <textarea
                         value={agentDraft.system_prompt}
-                        onChange={e => setAgentDraft(f => f ? { ...f, system_prompt: e.target.value } : f)}
+                        onChange={e => {
+                          markElementMutation();
+                          setAgentDraft(f => f ? { ...f, system_prompt: e.target.value } : f);
+                        }}
                         rows={18}
                         placeholder="You are a…"
                         className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
@@ -5180,7 +5256,10 @@ function PipelineCanvas() {
                     <PropertiesSection title="User Prompt">
                       <textarea
                         value={agentDraft.user_prompt}
-                        onChange={e => setAgentDraft(f => f ? { ...f, user_prompt: e.target.value } : f)}
+                        onChange={e => {
+                          markElementMutation();
+                          setAgentDraft(f => f ? { ...f, user_prompt: e.target.value } : f);
+                        }}
                         rows={18}
                         placeholder={"Analyse this:\n\n{transcript}"}
                         className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
@@ -5632,29 +5711,18 @@ function PipelineCanvas() {
 
         <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
           <History className="w-3 h-3 text-indigo-400 shrink-0" />
-          <select
-            value={runContextMode}
-            onChange={(e) => setRunContextMode(e.target.value as RunContextMode)}
-            disabled={canvasLocked}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[115px]"
-            title="Pick run context mode for node side-panels"
-          >
-            <option value="new">New run</option>
-            <option value="historical">Historical run</option>
-          </select>
+          <span className="px-2 py-1 rounded border border-gray-700 bg-gray-900 text-[10px] text-gray-200 min-w-[115px] text-center">
+            {runContextMode === "historical" ? "Historical run" : "New run"}
+          </span>
           {runContextMode === "historical" && (
-            <select
-              value={selectedCacheRunId}
-              onChange={(e) => setSelectedCacheRunId(e.target.value)}
-              disabled={canvasLocked}
-              className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-100 min-w-[190px]"
-              title="Select historical run id"
+            <button
+              type="button"
+              onClick={() => exitHistoricalRunContext(true)}
+              className="px-2 py-1 rounded border border-gray-700 text-[10px] text-gray-300 hover:bg-gray-800 transition-colors"
+              title="Exit historical run view"
             >
-              <option value="">{historyRuns.length ? "Select run…" : "No runs found"}</option>
-              {cacheRunOptions.map((opt) => (
-                <option key={opt.id} value={opt.id}>{opt.label}</option>
-              ))}
-            </select>
+              Reset
+            </button>
           )}
           <span
             className="px-2 py-1 rounded border border-gray-700 bg-gray-900 text-[10px] text-indigo-300 font-mono min-w-[86px] text-center"
@@ -6659,6 +6727,7 @@ function PipelineCanvas() {
                   </button>
                   {!dayCollapsed && group.runs.map((run) => {
                     const expanded = !!expandedHistoryRunIds[run.id];
+                    const historicalSelected = runContextMode === "historical" && selectedCacheRunId === run.id;
                     const timeline = runTimelineById.get(run.id);
                     const runStatus = String(run.status || "").toLowerCase();
                     const runStatusClass = runStatus === "done"
@@ -6667,7 +6736,15 @@ function PipelineCanvas() {
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
                         : "text-orange-300 border-orange-700/50 bg-orange-950/40";
                     return (
-                      <div key={run.id} className="rounded-lg border border-gray-800 bg-gray-900 px-2 py-2">
+                      <div
+                        key={run.id}
+                        className={cn(
+                          "rounded-lg border px-2 py-2 transition-colors",
+                          historicalSelected
+                            ? "border-indigo-500 bg-indigo-950/35 shadow-[0_0_0_1px_rgba(99,102,241,0.25)]"
+                            : "border-gray-800 bg-gray-900",
+                        )}
+                      >
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => setExpandedHistoryRunIds((prev) => ({ ...prev, [run.id]: !prev[run.id] }))}
@@ -6675,8 +6752,23 @@ function PipelineCanvas() {
                             title={expanded ? "Collapse run details" : "Expand run details"}
                           >
                             <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform shrink-0", expanded && "rotate-90")} />
-                            <span className="text-[10px] text-indigo-300 font-mono shrink-0">{run.id.slice(0, 8)}</span>
                             <span className="text-[10px] text-gray-200 font-medium truncate">{run.pipeline_name}</span>
+                          </button>
+                          <button
+                            onClick={() => toggleRunContextFromHistory(run)}
+                            className={cn(
+                              "text-[10px] font-mono shrink-0 px-1.5 py-0.5 rounded border transition-colors",
+                              historicalSelected
+                                ? "text-indigo-100 border-indigo-500 bg-indigo-700/40"
+                                : "text-indigo-300 border-indigo-800/50 bg-indigo-950/40 hover:bg-indigo-900/40",
+                            )}
+                            title={
+                              historicalSelected
+                                ? "Click to return to New run"
+                                : "Click to load this historical run on canvas"
+                            }
+                          >
+                            {run.id.slice(0, 8)}
                           </button>
                           <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
                             {run.status}

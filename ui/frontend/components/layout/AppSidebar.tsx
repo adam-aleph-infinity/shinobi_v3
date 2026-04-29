@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch, History,
+  FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch,
   User, ShieldCheck, Activity,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
@@ -27,7 +27,6 @@ const GROUPS = [
     items: [
       { href: "/pipeline", icon: GitBranch, label: "Pipeline Workflow" },
       { href: "/live",     icon: Activity,  label: "Live" },
-      { href: "/history",  icon: History,   label: "Run History" },
     ],
   },
   {
