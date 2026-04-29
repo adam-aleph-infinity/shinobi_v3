@@ -233,6 +233,10 @@ interface PipelineRunStep {
   cached_locations?: PipelineRunStepCachedLocation[];
   input_token_est?: number;
   output_token_est?: number;
+  thinking?: string;
+  model_info?: Record<string, any>;
+  request_raw?: Record<string, any>;
+  response_raw?: string;
   content?: string;
   error_msg?: string;
 }
@@ -245,6 +249,12 @@ interface StepCacheDisplay {
   model?: string;
   status?: string;
   errorMsg?: string;
+  inputTokenEst?: number;
+  outputTokenEst?: number;
+  thinking?: string;
+  modelInfo?: Record<string, any>;
+  requestRaw?: Record<string, any>;
+  responseRaw?: string;
   content: string;
 }
 
@@ -1545,6 +1555,8 @@ function PipelineCanvas() {
   const [selectedCacheRunId, setSelectedCacheRunId] = useState("");
   const [currentRunId, setCurrentRunId] = useState("");
   const [stepInputReady, setStepInputReady] = useState<boolean[]>([]);
+  const [liveThinkingByStep, setLiveThinkingByStep] = useState<Record<number, string>>({});
+  const [liveStreamByStep, setLiveStreamByStep] = useState<Record<number, string>>({});
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
   const [callTranscriptText, setCallTranscriptText] = useState("");
@@ -2212,6 +2224,16 @@ function PipelineCanvas() {
           model: String(s.model || ""),
           status: String(s.state || s.status || ""),
           errorMsg: String(s.error_msg || ""),
+          inputTokenEst: Number.isFinite(Number(s.input_token_est)) ? Number(s.input_token_est) : 0,
+          outputTokenEst: Number.isFinite(Number(s.output_token_est)) ? Number(s.output_token_est) : 0,
+          thinking: String(s.thinking || ""),
+          modelInfo: (s.model_info && typeof s.model_info === "object")
+            ? (s.model_info as Record<string, any>)
+            : {},
+          requestRaw: (s.request_raw && typeof s.request_raw === "object")
+            ? (s.request_raw as Record<string, any>)
+            : {},
+          responseRaw: String(s.response_raw || ""),
           content: String(s.content || ""),
         };
       };
@@ -3640,7 +3662,7 @@ function PipelineCanvas() {
         const evt = JSON.parse(dataLines.join("\n"));
         const type = evt.type as string;
         const data = evt.data ?? {};
-        const step = typeof data?.step === "number" ? data.step : 0;
+        const step = typeof data?.step === "number" ? data.step : -1;
         if (type === "pipeline_done") summary.sawPipelineDone = true;
         if (type === "error") summary.sawError = true;
         onEvent(type, data, step);
@@ -3842,6 +3864,8 @@ function PipelineCanvas() {
     setLogsExpanded(true);
     setLogsCollapsed(false);
     setRunLogLines([]);
+    setLiveThinkingByStep({});
+    setLiveStreamByStep({});
     appendRunLog(`Run started for ${salesAgent} · ${customer}${runNeedsCall ? ` · call ${callId}` : ""}`);
 
     let force = true;
@@ -3939,14 +3963,31 @@ function PipelineCanvas() {
           if (rid) setCurrentRunId(rid);
         }
         if (type === "progress" && evt?.msg) appendRunLog(String(evt.msg));
-        if (type === "stream" && evt?.text) appendRunLog(String(evt.text), "llm");
-        if (type === "thinking" && evt?.content) appendRunLog(String(evt.content), "llm");
-        if (stepIdx == null) return;
+        const liveKey = Number.isFinite(stepIdx) ? stepIdx : -1;
+        if (type === "stream" && evt?.text) {
+          const chunk = String(evt.text || "");
+          appendRunLog(chunk, "llm");
+          setLiveStreamByStep((prev) => ({
+            ...prev,
+            [liveKey]: `${String(prev[liveKey] || "")}${chunk}`,
+          }));
+        }
+        if (type === "thinking" && evt?.content) {
+          const chunk = String(evt.content || "");
+          appendRunLog(chunk, "llm");
+          setLiveThinkingByStep((prev) => ({
+            ...prev,
+            [liveKey]: `${String(prev[liveKey] || "")}${chunk}`,
+          }));
+        }
+        if (stepIdx == null || stepIdx < 0) return;
         const stepName = runtimeGraph.stepToProcNodeIds[stepIdx] || `step_${stepIdx + 1}`;
         if (type === "step_start") appendRunLog(`${stepName}: started`, "pipeline");
         if (type === "step_cached") appendRunLog(`${stepName}: cache hit`, "pipeline");
         if (type === "step_done") appendRunLog(`${stepName}: done`, "pipeline");
         if (type === "step_start") {
+          setLiveThinkingByStep((prev) => ({ ...prev, [stepIdx]: "" }));
+          setLiveStreamByStep((prev) => ({ ...prev, [stepIdx]: "" }));
           setStepStatuses(prev => prev.map((s, i) => (i === stepIdx ? "loading" : s)));
           setStepInputReady(prev => prev.map((ready, i) => (i === stepIdx ? false : ready)));
         }
@@ -4476,6 +4517,97 @@ function PipelineCanvas() {
     );
   }
 
+  function renderStepRuntimeDiagnostics(stepCache: StepCacheDisplay | null, stepIndex: number) {
+    if (stepIndex < 0) return null;
+    const modelInfo = (stepCache?.modelInfo && typeof stepCache.modelInfo === "object")
+      ? stepCache.modelInfo
+      : {};
+    const requestRaw = (stepCache?.requestRaw && typeof stepCache.requestRaw === "object")
+      ? stepCache.requestRaw
+      : {};
+    const responseRaw = String(stepCache?.responseRaw || "");
+    const capturedThinking = String(stepCache?.thinking || "");
+    const liveThinking = String(liveThinkingByStep[stepIndex] || liveThinkingByStep[-1] || "");
+    const liveStream = String(liveStreamByStep[stepIndex] || liveStreamByStep[-1] || "");
+    const provider = String(modelInfo.provider || "").trim();
+    const modelName = String(modelInfo.model || stepCache?.model || "").trim();
+    const temperature = modelInfo.temperature;
+    const inputTokens = Number(stepCache?.inputTokenEst || 0);
+    const outputTokens = Number(stepCache?.outputTokenEst || 0);
+    const hasAnything = Boolean(
+      modelName
+      || provider
+      || inputTokens
+      || outputTokens
+      || Object.keys(requestRaw).length
+      || responseRaw
+      || capturedThinking
+      || liveThinking
+      || liveStream,
+    );
+    if (!hasAnything) return null;
+
+    const pretty = (obj: any) => JSON.stringify(obj ?? {}, null, 2);
+
+    return (
+      <div className="space-y-1.5">
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40" open>
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Model Information</summary>
+          <div className="px-2 pb-2 text-[10px] text-gray-300 space-y-0.5">
+            <div>Provider: {provider || "UNKNOWN"}</div>
+            <div>Model: {modelName || "UNKNOWN"}</div>
+            <div>Temperature: {temperature == null ? "UNKNOWN" : String(temperature)}</div>
+            <div>Agent Class: {String(modelInfo.agent_class || "UNKNOWN")}</div>
+            <div>Output Format: {String(modelInfo.output_format || "UNKNOWN")}</div>
+          </div>
+        </details>
+
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40">
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Token Usage</summary>
+          <div className="px-2 pb-2 text-[10px] text-gray-300 space-y-0.5">
+            <div>Input Tokens: {Number.isFinite(inputTokens) ? inputTokens : 0}</div>
+            <div>Output Tokens: {Number.isFinite(outputTokens) ? outputTokens : 0}</div>
+          </div>
+        </details>
+
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40">
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Raw Input (Request)</summary>
+          <pre className="max-h-44 overflow-auto px-2 pb-2 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+            {pretty(requestRaw)}
+          </pre>
+        </details>
+
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40">
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Raw Response</summary>
+          <pre className="max-h-44 overflow-auto px-2 pb-2 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+            {responseRaw || String(stepCache?.content || "")}
+          </pre>
+        </details>
+
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40">
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Thinking (Captured)</summary>
+          <pre className="max-h-40 overflow-auto px-2 pb-2 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+            {capturedThinking || "No captured thinking."}
+          </pre>
+        </details>
+
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40" open={running}>
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Thinking (Live Stream)</summary>
+          <pre className="max-h-40 overflow-auto px-2 pb-2 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+            {liveThinking || (running ? "Streaming thinking…" : "No live thinking stream.")}
+          </pre>
+        </details>
+
+        <details className="rounded-lg border border-gray-700 bg-gray-900/40" open={running}>
+          <summary className="cursor-pointer px-2 py-1 text-[10px] text-indigo-300 font-medium">Output (Live Stream)</summary>
+          <pre className="max-h-40 overflow-auto px-2 pb-2 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+            {liveStream || (running ? "Streaming output…" : "No live output stream.")}
+          </pre>
+        </details>
+      </div>
+    );
+  }
+
   function renderPanel() {
     if (!selectedNode || !selData || !selKind || !selMeta) {
       return (
@@ -4582,6 +4714,7 @@ function PipelineCanvas() {
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{processingCache.errorMsg}</p>
                         )}
                         {renderResultContent(processingCache.content || "")}
+                        {renderStepRuntimeDiagnostics(processingCache, processingStepIndex)}
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">No agent response found for this step in the current context.</p>
@@ -4935,6 +5068,7 @@ function PipelineCanvas() {
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{stepCache.errorMsg}</p>
                         )}
                         {renderResultContent(stepCache.content || "")}
+                        {renderStepRuntimeDiagnostics(stepCache, stepIndex)}
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">

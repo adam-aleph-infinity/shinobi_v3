@@ -723,6 +723,21 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 
 
+def _model_provider_name(model: str) -> str:
+    m = str(model or "").strip().lower()
+    if not m:
+        return "unknown"
+    if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
+        return "openai"
+    if m.startswith("claude-"):
+        return "anthropic"
+    if m.startswith("gemini"):
+        return "google"
+    if m.startswith("grok"):
+        return "xai"
+    return "unknown"
+
+
 def _build_input_fingerprint(
     pipeline_id: str,
     step_idx: int,
@@ -4535,6 +4550,9 @@ async def run_pipeline(
                 "input_token_est":  0,
                 "output_token_est": 0,
                 "thinking":         "",
+                "model_info":       {},
+                "request_raw":      {},
+                "response_raw":     "",
                 "input_sources":    [],
                 "input_fingerprint": "",
                 "input_ready":      False,
@@ -5669,12 +5687,31 @@ async def run_pipeline(
                     if resolve_err:
                         break
                     run_steps[step_idx]["input_ready"] = True
+                    run_steps[step_idx]["model_info"] = {
+                        "provider": _model_provider_name(model),
+                        "model": model,
+                        "temperature": temperature,
+                        "agent_class": str(runtime_agent_def.get("agent_class") or ""),
+                        "output_format": str(runtime_agent_def.get("output_format") or ""),
+                    }
                     save_steps()  # input files/text resolved — persist input-node readiness
 
                     # Strict runtime policy:
                     # always pass resolved inputs as provider files only.
                     file_inputs = dict(resolved)
                     inline_inputs: dict[str, str] = {}
+                    run_steps[step_idx]["request_raw"] = {
+                        "system_prompt": system_prompt,
+                        "user_prompt_template": user_template,
+                        "inline_inputs": dict(inline_inputs),
+                        "resolved_input_meta": {
+                            str(k): {
+                                "chars": len(str(v or "")),
+                                "source": str(source_for_key.get(k) or ""),
+                            }
+                            for k, v in resolved.items()
+                        },
+                    }
 
                     input_fingerprint = _build_input_fingerprint(
                         pipeline_id=pipeline_id,
@@ -5798,6 +5835,10 @@ async def run_pipeline(
                                 return _resolve_provider_file_refs(model, file_inputs, _ldb)
 
                         file_ref_map = await loop.run_in_executor(None, _resolve_refs_only)
+                        run_steps[step_idx]["request_raw"] = {
+                            **(run_steps[step_idx].get("request_raw") or {}),
+                            "provider_file_refs": dict(file_ref_map or {}),
+                        }
                         if file_ref_map:
                             _ref_preview = ", ".join(f"{k}={v}" for k, v in list(file_ref_map.items())[:6])
                             if len(file_ref_map) > 6:
@@ -5918,6 +5959,7 @@ async def run_pipeline(
                     if llm_err:
                         break
 
+                    raw_content = content
                     content = _apply_output_postprocess(
                         raw_output=content,
                         agent_def=runtime_agent_def,
@@ -5963,6 +6005,7 @@ async def run_pipeline(
                         "input_token_est":  input_tok_est,
                         "output_token_est": output_tok_est,
                         "thinking":         (thinking or "")[:8000],
+                        "response_raw":     raw_content,
                     })
                     save_steps()  # write state BEFORE yields so file is correct if client disconnects
 
@@ -6109,6 +6152,18 @@ async def run_pipeline(
                                         merged_until_call_id=_mc,
                                     )
                                 _par_input_ready = True
+                                _par_request_raw = {
+                                    "system_prompt": _par_sysp,
+                                    "user_prompt_template": _par_ut,
+                                    "inline_inputs": {},
+                                    "resolved_input_meta": {
+                                        str(k): {
+                                            "chars": len(str(v or "")),
+                                            "source": str(_source_for_key.get(k) or ""),
+                                        }
+                                        for k, v in _par_resolved.items()
+                                    },
+                                }
 
                                 # Strict runtime policy:
                                 # always pass resolved inputs as provider files only.
@@ -6179,6 +6234,7 @@ async def run_pipeline(
                                 try:
                                     _par_ref_map = _resolve_provider_file_refs(_par_model, _par_fi, _par_db)
                                     if _par_ref_map:
+                                        _par_request_raw["provider_file_refs"] = dict(_par_ref_map or {})
                                         _par_ref_preview = ", ".join(
                                             f"{k}={v}" for k, v in list(_par_ref_map.items())[:6]
                                         )
@@ -6196,6 +6252,7 @@ async def run_pipeline(
                                 _par_content, _par_thinking = _llm_call_with_files(
                                     _par_sysp, _par_ut, _par_fi, _par_ii, _par_model, _par_temp, _par_db,
                                 )
+                                _par_response_raw = _par_content
                                 _par_content = _apply_output_postprocess(
                                     raw_output=_par_content,
                                     agent_def=_par_rdef,
@@ -6228,6 +6285,15 @@ async def run_pipeline(
                                     "input_fingerprint": _par_fp,
                                     "input_ready": _par_input_ready,
                                     "file_refs_preview": _par_ref_preview,
+                                    "request_raw": _par_request_raw,
+                                    "response_raw": _par_response_raw,
+                                    "model_info": {
+                                        "provider": _model_provider_name(_par_model),
+                                        "model": _par_model,
+                                        "temperature": _par_temp,
+                                        "agent_class": str(_par_rdef.get("agent_class") or ""),
+                                        "output_format": str(_par_rdef.get("output_format") or ""),
+                                    },
                                 }
                         except Exception as exc:
                             return {
@@ -6365,6 +6431,9 @@ async def run_pipeline(
                                 "input_token_est":  _res["input_tok"],
                                 "output_token_est": _res["output_tok"],
                                 "thinking":         (_res.get("thinking") or "")[:8000],
+                                "model_info":       (_res.get("model_info") or {}),
+                                "request_raw":      (_res.get("request_raw") or {}),
+                                "response_raw":     (_res.get("response_raw") or ""),
                                 "input_fingerprint": _res.get("input_fingerprint", ""),
                             })
                             save_steps()  # write BEFORE yields so file is correct if client disconnects
