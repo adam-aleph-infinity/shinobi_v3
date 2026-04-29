@@ -1507,6 +1507,9 @@ function PipelineCanvas() {
   const [pipelineId,   setPipelineId]       = useState<string | null>(null);
   const [pipelineFolder, setPipelineFolder] = useState("");
   const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [pipelinesPanelWidth, setPipelinesPanelWidth] = useState(320);
+  const [showCreatePipelineFolder, setShowCreatePipelineFolder] = useState(false);
+  const [newPipelineFolderDraft, setNewPipelineFolderDraft] = useState("");
   const [dragOverPipelineFolder, setDragOverPipelineFolder] = useState<string | null>(null);
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
@@ -1547,6 +1550,11 @@ function PipelineCanvas() {
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
   const [pendingOpenRunPayload, setPendingOpenRunPayload] = useState<PipelineOpenRunPayload | null>(null);
+  const pipelinesPanelResizeRef = useRef<{
+    active: boolean;
+    startX: number;
+    startWidth: number;
+  }>({ active: false, startX: 0, startWidth: 320 });
 
   useEffect(() => {
     return () => {
@@ -2838,6 +2846,31 @@ function PipelineCanvas() {
     stagesRef.current = next;
   }
 
+  function beginResizePipelinesPanel(e: React.MouseEvent<HTMLDivElement>) {
+    if (canvasLocked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pipelinesPanelResizeRef.current = {
+      active: true,
+      startX: e.clientX,
+      startWidth: pipelinesPanelWidth,
+    };
+    const onMove = (ev: MouseEvent) => {
+      if (!pipelinesPanelResizeRef.current.active) return;
+      const { startX, startWidth } = pipelinesPanelResizeRef.current;
+      const delta = startX - ev.clientX;
+      const next = Math.max(240, Math.min(640, Math.round(startWidth + delta)));
+      setPipelinesPanelWidth(next);
+    };
+    const onUp = () => {
+      pipelinesPanelResizeRef.current.active = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   function handleClear() {
     if (canvasLocked) return;
     runAbortRef.current?.abort();
@@ -2869,11 +2902,13 @@ function PipelineCanvas() {
     } catch { showToast("Network error — could not delete pipeline", false); }
   }
 
-  async function createPipelineFolder() {
-    if (canvasLocked) return;
-    const raw = window.prompt("Folder name");
-    const name = (raw ?? "").trim();
-    if (!name) return;
+  async function createPipelineFolder(rawName?: string) {
+    if (canvasLocked) return false;
+    const name = (rawName ?? newPipelineFolderDraft).trim();
+    if (!name) {
+      showToast("Folder name is required", false);
+      return false;
+    }
     const res = await fetch("/api/pipelines/folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2881,9 +2916,13 @@ function PipelineCanvas() {
     });
     if (!res.ok) {
       showToast("Could not create folder", false);
-      return;
+      return false;
     }
     mutate("/api/pipelines/folders");
+    setShowCreatePipelineFolder(false);
+    setNewPipelineFolderDraft("");
+    showToast(`Folder \"${name}\" created`, true);
+    return true;
   }
 
   async function deletePipelineFolder(folder: string) {
@@ -5607,17 +5646,26 @@ function PipelineCanvas() {
         {/* ── Right panel: Pipelines + elements ───────────────────────── */}
         <aside
           className={cn(
-            "w-52 shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col overflow-hidden order-3 transition-all duration-200",
+            "relative shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col overflow-hidden order-3 transition-all duration-200",
             logsExpanded && !logsCollapsed && "w-0 border-l-0 opacity-0 pointer-events-none",
           )}
+          style={{ width: logsExpanded && !logsCollapsed ? 0 : pipelinesPanelWidth }}
         >
+          <div
+            onMouseDown={beginResizePipelinesPanel}
+            title="Resize pipelines panel"
+            className={cn(
+              "absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-20 bg-transparent hover:bg-indigo-500/25",
+              canvasLocked && "pointer-events-none opacity-40",
+            )}
+          />
 
           {/* Pipelines list */}
           <div className="border-b border-gray-800 shrink-0">
             <div className="px-3 py-2 flex items-center justify-between">
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
               <div className="flex items-center gap-1">
-                <button onClick={createPipelineFolder} title="New folder"
+                <button onClick={() => { if (!canvasLocked) { setNewPipelineFolderDraft(""); setShowCreatePipelineFolder(true); } }} title="New folder"
                   disabled={canvasLocked}
                   className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
                   <Layers className="w-3 h-3" />
@@ -5629,7 +5677,8 @@ function PipelineCanvas() {
                 </button>
               </div>
             </div>
-            <div className="max-h-40 overflow-y-auto px-2 pb-2 space-y-1.5">
+            <div className="px-2 pb-2">
+              <div className="min-h-[200px] max-h-[52vh] resize-y overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/30 p-1.5 space-y-1.5">
               {([
                 { key: "", label: "Unfiled" },
                 ...pipelineFolders.map(f => ({ key: f, label: f })),
@@ -5711,6 +5760,7 @@ function PipelineCanvas() {
               {allPipelines.length === 0 && pipelineFolders.length === 0 && (
                 <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
               )}
+              </div>
             </div>
           </div>
 
@@ -6148,6 +6198,61 @@ function PipelineCanvas() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {showCreatePipelineFolder && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-4">
+              <div
+                className="w-full max-w-2xl rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_30px_80px_rgba(0,0,0,0.7)]"
+                style={{ animation: "canvasPopupIn 180ms ease-out" }}
+              >
+                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+                  <p className="text-sm font-semibold text-white">Create Pipeline Folder</p>
+                  <button
+                    onClick={() => setShowCreatePipelineFolder(false)}
+                    className="text-gray-500 hover:text-gray-300 transition-colors"
+                    disabled={canvasLocked}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <p className="text-xs text-gray-400">
+                    Folder names can be long (for example: Production / Brokerage / Per-Call Notes). You can resize the input box.
+                  </p>
+                  <textarea
+                    value={newPipelineFolderDraft}
+                    onChange={(e) => setNewPipelineFolderDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                        e.preventDefault();
+                        void createPipelineFolder();
+                      }
+                    }}
+                    placeholder="Folder name"
+                    rows={4}
+                    className="w-full min-h-[110px] bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-[12px] text-gray-200 resize focus:outline-none focus:border-indigo-500"
+                    disabled={canvasLocked}
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => setShowCreatePipelineFolder(false)}
+                      disabled={canvasLocked}
+                      className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-300 hover:bg-gray-800 transition-colors disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => { void createPipelineFolder(); }}
+                      disabled={canvasLocked}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors disabled:opacity-60"
+                    >
+                      Create Folder
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
