@@ -92,6 +92,34 @@ const RUNTIME_META: Record<RuntimeStatus, { label: string; className: string; do
   cancelled: { label: "Cancelled", className: "text-slate-200 border-slate-600/70 bg-slate-900/70", dot: "bg-slate-300" },
 };
 
+function normalizeStateToken(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isCancelledLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s.includes("cancel") || s.includes("abort") || s.includes("stop");
+}
+
+function isRunningLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "running" || s === "loading" || s === "started" || s.includes("in_progress");
+}
+
+function isFailedLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "failed" || s === "error" || s === "fail" || s.includes("exception");
+}
+
+function isCompletedLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "completed" || s === "done" || s === "pass" || s === "success" || s === "ok";
+}
+
 // ── Universal agent types & constants ────────────────────────────────────────
 
 interface AgentInput { key: string; source: string; agent_id?: string; }
@@ -2413,8 +2441,8 @@ function PipelineCanvas() {
     const out = new Map<string, RunTimeline>();
     for (const run of historyRuns) {
       const steps = parsedRunStepsById.get(run.id) ?? [];
-      const runState = String(run.status || "").trim().toLowerCase();
-      const runIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(runState);
+      const runState = normalizeStateToken(run.status);
+      const runIsCancelled = isCancelledLike(runState);
       let procNodesOrdered: Array<{ id: string; label: string; stageIndex: number | null }> = [];
       let outputsByProcId: Record<string, string[]> = {};
 
@@ -2472,12 +2500,12 @@ function PipelineCanvas() {
       for (let i = 0; i < total; i += 1) {
         const step = (steps[i] || {}) as PipelineRunStep;
         const proc = procNodesOrdered[i];
-        const rawState = String(step.state || step.status || "").trim().toLowerCase();
+        const rawState = normalizeStateToken(step.state || step.status);
         const hasCache = Array.isArray(step.cached_locations) && step.cached_locations.length > 0;
-        const isFailed = ["failed", "error", "fail"].includes(rawState);
-        const isCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(rawState);
-        const isRunning = ["running", "loading", "started"].includes(rawState);
-        const isCompleted = ["completed", "done", "pass", "success"].includes(rawState);
+        const isFailed = isFailedLike(rawState);
+        const isCancelled = isCancelledLike(rawState);
+        const isRunning = isRunningLike(rawState);
+        const isCompleted = isCompletedLike(rawState);
 
         let status: StepTimelineRow["status"] = "not_run";
         if (isFailed) status = "failed";
@@ -2784,12 +2812,14 @@ function PipelineCanvas() {
       runContextMode === "historical"
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
-    const sourceRunStatus = String(
+    const sourceRunStatus = normalizeStateToken(
       (runContextMode === "historical"
         ? selectedCacheRun?.status
         : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId)?.status) || "",
-    ).toLowerCase();
-    const sourceRunIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(sourceRunStatus);
+    );
+    const sourceRunIsCancelled = isCancelledLike(sourceRunStatus);
+    const sourceRunIsFailed = isFailedLike(sourceRunStatus);
+    const sourceRunIsCompleted = isCompletedLike(sourceRunStatus);
     if (sourceRunId && !parsedRunStepsById.has(sourceRunId)) {
       // Keep current in-memory status until runs cache catches up.
       return;
@@ -2798,21 +2828,24 @@ function PipelineCanvas() {
       const runSteps = parsedRunStepsById.get(sourceRunId) ?? [];
       runSteps.forEach((row, idx) => {
         if (idx >= next.length || !row) return;
-        const rawState = String(row.state || row.status || "").toLowerCase();
+        const rawState = normalizeStateToken(row.state || row.status);
         if (!rawState) return;
         const hasCachedLocations = Array.isArray((row as any).cached_locations)
           ? ((row as any).cached_locations as any[]).length > 0
           : !!(row as any).cached_locations;
-        if (["cached", "cache_hit"].includes(rawState) || (rawState === "completed" && hasCachedLocations)) {
+        if (rawState === "cached" || rawState === "cache_hit" || (isCompletedLike(rawState) && hasCachedLocations)) {
           next[idx] = "cached";
-        } else if (["done", "completed", "pass", "success"].includes(rawState)) {
+        } else if (isCompletedLike(rawState)) {
           next[idx] = "done";
         }
-        else if (["running", "loading", "started"].includes(rawState)) {
-          next[idx] = sourceRunIsCancelled ? "cancelled" : "loading";
+        else if (isRunningLike(rawState)) {
+          if (sourceRunIsCancelled) next[idx] = "cancelled";
+          else if (sourceRunIsFailed) next[idx] = "error";
+          else if (sourceRunIsCompleted) next[idx] = hasCachedLocations ? "cached" : "done";
+          else next[idx] = "loading";
         }
-        else if (["cancelled", "canceled", "aborted", "stopped"].includes(rawState)) next[idx] = "cancelled";
-        else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
+        else if (isCancelledLike(rawState)) next[idx] = "cancelled";
+        else if (isFailedLike(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
       });
     }
@@ -7128,12 +7161,12 @@ function PipelineCanvas() {
                     const expanded = !!expandedHistoryRunIds[run.id];
                     const historicalSelected = runContextMode === "historical" && selectedCacheRunId === run.id;
                     const timeline = runTimelineById.get(run.id);
-                    const runStatus = String(run.status || "").toLowerCase();
-                    const runStatusClass = runStatus === "done" || runStatus === "completed"
+                    const runStatus = normalizeStateToken(run.status);
+                    const runStatusClass = isCompletedLike(runStatus)
                       ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                      : runStatus === "error" || runStatus === "failed"
+                      : isFailedLike(runStatus)
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
-                        : runStatus === "cancelled" || runStatus === "canceled"
+                        : isCancelledLike(runStatus)
                           ? "text-slate-200 border-slate-700/50 bg-slate-900/50"
                         : runStatus === "queued"
                           ? "text-sky-200 border-sky-700/50 bg-sky-950/40"
