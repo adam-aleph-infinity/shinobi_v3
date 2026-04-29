@@ -867,17 +867,84 @@ def _queue_item_sort_key(item: dict[str, Any]) -> tuple[float, float]:
     return (next_ts, created_ts)
 
 
-async def _enqueue_live_item(item: dict[str, Any]) -> None:
+async def _enqueue_live_item(item: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """
+    Enqueue a live item with duplicate suppression.
+    Returns: (created, meta)
+      - created=True: new queue item added
+      - created=False: duplicate suppressed, meta contains existing run_id/state/message
+    """
     # Single-writer guard: webhook requests can arrive concurrently.
     # Without this lock, read-modify-write races can drop queue entries.
     async with _LIVE_QUEUE_LOCK:
         queue = _load_live_queue()
-        run_id = str(item.get("run_id") or "")
-        if run_id and any(str(x.get("run_id") or "") == run_id for x in queue):
-            return
+        run_id = str(item.get("run_id") or "").strip()
+        pipeline_id = str(item.get("pipeline_id") or "").strip()
+        sales_agent = str(item.get("sales_agent") or "").strip()
+        customer = str(item.get("customer") or "").strip()
+        call_id = str(item.get("call_id") or "").strip()
+
+        if run_id:
+            for row in queue:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("run_id") or "").strip() == run_id:
+                    return False, {
+                        "run_id": run_id,
+                        "state": str(row.get("state") or "queued"),
+                        "message": "Run already exists in live queue.",
+                    }
+
+        active_states = {"queued", "preparing", "running", "retrying"}
+        if pipeline_id and sales_agent and customer and call_id:
+            for row in queue:
+                if not isinstance(row, dict):
+                    continue
+                st = str(row.get("state") or "").strip().lower()
+                if st not in active_states:
+                    continue
+                if (
+                    str(row.get("pipeline_id") or "").strip() == pipeline_id
+                    and str(row.get("sales_agent") or "").strip() == sales_agent
+                    and str(row.get("customer") or "").strip() == customer
+                    and str(row.get("call_id") or "").strip() == call_id
+                ):
+                    return False, {
+                        "run_id": str(row.get("run_id") or ""),
+                        "state": str(row.get("state") or "queued"),
+                        "message": "Duplicate webhook suppressed (already queued/running).",
+                    }
+
+            # Fallback duplicate guard against orphaned/active DB rows.
+            try:
+                with Session(_db_engine) as s:
+                    rows = s.exec(
+                        select(PipelineRun).where(
+                            PipelineRun.pipeline_id == pipeline_id,
+                            PipelineRun.sales_agent == sales_agent,
+                            PipelineRun.customer == customer,
+                            PipelineRun.call_id == call_id,
+                            PipelineRun.status.in_(["queued", "preparing", "running", "retrying"]),
+                        )
+                    ).all()
+                for db_row in rows or []:
+                    if _steps_json_is_webhook_origin(getattr(db_row, "steps_json", "")):
+                        return False, {
+                            "run_id": str(getattr(db_row, "id", "") or ""),
+                            "state": str(getattr(db_row, "status", "") or "queued"),
+                            "message": "Duplicate webhook suppressed (active run already exists).",
+                        }
+            except Exception:
+                pass
+
         queue.append(item)
         queue.sort(key=_queue_item_sort_key)
         _save_live_queue(queue)
+        return True, {
+            "run_id": run_id,
+            "state": str(item.get("state") or "queued"),
+            "message": "Queued for live dispatcher.",
+        }
 
 
 def _steps_json_is_webhook_origin(raw_steps_json: Any) -> bool:
@@ -1037,6 +1104,138 @@ def _recover_orphaned_live_queue_items(
     return recovered
 
 
+async def _execute_live_queue_item(
+    item_snapshot: dict[str, Any],
+    cfg: dict[str, Any],
+    request_base_url: str = "",
+) -> dict[str, Any]:
+    item = dict(item_snapshot or {})
+    run_id = str(item.get("run_id") or "").strip()
+    pipeline_id = str(item.get("pipeline_id") or "").strip()
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    pair = item.get("pair") if isinstance(item.get("pair"), dict) else {}
+    attempt_num = int(item.get("attempts") or 0) + 1
+    item["attempts"] = attempt_num
+
+    if not run_id or not pipeline_id or not payload:
+        item["state"] = "failed"
+        item["last_error"] = "Invalid queued item payload."
+        item["updated_at"] = _utc_now_iso()
+        return item
+
+    try:
+        if bool(cfg.get("backfill_historical_transcripts", True)) and pair:
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=str(item.get("pipeline_name") or ""),
+                sales_agent=str(item.get("sales_agent") or ""),
+                customer=str(item.get("customer") or ""),
+                call_id=str(item.get("call_id") or ""),
+                status="preparing",
+                log_line="Backfilling historical transcripts (skipping existing)",
+            )
+            backfill = await _backfill_pair_transcripts(pair, cfg)
+            if not bool(backfill.get("ok")):
+                raise RuntimeError(
+                    f"Backfill failed ({int(backfill.get('failed') or 0)} failed jobs)."
+                )
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=str(item.get("pipeline_name") or ""),
+                sales_agent=str(item.get("sales_agent") or ""),
+                customer=str(item.get("customer") or ""),
+                call_id=str(item.get("call_id") or ""),
+                status="preparing",
+                log_line=(
+                    f"Backfill done: submitted {int(backfill.get('submitted') or 0)}, "
+                    f"skipped {int(backfill.get('skipped') or 0)}."
+                ),
+            )
+
+        req_base = str(item.get("request_base_url") or request_base_url or "").strip()
+        fake_req = type("WebhookReq", (), {"base_url": req_base or "http://127.0.0.1:8000"})()
+        payload_for_run = dict(payload)
+        payload_for_run["run_id"] = run_id
+        payload_for_run["run_origin"] = "webhook"
+        result = await _trigger_pipeline_run(
+            request=fake_req,  # type: ignore[arg-type]
+            pipeline_id=pipeline_id,
+            payload=payload_for_run,
+        )
+        actual_run_id = str(result.get("run_id") or run_id)
+        item["run_id"] = actual_run_id
+        item["state"] = "running"
+        item["updated_at"] = _utc_now_iso()
+        item["last_error"] = ""
+        _upsert_pipeline_run_stub(
+            run_id=actual_run_id,
+            pipeline_id=pipeline_id,
+            pipeline_name=str(item.get("pipeline_name") or ""),
+            sales_agent=str(item.get("sales_agent") or ""),
+            customer=str(item.get("customer") or ""),
+            call_id=str(item.get("call_id") or ""),
+            status="running",
+            log_line="Pipeline execution started from live queue.",
+        )
+        return item
+    except Exception as exc:
+        err_text = str(getattr(exc, "detail", "") or str(exc) or "Dispatch failed")
+        max_attempts = int(item.get("max_attempts") or int(cfg.get("retry_max_attempts") or 2))
+        can_retry = (
+            bool(cfg.get("auto_retry_enabled", True))
+            and attempt_num < max_attempts
+            and _is_retryable_text(err_text, cfg)
+        )
+        if can_retry:
+            item["state"] = "retrying"
+            item["last_error"] = err_text
+            item["next_attempt_at"] = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=int(cfg.get("retry_delay_s") or 45))
+            ).isoformat()
+            item["updated_at"] = _utc_now_iso()
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=str(item.get("pipeline_name") or ""),
+                sales_agent=str(item.get("sales_agent") or ""),
+                customer=str(item.get("customer") or ""),
+                call_id=str(item.get("call_id") or ""),
+                status="retrying",
+                log_line=f"Dispatch retry scheduled: {err_text[:220]}",
+            )
+        else:
+            item["state"] = "failed"
+            item["last_error"] = err_text
+            item["updated_at"] = _utc_now_iso()
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=str(item.get("pipeline_name") or ""),
+                sales_agent=str(item.get("sales_agent") or ""),
+                customer=str(item.get("customer") or ""),
+                call_id=str(item.get("call_id") or ""),
+                status="failed",
+                log_line=f"Dispatch failed: {err_text[:220]}",
+            )
+        return item
+
+
+def _prune_live_queue_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pruned: list[dict[str, Any]] = []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    for item in items:
+        st = str(item.get("state") or "").lower()
+        if st in {"done"}:
+            updated = _parse_iso(item.get("updated_at"))
+            if updated and (now_ts - updated.timestamp()) > 1800:
+                continue
+        pruned.append(item)
+    return pruned
+
+
 async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     cfg = _load_call_ended_config()
     if not bool(cfg.get("enabled", True)):
@@ -1050,6 +1249,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     now = datetime.now(timezone.utc)
     preparing_stale_after_s = 90
     running_stale_after_s = max(180, int(cfg.get("running_stale_after_s") or 600))
+    candidates: list[dict[str, Any]] = []
 
     async with _LIVE_QUEUE_LOCK:
         queue = _load_live_queue()
@@ -1058,13 +1258,11 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
             cfg=cfg,
             request_base_url=str(request_base_url or ""),
         )
-        if recovered:
-            _save_live_queue(queue)
+        changed = bool(recovered)
         if not queue:
             return
 
         # Reconcile running/retrying/finalized items.
-        changed = False
         for item in queue:
             state = str(item.get("state") or "queued").strip().lower()
             run_id = str(item.get("run_id") or "")
@@ -1193,160 +1391,88 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
 
         running_count = _count_running_pipeline_runs(queue)
         slots = max(0, max_running - running_count)
-        if slots <= 0:
-            if changed:
-                _save_live_queue(queue)
-            return
 
-        queue.sort(key=_queue_item_sort_key)
-        for item in queue:
-            if slots <= 0:
-                break
-            state = str(item.get("state") or "queued").strip().lower()
-            if state not in {"queued", "retrying", "preparing"}:
-                continue
-            next_attempt = _parse_iso(item.get("next_attempt_at"))
-            if next_attempt and next_attempt > now:
-                continue
+        if slots > 0:
+            queue.sort(key=_queue_item_sort_key)
+            for item in queue:
+                if slots <= 0:
+                    break
+                state = str(item.get("state") or "queued").strip().lower()
+                if state not in {"queued", "retrying", "preparing"}:
+                    continue
+                next_attempt = _parse_iso(item.get("next_attempt_at"))
+                if next_attempt and next_attempt > now:
+                    continue
 
-            run_id = str(item.get("run_id") or "").strip()
-            pipeline_id = str(item.get("pipeline_id") or "").strip()
-            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-            pair = item.get("pair") if isinstance(item.get("pair"), dict) else {}
-            if not run_id or not pipeline_id or not payload:
-                item["state"] = "failed"
-                item["last_error"] = "Invalid queued item payload."
+                run_id = str(item.get("run_id") or "").strip()
+                pipeline_id = str(item.get("pipeline_id") or "").strip()
+                payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                if not run_id or not pipeline_id or not payload:
+                    item["state"] = "failed"
+                    item["last_error"] = "Invalid queued item payload."
+                    item["updated_at"] = _utc_now_iso()
+                    changed = True
+                    continue
+
+                item["state"] = "preparing"
                 item["updated_at"] = _utc_now_iso()
-                changed = True
-                continue
-
-            item["state"] = "preparing"
-            item["updated_at"] = _utc_now_iso()
-            _upsert_pipeline_run_stub(
-                run_id=run_id,
-                pipeline_id=pipeline_id,
-                pipeline_name=str(item.get("pipeline_name") or ""),
-                sales_agent=str(item.get("sales_agent") or ""),
-                customer=str(item.get("customer") or ""),
-                call_id=str(item.get("call_id") or ""),
-                status="preparing",
-                log_line="Dequeued for preflight checks",
-            )
-            changed = True
-            _save_live_queue(queue)
-
-            try:
-                if bool(cfg.get("backfill_historical_transcripts", True)) and pair:
-                    _upsert_pipeline_run_stub(
-                        run_id=run_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_name=str(item.get("pipeline_name") or ""),
-                        sales_agent=str(item.get("sales_agent") or ""),
-                        customer=str(item.get("customer") or ""),
-                        call_id=str(item.get("call_id") or ""),
-                        status="preparing",
-                        log_line="Backfilling historical transcripts (skipping existing)",
-                    )
-                    backfill = await _backfill_pair_transcripts(pair, cfg)
-                    if not bool(backfill.get("ok")):
-                        raise RuntimeError(
-                            f"Backfill failed ({int(backfill.get('failed') or 0)} failed jobs)."
-                        )
-                    _upsert_pipeline_run_stub(
-                        run_id=run_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_name=str(item.get("pipeline_name") or ""),
-                        sales_agent=str(item.get("sales_agent") or ""),
-                        customer=str(item.get("customer") or ""),
-                        call_id=str(item.get("call_id") or ""),
-                        status="preparing",
-                        log_line=(
-                            f"Backfill done: submitted {int(backfill.get('submitted') or 0)}, "
-                            f"skipped {int(backfill.get('skipped') or 0)}."
-                        ),
-                    )
-
-                req_base = str(item.get("request_base_url") or request_base_url or "").strip()
-                fake_req = type("WebhookReq", (), {"base_url": req_base or "http://127.0.0.1:8000"})()
-                payload_for_run = dict(payload)
-                payload_for_run["run_id"] = run_id
-                payload_for_run["run_origin"] = "webhook"
-                result = await _trigger_pipeline_run(
-                    request=fake_req,  # type: ignore[arg-type]
-                    pipeline_id=pipeline_id,
-                    payload=payload_for_run,
-                )
-                actual_run_id = str(result.get("run_id") or run_id)
-                item["run_id"] = actual_run_id
-                item["state"] = "running"
-                item["attempts"] = int(item.get("attempts") or 0) + 1
-                item["updated_at"] = _utc_now_iso()
-                item["last_error"] = ""
                 _upsert_pipeline_run_stub(
-                    run_id=actual_run_id,
+                    run_id=run_id,
                     pipeline_id=pipeline_id,
                     pipeline_name=str(item.get("pipeline_name") or ""),
                     sales_agent=str(item.get("sales_agent") or ""),
                     customer=str(item.get("customer") or ""),
                     call_id=str(item.get("call_id") or ""),
-                    status="running",
-                    log_line="Pipeline execution started from live queue.",
+                    status="preparing",
+                    log_line="Dequeued for preflight checks",
                 )
+                candidates.append(dict(item))
                 slots -= 1
-            except Exception as exc:
-                err_text = str(getattr(exc, "detail", "") or str(exc) or "Dispatch failed")
-                attempts = int(item.get("attempts") or 0)
-                max_attempts = int(item.get("max_attempts") or int(cfg.get("retry_max_attempts") or 2))
-                can_retry = (
-                    bool(cfg.get("auto_retry_enabled", True))
-                    and attempts < max_attempts
-                    and _is_retryable_text(err_text, cfg)
-                )
-                if can_retry:
-                    item["state"] = "retrying"
-                    item["last_error"] = err_text
-                    item["next_attempt_at"] = (
-                        datetime.now(timezone.utc)
-                        + timedelta(seconds=int(cfg.get("retry_delay_s") or 45))
-                    ).isoformat()
-                    item["updated_at"] = _utc_now_iso()
-                    _upsert_pipeline_run_stub(
-                        run_id=run_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_name=str(item.get("pipeline_name") or ""),
-                        sales_agent=str(item.get("sales_agent") or ""),
-                        customer=str(item.get("customer") or ""),
-                        call_id=str(item.get("call_id") or ""),
-                        status="retrying",
-                        log_line=f"Dispatch retry scheduled: {err_text[:220]}",
-                    )
-                else:
-                    item["state"] = "failed"
-                    item["last_error"] = err_text
-                    item["updated_at"] = _utc_now_iso()
-                    _upsert_pipeline_run_stub(
-                        run_id=run_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_name=str(item.get("pipeline_name") or ""),
-                        sales_agent=str(item.get("sales_agent") or ""),
-                        customer=str(item.get("customer") or ""),
-                        call_id=str(item.get("call_id") or ""),
-                        status="failed",
-                        log_line=f"Dispatch failed: {err_text[:220]}",
-                    )
-            finally:
                 changed = True
 
-        # Keep queue compact (drop completed items after 30 minutes).
-        pruned: list[dict[str, Any]] = []
-        now_ts = datetime.now(timezone.utc).timestamp()
-        for item in queue:
-            st = str(item.get("state") or "").lower()
-            if st in {"done"}:
-                updated = _parse_iso(item.get("updated_at"))
-                if updated and (now_ts - updated.timestamp()) > 1800:
-                    continue
-            pruned.append(item)
+        pruned = _prune_live_queue_items(queue)
+        if changed or len(pruned) != len(queue):
+            _save_live_queue(pruned)
+
+    if not candidates:
+        return
+
+    results = await asyncio.gather(
+        *[_execute_live_queue_item(c, cfg, request_base_url) for c in candidates],
+        return_exceptions=True,
+    )
+
+    async with _LIVE_QUEUE_LOCK:
+        queue = _load_live_queue()
+        changed = False
+        for res in results:
+            if isinstance(res, Exception):
+                continue
+            if not isinstance(res, dict):
+                continue
+            item_id = str(res.get("id") or "").strip()
+            run_id = str(res.get("run_id") or "").strip()
+
+            idx = -1
+            if item_id:
+                for i, row in enumerate(queue):
+                    if str(row.get("id") or "").strip() == item_id:
+                        idx = i
+                        break
+            if idx < 0 and run_id:
+                for i, row in enumerate(queue):
+                    if str(row.get("run_id") or "").strip() == run_id:
+                        idx = i
+                        break
+
+            if idx >= 0:
+                queue[idx].update(res)
+                changed = True
+            else:
+                queue.append(dict(res))
+                changed = True
+
+        pruned = _prune_live_queue_items(queue)
         if changed or len(pruned) != len(queue):
             _save_live_queue(pruned)
 
@@ -1534,50 +1660,50 @@ async def _handle_call_webhook(
                     queued_payload["run_id"] = run_id
                     queued_payload["run_origin"] = "webhook"
                     max_attempts = int(cfg.get("retry_max_attempts") or 2)
-
-                    _upsert_pipeline_run_stub(
-                        run_id=run_id,
-                        pipeline_id=pipeline_id,
-                        pipeline_name=pipeline_name,
-                        sales_agent=pair["agent"],
-                        customer=pair["customer"],
-                        call_id=call_id,
-                        status="queued",
-                        log_line="Queued from webhook trigger",
-                    )
-                    await _enqueue_live_item(
-                        {
-                            "id": str(uuid.uuid4()),
-                            "webhook_type": webhook_type,
-                            "created_at": queued_at,
-                            "updated_at": queued_at,
-                            "state": "queued",
-                            "attempts": 0,
-                            "max_attempts": max_attempts,
-                            "next_attempt_at": queued_at,
-                            "last_error": "",
-                            "request_base_url": str(request.base_url or ""),
-                            "pipeline_id": pipeline_id,
-                            "pipeline_name": pipeline_name,
-                            "run_id": run_id,
-                            "sales_agent": pair["agent"],
+                    queue_item = {
+                        "id": str(uuid.uuid4()),
+                        "webhook_type": webhook_type,
+                        "created_at": queued_at,
+                        "updated_at": queued_at,
+                        "state": "queued",
+                        "attempts": 0,
+                        "max_attempts": max_attempts,
+                        "next_attempt_at": queued_at,
+                        "last_error": "",
+                        "request_base_url": str(request.base_url or ""),
+                        "pipeline_id": pipeline_id,
+                        "pipeline_name": pipeline_name,
+                        "run_id": run_id,
+                        "sales_agent": pair["agent"],
+                        "customer": pair["customer"],
+                        "call_id": call_id,
+                        "pair": {
+                            "crm_url": pair["crm_url"],
+                            "account_id": pair["account_id"],
+                            "agent": pair["agent"],
                             "customer": pair["customer"],
-                            "call_id": call_id,
-                            "pair": {
-                                "crm_url": pair["crm_url"],
-                                "account_id": pair["account_id"],
-                                "agent": pair["agent"],
-                                "customer": pair["customer"],
-                            },
-                            "payload": queued_payload,
-                        }
-                    )
+                        },
+                        "payload": queued_payload,
+                    }
+                    created, meta = await _enqueue_live_item(queue_item)
+                    if created:
+                        _upsert_pipeline_run_stub(
+                            run_id=run_id,
+                            pipeline_id=pipeline_id,
+                            pipeline_name=pipeline_name,
+                            sales_agent=pair["agent"],
+                            customer=pair["customer"],
+                            call_id=call_id,
+                            status="queued",
+                            log_line="Queued from webhook trigger",
+                        )
                     entry.update(
                         {
                             "triggered": False,
-                            "run_id": run_id,
-                            "state": "queued",
-                            "message": "Queued for live dispatcher.",
+                            "run_id": str(meta.get("run_id") or run_id),
+                            "state": str(meta.get("state") or ("queued" if created else "queued")),
+                            "message": str(meta.get("message") or "Queued for live dispatcher."),
+                            "deduplicated": (not created),
                         }
                     )
                 except Exception as e:
