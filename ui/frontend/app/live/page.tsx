@@ -58,6 +58,8 @@ interface LiveWebhookConfig {
   retry_on_server_error: boolean;
   retry_on_rate_limit: boolean;
   retry_on_timeout: boolean;
+  read_only?: boolean;
+  mirror_source?: string;
 }
 
 function statusTone(status: string): string {
@@ -221,8 +223,9 @@ export default function LivePage() {
     fetcher,
     { refreshInterval: 7000 },
   );
+  const liveReadOnly = !!liveCfg?.read_only;
 
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=600";
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=600&mirror=1";
 
   const { data: runsData, isLoading } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
     refreshInterval: 1500,
@@ -280,6 +283,11 @@ export default function LivePage() {
   }, [liveCfg?.live_pipeline_ids, liveCfg?.default_pipeline_id]);
 
   const applyLivePipelineSelection = async (pipelineIds: string[]) => {
+    if (liveReadOnly) {
+      setLiveMessageError(true);
+      setLiveMessage("Live mirror mode is read-only in this environment.");
+      return;
+    }
     const cleaned = Array.from(new Set((pipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
     setLiveSaving(true);
     setLiveMessage("");
@@ -655,7 +663,7 @@ export default function LivePage() {
                       <input
                         type="checkbox"
                         checked={checked}
-                        disabled={liveSaving}
+                        disabled={liveSaving || liveReadOnly}
                         onChange={() => { void toggleLivePipelineChecked(String(p.id || "")); }}
                         className="accent-emerald-500"
                       />
@@ -669,6 +677,11 @@ export default function LivePage() {
                 {liveMessage ? (
                   <p className={cn("pt-2 text-[11px]", liveMessageError ? "text-red-300" : "text-emerald-300")}>
                     {liveMessage}
+                  </p>
+                ) : null}
+                {liveReadOnly ? (
+                  <p className="pt-1 text-[11px] text-amber-300">
+                    Read-only mirror from {String(liveCfg?.mirror_source || "production")}.
                   </p>
                 ) : null}
               </div>

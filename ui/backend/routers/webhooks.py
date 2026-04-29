@@ -564,6 +564,8 @@ def _extract_webhook_token_from_headers(request: Request) -> str:
 
 
 def _assert_webhook_auth(request: Request, payload: CallEndedWebhookPayload) -> None:
+    if bool(settings.live_mirror_enabled):
+        raise HTTPException(status_code=403, detail="CRM webhook ingest is disabled in live mirror mode.")
     if not bool(settings.crm_webhook_enabled):
         raise HTTPException(status_code=403, detail="CRM webhook is disabled. Set CRM_WEBHOOK_ENABLED=true.")
 
@@ -587,6 +589,8 @@ def _assert_webhook_admin_auth(request: Request) -> None:
     Guard configuration endpoints under /api/webhooks/*.
     These endpoints become publicly reachable once webhook path bypasses IAP.
     """
+    if bool(settings.live_mirror_enabled):
+        raise HTTPException(status_code=403, detail="Webhook admin endpoints are disabled in live mirror mode.")
     if not bool(settings.crm_webhook_enabled):
         raise HTTPException(status_code=403, detail="CRM webhook is disabled. Set CRM_WEBHOOK_ENABLED=true.")
 

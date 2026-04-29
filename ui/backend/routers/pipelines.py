@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -44,6 +45,67 @@ _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
 _RUN_SUBSCRIBERS: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+
+
+def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
+    if not bool(settings.live_mirror_enabled):
+        return False
+    if not str(settings.live_mirror_base_url or "").strip():
+        return False
+    if request is not None and str(request.headers.get("x-shinobi-live-mirror-hop") or "").strip() == "1":
+        return False
+    return True
+
+
+def _live_mirror_headers() -> dict[str, str]:
+    headers: dict[str, str] = {"x-shinobi-live-mirror-hop": "1"}
+    token = str(settings.live_mirror_auth_token or "").strip()
+    if token:
+        hdr = str(settings.live_mirror_auth_header or "x-api-token").strip() or "x-api-token"
+        headers[hdr] = token
+    return headers
+
+
+def _live_mirror_url(path: str) -> str:
+    base = str(settings.live_mirror_base_url or "").strip().rstrip("/")
+    p = str(path or "").strip()
+    if not p.startswith("/"):
+        p = f"/{p}"
+    return f"{base}{p}"
+
+
+def _live_mirror_request_json(
+    method: str,
+    path: str,
+    *,
+    request: Optional[Request] = None,
+    payload: Optional[dict[str, Any]] = None,
+) -> Any:
+    if not _is_live_mirror_mode(request):
+        raise HTTPException(status_code=500, detail="Live mirror mode is not configured.")
+    url = _live_mirror_url(path)
+    timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
+    try:
+        with httpx.Client(timeout=timeout_s, headers=_live_mirror_headers()) as client:
+            if str(method or "GET").upper() == "GET":
+                resp = client.get(url)
+            else:
+                resp = client.request(str(method).upper(), url, json=(payload or {}))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Live mirror request failed: {e}") from e
+    if resp.status_code >= 400:
+        detail = resp.text
+        try:
+            parsed = resp.json()
+            if isinstance(parsed, dict):
+                detail = str(parsed.get("detail") or parsed.get("error") or detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=resp.status_code, detail=f"Live mirror error: {detail}")
+    try:
+        return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Live mirror returned invalid JSON: {e}") from e
 
 
 def _norm_ci(value: Any) -> str:
@@ -4243,7 +4305,13 @@ def get_pipeline_state(
 
 
 @router.get("/live-webhook/config")
-def get_live_webhook_config():
+def get_live_webhook_config(request: Request):
+    if _is_live_mirror_mode(request):
+        mirrored = _live_mirror_request_json("GET", "/api/pipelines/live-webhook/config", request=request)
+        if isinstance(mirrored, dict):
+            mirrored["read_only"] = True
+            mirrored["mirror_source"] = str(settings.live_mirror_base_url or "").strip()
+        return mirrored
     cfg = _load_live_webhook_config()
     return {
         "enabled": bool(cfg.get("enabled", True)),
@@ -4265,11 +4333,14 @@ def get_live_webhook_config():
         "retry_on_server_error": bool(cfg.get("retry_on_server_error", True)),
         "retry_on_rate_limit": bool(cfg.get("retry_on_rate_limit", True)),
         "retry_on_timeout": bool(cfg.get("retry_on_timeout", True)),
+        "read_only": False,
     }
 
 
 @router.put("/live-webhook/config")
-def set_live_webhook_config(req: LiveWebhookConfigIn):
+def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook config is read-only in mirror mode.")
     incoming = req.model_dump()
     incoming["default_pipeline_id"] = str(incoming.get("default_pipeline_id") or "").strip()
     raw_live_ids = incoming.get("live_pipeline_ids")
@@ -4322,7 +4393,9 @@ def set_live_webhook_config(req: LiveWebhookConfigIn):
 
 
 @router.put("/live-webhook/quick-set")
-def quick_set_live_webhook(req: LiveWebhookQuickSetIn):
+def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook config is read-only in mirror mode.")
     pipeline_id = str(req.pipeline_id or "").strip()
     if req.enabled and not pipeline_id:
         raise HTTPException(status_code=400, detail="pipeline_id is required when enabling live webhook execution.")

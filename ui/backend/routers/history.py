@@ -3,7 +3,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -11,6 +12,25 @@ from ui.backend.database import get_session
 
 router = APIRouter(prefix="/history", tags=["history"])
 _WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
+
+
+def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
+    if not bool(settings.live_mirror_enabled):
+        return False
+    if not str(settings.live_mirror_base_url or "").strip():
+        return False
+    if request is not None and str(request.headers.get("x-shinobi-live-mirror-hop") or "").strip() == "1":
+        return False
+    return True
+
+
+def _live_mirror_headers() -> dict[str, str]:
+    headers: dict[str, str] = {"x-shinobi-live-mirror-hop": "1"}
+    token = str(settings.live_mirror_auth_token or "").strip()
+    if token:
+        hdr = str(settings.live_mirror_auth_header or "x-api-token").strip() or "x-api-token"
+        headers[hdr] = token
+    return headers
 
 
 def _norm_ci(value: Any) -> str:
@@ -134,6 +154,7 @@ def _matches_webhook_event(
 
 @router.get("/runs")
 def list_runs(
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     pipeline_id: str = Query(""),
@@ -145,9 +166,49 @@ def list_runs(
     sort_by: str = Query("started_at"),
     sort_dir: str = Query("desc"),
     limit: int = Query(200, ge=1, le=2000),
+    mirror: int = Query(0),
     db: Session = Depends(get_session),
 ):
     """Return recent pipeline runs, newest first."""
+    if bool(mirror) and _is_live_mirror_mode(request):
+        base = str(settings.live_mirror_base_url or "").strip().rstrip("/")
+        url = f"{base}/api/history/runs"
+        params = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "pipeline_id": pipeline_id,
+            "call_id": call_id,
+            "status": status,
+            "crm_url": crm_url,
+            "date_from": date_from,
+            "date_to": date_to,
+            "sort_by": sort_by,
+            "sort_dir": sort_dir,
+            "limit": limit,
+        }
+        timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
+        try:
+            with httpx.Client(timeout=timeout_s, headers=_live_mirror_headers()) as client:
+                resp = client.get(url, params=params)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Live mirror request failed: {e}") from e
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                parsed = resp.json()
+                if isinstance(parsed, dict):
+                    detail = str(parsed.get("detail") or parsed.get("error") or detail)
+            except Exception:
+                pass
+            raise HTTPException(status_code=resp.status_code, detail=f"Live mirror error: {detail}")
+        try:
+            data = resp.json()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Live mirror returned invalid JSON: {e}") from e
+        if not isinstance(data, list):
+            raise HTTPException(status_code=502, detail="Live mirror returned invalid runs payload.")
+        return data
+
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.crm import CRMCall, CRMPair
 

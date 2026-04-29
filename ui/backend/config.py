@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     crm_webhook_transcription_timeout_s: int = 900
     crm_webhook_transcription_poll_interval_s: float = 2.0
     crm_webhook_internal_base_url: str = "http://127.0.0.1:8000"
+    # Development mirror mode: show production live/webhook state read-only.
+    live_mirror_enabled: bool = False
+    live_mirror_base_url: str = ""
+    live_mirror_timeout_s: int = 20
+    live_mirror_auth_header: str = "x-api-token"
+    live_mirror_auth_token: str = ""
 
     model_config = {"env_file": str(Path(__file__).parent.parent.parent / ".env"), "extra": "ignore"}
 

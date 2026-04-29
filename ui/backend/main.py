@@ -431,11 +431,14 @@ async def on_startup():
 
     asyncio.create_task(_reconcile_crm_financials_bg())
 
-    # Start persistent live-webhook queue dispatcher.
-    try:
-        ensure_live_dispatcher_started()
-    except Exception as e:
-        print(f"[startup] live webhook dispatcher start failed: {e}")
+    # Start persistent live-webhook queue dispatcher (disabled in mirror mode).
+    if settings.live_mirror_enabled:
+        print("[startup] live webhook dispatcher disabled (LIVE_MIRROR_ENABLED=true)")
+    else:
+        try:
+            ensure_live_dispatcher_started()
+        except Exception as e:
+            print(f"[startup] live webhook dispatcher start failed: {e}")
 
     # Re-queue orphaned jobs from previous server runs
     loop = asyncio.get_running_loop()
