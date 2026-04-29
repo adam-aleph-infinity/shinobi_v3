@@ -78,18 +78,30 @@ interface LiveWebhookConfig {
 }
 
 function statusTone(status: string): string {
-  const s = String(status || "").toLowerCase();
+  const s = String(status || "").trim().toLowerCase();
   if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
   if (s === "preparing") return "text-cyan-200 border-cyan-700/50 bg-cyan-950/40";
   if (s === "retrying") return "text-violet-200 border-violet-700/50 bg-violet-950/40";
-  if (s === "done" || s === "completed") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
-  if (s === "error" || s === "failed") return "text-red-300 border-red-700/50 bg-red-950/40";
+  if (s === "done" || s === "completed" || s === "success" || s === "ok") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
+  if (s === "error" || s === "failed" || s.includes("exception")) return "text-red-300 border-red-700/50 bg-red-950/40";
+  if (s.includes("cancel") || s.includes("abort") || s.includes("stop")) return "text-slate-200 border-slate-700/50 bg-slate-900/50";
   return "text-amber-300 border-amber-700/50 bg-amber-950/40";
 }
 
 function isCompletedRun(status: string): boolean {
-  const s = String(status || "").toLowerCase();
-  return s === "done" || s === "completed" || s === "error" || s === "failed" || s === "stopped" || s === "cancelled";
+  const s = String(status || "").trim().toLowerCase();
+  return (
+    s === "done"
+    || s === "completed"
+    || s === "success"
+    || s === "ok"
+    || s === "error"
+    || s === "failed"
+    || s.includes("cancel")
+    || s.includes("abort")
+    || s.includes("stop")
+    || s.includes("exception")
+  );
 }
 
 function isQueuedRun(status: string): boolean {

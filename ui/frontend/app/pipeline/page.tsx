@@ -120,6 +120,12 @@ function isCompletedLike(value: unknown): boolean {
   return s === "completed" || s === "done" || s === "pass" || s === "success" || s === "ok";
 }
 
+function isActiveRunLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "running" || s === "queued" || s === "preparing" || s === "retrying";
+}
+
 // ── Universal agent types & constants ────────────────────────────────────────
 
 interface AgentInput { key: string; source: string; agent_id?: string; }
@@ -2442,7 +2448,11 @@ function PipelineCanvas() {
     for (const run of historyRuns) {
       const steps = parsedRunStepsById.get(run.id) ?? [];
       const runState = normalizeStateToken(run.status);
+      const runFinishedAtMs = parseIsoMs(run.finished_at);
+      const runIsActive = isActiveRunLike(runState) && runFinishedAtMs == null;
       const runIsCancelled = isCancelledLike(runState);
+      const runIsFailed = isFailedLike(runState);
+      const runIsCompleted = isCompletedLike(runState);
       let procNodesOrdered: Array<{ id: string; label: string; stageIndex: number | null }> = [];
       let outputsByProcId: Record<string, string[]> = {};
 
@@ -2517,8 +2527,11 @@ function PipelineCanvas() {
 
         // If the overall run was cancelled, stale in-flight step states should
         // no longer be presented as running in history/timeline.
-        if (runIsCancelled && status === "running") {
-          status = "cancelled";
+        if (status === "running") {
+          if (runIsCancelled) status = "cancelled";
+          else if (runIsFailed) status = "failed";
+          else if (runIsCompleted) status = hasCache ? "cached" : "finished";
+          else if (!runIsActive) status = "cancelled";
         }
 
         const statusMeta = {
@@ -2812,11 +2825,17 @@ function PipelineCanvas() {
       runContextMode === "historical"
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
-    const sourceRunStatus = normalizeStateToken(
-      (runContextMode === "historical"
-        ? selectedCacheRun?.status
-        : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId)?.status) || "",
-    );
+    const sourceRunRecord = runContextMode === "historical"
+      ? selectedCacheRun
+      : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
+    const sourceRunStatus = normalizeStateToken(sourceRunRecord?.status || "");
+    const sourceRunFinishedAtMs = (() => {
+      const raw = String(sourceRunRecord?.finished_at || "").trim();
+      if (!raw) return null;
+      const ts = Date.parse(raw);
+      return Number.isFinite(ts) ? ts : null;
+    })();
+    const sourceRunIsActive = isActiveRunLike(sourceRunStatus) && sourceRunFinishedAtMs == null;
     const sourceRunIsCancelled = isCancelledLike(sourceRunStatus);
     const sourceRunIsFailed = isFailedLike(sourceRunStatus);
     const sourceRunIsCompleted = isCompletedLike(sourceRunStatus);
@@ -2842,6 +2861,7 @@ function PipelineCanvas() {
           if (sourceRunIsCancelled) next[idx] = "cancelled";
           else if (sourceRunIsFailed) next[idx] = "error";
           else if (sourceRunIsCompleted) next[idx] = hasCachedLocations ? "cached" : "done";
+          else if (!sourceRunIsActive) next[idx] = "cancelled";
           else next[idx] = "loading";
         }
         else if (isCancelledLike(rawState)) next[idx] = "cancelled";
@@ -7162,17 +7182,35 @@ function PipelineCanvas() {
                     const historicalSelected = runContextMode === "historical" && selectedCacheRunId === run.id;
                     const timeline = runTimelineById.get(run.id);
                     const runStatus = normalizeStateToken(run.status);
-                    const runStatusClass = isCompletedLike(runStatus)
+                    const rowStatuses = timeline?.rows.map((r) => r.status) ?? [];
+                    const hasRowCancelled = rowStatuses.includes("cancelled");
+                    const hasRowFailed = rowStatuses.includes("failed");
+                    const hasRowRunning = rowStatuses.includes("running");
+                    const runFinishedTs = (() => {
+                      const raw = String(run.finished_at || "").trim();
+                      if (!raw) return null;
+                      const ts = Date.parse(raw);
+                      return Number.isFinite(ts) ? ts : null;
+                    })();
+                    const runIsActive = isActiveRunLike(runStatus) && runFinishedTs == null;
+                    const displayStatus = hasRowCancelled
+                      ? "cancelled"
+                      : hasRowFailed
+                        ? "failed"
+                        : hasRowRunning && !runIsActive
+                          ? "cancelled"
+                          : runStatus;
+                    const runStatusClass = isCompletedLike(displayStatus)
                       ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                      : isFailedLike(runStatus)
+                      : isFailedLike(displayStatus)
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
-                        : isCancelledLike(runStatus)
+                        : isCancelledLike(displayStatus)
                           ? "text-slate-200 border-slate-700/50 bg-slate-900/50"
-                        : runStatus === "queued"
+                        : displayStatus === "queued"
                           ? "text-sky-200 border-sky-700/50 bg-sky-950/40"
-                          : runStatus === "preparing"
+                          : displayStatus === "preparing"
                             ? "text-cyan-200 border-cyan-700/50 bg-cyan-950/40"
-                            : runStatus === "retrying"
+                            : displayStatus === "retrying"
                               ? "text-violet-200 border-violet-700/50 bg-violet-950/40"
                               : "text-orange-300 border-orange-700/50 bg-orange-950/40";
                     return (
@@ -7226,7 +7264,7 @@ function PipelineCanvas() {
                             {run.id.slice(0, 8)}
                           </button>
                           <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
-                            {run.status}
+                            {displayStatus || run.status}
                           </span>
                         </div>
                         <p className="mt-1 text-[9px] text-gray-500 truncate">
