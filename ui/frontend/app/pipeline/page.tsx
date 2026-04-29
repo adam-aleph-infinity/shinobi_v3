@@ -1510,6 +1510,7 @@ function PipelineCanvas() {
   const [pipelinesPanelWidth, setPipelinesPanelWidth] = useState(320);
   const [showCreatePipelineFolder, setShowCreatePipelineFolder] = useState(false);
   const [newPipelineFolderDraft, setNewPipelineFolderDraft] = useState("");
+  const [collapsedPipelineFolderIds, setCollapsedPipelineFolderIds] = useState<Record<string, boolean>>({});
   const [dragOverPipelineFolder, setDragOverPipelineFolder] = useState<string | null>(null);
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
@@ -5684,6 +5685,8 @@ function PipelineCanvas() {
                 ...pipelineFolders.map(f => ({ key: f, label: f })),
               ]).map(section => {
                 const list = pipelinesByFolder[section.key] ?? [];
+                const sectionId = section.key || "__unfiled__";
+                const folderCollapsed = !!collapsedPipelineFolderIds[sectionId];
                 return (
                   <div
                     key={section.label}
@@ -5702,7 +5705,15 @@ function PipelineCanvas() {
                       dragOverPipelineFolder === section.key ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
                     )}>
                     <div className="flex items-center gap-1 px-1.5 mb-0.5">
-                      <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest flex-1">{section.label}</p>
+                      <button
+                        onClick={() => setCollapsedPipelineFolderIds((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }))}
+                        className="min-w-0 flex-1 flex items-center gap-1 text-left hover:bg-gray-800/60 rounded px-1 py-0.5 transition-colors"
+                        title={folderCollapsed ? "Expand folder" : "Collapse folder"}
+                      >
+                        <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
+                        <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest truncate">{section.label}</p>
+                        <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
+                      </button>
                       {section.key !== "" && (
                         <button
                           onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.key); }}
@@ -5714,7 +5725,7 @@ function PipelineCanvas() {
                         </button>
                       )}
                     </div>
-                    {list.length === 0 ? (
+                    {folderCollapsed ? null : list.length === 0 ? (
                       <p className="text-[9px] text-gray-700 italic px-2 py-1">Drop pipelines here</p>
                     ) : list.map(p => (
                       <div key={p.id} className="flex items-center group">
