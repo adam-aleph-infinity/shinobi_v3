@@ -40,8 +40,8 @@ interface CachedStepResult {
 }
 
 
-type StepStatus    = "pending" | "loading" | "cached" | "done" | "error";
-type CallRunStatus = "queued"  | "running" | "cached" | "done" | "error";
+type StepStatus    = "pending" | "loading" | "cached" | "done" | "error" | "cancelled";
+type CallRunStatus = "queued"  | "running" | "cached" | "done" | "error" | "cancelled";
 
 interface StepState {
   agentName: string; status: StepStatus;
@@ -64,6 +64,25 @@ interface CallResult {
 
 function normalizeCallId(raw: string | null | undefined): string {
   return String(raw || "").trim().toLowerCase();
+}
+
+function normalizeState(raw: unknown): string {
+  return String(raw || "").trim().toLowerCase();
+}
+
+function isCancelLike(raw: unknown): boolean {
+  const s = normalizeState(raw);
+  return s.includes("cancel") || s.includes("abort") || s.includes("stop");
+}
+
+function isErrorLike(raw: unknown): boolean {
+  const s = normalizeState(raw);
+  return s === "error" || s === "failed" || s === "fail" || s.includes("exception");
+}
+
+function isActiveLike(raw: unknown): boolean {
+  const s = normalizeState(raw);
+  return s === "running" || s === "loading" || s === "started" || s === "queued" || s === "preparing" || s === "retrying";
 }
 
 function initStepsFor(pipeline: Pipeline, agents: UniversalAgent[]): StepState[] {
@@ -189,19 +208,21 @@ function MiniCanvas({
       //   step_cached → cached   (whole step was cached — yellow)
       //   step_done   → done     (fallback if input_ready was missed)
       // Fall back to processing step status for per_call mode / restored runs.
-      const statuses = procIds.map(pid => {
-        const i = procStepIdx.get(pid);
-        if (i == null) return "pending" as StepStatus;
-        const inputSt = stepInputStatus[i];
-        if (inputSt != null) return inputSt;
-        // Fallback: derive from processing status (same logic as before)
-        const procSt = flowSteps[i]?.status ?? "pending";
-        if (procSt === "error")   return "error"  as StepStatus;
-        if (procSt === "done")    return "done"   as StepStatus;
-        if (procSt === "cached")  return "cached" as StepStatus;
-        if (procSt === "loading") return "cached" as StepStatus; // data available
-        return "pending" as StepStatus;
-      });
+        const statuses = procIds.map(pid => {
+          const i = procStepIdx.get(pid);
+          if (i == null) return "pending" as StepStatus;
+          const inputSt = stepInputStatus[i];
+          if (inputSt != null) return inputSt;
+          // Fallback: derive from processing status (same logic as before)
+          const procSt = flowSteps[i]?.status ?? "pending";
+          if (procSt === "cancelled") return "cancelled" as StepStatus;
+          if (procSt === "error")   return "error"  as StepStatus;
+          if (procSt === "done")    return "done"   as StepStatus;
+          if (procSt === "cached")  return "cached" as StepStatus;
+          if (procSt === "loading") return "cached" as StepStatus; // data available
+          return "pending" as StepStatus;
+        });
+      if (statuses.some(s => s === "cancelled")) return "cancelled";
       if (statuses.some(s => s === "error"))   return "error";
       if (statuses.some(s => s === "done"))    return "done";
       if (statuses.some(s => s === "cached"))  return "cached";
@@ -220,6 +241,7 @@ function MiniCanvas({
     if (st === "cached")  return { bg: "#1c1400", border: "#ca8a04", text: "#fde68a", glow: "0 0 10px rgba(234,179,8,0.30)" };
     if (st === "loading") return { bg: "#1c0a00", border: "#ea580c", text: "#fed7aa", glow: "0 0 12px rgba(249,115,22,0.45)" };
     if (st === "error")   return { bg: "#2d0a0a", border: "#b91c1c", text: "#fca5a5", glow: "0 0 10px rgba(239,68,68,0.30)" };
+    if (st === "cancelled") return { bg: "#111827", border: "#64748b", text: "#cbd5e1", glow: "0 0 10px rgba(148,163,184,0.25)" };
     if (n.type === "input")      return { bg: "#0d1f3c", border: "#1e40af", text: "#93c5fd", glow: "" };
     if (n.type === "processing") return { bg: "#0f0e1f", border: "#3730a3", text: "#a5b4fc", glow: "" };
     return                              { bg: "#150b2e", border: "#6d28d9", text: "#c4b5fd", glow: "" };
@@ -254,7 +276,7 @@ function MiniCanvas({
             const tx = nx(t) + nw / 2, ty = ny(t);
             const cy = (sy + ty) / 2;
             const st = stepSt(s);
-            const stroke = st === "done" ? "#22c55e" : st === "cached" ? "#ca8a04" : st === "loading" ? "#ea580c" : st === "error" ? "#b91c1c" : "#374151";
+            const stroke = st === "done" ? "#22c55e" : st === "cached" ? "#ca8a04" : st === "loading" ? "#ea580c" : st === "error" ? "#b91c1c" : st === "cancelled" ? "#94a3b8" : "#374151";
             const aw = Math.max(3, 4.5 * scale);
             return (
               <g key={e.id}>
@@ -278,7 +300,7 @@ function MiniCanvas({
             ? (SOURCE_META[n.data.inputSource ?? ""]?.label ?? n.data.label)
             : n.type === "output" ? "Output"
             : (n.data.agentName || n.data.label);
-          const statusText = st === "done" ? "done" : st === "cached" ? "cached" : st === "loading" ? "…" : st === "error" ? "err" : "";
+          const statusText = st === "done" ? "done" : st === "cached" ? "cached" : st === "loading" ? "…" : st === "error" ? "err" : st === "cancelled" ? "cancel" : "";
 
           return (
             <div key={n.id} onClick={() => onNodeClick(k)}
@@ -305,6 +327,7 @@ function MiniCanvas({
                    st === "cached"  ? <span style={{ color: "#eab308" }}>◎</span> :
                    st === "loading" ? <span style={{ color: "#f97316" }}>⟳</span> :
                    st === "error"   ? <span style={{ color: "#ef4444" }}>✕</span> :
+                   st === "cancelled" ? <span style={{ color: "#cbd5e1" }}>■</span> :
                                       <span style={{ color: c.border, opacity: 0.4 }}>·</span>}
                 </span>
                 {/* Label */}
@@ -313,7 +336,7 @@ function MiniCanvas({
                 {statusText && (
                   <span className="shrink-0" style={{
                     fontSize: Math.max(5, fs * 0.72), lineHeight: 1,
-                    color: st === "done" ? "#22c55e" : st === "cached" ? "#eab308" : st === "loading" ? "#f97316" : "#ef4444",
+                    color: st === "done" ? "#22c55e" : st === "cached" ? "#eab308" : st === "loading" ? "#f97316" : st === "cancelled" ? "#cbd5e1" : "#ef4444",
                     opacity: 0.75, fontWeight: 700, letterSpacing: "0.02em",
                   }}>{statusText}</span>
                 )}
@@ -460,12 +483,13 @@ export function PipelineSidePanel({
     const raw = pipelineState?.node_states;
     if (!raw || typeof raw !== "object") return out;
     const toSt = (v: any): StepStatus | null => {
-      const s = String(v || "").toLowerCase();
+      const s = normalizeState(v);
       if (s === "pending" || s === "waiting") return "pending";
       if (s === "running" || s === "loading") return "loading";
       if (s === "completed" || s === "done") return "done";
       if (s === "cached") return "cached";
       if (s === "failed" || s === "error") return "error";
+      if (isCancelLike(s)) return "cancelled";
       return null;
     };
     for (const bucket of ["input", "processing", "output"] as const) {
@@ -495,16 +519,22 @@ export function PipelineSidePanel({
     }
 
     const runSteps: any[] = pipelineState.steps ?? [];
-    const status: string  = pipelineState.status ?? "";
+    const status: string  = String(pipelineState.status ?? "");
+    const runStatusNorm = normalizeState(status);
 
     // Translate new state field names → internal StepStatus (with legacy fallback).
     const toStepStatus = (s: any): StepStatus => {
-      const raw: string = s.state ?? s.status ?? "waiting";
+      const raw: string = normalizeState(s.state ?? s.status ?? "waiting");
+      if (isCancelLike(raw)) return "cancelled";
       switch (raw) {
         case "waiting":   return "pending";
         case "running":   return "loading";
         case "completed": return "done";
         case "failed":    return "error";
+        case "cancelled": return "cancelled";
+        case "canceled":  return "cancelled";
+        case "aborted":   return "cancelled";
+        case "stopped":   return "cancelled";
         // legacy values (backward compat with old state files):
         case "pending":   return "pending";
         case "loading":   return "loading";
@@ -515,13 +545,20 @@ export function PipelineSidePanel({
       }
     };
 
+    const runHasCancelledSteps = runSteps.some((s: any) => isCancelLike(s?.state ?? s?.status));
+    const runHasFailedSteps = runSteps.some((s: any) => isErrorLike(s?.state ?? s?.status));
+    const runIsCancelled = isCancelLike(runStatusNorm) || runHasCancelledSteps;
+    const runIsFailed = isErrorLike(runStatusNorm) || runHasFailedSteps;
+    const runIsActive = isActiveLike(runStatusNorm) && !runIsCancelled && !runIsFailed;
+
     const mapStep = (s: any, i: number, prevStep?: StepState) => {
       const a = agents.find(x => x.id === pipeline.steps[i]?.agent_id);
       const rawStatus = toStepStatus(s);
-      // If pipeline finished but step still shows "running/loading", treat it as "done"
-      const isFinished = status !== "running";
-      const resolvedStatus: StepStatus =
-        (isFinished && rawStatus === "loading") ? "done" : rawStatus;
+      // Historical/cancelled snapshots must not keep stale "running" on agents.
+      let resolvedStatus: StepStatus = rawStatus;
+      if (rawStatus === "loading" && !runIsActive) {
+        resolvedStatus = runIsCancelled ? "cancelled" : (runIsFailed ? "error" : "done");
+      }
       const stateContent = typeof s.content === "string" ? s.content : "";
       const cachedContent = cachedResults?.[i]?.result?.content ?? "";
       const resolvedContent =
@@ -546,18 +583,18 @@ export function PipelineSidePanel({
 
     // Input node color: "loading/running" means input_ready already fired — data available → green.
     const inputStRunning = (st: StepStatus): StepStatus => {
-      if (st === "done" || st === "cached" || st === "error") return st;
+      if (st === "done" || st === "cached" || st === "error" || st === "cancelled") return st;
       if (st === "loading") return "done";
       return "pending";
     };
     const inputStDone = (st: StepStatus): StepStatus => {
-      return (st === "done" || st === "cached" || st === "error") ? st : "pending";
+      return (st === "done" || st === "cached" || st === "error" || st === "cancelled") ? st : "pending";
     };
 
     setSteps(prev => runSteps.map((s: any, i: number) => mapStep(s, i, prev[i])));
     setStepInputStatus(runSteps.map((s: any) => {
       const st = toStepStatus(s);
-      return status === "running" ? inputStRunning(st) : inputStDone(st);
+      return runIsActive ? inputStRunning(st) : inputStDone(st);
     }));
   }, [pipelineState, pipeline, agents, isPerCall, cachedResults]);
 
@@ -997,10 +1034,10 @@ export function PipelineSidePanel({
         if (cr.runStatus !== "running" && cr.runStatus !== "queued") return cr;
         return {
           ...cr,
-          runStatus: "error" as CallRunStatus,
+          runStatus: "cancelled" as CallRunStatus,
           done: true,
           error: cr.error || stopMsg,
-          steps: cr.steps.map(st => st.status === "loading" ? { ...st, status: "error", errorMsg: stopMsg } : st),
+          steps: cr.steps.map(st => st.status === "loading" ? { ...st, status: "cancelled", errorMsg: stopMsg } : st),
         };
       }));
       return;
@@ -1911,7 +1948,9 @@ export function PipelineSidePanel({
           {focusedStepCall && (
             <div className={cn(
               "border rounded-xl overflow-hidden transition-colors",
-              focusedStepCall.runStatus === "running" ? "border-teal-700/60" : "border-gray-700/50",
+              focusedStepCall.runStatus === "running" ? "border-teal-700/60" :
+              focusedStepCall.runStatus === "cancelled" ? "border-slate-600/60" :
+              "border-gray-700/50",
             )}>
               <div className="w-full flex items-center gap-2 px-3 py-2 bg-gray-900 text-left">
                 {focusedStepCall.runStatus === "queued"  && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
@@ -1919,6 +1958,7 @@ export function PipelineSidePanel({
                 {focusedStepCall.runStatus === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
                 {focusedStepCall.runStatus === "cached"  && <Zap className="w-3 h-3 text-amber-400 shrink-0" />}
                 {focusedStepCall.runStatus === "error"   && <AlertCircle className="w-3 h-3 text-red-400 shrink-0" />}
+                {focusedStepCall.runStatus === "cancelled" && <Square className="w-3 h-3 text-slate-300 shrink-0" />}
                 <span className="text-[10px] font-mono text-gray-400 truncate flex-1 min-w-0">{focusedStepCall.callId}</span>
                 <span className="text-[9px] text-gray-600 shrink-0 tabular-nums">{focusedStepCall.date.slice(0, 10)}</span>
                 {callResults.length > 1 && (
@@ -1931,6 +1971,7 @@ export function PipelineSidePanel({
                 {focusedStepCall.runStatus === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
                 {focusedStepCall.runStatus === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
                 {focusedStepCall.runStatus === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+                {focusedStepCall.runStatus === "cancelled" && <span className="text-[9px] px-1 py-0.5 rounded bg-slate-900/60 text-slate-200 border border-slate-700/50 shrink-0">cancelled</span>}
               </div>
               {effectiveFocusedCallId && normalizeCallId(focusedStepCall.callId) !== normalizeCallId(effectiveFocusedCallId) && (
                 <div className="px-3 py-1 border-t border-gray-800 text-[10px] text-amber-400/80">
@@ -1980,6 +2021,7 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
   prevContent?: string;   // cached result snapshot taken before this run started
 }) {
   const isOpen = st.status === "done" || st.status === "cached" || st.status === "error" ||
+    st.status === "cancelled" ||
     (st.status === "loading" && !!prevContent);
   return (
     <div className={cn("border rounded-xl overflow-hidden", isOpen ? "border-gray-700/60" : "border-gray-800")}>
@@ -1992,6 +2034,7 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
         {st.status === "cached"  && <Zap className="w-3 h-3 text-amber-400 shrink-0" />}
         {st.status === "done"    && <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" />}
         {st.status === "error"   && <AlertCircle  className="w-3 h-3 text-red-400 shrink-0" />}
+        {st.status === "cancelled" && <Square className="w-3 h-3 text-slate-300 shrink-0" />}
         {st.status === "pending" && <span className="w-2 h-2 rounded-full border border-gray-700 shrink-0" />}
         <span className="text-[10px] text-gray-500 font-mono shrink-0">#{index + 1}</span>
         <span className={cn("text-xs flex-1 font-medium truncate", st.status === "loading" ? "text-teal-300" : "text-gray-300")}>{st.agentName}</span>
@@ -2005,6 +2048,7 @@ function StepRow({ st, index, streamEndRef, onToggle, hasCached, pendingLabel, p
         {st.status === "cached"  && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-700/40 shrink-0">cached</span>}
         {st.status === "done"    && <span className="text-[9px] px-1 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">done</span>}
         {st.status === "error"   && <span className="text-[9px] px-1 py-0.5 rounded bg-red-900/40 text-red-400 border border-red-700/40 shrink-0">error</span>}
+        {st.status === "cancelled" && <span className="text-[9px] px-1 py-0.5 rounded bg-slate-900/60 text-slate-200 border border-slate-700/50 shrink-0">cancelled</span>}
         {st.status === "pending" && <span className="text-[9px] text-gray-600 shrink-0">{pendingLabel ?? "not run"}</span>}
         {isOpen && (
           st.expanded ? <ChevronUp className="w-3 h-3 text-gray-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-gray-600 shrink-0" />
