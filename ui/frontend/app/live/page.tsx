@@ -86,20 +86,25 @@ function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "loc
   return "local";
 }
 
-function relativeTime(isoStr: string | null | undefined): string {
+function relativeTime(isoStr: string | null | undefined, nowMs?: number): string {
   const dt = parseServerDate(isoStr);
   if (!dt) return "—";
-  const d = Math.floor((Date.now() - dt.getTime()) / 1000);
+  const nowTs = typeof nowMs === "number" ? nowMs : Date.now();
+  const d = Math.floor((nowTs - dt.getTime()) / 1000);
   if (d < 60) return `${d}s ago`;
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
 }
 
-function durationStr(startedAt: string | null | undefined, finishedAt: string | null | undefined): string {
+function durationStr(
+  startedAt: string | null | undefined,
+  finishedAt: string | null | undefined,
+  nowMs?: number,
+): string {
   const s = parseServerDate(startedAt);
   if (!s) return "—";
-  const e = parseServerDate(finishedAt) ?? new Date();
+  const e = parseServerDate(finishedAt) ?? new Date(typeof nowMs === "number" ? nowMs : Date.now());
   const ms = Math.max(0, e.getTime() - s.getTime());
   const sec = Math.floor(ms / 1000);
   if (sec < 60) return `${sec}s`;
@@ -203,6 +208,12 @@ export default function LivePage() {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const ticker = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(ticker);
+  }, []);
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
   const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
@@ -475,8 +486,8 @@ export default function LivePage() {
       <div className="mt-1.5 text-[11px] text-gray-400 flex flex-wrap gap-x-3 gap-y-1">
         <span>{run.sales_agent || "—"} · {run.customer || "—"}</span>
         <span>call {run.call_id || "—"}</span>
-        <span>{relativeTime(run.started_at)}</span>
-        <span>{durationStr(run.started_at, run.finished_at)}</span>
+        <span>{relativeTime(run.started_at, nowMs)}</span>
+        <span>{durationStr(run.started_at, run.finished_at, nowMs)}</span>
       </div>
       {(() => {
         const phases = inferPhaseBadges(run);

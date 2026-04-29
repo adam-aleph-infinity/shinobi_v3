@@ -867,14 +867,174 @@ def _queue_item_sort_key(item: dict[str, Any]) -> tuple[float, float]:
     return (next_ts, created_ts)
 
 
-def _enqueue_live_item(item: dict[str, Any]) -> None:
-    queue = _load_live_queue()
-    run_id = str(item.get("run_id") or "")
-    if run_id and any(str(x.get("run_id") or "") == run_id for x in queue):
-        return
-    queue.append(item)
-    queue.sort(key=_queue_item_sort_key)
-    _save_live_queue(queue)
+async def _enqueue_live_item(item: dict[str, Any]) -> None:
+    # Single-writer guard: webhook requests can arrive concurrently.
+    # Without this lock, read-modify-write races can drop queue entries.
+    async with _LIVE_QUEUE_LOCK:
+        queue = _load_live_queue()
+        run_id = str(item.get("run_id") or "")
+        if run_id and any(str(x.get("run_id") or "") == run_id for x in queue):
+            return
+        queue.append(item)
+        queue.sort(key=_queue_item_sort_key)
+        _save_live_queue(queue)
+
+
+def _steps_json_is_webhook_origin(raw_steps_json: Any) -> bool:
+    try:
+        parsed = json.loads(str(raw_steps_json or "[]"))
+    except Exception:
+        return False
+    if not isinstance(parsed, list):
+        return False
+    for step in parsed:
+        if not isinstance(step, dict):
+            continue
+        origin = str(step.get("run_origin") or "").strip().lower()
+        if origin in {"webhook", "production"}:
+            return True
+    return False
+
+
+def _iso_from_dt(dt: Any, fallback_iso: str) -> str:
+    if not isinstance(dt, datetime):
+        return fallback_iso
+    value = dt
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _pair_from_names(agent: str, customer: str) -> dict[str, str]:
+    try:
+        with Session(_db_engine) as s:
+            row = s.exec(
+                select(CRMPair)
+                .where(CRMPair.agent == str(agent or ""))
+                .where(CRMPair.customer == str(customer or ""))
+                .limit(1)
+            ).first()
+            if row:
+                return {
+                    "crm_url": str(getattr(row, "crm_url", "") or ""),
+                    "account_id": str(getattr(row, "account_id", "") or ""),
+                    "agent": str(getattr(row, "agent", "") or agent or ""),
+                    "customer": str(getattr(row, "customer", "") or customer or ""),
+                }
+    except Exception:
+        pass
+    return {
+        "crm_url": "",
+        "account_id": "",
+        "agent": str(agent or ""),
+        "customer": str(customer or ""),
+    }
+
+
+def _build_webhook_run_payload_from_row(row: PipelineRun, cfg: dict[str, Any]) -> dict[str, Any]:
+    run_payload: dict[str, Any] = {
+        "sales_agent": str(getattr(row, "sales_agent", "") or ""),
+        "customer": str(getattr(row, "customer", "") or ""),
+        "call_id": str(getattr(row, "call_id", "") or ""),
+        "resume_partial": True,
+        "run_origin": "webhook",
+        "run_id": str(getattr(row, "id", "") or ""),
+    }
+    cfg_run_payload = cfg.get("run_payload")
+    if isinstance(cfg_run_payload, dict):
+        for k, v in cfg_run_payload.items():
+            run_payload[str(k)] = v
+    return run_payload
+
+
+def _recover_orphaned_live_queue_items(
+    *,
+    queue: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    request_base_url: str,
+) -> int:
+    """
+    Recover webhook runs that were persisted as queued/preparing/retrying/running
+    in pipeline_run but are missing from live_queue.json (e.g. concurrent write race).
+    """
+    existing_run_ids: set[str] = {
+        str(item.get("run_id") or "").strip()
+        for item in queue
+        if isinstance(item, dict)
+    }
+    now_iso = _utc_now_iso()
+    recovered = 0
+
+    try:
+        with Session(_db_engine) as s:
+            rows = s.exec(
+                select(PipelineRun).where(
+                    PipelineRun.status.in_(["queued", "preparing", "running", "retrying"])
+                )
+            ).all()
+    except Exception:
+        rows = []
+
+    for row in rows or []:
+        run_id = str(getattr(row, "id", "") or "").strip()
+        if not run_id or run_id in existing_run_ids:
+            continue
+        if not _steps_json_is_webhook_origin(getattr(row, "steps_json", "")):
+            continue
+
+        row_status = str(getattr(row, "status", "") or "").strip().lower()
+        if row_status not in {"queued", "preparing", "running", "retrying"}:
+            continue
+
+        queue_state = "queued" if row_status == "preparing" else row_status
+        pair = _pair_from_names(
+            str(getattr(row, "sales_agent", "") or ""),
+            str(getattr(row, "customer", "") or ""),
+        )
+        payload = _build_webhook_run_payload_from_row(row, cfg)
+        created_iso = _iso_from_dt(getattr(row, "started_at", None), now_iso)
+        updated_iso = created_iso
+        max_attempts = int(cfg.get("retry_max_attempts") or 2)
+
+        queue.append(
+            {
+                "id": str(uuid.uuid4()),
+                "webhook_type": "recovered",
+                "created_at": created_iso,
+                "updated_at": updated_iso,
+                "state": queue_state,
+                "attempts": 0,
+                "max_attempts": max_attempts,
+                "next_attempt_at": now_iso,
+                "last_error": "",
+                "request_base_url": str(request_base_url or ""),
+                "pipeline_id": str(getattr(row, "pipeline_id", "") or ""),
+                "pipeline_name": str(getattr(row, "pipeline_name", "") or ""),
+                "run_id": run_id,
+                "sales_agent": str(getattr(row, "sales_agent", "") or ""),
+                "customer": str(getattr(row, "customer", "") or ""),
+                "call_id": str(getattr(row, "call_id", "") or ""),
+                "pair": pair,
+                "payload": payload,
+            }
+        )
+        existing_run_ids.add(run_id)
+        recovered += 1
+        if queue_state in {"queued", "retrying"}:
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=str(getattr(row, "pipeline_id", "") or ""),
+                pipeline_name=str(getattr(row, "pipeline_name", "") or ""),
+                sales_agent=str(getattr(row, "sales_agent", "") or ""),
+                customer=str(getattr(row, "customer", "") or ""),
+                call_id=str(getattr(row, "call_id", "") or ""),
+                status=queue_state,
+                log_line="Recovered missing live-queue entry.",
+            )
+
+    if recovered:
+        queue.sort(key=_queue_item_sort_key)
+    return recovered
 
 
 async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
@@ -889,10 +1049,17 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     max_running = int(cfg.get("max_live_running") or 5)
     now = datetime.now(timezone.utc)
     preparing_stale_after_s = 90
-    running_stale_after_s = max(300, int(cfg.get("running_stale_after_s") or 900))
+    running_stale_after_s = max(180, int(cfg.get("running_stale_after_s") or 600))
 
     async with _LIVE_QUEUE_LOCK:
         queue = _load_live_queue()
+        recovered = _recover_orphaned_live_queue_items(
+            queue=queue,
+            cfg=cfg,
+            request_base_url=str(request_base_url or ""),
+        )
+        if recovered:
+            _save_live_queue(queue)
         if not queue:
             return
 
@@ -1378,7 +1545,7 @@ async def _handle_call_webhook(
                         status="queued",
                         log_line="Queued from webhook trigger",
                     )
-                    _enqueue_live_item(
+                    await _enqueue_live_item(
                         {
                             "id": str(uuid.uuid4()),
                             "webhook_type": webhook_type,
