@@ -361,7 +361,7 @@ export default function LivePage() {
   const applyLivePipelineSelection = async (pipelineIds: string[]) => {
     if (liveReadOnly) {
       setLiveMessageError(true);
-      setLiveMessage("Live mirror mode is read-only in this environment.");
+      setLiveMessage("Jobs mirror mode is read-only in this environment.");
       return;
     }
     const cleaned = Array.from(new Set((pipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
@@ -405,8 +405,8 @@ export default function LivePage() {
       setLiveMessageError(false);
       setLiveMessage(
         cleaned.length
-          ? `Live enabled for ${cleaned.length} pipeline(s).`
-          : "Live disabled (ingest-only mode).",
+          ? `Jobs enabled for ${cleaned.length} pipeline(s).`
+          : "Jobs disabled (ingest-only mode).",
       );
       await mutateLiveCfg();
     } catch (e: any) {
@@ -643,7 +643,7 @@ export default function LivePage() {
       <div className="px-5 py-3 border-b border-gray-800 bg-gray-900 shrink-0">
         <div className="flex items-center gap-2">
           <Activity className="w-5 h-5 text-emerald-400" />
-          <h1 className="text-lg font-semibold text-white">Live</h1>
+          <h1 className="text-lg font-semibold text-white">Jobs</h1>
           <span className="text-xs text-gray-500">Queued, running + completed pipeline runs</span>
         </div>
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-8 gap-2">
@@ -752,7 +752,7 @@ export default function LivePage() {
         </div>
         {runsError && (
           <div className="mt-2 text-[11px] text-red-300 border border-red-800/60 bg-red-950/40 rounded px-2 py-1">
-            Live run history fetch failed: {String((runsError as any)?.message || "unknown error")}.
+            Jobs run history fetch failed: {String((runsError as any)?.message || "unknown error")}.
             {runs.length > 0 ? " Showing last known data." : ""}
           </div>
         )}
@@ -769,7 +769,7 @@ export default function LivePage() {
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
-                <p className="text-sm font-semibold text-gray-100">Live Pipelines</p>
+                <p className="text-sm font-semibold text-gray-100">Jobs Pipelines</p>
                 <span className="text-xs text-gray-500">{pipelineList.length}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">

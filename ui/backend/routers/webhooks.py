@@ -1230,6 +1230,30 @@ def _steps_json_is_webhook_origin(raw_steps_json: Any) -> bool:
     return False
 
 
+def _row_looks_like_webhook_run(row: PipelineRun, cfg: dict[str, Any]) -> bool:
+    if _steps_json_is_webhook_origin(getattr(row, "steps_json", "")):
+        return True
+
+    # Recovery fallback for legacy/partial rows that were created while runtime
+    # pipeline files were missing (steps_json can be empty, so run_origin is absent).
+    pipeline_id = str(getattr(row, "pipeline_id", "") or "").strip()
+    sales_agent = str(getattr(row, "sales_agent", "") or "").strip()
+    customer = str(getattr(row, "customer", "") or "").strip()
+    call_id = str(getattr(row, "call_id", "") or "").strip()
+    if not (pipeline_id and sales_agent and customer and call_id):
+        return False
+
+    allowed_pipeline_ids = set(_resolve_live_pipeline_ids(cfg))
+    default_pid = str(cfg.get("default_pipeline_id") or "").strip()
+    if default_pid:
+        allowed_pipeline_ids.add(default_pid)
+    if not allowed_pipeline_ids:
+        return False
+    if pipeline_id not in allowed_pipeline_ids:
+        return False
+    return True
+
+
 def _iso_from_dt(dt: Any, fallback_iso: str) -> str:
     if not isinstance(dt, datetime):
         return fallback_iso
@@ -1331,7 +1355,7 @@ def _recover_orphaned_live_queue_items(
         run_id = str(getattr(row, "id", "") or "").strip()
         if not run_id or run_id in existing_run_ids:
             continue
-        if not _steps_json_is_webhook_origin(getattr(row, "steps_json", "")):
+        if not _row_looks_like_webhook_run(row, cfg):
             continue
 
         row_status = str(getattr(row, "status", "") or "").strip().lower()

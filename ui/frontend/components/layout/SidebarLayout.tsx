@@ -113,14 +113,17 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const path = String(pathname || "");
   const isPipelinePage =
     path === "/pipeline" || path.startsWith("/pipeline/");
-  const isLivePage =
-    path === "/live" || path.startsWith("/live/");
+  const isJobsPage =
+    path === "/jobs" ||
+    path.startsWith("/jobs/") ||
+    path === "/live" ||
+    path.startsWith("/live/");
   // Use contains check too to avoid edge cases where pathname may include prefixes.
   const isAgentDeepDivePage =
     path === "/agent-deep-dive" ||
     path.startsWith("/agent-deep-dive/") ||
     path.includes("agent-deep-dive");
-  const showContextBar = !(isPipelinePage || isLivePage || isAgentDeepDivePage);
+  const showContextBar = !(isPipelinePage || isJobsPage || isAgentDeepDivePage);
   const sidebarPanelWidth = mounted && collapsed ? 0 : SIDEBAR_WIDTH;
   const copilotPanelWidth = mounted && copilotCollapsed ? 0 : copilotWidth;
 
