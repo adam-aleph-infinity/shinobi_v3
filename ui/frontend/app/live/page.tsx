@@ -299,7 +299,7 @@ export default function LivePage() {
   );
   const liveReadOnly = !!liveCfg?.read_only;
 
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=2000&compact=1&mirror=1";
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=10000&compact=1&mirror=1";
 
   const { data: runsData, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
     refreshInterval: 2500,
@@ -462,7 +462,9 @@ export default function LivePage() {
     () => filteredRuns.filter((r) => !isCompletedRun(r.status) && !isQueuedRun(r.status)),
     [filteredRuns],
   );
-  const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
+  // Completed history should always show the full available history (date-folded),
+  // independent of transient queue/running filters.
+  const completedRuns = useMemo(() => runs.filter((r) => isCompletedRun(r.status)), [runs]);
   const queuedProductionRuns = useMemo(
     () => queuedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
     [queuedRuns],
