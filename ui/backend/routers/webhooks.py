@@ -1906,9 +1906,9 @@ async def _live_dispatcher_loop() -> None:
     while True:
         try:
             await _dispatch_live_queue_once()
-        except Exception:
+        except Exception as e:
             # Keep dispatcher alive even if one cycle fails.
-            pass
+            print(f"[live-dispatcher] cycle error: {e}")
         await asyncio.sleep(2.0)
 
 
