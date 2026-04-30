@@ -2238,9 +2238,36 @@ function PipelineCanvas() {
     { refreshInterval: running ? 4000 : 15000 },
   );
 
+  const selectedRunByIdUrl = useMemo(() => {
+    if (runContextMode !== "historical") return null;
+    const rid = String(selectedCacheRunId || currentRunId || "").trim();
+    if (!rid) return null;
+    const qp = new URLSearchParams({ mirror: "1" });
+    return `/api/history/runs/${encodeURIComponent(rid)}?${qp.toString()}`;
+  }, [runContextMode, selectedCacheRunId, currentRunId]);
+
+  const { data: selectedRunByIdData } = useSWR<PipelineRunRecord>(
+    selectedRunByIdUrl,
+    fetcher,
+    {
+      refreshInterval: (data) => {
+        const st = String((data as PipelineRunRecord | undefined)?.status || "").trim().toLowerCase();
+        return ["queued", "preparing", "running", "retrying"].includes(st) ? 4000 : 15000;
+      },
+      revalidateOnFocus: true,
+    },
+  );
+
   const historyRuns = useMemo(() => {
-    const list = Array.isArray(runsData) ? runsData : [];
+    const list = Array.isArray(runsData) ? [...runsData] : [];
+    if (selectedRunByIdData?.id && !list.some((r) => String(r.id || "") === String(selectedRunByIdData.id || ""))) {
+      list.unshift(selectedRunByIdData);
+    }
+    const selectedRid = String(selectedCacheRunId || "").trim();
     return list.filter((r) => {
+      if (runContextMode === "historical" && selectedRid && String(r.id || "").trim() === selectedRid) {
+        return true;
+      }
       if (salesAgent && r.sales_agent !== salesAgent) return false;
       if (customer && r.customer !== customer) return false;
       if (runNeedsCall && callId) {
@@ -2248,7 +2275,7 @@ function PipelineCanvas() {
       }
       return true;
     });
-  }, [runsData, salesAgent, customer, runNeedsCall, callId]);
+  }, [runsData, selectedRunByIdData, runContextMode, selectedCacheRunId, salesAgent, customer, runNeedsCall, callId]);
 
   const historyRunDayGroups = useMemo(() => {
     const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -2318,12 +2345,13 @@ function PipelineCanvas() {
     return out;
   }, [historyRuns]);
 
-  const selectedCacheRun = useMemo(
-    () => (runContextMode === "historical"
-      ? historyRuns.find((r) => r.id === selectedCacheRunId) ?? null
-      : null),
-    [historyRuns, selectedCacheRunId, runContextMode],
-  );
+  const selectedCacheRun = useMemo(() => {
+    if (runContextMode !== "historical") return null;
+    const rid = String(selectedCacheRunId || "").trim();
+    if (!rid) return null;
+    if (selectedRunByIdData && String(selectedRunByIdData.id || "").trim() === rid) return selectedRunByIdData;
+    return historyRuns.find((r) => String(r.id || "").trim() === rid) ?? null;
+  }, [historyRuns, selectedCacheRunId, runContextMode, selectedRunByIdData]);
 
   useEffect(() => {
     persistRunLogLines(runLogContextKey, currentRunId, runLogLines);
@@ -2344,7 +2372,11 @@ function PipelineCanvas() {
       return;
     }
     const runRows = Array.isArray(runsData) ? runsData : [];
-    const runRow = runRows.find((r) => String(r.id || "").trim() === activeRunId)
+    const runRow = (
+      selectedRunByIdData && String(selectedRunByIdData.id || "").trim() === activeRunId
+        ? selectedRunByIdData
+        : null
+    ) ?? runRows.find((r) => String(r.id || "").trim() === activeRunId)
       ?? historyRuns.find((r) => String(r.id || "").trim() === activeRunId);
     if (runRow) {
       const parsed = parseSavedRunLogLines(runRow.log_json);
@@ -2369,6 +2401,7 @@ function PipelineCanvas() {
     currentRunId,
     historyRuns,
     runsData,
+    selectedRunByIdData,
     runLogContextKey,
   ]);
 

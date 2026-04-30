@@ -439,6 +439,162 @@ def list_runs(
     return out_rows
 
 
+@router.get("/runs/{run_id}")
+def get_run_by_id(
+    run_id: str,
+    request: Request,
+    compact: int = Query(0),
+    mirror: int = Query(0),
+    db: Session = Depends(get_session),
+):
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise HTTPException(400, "Missing run_id")
+
+    if bool(mirror) and _is_live_mirror_mode(request):
+        base = str(settings.live_mirror_base_url or "").strip().rstrip("/")
+        if base:
+            url = f"{base}/api/history/runs/{rid}"
+            params = {"compact": 1 if bool(compact) else 0}
+            timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
+            try:
+                with httpx.Client(timeout=timeout_s, headers=_live_mirror_headers()) as client:
+                    resp = client.get(url, params=params)
+                if resp.status_code < 400:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        return data
+                    raise HTTPException(502, "Live mirror returned invalid run payload type.")
+                detail = resp.text
+                try:
+                    parsed = resp.json()
+                    if isinstance(parsed, dict):
+                        detail = str(parsed.get("detail") or parsed.get("error") or detail)
+                except Exception:
+                    pass
+                raise HTTPException(resp.status_code, f"Live mirror error: {detail}")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(502, f"Live mirror request failed: {e}") from e
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.models.crm import CRMCall, CRMPair
+
+    r = db.get(PR, rid)
+    if not r:
+        raise HTTPException(404, "Run not found")
+
+    def norm(v: Any) -> str:
+        return str(v or "").strip().lower()
+
+    call_key = norm(r.call_id)
+    pair_key = (norm(r.sales_agent), norm(r.customer))
+
+    resolved_crm = ""
+    if call_key:
+        try:
+            call_row = db.exec(
+                select(CRMCall).where(CRMCall.call_id == str(r.call_id or "").strip()).limit(1)
+            ).first()
+            resolved_crm = str(getattr(call_row, "crm_url", "") or "").strip() if call_row else ""
+        except Exception:
+            resolved_crm = ""
+
+    if not resolved_crm:
+        try:
+            pair_row = db.exec(
+                select(CRMPair)
+                .where(CRMPair.agent == r.sales_agent)
+                .where(CRMPair.customer == r.customer)
+                .limit(1)
+            ).first()
+            resolved_crm = str(getattr(pair_row, "crm_url", "") or "").strip() if pair_row else ""
+        except Exception:
+            resolved_crm = ""
+
+    run_origin = _extract_run_origin_from_steps_json(r.steps_json) or "local"
+    if run_origin != "webhook" and str(r.call_id or "").strip():
+        by_key, by_call = _load_webhook_event_index()
+        started = r.started_at
+        if started is not None and getattr(started, "tzinfo", None) is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if _matches_webhook_event(
+            started_at=started,
+            call_id=r.call_id,
+            agent=r.sales_agent,
+            customer=r.customer,
+            by_key=by_key,
+            by_call=by_call,
+        ):
+            run_origin = "webhook"
+
+    def _compact_steps_json(raw: Any) -> str:
+        try:
+            parsed = json.loads(str(raw or "[]"))
+        except Exception:
+            return "[]"
+        if not isinstance(parsed, list):
+            return "[]"
+        compact_steps: list[dict[str, Any]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            compact_steps.append(
+                {
+                    "agent_name": str(item.get("agent_name") or ""),
+                    "state": str(item.get("state") or item.get("status") or ""),
+                    "start_time": item.get("start_time"),
+                    "end_time": item.get("end_time"),
+                }
+            )
+        return json.dumps(compact_steps, ensure_ascii=False)
+
+    def _compact_log_json(raw: Any) -> str:
+        try:
+            parsed = json.loads(str(raw or "[]"))
+        except Exception:
+            return "[]"
+        if not isinstance(parsed, list):
+            return "[]"
+        tail = parsed[-40:]
+        out: list[dict[str, Any]] = []
+        for item in tail:
+            if isinstance(item, dict):
+                out.append(
+                    {
+                        "ts": item.get("ts"),
+                        "text": item.get("text") or item.get("message") or item.get("msg"),
+                        "level": item.get("level"),
+                    }
+                )
+            else:
+                out.append({"text": str(item)})
+        return json.dumps(out, ensure_ascii=False)
+
+    row_payload = {
+        "id": r.id,
+        "pipeline_id": r.pipeline_id,
+        "pipeline_name": r.pipeline_name,
+        "sales_agent": r.sales_agent,
+        "customer": r.customer,
+        "call_id": r.call_id,
+        "crm_url": resolved_crm,
+        "started_at": r.started_at.isoformat() if r.started_at else None,
+        "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+        "status": r.status,
+        "canvas_json": r.canvas_json,
+        "steps_json": r.steps_json,
+        "log_json": r.log_json,
+        "run_origin": run_origin,
+    }
+    if bool(compact):
+        row_payload["canvas_json"] = ""
+        row_payload["steps_json"] = _compact_steps_json(r.steps_json)
+        row_payload["log_json"] = _compact_log_json(r.log_json)
+    return row_payload
+
+
 @router.delete("/runs/{run_id}")
 def delete_run(run_id: str, db: Session = Depends(get_session)):
     """Delete a pipeline run and all its step data."""
