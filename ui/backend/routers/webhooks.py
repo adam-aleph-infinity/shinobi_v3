@@ -574,6 +574,10 @@ async def _wait_for_jobs(
     no_progress_timeout_s: int = 300,
     progress_cb: Optional[Callable[[int, int, int], None]] = None,
 ) -> dict[str, Any]:
+    def _job_status_text(value: Any) -> str:
+        raw = getattr(value, "value", value)
+        return str(raw or "").strip().lower()
+
     _ids = [str(x) for x in job_ids if str(x)]
     if not _ids:
         return {
@@ -593,7 +597,7 @@ async def _wait_for_jobs(
     while True:
         with Session(_db_engine) as s:
             rows = s.exec(select(Job).where(Job.id.in_(_ids))).all()
-        status_by_id = {str(r.id): str(r.status) for r in rows}
+        status_by_id = {str(r.id): _job_status_text(r.status) for r in rows}
         done = sum(1 for _id in _ids if status_by_id.get(_id) in {"complete", "failed"})
         failed = sum(1 for _id in _ids if status_by_id.get(_id) == "failed")
         if done != _last_done:

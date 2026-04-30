@@ -5169,6 +5169,10 @@ async def run_pipeline(
         ) -> tuple[bool, int]:
             from ui.backend.models.job import Job, JobStatus
 
+            def _job_status_text(_value: Any) -> str:
+                _raw = getattr(_value, "value", _value)
+                return str(_raw or "").strip().lower()
+
             _ids = list(dict.fromkeys([str(_j) for _j in _job_ids if str(_j)]))
             if not _ids:
                 return True, 0
@@ -5181,7 +5185,7 @@ async def run_pipeline(
                     _rows = _s.exec(
                         select(Job).where(Job.id.in_(_ids))
                     ).all()
-                _status_by_id = {str(_r.id): str(_r.status) for _r in _rows}
+                _status_by_id = {str(_r.id): _job_status_text(_r.status) for _r in _rows}
                 _done = sum(
                     1 for _i in _ids
                     if _status_by_id.get(_i) in ("complete", "failed")
