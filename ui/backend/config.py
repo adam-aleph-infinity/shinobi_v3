@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     crm_webhook_token_header: str = "x-webhook-token"
     crm_webhook_transcription_timeout_s: int = 900
     crm_webhook_transcription_poll_interval_s: float = 2.0
+    elevenlabs_connect_timeout_s: float = 20.0
+    elevenlabs_read_timeout_s: float = 180.0
     crm_webhook_internal_base_url: str = "http://127.0.0.1:8000"
     # Development mirror mode: show production live/webhook state read-only.
     live_mirror_enabled: bool = False

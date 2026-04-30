@@ -1,5 +1,6 @@
 """Global pipeline execution history — all runs across all pipelines."""
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -12,6 +13,11 @@ from ui.backend.database import get_session
 
 router = APIRouter(prefix="/history", tags=["history"])
 _WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
+_WEBHOOK_INDEX_CACHE: dict[str, Any] = {
+    "loaded_at": 0.0,
+    "by_key": {},
+    "by_call": {},
+}
 
 
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
@@ -80,17 +86,33 @@ def _extract_run_origin_from_steps_json(steps_json: Any) -> str:
     return ""
 
 
-def _load_webhook_event_index(limit_files: int = 5000) -> tuple[dict[tuple[str, str, str], list[float]], dict[str, list[float]]]:
+def _load_webhook_event_index(
+    limit_files: int = 2000,
+    cache_ttl_s: int = 20,
+) -> tuple[dict[tuple[str, str, str], list[float]], dict[str, list[float]]]:
     by_key: dict[tuple[str, str, str], list[float]] = {}
     by_call: dict[str, list[float]] = {}
     if not _WEBHOOK_INBOX_DIR.exists():
         return by_key, by_call
+    now = time.monotonic()
+    try:
+        loaded_at = float(_WEBHOOK_INDEX_CACHE.get("loaded_at") or 0.0)
+    except Exception:
+        loaded_at = 0.0
+    if loaded_at > 0 and (now - loaded_at) < max(1, int(cache_ttl_s or 20)):
+        try:
+            cached_by_key = _WEBHOOK_INDEX_CACHE.get("by_key")
+            cached_by_call = _WEBHOOK_INDEX_CACHE.get("by_call")
+            if isinstance(cached_by_key, dict) and isinstance(cached_by_call, dict):
+                return cached_by_key, cached_by_call
+        except Exception:
+            pass
     try:
         files = sorted(
             _WEBHOOK_INBOX_DIR.glob("*.json"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
-        )[: max(100, min(int(limit_files or 5000), 20000))]
+        )[: max(100, min(int(limit_files or 2000), 10000))]
     except Exception:
         return by_key, by_call
 
@@ -116,6 +138,9 @@ def _load_webhook_event_index(limit_files: int = 5000) -> tuple[dict[tuple[str, 
         except Exception:
             continue
 
+    _WEBHOOK_INDEX_CACHE["loaded_at"] = now
+    _WEBHOOK_INDEX_CACHE["by_key"] = by_key
+    _WEBHOOK_INDEX_CACHE["by_call"] = by_call
     return by_key, by_call
 
 

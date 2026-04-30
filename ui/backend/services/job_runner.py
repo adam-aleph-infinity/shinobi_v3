@@ -143,9 +143,15 @@ def _s3_presigned_url(crm_url: str, record_path: str, expires: int = 3600) -> tu
 def _transcribe_via_elevenlabs(audio_url: Optional[str], audio_path: Optional[str]) -> dict:
     """Call ElevenLabs Scribe v2. Returns raw JSON dict with words + text."""
     import os
+    from ui.backend.config import settings
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY not set")
+
+    # Keep webhook/backfill responsive under provider network issues.
+    # Use short connect timeout and bounded read timeout instead of a single 300s block.
+    connect_timeout_s = max(5.0, float(getattr(settings, "elevenlabs_connect_timeout_s", 20.0) or 20.0))
+    read_timeout_s = max(20.0, float(getattr(settings, "elevenlabs_read_timeout_s", 180.0) or 180.0))
 
     if audio_url:
         import requests
@@ -159,7 +165,7 @@ def _transcribe_via_elevenlabs(audio_url: Optional[str], audio_path: Optional[st
                 "timestamps_granularity": "word",
             },
             headers={"xi-api-key": api_key},
-            timeout=300,
+            timeout=(connect_timeout_s, read_timeout_s),
         )
         if not resp.ok:
             raise RuntimeError(f"ElevenLabs error {resp.status_code}: {resp.text[:300]}")

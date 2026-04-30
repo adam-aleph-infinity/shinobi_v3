@@ -2185,10 +2185,13 @@ function PipelineCanvas() {
   }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
 
   const runsUrl = useMemo(() => {
-    if (!pipelineId) return null;
-    const qp = new URLSearchParams({ pipeline_id: pipelineId, limit: "100" });
+    const qp = new URLSearchParams({ limit: "300" });
+    if (pipelineId) qp.set("pipeline_id", pipelineId);
+    if (salesAgent) qp.set("sales_agent", salesAgent);
+    if (customer) qp.set("customer", customer);
+    if (runNeedsCall && callId) qp.set("call_id", callId);
     return `/api/history/runs?${qp.toString()}`;
-  }, [pipelineId]);
+  }, [pipelineId, salesAgent, customer, runNeedsCall, callId]);
   const { data: runsData, mutate: mutateRuns } = useSWR<PipelineRunRecord[]>(
     runsUrl,
     fetcher,
@@ -2777,7 +2780,18 @@ function PipelineCanvas() {
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
     if (sourceRunId && !parsedRunStepsById.has(sourceRunId)) {
-      // Keep current in-memory status until runs cache catches up.
+      // Do not keep stale in-memory statuses (can incorrectly show "running" forever).
+      // Reset from current run terminal state while waiting for step payload to load.
+      if (sourceRunIsCancelled) {
+        next.fill("cancelled");
+      } else if (sourceRunIsFailed) {
+        next.fill("error");
+      } else if (sourceRunIsCompleted) {
+        next.fill("done");
+      }
+      setStepStatuses(next);
+      setStepInputReady(nextInputReady);
+      applyRuntimeStatusMap(next, nextInputReady);
       return;
     }
     if (sourceRunId) {
