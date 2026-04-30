@@ -553,12 +553,10 @@ class NoteSendToCRMRequest(BaseModel):
     account_id: str = ""
 
 
-@router.post("/{note_id}/send-to-crm")
-def send_note_to_crm(
+def send_note_to_crm_internal(
     note_id: str,
-    req: NoteSendToCRMRequest,
-    request: Request,
-    db: Session = Depends(get_session),
+    account_id: str,
+    db: Session,
 ):
     if not settings.crm_push_enabled:
         raise HTTPException(403, "CRM push is disabled. Set CRM_PUSH_ENABLED=true.")
@@ -577,7 +575,7 @@ def send_note_to_crm(
     if missing:
         raise HTTPException(500, f"Missing CRM push credentials: {', '.join(missing)}")
 
-    account_id = str(req.account_id or "").strip()
+    account_id = str(account_id or "").strip()
     crm_url = ""
     if not account_id:
         account_id, crm_url = _resolve_account_for_note(note.agent, note.customer, db)
@@ -672,6 +670,20 @@ def send_note_to_crm(
         "crm_url": crm_url,
         "note_id": note.id,
     }
+
+
+@router.post("/{note_id}/send-to-crm")
+def send_note_to_crm(
+    note_id: str,
+    req: NoteSendToCRMRequest,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    return send_note_to_crm_internal(
+        note_id=note_id,
+        account_id=str(req.account_id or "").strip(),
+        db=db,
+    )
 
 
 # ── Analyze a single call — SSE stream ───────────────────────────────────────

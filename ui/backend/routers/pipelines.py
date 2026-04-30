@@ -229,6 +229,7 @@ def _default_live_webhook_config() -> dict[str, Any]:
         "retry_on_server_error": True,
         "retry_on_rate_limit": True,
         "retry_on_timeout": True,
+        "send_note_pipeline_ids": [],
         "run_payload": {
             "resume_partial": True,
         },
@@ -257,6 +258,19 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
         base["live_pipeline_ids"] = dedup
     else:
         base["live_pipeline_ids"] = []
+    send_note_ids = base.get("send_note_pipeline_ids")
+    if isinstance(send_note_ids, list):
+        dedup_send: list[str] = []
+        seen_send: set[str] = set()
+        for v in send_note_ids:
+            pid = str(v or "").strip()
+            if not pid or pid in seen_send:
+                continue
+            seen_send.add(pid)
+            dedup_send.append(pid)
+        base["send_note_pipeline_ids"] = dedup_send
+    else:
+        base["send_note_pipeline_ids"] = []
     base["default_pipeline_id"] = str(base.get("default_pipeline_id") or "").strip()
     base["transcription_model"] = str(base.get("transcription_model") or "gpt-5.4").strip() or "gpt-5.4"
     try:
@@ -2637,6 +2651,7 @@ class LiveWebhookConfigIn(BaseModel):
     retry_on_server_error: bool = True
     retry_on_rate_limit: bool = True
     retry_on_timeout: bool = True
+    send_note_pipeline_ids: list[str] = []
     run_payload: dict[str, Any] = {}
 
 
@@ -4447,6 +4462,9 @@ def get_live_webhook_config(request: Request):
         "trigger_pipeline": bool(cfg.get("trigger_pipeline", True)),
         "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
         "live_pipeline_ids": cfg.get("live_pipeline_ids") if isinstance(cfg.get("live_pipeline_ids"), list) else [],
+        "send_note_pipeline_ids": (
+            cfg.get("send_note_pipeline_ids") if isinstance(cfg.get("send_note_pipeline_ids"), list) else []
+        ),
         "default_pipeline_id": str(cfg.get("default_pipeline_id") or "").strip(),
         "pipeline_by_agent": cfg.get("pipeline_by_agent") if isinstance(cfg.get("pipeline_by_agent"), dict) else {},
         "run_payload": cfg.get("run_payload") if isinstance(cfg.get("run_payload"), dict) else {},
@@ -4649,11 +4667,16 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
     raw_live_ids = incoming.get("live_pipeline_ids")
     live_ids = [str(v or "").strip() for v in raw_live_ids] if isinstance(raw_live_ids, list) else []
     incoming["live_pipeline_ids"] = [pid for pid in live_ids if pid]
+    raw_send_note_ids = incoming.get("send_note_pipeline_ids")
+    send_note_ids = [str(v or "").strip() for v in raw_send_note_ids] if isinstance(raw_send_note_ids, list) else []
+    incoming["send_note_pipeline_ids"] = [pid for pid in send_note_ids if pid]
 
     default_pid = str(incoming.get("default_pipeline_id") or "").strip()
     if default_pid:
         _find_file(default_pid)
     for pid in incoming.get("live_pipeline_ids", []):
+        _find_file(pid)
+    for pid in incoming.get("send_note_pipeline_ids", []):
         _find_file(pid)
 
     mapping = incoming.get("pipeline_by_agent")
@@ -4675,6 +4698,9 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
             "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
             "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
+            "send_note_pipeline_ids": (
+                saved.get("send_note_pipeline_ids") if isinstance(saved.get("send_note_pipeline_ids"), list) else []
+            ),
             "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
             "pipeline_by_agent": (
                 saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
@@ -4737,6 +4763,9 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
             "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
             "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
+            "send_note_pipeline_ids": (
+                saved.get("send_note_pipeline_ids") if isinstance(saved.get("send_note_pipeline_ids"), list) else []
+            ),
             "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
             "pipeline_by_agent": (
                 saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
@@ -7247,6 +7276,53 @@ async def run_pipeline(
                                     _s.commit()
                 except Exception:
                     pass
+            # For production runs triggered by webhook, optionally push notes back to CRM.
+            try:
+                if run_final_status == "done" and run_origin == "webhook":
+                    _cfg = _load_live_webhook_config()
+                    _send_ids = {
+                        str(v or "").strip()
+                        for v in (_cfg.get("send_note_pipeline_ids") or [])
+                        if str(v or "").strip()
+                    }
+                    if pipeline_id in _send_ids:
+                        _note_id = ""
+                        for _st in run_steps:
+                            _nid = str(_st.get("note_id") or "").strip()
+                            if _nid:
+                                _note_id = _nid
+                        if _note_id:
+                            log_buffer.emit(f"[CRM-PUSH] Sending note {_note_id} to CRM…")
+                            try:
+                                from ui.backend.routers.notes import send_note_to_crm_internal
+                                with Session(_db_engine) as _note_s:
+                                    _push = send_note_to_crm_internal(
+                                        note_id=_note_id,
+                                        account_id="",
+                                        db=_note_s,
+                                    )
+                                _crm_status = str(_push.get("crm_status") or "")
+                                _endpoint = str(_push.get("endpoint") or "")
+                                log_buffer.emit(
+                                    f"[CRM-PUSH] ✓ Sent note {_note_id} to CRM"
+                                    + (f" (status {_crm_status})" if _crm_status else "")
+                                )
+                                if _endpoint:
+                                    log_buffer.emit(f"[CRM-PUSH] endpoint: {_endpoint}")
+                            except HTTPException as _crm_http_err:
+                                _detail = _crm_http_err.detail
+                                if isinstance(_detail, (dict, list)):
+                                    _detail = json.dumps(_detail, ensure_ascii=False)
+                                log_buffer.emit(
+                                    f"[CRM-PUSH] ✗ Failed for note {_note_id}: "
+                                    f"{_crm_http_err.status_code} {str(_detail or '').strip()}"
+                                )
+                            except Exception as _crm_err:
+                                log_buffer.emit(f"[CRM-PUSH] ✗ Failed for note {_note_id}: {_crm_err}")
+                        else:
+                            log_buffer.emit("[CRM-PUSH] Skipped: no note artifact produced by this run.")
+            except Exception as _crm_outer_err:
+                log_buffer.emit(f"[CRM-PUSH] ⚠ Post-run push check failed: {_crm_outer_err}")
             log_lines: list[dict[str, Any]] = []
             try:
                 log_lines = [

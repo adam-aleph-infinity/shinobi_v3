@@ -59,6 +59,7 @@ interface LiveWebhookConfig {
   trigger_pipeline: boolean;
   agent_continuity_filter_enabled: boolean;
   live_pipeline_ids: string[];
+  send_note_pipeline_ids: string[];
   default_pipeline_id: string;
   pipeline_by_agent: Record<string, string>;
   run_payload: Record<string, unknown>;
@@ -301,6 +302,7 @@ export default function LivePage() {
   const { setCustomer, setCallId, setActivePipeline } = useAppCtx();
 
   const [liveSelectedPipelineIds, setLiveSelectedPipelineIds] = useState<string[]>([]);
+  const [sendNotePipelineIds, setSendNotePipelineIds] = useState<string[]>([]);
   const [liveSaving, setLiveSaving] = useState(false);
   const [liveMessage, setLiveMessage] = useState("");
   const [liveMessageError, setLiveMessageError] = useState(false);
@@ -410,10 +412,14 @@ export default function LivePage() {
     const ids = Array.isArray(liveCfg.live_pipeline_ids)
       ? liveCfg.live_pipeline_ids.map((v) => String(v || "").trim()).filter(Boolean)
       : [];
+    const sendIds = Array.isArray(liveCfg.send_note_pipeline_ids)
+      ? liveCfg.send_note_pipeline_ids.map((v) => String(v || "").trim()).filter(Boolean)
+      : [];
     const fallback = String(liveCfg.default_pipeline_id || "").trim();
     const next = ids.length ? ids : (fallback ? [fallback] : []);
     setLiveSelectedPipelineIds(next);
-  }, [liveCfg?.live_pipeline_ids, liveCfg?.default_pipeline_id]);
+    setSendNotePipelineIds(sendIds);
+  }, [liveCfg?.live_pipeline_ids, liveCfg?.send_note_pipeline_ids, liveCfg?.default_pipeline_id]);
 
   const applyLivePipelineSelection = async (pipelineIds: string[]) => {
     if (liveReadOnly) {
@@ -428,6 +434,9 @@ export default function LivePage() {
       const currentRunPayload = (liveCfg && typeof liveCfg.run_payload === "object" && liveCfg.run_payload)
         ? liveCfg.run_payload
         : { resume_partial: true };
+      const currentSendNoteIds = Array.from(
+        new Set((sendNotePipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)),
+      );
       const res = await fetch("/api/pipelines/live-webhook/config", {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -437,6 +446,7 @@ export default function LivePage() {
           trigger_pipeline: true,
           agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
           live_pipeline_ids: cleaned,
+          send_note_pipeline_ids: currentSendNoteIds,
           default_pipeline_id: cleaned[0] || "",
           pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
             ? liveCfg.pipeline_by_agent
@@ -497,6 +507,9 @@ export default function LivePage() {
         ? liveCfg.run_payload
         : { resume_partial: true };
       const selected = Array.from(new Set((liveSelectedPipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
+      const currentSendNoteIds = Array.from(
+        new Set((sendNotePipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)),
+      );
       const res = await fetch("/api/pipelines/live-webhook/config", {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -506,6 +519,7 @@ export default function LivePage() {
           trigger_pipeline: true,
           agent_continuity_filter_enabled: nextEnabled,
           live_pipeline_ids: selected,
+          send_note_pipeline_ids: currentSendNoteIds,
           default_pipeline_id: selected[0] || "",
           pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
             ? liveCfg.pipeline_by_agent
@@ -555,6 +569,85 @@ export default function LivePage() {
     await applyLivePipelineSelection(next);
   };
 
+  const toggleSendNotePipelineChecked = async (pipelineIdToToggle: string) => {
+    const pid = String(pipelineIdToToggle || "").trim();
+    if (!pid) return;
+    if (liveReadOnly) {
+      setLiveMessageError(true);
+      setLiveMessage("Live mirror mode is read-only in this environment.");
+      return;
+    }
+    const currentlyOn = sendNotePipelineIds.includes(pid);
+    const action = currentlyOn ? "disable" : "enable";
+    const name = pipelineNameById[pid] || pid;
+    const ok = window.confirm(
+      `Are you sure you want to ${action} automatic CRM note push for "${name}" (webhook runs only)?`,
+    );
+    if (!ok) return;
+
+    const nextSendNoteIds = currentlyOn
+      ? sendNotePipelineIds.filter((v) => v !== pid)
+      : [...sendNotePipelineIds, pid];
+    setSendNotePipelineIds(nextSendNoteIds);
+    setLiveSaving(true);
+    setLiveMessage("");
+    try {
+      const selectedLive = Array.from(
+        new Set((liveSelectedPipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)),
+      );
+      const cleanedSend = Array.from(
+        new Set((nextSendNoteIds || []).map((v) => String(v || "").trim()).filter(Boolean)),
+      );
+      const currentRunPayload = (liveCfg && typeof liveCfg.run_payload === "object" && liveCfg.run_payload)
+        ? liveCfg.run_payload
+        : { resume_partial: true };
+      const res = await fetch("/api/pipelines/live-webhook/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          ingest_only: selectedLive.length === 0,
+          trigger_pipeline: true,
+          agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
+          live_pipeline_ids: selectedLive,
+          send_note_pipeline_ids: cleanedSend,
+          default_pipeline_id: selectedLive[0] || "",
+          pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
+            ? liveCfg.pipeline_by_agent
+            : {},
+          run_payload: currentRunPayload,
+          transcription_model: String(liveCfg?.transcription_model || "gpt-5.4"),
+          transcription_timeout_s: Number(liveCfg?.transcription_timeout_s || 900),
+          transcription_poll_interval_s: Number(liveCfg?.transcription_poll_interval_s || 2),
+          max_live_running: Number(liveCfg?.max_live_running || 5),
+          auto_retry_enabled: !!(liveCfg?.auto_retry_enabled ?? true),
+          retry_max_attempts: Number(liveCfg?.retry_max_attempts || 2),
+          retry_delay_s: Number(liveCfg?.retry_delay_s || 45),
+          backfill_historical_transcripts: !!(liveCfg?.backfill_historical_transcripts ?? true),
+          backfill_timeout_s: Number(liveCfg?.backfill_timeout_s || 5400),
+          retry_on_server_error: !!(liveCfg?.retry_on_server_error ?? true),
+          retry_on_rate_limit: !!(liveCfg?.retry_on_rate_limit ?? true),
+          retry_on_timeout: !!(liveCfg?.retry_on_timeout ?? true),
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setLiveMessageError(false);
+      setLiveMessage(
+        cleanedSend.length
+          ? `CRM note push enabled for ${cleanedSend.length} pipeline(s).`
+          : "CRM note push disabled for all pipelines.",
+      );
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to update CRM note push setting."));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
   const moveRejectedToRun = async (item: RejectedWebhookItem) => {
     const rejectionId = String(item?.id || "").trim();
     if (!rejectionId) return;
@@ -941,25 +1034,38 @@ export default function LivePage() {
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
                 {pipelineList.map((p) => {
                   const checked = liveSelectedPipelineIds.includes(String(p.id || ""));
+                  const sendNoteChecked = sendNotePipelineIds.includes(String(p.id || ""));
                   return (
-                    <label
+                    <div
                       key={p.id}
                       className={cn(
-                        "w-full flex items-center gap-2 text-xs rounded-lg border px-2 py-2 cursor-pointer transition-colors",
+                        "w-full flex items-center gap-2 text-xs rounded-lg border px-2 py-2 transition-colors",
                         checked
                           ? "border-emerald-700/60 bg-emerald-950/30 text-emerald-200"
                           : "border-gray-800 bg-gray-900 text-gray-300 hover:bg-gray-800",
                       )}
                     >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={liveSaving || liveReadOnly}
-                        onChange={() => { void toggleLivePipelineChecked(String(p.id || "")); }}
-                        className="accent-emerald-500"
-                      />
-                      <span className="truncate">{p.name}</span>
-                    </label>
+                      <label className="min-w-0 flex-1 flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={liveSaving || liveReadOnly}
+                          onChange={() => { void toggleLivePipelineChecked(String(p.id || "")); }}
+                          className="accent-emerald-500"
+                        />
+                        <span className="truncate">{p.name}</span>
+                      </label>
+                      <label className="shrink-0 flex items-center gap-1 text-[10px] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={sendNoteChecked}
+                          disabled={liveSaving || liveReadOnly}
+                          onChange={() => { void toggleSendNotePipelineChecked(String(p.id || "")); }}
+                          className="accent-cyan-500"
+                        />
+                        <span className={cn(sendNoteChecked ? "text-cyan-200" : "text-gray-400")}>Send note</span>
+                      </label>
+                    </div>
                   );
                 })}
                 {pipelineList.length === 0 && (
