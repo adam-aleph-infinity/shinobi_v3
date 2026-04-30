@@ -324,6 +324,7 @@ export default function LivePage() {
   const [requeueingRejectedId, setRequeueingRejectedId] = useState("");
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
+  const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -1016,6 +1017,84 @@ export default function LivePage() {
             {runs.length > 0 ? " Showing last known data." : ""}
           </div>
         )}
+        <div className="mt-3 rounded border border-red-900/40 bg-red-950/20">
+          <button
+            type="button"
+            onClick={() => setCollapsedRejectedFilters((v) => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-red-900/20 transition-colors"
+            title={collapsedRejectedFilters ? "Expand rejected webhooks" : "Collapse rejected webhooks"}
+          >
+            <ChevronRight className={cn("w-3.5 h-3.5 text-red-300 transition-transform", !collapsedRejectedFilters && "rotate-90")} />
+            <span className="text-xs font-semibold text-red-200">Rejected Webhooks</span>
+            <span className="text-[10px] text-red-300/80">{rejectedItems.length}</span>
+            <span className="ml-auto text-[10px] text-red-300/70">inside filters</span>
+          </button>
+          {!collapsedRejectedFilters && (
+            <div className="border-t border-red-900/40 px-3 py-2 space-y-2 max-h-72 overflow-y-auto">
+              {rejectionActionMsg ? (
+                <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
+                  {rejectionActionMsg}
+                </p>
+              ) : null}
+              {rejectedItems.length === 0 ? (
+                <p className="text-[11px] text-gray-400 italic">No rejected webhook records.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {rejectedItems.map((item) => {
+                    const rid = String(item.id || "");
+                    const expanded = expandedRejectedId === rid;
+                    const status = String(item.status || "rejected").toLowerCase();
+                    const statusCls = status === "queued_manual"
+                      ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                      : "text-red-300 border-red-700/60 bg-red-950/30";
+                    return (
+                      <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                        <div className="flex items-start gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
+                            className="mt-0.5 text-gray-500 hover:text-gray-300"
+                            title={expanded ? "Hide payload" : "View payload"}
+                          >
+                            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+                          </button>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
+                                {rid.slice(0, 8)}
+                              </span>
+                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
+                                {status}
+                              </span>
+                              <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-1 truncate">
+                              {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={requeueingRejectedId === rid}
+                            onClick={() => { void moveRejectedToRun(item); }}
+                            className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
+                            title="Move this rejected webhook to run queue"
+                          >
+                            {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
+                          </button>
+                        </div>
+                        {expanded ? (
+                          <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
+{JSON.stringify(item, null, 2)}
+                          </pre>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 overflow-hidden">
@@ -1115,73 +1194,6 @@ export default function LivePage() {
                   </details>
                 </div>
 
-                <div className="mt-3 pt-3 border-t border-gray-800 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-red-200">Rejected Webhooks</span>
-                    <span className="text-[10px] text-gray-500">{rejectedItems.length}</span>
-                  </div>
-                  {rejectionActionMsg ? (
-                    <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
-                      {rejectionActionMsg}
-                    </p>
-                  ) : null}
-                  {rejectedItems.length === 0 ? (
-                    <p className="text-[11px] text-gray-500 italic">No rejected webhook records.</p>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {rejectedItems.map((item) => {
-                        const rid = String(item.id || "");
-                        const expanded = expandedRejectedId === rid;
-                        const status = String(item.status || "rejected").toLowerCase();
-                        const statusCls = status === "queued_manual"
-                          ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
-                          : "text-red-300 border-red-700/60 bg-red-950/30";
-                        return (
-                          <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
-                            <div className="flex items-start gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
-                                className="mt-0.5 text-gray-500 hover:text-gray-300"
-                                title={expanded ? "Hide payload" : "View payload"}
-                              >
-                                <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
-                              </button>
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1 flex-wrap">
-                                  <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
-                                    {rid.slice(0, 8)}
-                                  </span>
-                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
-                                    {status}
-                                  </span>
-                                  <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
-                                </div>
-                                <div className="text-[10px] text-gray-500 mt-1 truncate">
-                                  {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                disabled={requeueingRejectedId === rid}
-                                onClick={() => { void moveRejectedToRun(item); }}
-                                className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
-                                title="Move this rejected webhook to run queue"
-                              >
-                                {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
-                              </button>
-                            </div>
-                            {expanded ? (
-                              <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-{JSON.stringify(item, null, 2)}
-                              </pre>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
               </div>
             </section>
 
