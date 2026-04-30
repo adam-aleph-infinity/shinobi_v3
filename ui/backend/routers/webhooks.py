@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -432,17 +432,36 @@ def _extract_run_error(run_row: Optional[PipelineRun]) -> str:
     return ""
 
 
-async def _wait_for_jobs(job_ids: list[str], timeout_s: int = 5400) -> tuple[bool, int]:
+async def _wait_for_jobs(
+    job_ids: list[str],
+    timeout_s: int = 5400,
+    progress_cb: Optional[Callable[[int, int, int], None]] = None,
+) -> tuple[bool, int]:
     _ids = [str(x) for x in job_ids if str(x)]
     if not _ids:
         return True, 0
     deadline = time.monotonic() + max(60, int(timeout_s))
+    _last_emit = 0.0
+    _last_done = -1
+    _last_failed = -1
     while True:
         with Session(_db_engine) as s:
             rows = s.exec(select(Job).where(Job.id.in_(_ids))).all()
         status_by_id = {str(r.id): str(r.status) for r in rows}
         done = sum(1 for _id in _ids if status_by_id.get(_id) in {"complete", "failed"})
         failed = sum(1 for _id in _ids if status_by_id.get(_id) == "failed")
+        if progress_cb and (
+            done != _last_done
+            or failed != _last_failed
+            or (time.monotonic() - _last_emit) >= 6.0
+        ):
+            try:
+                progress_cb(done, len(_ids), failed)
+            except Exception:
+                pass
+            _last_done = done
+            _last_failed = failed
+            _last_emit = time.monotonic()
         if done >= len(_ids):
             return failed == 0, failed
         if time.monotonic() >= deadline:
@@ -450,7 +469,11 @@ async def _wait_for_jobs(job_ids: list[str], timeout_s: int = 5400) -> tuple[boo
         await asyncio.sleep(2.0)
 
 
-async def _backfill_pair_transcripts(pair: dict[str, str], cfg: dict[str, Any]) -> dict[str, Any]:
+async def _backfill_pair_transcripts(
+    pair: dict[str, str],
+    cfg: dict[str, Any],
+    progress_cb: Optional[Callable[[int, int, int], None]] = None,
+) -> dict[str, Any]:
     from ui.backend.routers.transcription_process import BatchPairsRequest, PairSpec, batch_transcribe_pairs
 
     req = BatchPairsRequest(
@@ -472,7 +495,11 @@ async def _backfill_pair_transcripts(pair: dict[str, str], cfg: dict[str, Any]) 
     ok = True
     failed = 0
     if job_ids:
-        ok, failed = await _wait_for_jobs(job_ids, timeout_s=int(cfg.get("backfill_timeout_s") or 5400))
+        ok, failed = await _wait_for_jobs(
+            job_ids,
+            timeout_s=int(cfg.get("backfill_timeout_s") or 5400),
+            progress_cb=progress_cb,
+        )
     return {
         "submitted": submitted,
         "skipped": skipped,
@@ -1184,6 +1211,18 @@ async def _execute_live_queue_item(
 
     try:
         if bool(cfg.get("backfill_historical_transcripts", True)) and pair:
+            def _on_backfill_progress(done: int, total: int, failed_jobs: int) -> None:
+                _upsert_pipeline_run_stub(
+                    run_id=run_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=str(item.get("pipeline_name") or ""),
+                    sales_agent=str(item.get("sales_agent") or ""),
+                    customer=str(item.get("customer") or ""),
+                    call_id=str(item.get("call_id") or ""),
+                    status="preparing",
+                    log_line=f"Backfill running ({done}/{total} complete, {failed_jobs} failed)",
+                )
+
             _upsert_pipeline_run_stub(
                 run_id=run_id,
                 pipeline_id=pipeline_id,
@@ -1196,7 +1235,7 @@ async def _execute_live_queue_item(
             )
             # Guard backfill so a stuck CRM/transcription dependency cannot pin live slots forever.
             backfill = await asyncio.wait_for(
-                _backfill_pair_transcripts(pair, cfg),
+                _backfill_pair_transcripts(pair, cfg, progress_cb=_on_backfill_progress),
                 timeout=max(120, int(cfg.get("backfill_timeout_s") or 5400) + 60),
             )
             if not bool(backfill.get("ok")):
