@@ -2468,6 +2468,9 @@ function PipelineCanvas() {
         outputsByProcId = {};
       }
 
+      const runState = String(run.status || "").trim().toLowerCase();
+      const runIsPreflight = ["preparing", "queued", "retrying"].includes(runState);
+
       const rows: StepTimelineRow[] = [];
       const total = Math.max(steps.length, procNodesOrdered.length);
       for (let i = 0; i < total; i += 1) {
@@ -2483,7 +2486,7 @@ function PipelineCanvas() {
         let status: StepTimelineRow["status"] = "not_run";
         if (isFailed) status = "failed";
         else if (isCancelled) status = "cancelled";
-        else if (isRunning) status = "running";
+        else if (isRunning) status = runIsPreflight ? "not_run" : "running";
         else if (hasCache || rawState.includes("cache")) status = "cached";
         else if (isCompleted) status = "finished";
         else status = "not_run";
@@ -2720,6 +2723,17 @@ function PipelineCanvas() {
   }, [nodes, edges]);
 
   const applyRuntimeStatusMap = useCallback((statuses: RuntimeStatus[], inputReadyByStep: boolean[] = []) => {
+    const sourceRunId =
+      runContextMode === "historical"
+        ? String(selectedCacheRun?.id || "").trim()
+        : String(currentRunId || "").trim();
+    const sourceRunRecord =
+      runContextMode === "historical"
+        ? selectedCacheRun
+        : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
+    const sourceRunStatus = String(sourceRunRecord?.status || "").trim().toLowerCase();
+    const sourceRunIsPreflight = ["preparing", "queued", "retrying"].includes(sourceRunStatus);
+
     const runtimeByNodeId: Record<string, RuntimeStatus> = {};
 
     runtimeGraph.stepToProcNodeIds.forEach((procId, idx) => {
@@ -2746,6 +2760,7 @@ function PipelineCanvas() {
       else if (connected.some((s) => s.status === "cached")) runtimeByNodeId[inputId] = "cached";
       else if (connected.some((s) => s.status === "loading" && s.inputReady)) runtimeByNodeId[inputId] = "done";
       else if (hasInputReady) runtimeByNodeId[inputId] = runContextMode === "historical" ? "cached" : "done";
+      else if (sourceRunIsPreflight) runtimeByNodeId[inputId] = "loading";
       else if (connected.some((s) => s.status === "loading")) runtimeByNodeId[inputId] = "loading";
       else runtimeByNodeId[inputId] = "pending";
     });
@@ -2762,7 +2777,7 @@ function PipelineCanvas() {
       });
       return changed ? next : ns;
     });
-  }, [runtimeGraph, runContextMode, setNodes]);
+  }, [runtimeGraph, runContextMode, selectedCacheRun, currentRunId, historyRuns, setNodes]);
 
   useEffect(() => {
     if (running) return;
@@ -2784,6 +2799,7 @@ function PipelineCanvas() {
         ? selectedCacheRun
         : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
     const sourceRunStatus = String(sourceRunRecord?.status || "").trim().toLowerCase();
+    const sourceRunIsPreflight = ["preparing", "queued", "retrying"].includes(sourceRunStatus);
     const sourceRunIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(sourceRunStatus);
     const sourceRunIsFailed = ["failed", "error", "fail"].includes(sourceRunStatus);
     const sourceRunIsCompleted = ["done", "completed", "pass", "success"].includes(sourceRunStatus);
@@ -2816,7 +2832,13 @@ function PipelineCanvas() {
         } else if (["done", "completed", "pass", "success"].includes(rawState)) {
           next[idx] = "done";
         }
-        else if (["running", "loading", "started"].includes(rawState)) next[idx] = "loading";
+        else if (["running", "loading", "started"].includes(rawState)) {
+          if (sourceRunIsPreflight) next[idx] = "pending";
+          else if (sourceRunIsCancelled) next[idx] = "cancelled";
+          else if (sourceRunIsFailed) next[idx] = "error";
+          else if (sourceRunIsCompleted) next[idx] = hasCachedLocations ? "cached" : "done";
+          else next[idx] = "loading";
+        }
         else if (["cancelled", "canceled", "aborted", "stopped"].includes(rawState)) next[idx] = "cancelled";
         else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";

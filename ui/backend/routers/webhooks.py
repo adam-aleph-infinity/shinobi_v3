@@ -375,8 +375,8 @@ def _upsert_pipeline_run_stub(
             if row is None:
                 _steps = _build_step_skeleton(pipeline_id)
                 if _status == "preparing" and _steps:
-                    _steps[0]["state"] = "running"
-                    _steps[0]["status"] = "running"
+                    _steps[0]["state"] = "preparing"
+                    _steps[0]["status"] = "preparing"
                 row = PipelineRun(
                     id=run_id,
                     pipeline_id=pipeline_id,
@@ -421,8 +421,8 @@ def _upsert_pipeline_run_stub(
                         if isinstance(first, dict):
                             prev = str(first.get("state") or first.get("status") or "").strip().lower()
                             if prev in {"", "waiting", "pending"}:
-                                first["state"] = "running"
-                                first["status"] = "running"
+                                first["state"] = "preparing"
+                                first["status"] = "preparing"
                                 changed_steps = True
                     if _status in _cancel_like:
                         for step in parsed_steps:
