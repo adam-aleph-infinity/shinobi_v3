@@ -887,12 +887,19 @@ export default function LivePage() {
 
   const renderRunCard = (run: PipelineRunRecord) => {
     const runCallId = inferRunCallId(run);
+    const selectable = !liveReadOnly;
     return (
     <button
       key={run.id}
-      onClick={() => openRunInCanvas(run)}
-      className="w-full text-left rounded-xl border border-gray-700/70 bg-gray-900 hover:bg-gray-800 hover:border-indigo-600/60 transition-colors px-3 py-2.5"
-      title="Open this run in Pipeline canvas"
+      onClick={() => { if (selectable) openRunInCanvas(run); }}
+      disabled={!selectable}
+      className={cn(
+        "w-full text-left rounded-xl border border-gray-700/70 bg-gray-900 transition-colors px-3 py-2.5",
+        selectable
+          ? "hover:bg-gray-800 hover:border-indigo-600/60"
+          : "opacity-70 cursor-not-allowed",
+      )}
+      title={selectable ? "Open this run in Pipeline canvas" : "Read-only on dev mirror"}
     >
       <div className="flex items-center gap-2 flex-wrap">
         {normalizeRunOrigin(run.run_origin) === "webhook" ? (
