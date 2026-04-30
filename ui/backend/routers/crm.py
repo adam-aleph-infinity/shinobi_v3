@@ -2,6 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from typing import Optional
+import re
 
 from ui.backend.database import get_session
 from ui.backend.models.crm import CRMPair
@@ -14,6 +15,63 @@ class AuthRequest(BaseModel):
     crm_url: str
     email: str
     password: str
+
+
+def _norm_agent_name(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _build_account_agent_uniqueness_index(db: Session) -> dict[str, dict[str, object]]:
+    """
+    Returns:
+      {
+        "<account_id>": {
+          "is_unique": bool,
+          "agent_count": int,
+          "agents_canonical": list[str],
+        }
+      }
+    """
+    rows = db.exec(select(CRMPair)).all()
+    if not rows:
+        return {}
+
+    raw_names = sorted(
+        {
+            str(getattr(r, "agent", "") or "").strip()
+            for r in rows
+            if str(getattr(r, "agent", "") or "").strip()
+        }
+    )
+    alias_map: dict[str, str] = {}
+    try:
+        from ui.backend.services.crm_service import _auto_detect_re_aliases, _load_aliases
+
+        alias_map = {**_auto_detect_re_aliases(raw_names), **_load_aliases()}
+    except Exception:
+        alias_map = {}
+
+    account_agents: dict[str, set[str]] = {}
+    for row in rows:
+        account_id = str(getattr(row, "account_id", "") or "").strip()
+        if not account_id:
+            continue
+        raw_agent = str(getattr(row, "agent", "") or "").strip()
+        canonical = str(alias_map.get(raw_agent) or raw_agent).strip()
+        canonical_norm = _norm_agent_name(canonical)
+        if not canonical_norm:
+            continue
+        account_agents.setdefault(account_id, set()).add(canonical_norm)
+
+    out: dict[str, dict[str, object]] = {}
+    for account_id, agents in account_agents.items():
+        agents_sorted = sorted(agents)
+        out[account_id] = {
+            "is_unique": len(agents_sorted) <= 1,
+            "agent_count": len(agents_sorted),
+            "agents_canonical": agents_sorted,
+        }
+    return out
 
 
 
@@ -37,6 +95,7 @@ def get_pairs(
 ):
     from sqlalchemy import func as sa_func, select as sa_select
     try:
+        uniqueness_index = _build_account_agent_uniqueness_index(db)
         stmt = select(CRMPair)
         if crm:
             stmt = stmt.where(CRMPair.crm_url.ilike(f"%{crm}%"))
@@ -98,6 +157,12 @@ def get_pairs(
                 "total_duration": p.total_duration_s,
                 "net_deposits": p.net_deposits,
                 "ftd_at": p.ftd_at,
+                "pair_is_unique": bool(
+                    (uniqueness_index.get(str(p.account_id or "").strip()) or {}).get("is_unique", True)
+                ),
+                "pair_agent_count": int(
+                    (uniqueness_index.get(str(p.account_id or "").strip()) or {}).get("agent_count", 1) or 1
+                ),
             }
             for p in pairs
         ]

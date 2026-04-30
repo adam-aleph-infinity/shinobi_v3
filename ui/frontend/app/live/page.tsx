@@ -58,6 +58,8 @@ interface LiveWebhookConfig {
   ingest_only: boolean;
   trigger_pipeline: boolean;
   agent_continuity_filter_enabled: boolean;
+  agent_continuity_pair_tag_fallback_enabled: boolean;
+  agent_continuity_reject_multi_agent_pair_tags: boolean;
   live_pipeline_ids: string[];
   send_note_pipeline_ids: string[];
   default_pipeline_id: string;
@@ -378,26 +380,19 @@ export default function LivePage() {
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
   const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
   const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData.items : [];
-  const rejectedByDay = useMemo(() => {
-    const sorted = [...rejectedItems].sort((a, b) => rejectedItemTs(b) - rejectedItemTs(a));
-    const byDay = new Map<string, RejectedWebhookItem[]>();
-    for (const item of sorted) {
-      const d = parseServerDate(item.created_at || item.updated_at);
-      const dayId = d
-        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-        : "unknown";
-      const arr = byDay.get(dayId) || [];
-      arr.push(item);
-      byDay.set(dayId, arr);
-    }
-    const groups = Array.from(byDay.entries()).map(([dayId, dayItems]) => ({
-      dayId,
-      label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
-      items: dayItems,
-    }));
-    groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
-    return groups;
-  }, [rejectedItems]);
+  const continuityRejectedCount = useMemo(
+    () =>
+      rejectedItems.filter((r) => {
+        const reason = String(r?.reason || "").toLowerCase();
+        return (
+          reason === "multi_agent_pair"
+          || reason === "payload_agent_mismatch"
+          || reason === "resolved_agent_mismatch"
+          || reason === "no_agent_history"
+        );
+      }).length,
+    [rejectedItems],
+  );
 
   const pipelineNameById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -476,6 +471,12 @@ export default function LivePage() {
           ingest_only: cleaned.length === 0,
           trigger_pipeline: true,
           agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
+          agent_continuity_pair_tag_fallback_enabled: !!(
+            liveCfg?.agent_continuity_pair_tag_fallback_enabled ?? true
+          ),
+          agent_continuity_reject_multi_agent_pair_tags: !!(
+            liveCfg?.agent_continuity_reject_multi_agent_pair_tags ?? true
+          ),
           live_pipeline_ids: cleaned,
           send_note_pipeline_ids: currentSendNoteIds,
           default_pipeline_id: cleaned[0] || "",
@@ -526,8 +527,8 @@ export default function LivePage() {
     const nextEnabled = !currentEnabled;
     const ok = window.confirm(
       nextEnabled
-        ? "Enable continuity filter? Only webhooks whose customer first/last historical agents are the same will auto-run."
-        : "Disable continuity filter? Webhooks will run regardless of first/last historical agent continuity.",
+        ? "Enable unique-pair filter? Only webhooks with a unique customer-agent history will auto-run."
+        : "Disable unique-pair filter? Webhooks will run regardless of pair uniqueness.",
     );
     if (!ok) return;
 
@@ -549,6 +550,12 @@ export default function LivePage() {
           ingest_only: selected.length === 0,
           trigger_pipeline: true,
           agent_continuity_filter_enabled: nextEnabled,
+          agent_continuity_pair_tag_fallback_enabled: !!(
+            liveCfg?.agent_continuity_pair_tag_fallback_enabled ?? true
+          ),
+          agent_continuity_reject_multi_agent_pair_tags: !!(
+            liveCfg?.agent_continuity_reject_multi_agent_pair_tags ?? true
+          ),
           live_pipeline_ids: selected,
           send_note_pipeline_ids: currentSendNoteIds,
           default_pipeline_id: selected[0] || "",
@@ -575,11 +582,11 @@ export default function LivePage() {
         throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
       }
       setLiveMessageError(false);
-      setLiveMessage(nextEnabled ? "Continuity filter enabled." : "Continuity filter disabled.");
+      setLiveMessage(nextEnabled ? "Unique-pair filter enabled." : "Unique-pair filter disabled.");
       await mutateLiveCfg();
     } catch (e: any) {
       setLiveMessageError(true);
-      setLiveMessage(String(e?.message || "Failed to update continuity filter."));
+      setLiveMessage(String(e?.message || "Failed to update unique-pair filter."));
     } finally {
       setLiveSaving(false);
     }
@@ -640,6 +647,12 @@ export default function LivePage() {
           ingest_only: selectedLive.length === 0,
           trigger_pipeline: true,
           agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
+          agent_continuity_pair_tag_fallback_enabled: !!(
+            liveCfg?.agent_continuity_pair_tag_fallback_enabled ?? true
+          ),
+          agent_continuity_reject_multi_agent_pair_tags: !!(
+            liveCfg?.agent_continuity_reject_multi_agent_pair_tags ?? true
+          ),
           live_pipeline_ids: selectedLive,
           send_note_pipeline_ids: cleanedSend,
           default_pipeline_id: selectedLive[0] || "",
@@ -1055,14 +1068,7 @@ export default function LivePage() {
             Loading live runs…
           </div>
         ) : (
-          <div
-            className={cn(
-              "h-full grid grid-cols-1 gap-0",
-              collapsedRejectedFilters
-                ? "2xl:grid-cols-[300px_56px_1fr_1fr_1fr]"
-                : "2xl:grid-cols-[300px_340px_1fr_1fr_1fr]",
-            )}
-          >
+          <div className="h-full grid grid-cols-1 2xl:grid-cols-[300px_340px_1fr_1fr_1fr] gap-0">
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
@@ -1122,7 +1128,7 @@ export default function LivePage() {
 
                 <div className="mt-3 pt-3 border-t border-gray-800 space-y-2">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-amber-200">Continuity Filter</span>
+                    <span className="text-xs font-semibold text-amber-200">Unique Pair Filter</span>
                     <span
                       className={cn(
                         "text-[10px] px-1.5 py-0.5 rounded border font-semibold",
@@ -1134,128 +1140,100 @@ export default function LivePage() {
                       {!!(liveCfg?.agent_continuity_filter_enabled ?? true) ? "ON" : "OFF"}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    disabled={liveSaving || liveReadOnly}
-                    onClick={() => { void toggleContinuityFilter(); }}
-                    className="text-[11px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-60"
-                  >
-                    Toggle Filter
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={liveSaving || liveReadOnly}
+                      onClick={() => { void toggleContinuityFilter(); }}
+                      className="text-[11px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-60"
+                    >
+                      Toggle Unique Filter
+                    </button>
+                  </div>
                   <details className="rounded border border-gray-800 bg-gray-950/40 px-2 py-1">
                     <summary className="cursor-pointer text-[11px] text-gray-300">Filter Logic</summary>
                     <div className="mt-1 space-y-1 text-[10px] text-gray-400">
-                      <p>1. If no call history exists: webhook passes.</p>
-                      <p>2. If first historical agent equals last historical agent: webhook passes.</p>
-                      <p>3. If first historical agent differs from last historical agent: webhook is rejected.</p>
+                      <p>1. Unique filter OFF: webhook passes.</p>
+                      <p>2. Unique filter ON: webhook runs only when the pair has a single canonical agent.</p>
+                      <p>3. If historical/pair data shows multiple canonical agents: rejected.</p>
+                      <p>4. If webhook agent mismatches the unique canonical agent: rejected.</p>
                     </div>
                   </details>
+                  <p className="text-[10px] text-gray-500">
+                    Unique-filter rejections tracked: <span className="text-amber-300 font-semibold">{continuityRejectedCount}</span>
+                  </p>
                 </div>
 
               </div>
             </section>
 
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
-              <div
-                className={cn(
-                  "border-b border-gray-800 bg-gray-900/70 flex items-center shrink-0",
-                  collapsedRejectedFilters ? "px-2 py-2 justify-center gap-1" : "px-4 py-2 gap-2",
-                )}
-              >
-                <XCircle className="w-4 h-4 text-red-400 shrink-0" />
-                {!collapsedRejectedFilters ? <p className="text-sm font-semibold text-gray-100">Rejected</p> : null}
-                {!collapsedRejectedFilters ? <span className="text-xs text-gray-500">{rejectedItems.length}</span> : null}
-                {collapsedRejectedFilters ? <span className="text-[9px] text-gray-500 shrink-0">{rejectedItems.length}</span> : null}
-                <button
-                  type="button"
-                  onClick={() => setCollapsedRejectedFilters((v) => !v)}
-                  className={cn("text-gray-500 hover:text-gray-300", collapsedRejectedFilters ? "" : "ml-auto")}
-                  title={collapsedRejectedFilters ? "Expand rejected webhooks" : "Collapse rejected webhooks"}
-                >
-                  <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", !collapsedRejectedFilters && "rotate-90")} />
-                </button>
+              <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
+                <XCircle className="w-4 h-4 text-red-400" />
+                <p className="text-sm font-semibold text-gray-100">Rejected</p>
+                <span className="text-xs text-gray-500">{rejectedItems.length}</span>
               </div>
-              {!collapsedRejectedFilters ? (
-                <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                  {rejectionActionMsg ? (
-                    <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
-                      {rejectionActionMsg}
-                    </p>
-                  ) : null}
-                  {rejectedByDay.length === 0 ? (
-                    <p className="text-xs text-gray-600 italic">No rejected webhooks.</p>
-                  ) : (
-                    rejectedByDay.map((group) => {
-                      const groupCollapsed = !!collapsedRejectedDayIds[group.dayId];
-                      return (
-                        <div key={group.dayId} className="space-y-1.5">
+              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                {rejectionActionMsg ? (
+                  <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
+                    {rejectionActionMsg}
+                  </p>
+                ) : null}
+                {rejectedItems.length === 0 ? (
+                  <p className="text-xs text-gray-600 italic">No rejected webhooks.</p>
+                ) : (
+                  rejectedItems.map((item) => {
+                    const rid = String(item.id || "");
+                    const expanded = expandedRejectedId === rid;
+                    const status = String(item.status || "rejected").toLowerCase();
+                    const statusCls = status === "queued_manual"
+                      ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                      : "text-red-300 border-red-700/60 bg-red-950/30";
+                    return (
+                      <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                        <div className="flex items-start gap-1.5">
                           <button
                             type="button"
-                            onClick={() =>
-                              setCollapsedRejectedDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
-                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-gray-800 bg-gray-900/70 hover:bg-gray-800 text-left"
-                            title={groupCollapsed ? "Expand date folder" : "Collapse date folder"}
+                            onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
+                            className="mt-0.5 text-gray-500 hover:text-gray-300"
+                            title={expanded ? "Hide payload" : "View payload"}
                           >
-                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform", !groupCollapsed && "rotate-90")} />
-                            <span className="text-[11px] text-gray-300 font-semibold">{group.label}</span>
-                            <span className="ml-auto text-[10px] text-gray-500">{group.items.length}</span>
+                            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
                           </button>
-                          {!groupCollapsed && group.items.map((item) => {
-                            const rid = String(item.id || "");
-                            const expanded = expandedRejectedId === rid;
-                            const status = String(item.status || "rejected").toLowerCase();
-                            const statusCls = status === "queued_manual"
-                              ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
-                              : "text-red-300 border-red-700/60 bg-red-950/30";
-                            return (
-                              <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
-                                <div className="flex items-start gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
-                                    className="mt-0.5 text-gray-500 hover:text-gray-300"
-                                    title={expanded ? "Hide payload" : "View payload"}
-                                  >
-                                    <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
-                                  </button>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-1 flex-wrap">
-                                      <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
-                                        {rid.slice(0, 8)}
-                                      </span>
-                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
-                                        {status}
-                                      </span>
-                                      <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
-                                    </div>
-                                    <div className="text-[10px] text-gray-500 mt-1 truncate">
-                                      {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
-                                    </div>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    disabled={requeueingRejectedId === rid}
-                                    onClick={() => { void moveRejectedToRun(item); }}
-                                    className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
-                                    title="Move this rejected webhook to run queue"
-                                  >
-                                    {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
-                                  </button>
-                                </div>
-                                {expanded ? (
-                                  <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-{JSON.stringify(item, null, 2)}
-                                  </pre>
-                                ) : null}
-                              </div>
-                            );
-                          })}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
+                                {rid.slice(0, 8)}
+                              </span>
+                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
+                                {status}
+                              </span>
+                              <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-1 truncate">
+                              {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={requeueingRejectedId === rid}
+                            onClick={() => { void moveRejectedToRun(item); }}
+                            className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
+                            title="Move this rejected webhook to run queue"
+                          >
+                            {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
+                          </button>
                         </div>
-                      );
-                    })
-                  )}
-                </div>
-              ) : null}
+                        {expanded ? (
+                          <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
+{JSON.stringify(item, null, 2)}
+                          </pre>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
             </section>
 
             <section className="min-h-0 border-r border-gray-800 flex flex-col">

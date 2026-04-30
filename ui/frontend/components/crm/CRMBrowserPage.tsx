@@ -13,7 +13,22 @@ import { logClientExecutionEvent } from "@/lib/execution-log";
 import AgentDeepDiveView from "@/components/crm/AgentDeepDiveView";
 
 const API = "/api";
-const fetcher = (url: string) => fetch(`${API}${url}`).then(r => r.json());
+const fetcher = async (url: string) => {
+  const res = await fetch(`${API}${url}`, { cache: "no-store" });
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error("Invalid JSON response");
+  }
+  if (!res.ok) {
+    const msg = String(data?.detail || data?.error || data?.message || `HTTP ${res.status}`);
+    throw new Error(msg);
+  }
+  return data;
+};
 
 // ── sessionStorage helpers ─────────────────────────────────────────────────────
 const SS_KEY = "crm_filters";
@@ -268,7 +283,8 @@ export default function CRMBrowserPage({
 
   // ── Data ───────────────────────────────────────────────────────────────────
   const { data: allPairs } = useSWR<AgentCustomerPair[]>(`/crm/pairs?sort=agent&dir=asc`, fetcher);
-  const crms = allPairs ? Array.from(new Set(allPairs.map(p => p.crm_url))).sort() : [];
+  const allPairsSafe: AgentCustomerPair[] = Array.isArray(allPairs) ? allPairs : [];
+  const crms = Array.from(new Set(allPairsSafe.map((p) => p.crm_url))).sort();
 
   // Client-side-only sort modes use a stable server base sort.
   const clientOnlySort = new Set<SortKey>([
@@ -294,6 +310,7 @@ export default function CRMBrowserPage({
   const { data: pairs, isLoading, error, mutate } = useSWR<AgentCustomerPair[]>(
     `/crm/pairs?${params.toString()}`, fetcher, { refreshInterval: 0 }
   );
+  const pairsSafe: AgentCustomerPair[] = Array.isArray(pairs) ? pairs : [];
 
   const { data: txStats } = useSWR<TxStats>(`/final-transcript/tx-stats`, fetcher, { refreshInterval: 30000 });
 
@@ -448,7 +465,7 @@ export default function CRMBrowserPage({
     (showArtifactColumns ? 4 : 0)
     + (showArtifactScoreColumns ? scoreSections.length : 0)
     + (showArtifactViolationColumns ? violationTypes.length : 0);
-  const tableColSpan = 11 + artifactColumnCount;
+  const tableColSpan = 12 + artifactColumnCount;
 
   function selectPair(pair: AgentCustomerPair) {
     setSelectedIds(new Set([pair.id]));
@@ -492,7 +509,7 @@ export default function CRMBrowserPage({
 
   // ── Client-side Tx sort + filter (txStats is fetched separately) ──────────
   const displayPairs = useMemo(() => {
-    let result = pairs ?? [];
+    let result = pairsSafe;
     if (accountIdFilter) {
       const q = accountIdFilter.trim().toLowerCase();
       result = result.filter(p => p.account_id?.toLowerCase().includes(q));
@@ -608,7 +625,7 @@ export default function CRMBrowserPage({
     }
     return result;
   }, [
-    pairs, txStats, sortKey, sortDir, minTx, accountIdFilter,
+    pairsSafe, txStats, sortKey, sortDir, minTx, accountIdFilter,
     hasArtifactFilter, artifactPairMap, artifactAgentMap,
     minArtifactAvgScore, maxArtifactAvgScore,
     minArtifactTotalViolations, maxArtifactTotalViolations,
@@ -652,8 +669,8 @@ export default function CRMBrowserPage({
 
   // ── Batch transcription ────────────────────────────────────────────────────
   async function handleTranscribe() {
-    if (!pairs || selectedIds.size === 0) return;
-    const selectedPairs = pairs.filter(p => selectedIds.has(p.id));
+    if (pairsSafe.length === 0 || selectedIds.size === 0) return;
+    const selectedPairs = pairsSafe.filter(p => selectedIds.has(p.id));
     setTranscribing(true);
     setTranscribeResult(null);
     try {
@@ -1072,7 +1089,7 @@ export default function CRMBrowserPage({
               <thead className="sticky top-0 bg-gray-900 z-10">
                 {showArtifactColumns && (
                   <tr className="border-b border-gray-800/70">
-                    <th colSpan={10} className="px-3 py-2 text-left font-medium text-[11px] text-gray-500 uppercase tracking-wide">
+                      <th colSpan={11} className="px-3 py-2 text-left font-medium text-[11px] text-gray-500 uppercase tracking-wide">
                       CRM Core
                     </th>
                     <th colSpan={2} className="px-3 py-2 text-right font-medium text-[11px] text-indigo-300 uppercase tracking-wide">
@@ -1104,6 +1121,7 @@ export default function CRMBrowserPage({
                     </button>
                   </th>
                   <ThBtn col="agent"      label="Agent" />
+                  <th className="px-3 py-3 font-medium text-gray-400 text-xs">Pair</th>
                   <ThBtn col="customer"   label="Customer" />
                   <ThBtn col="account_id" label="Account ID" />
                   <ThBtn col="crm"        label="CRM" />
@@ -1177,6 +1195,20 @@ export default function CRMBrowserPage({
                         </button>
                       </td>
                       <td className="px-3 py-3 text-white font-medium">{pair.agent}</td>
+                      <td className="px-3 py-3">
+                        {pair.pair_is_unique ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-700/60 bg-emerald-950/40 text-emerald-300">
+                            Unique
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded-full border border-amber-700/60 bg-amber-950/40 text-amber-300"
+                            title={`Multiple agents detected (${Number(pair.pair_agent_count || 0)})`}
+                          >
+                            Multi
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-3 text-gray-300">{pair.customer}</td>
                       <td className="px-3 py-3 font-mono text-xs text-gray-400">{pair.account_id || "—"}</td>
                       <td className="px-3 py-3">
@@ -1286,8 +1318,8 @@ export default function CRMBrowserPage({
           {/* Footer: count + transcribe button */}
           <div className="px-4 py-2 border-t border-gray-800 flex items-center gap-3 shrink-0">
             <span className="text-xs text-gray-500 flex-1">
-              {pairs && allPairs
-                ? `${displayPairs.length}${hasFilter ? ` of ${allPairs.length}` : ""} pair${displayPairs.length !== 1 ? "s" : ""}`
+              {pairsSafe.length > 0 || allPairsSafe.length > 0
+                ? `${displayPairs.length}${hasFilter ? ` of ${allPairsSafe.length}` : ""} pair${displayPairs.length !== 1 ? "s" : ""}`
                 : ""}
               {someSelected && ` · ${selectedIds.size} selected`}
             </span>

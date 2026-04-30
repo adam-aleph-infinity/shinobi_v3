@@ -49,6 +49,8 @@ class CallEndedWebhookConfig(BaseModel):
     ingest_only: bool = True
     trigger_pipeline: bool = True
     agent_continuity_filter_enabled: bool = True
+    agent_continuity_pair_tag_fallback_enabled: bool = True
+    agent_continuity_reject_multi_agent_pair_tags: bool = True
     live_pipeline_ids: list[str] = Field(default_factory=list)
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = Field(default_factory=dict)
@@ -74,6 +76,8 @@ def _default_call_ended_config() -> dict[str, Any]:
         "ingest_only": True,
         "trigger_pipeline": True,
         "agent_continuity_filter_enabled": True,
+        "agent_continuity_pair_tag_fallback_enabled": True,
+        "agent_continuity_reject_multi_agent_pair_tags": True,
         "live_pipeline_ids": [],
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
@@ -113,6 +117,12 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
     base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
     base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
+    base["agent_continuity_pair_tag_fallback_enabled"] = bool(
+        base.get("agent_continuity_pair_tag_fallback_enabled", True)
+    )
+    base["agent_continuity_reject_multi_agent_pair_tags"] = bool(
+        base.get("agent_continuity_reject_multi_agent_pair_tags", True)
+    )
     live_ids = base.get("live_pipeline_ids")
     if isinstance(live_ids, list):
         dedup: list[str] = []
@@ -1021,23 +1031,26 @@ def _resolve_pair(db: Session, payload: CallEndedWebhookPayload) -> dict[str, st
     }
 
 
-def _load_agent_continuity_filter_enabled(fallback_cfg: Optional[dict[str, Any]] = None) -> bool:
-    """
-    Source of truth is the live-webhook config used by Jobs page.
-    Fallback to call-ended config for backward compatibility.
-    """
+def _load_agent_continuity_policy(fallback_cfg: Optional[dict[str, Any]] = None) -> dict[str, bool]:
+    """Source of truth is live-webhook config; fallback to call-ended config."""
+    policy = {"enabled": True}
     try:
         from ui.backend.routers.pipelines import _load_live_webhook_config as _load_live_cfg
 
         live_cfg = _load_live_cfg()
         if isinstance(live_cfg, dict):
-            return bool(live_cfg.get("agent_continuity_filter_enabled", True))
+            policy["enabled"] = bool(live_cfg.get("agent_continuity_filter_enabled", True))
+            return policy
     except Exception:
         pass
 
     if isinstance(fallback_cfg, dict):
-        return bool(fallback_cfg.get("agent_continuity_filter_enabled", True))
-    return True
+        policy["enabled"] = bool(fallback_cfg.get("agent_continuity_filter_enabled", True))
+    return policy
+
+
+def _load_agent_continuity_filter_enabled(fallback_cfg: Optional[dict[str, Any]] = None) -> bool:
+    return bool(_load_agent_continuity_policy(fallback_cfg).get("enabled", True))
 
 
 def _call_order_key(row: CRMCall) -> tuple[Any, ...]:
@@ -1054,57 +1067,114 @@ def _norm_agent_name(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
 
+def _agent_alias_primary(name: str, alias_map: dict[str, str]) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    direct = str(alias_map.get(raw) or "").strip()
+    if direct:
+        return direct
+    low = raw.lower()
+    for k, v in alias_map.items():
+        if str(k or "").strip().lower() == low:
+            vv = str(v or "").strip()
+            return vv or raw
+    return raw
+
+
 def _agent_continuity_check(
     db: Session,
     pair: dict[str, str],
     payload_agent: str = "",
+    policy: Optional[dict[str, Any]] = None,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """
-    Allow by default. Reject only when historical first/last agents differ.
-    """
+    """Unique-pair-only admission rule for webhook jobs."""
     account_id = str(pair.get("account_id") or "").strip()
     crm_url = str(pair.get("crm_url") or "").strip()
     customer = str(pair.get("customer") or "").strip()
     current_agent = str(pair.get("agent") or payload_agent or "").strip()
+    payload_agent_name = str(payload_agent or "").strip()
     base_meta: dict[str, Any] = {
         "account_id": account_id,
         "crm_url": crm_url,
         "customer": customer,
         "current_agent": current_agent,
+        "payload_agent": payload_agent_name,
     }
     if not account_id:
-        return True, "missing_account_id", base_meta
+        return False, "missing_account_id", base_meta
 
+    history_source = "crm_call"
     stmt = select(CRMCall).where(_sql_func.trim(CRMCall.account_id) == account_id)
     if crm_url:
         stmt = stmt.where(_sql_func.trim(CRMCall.crm_url) == crm_url)
     rows = db.exec(stmt).all()
     if not rows:
-        return True, "no_call_history", base_meta
+        history_source = "crm_pair"
+        pair_stmt = select(CRMPair).where(_sql_func.trim(CRMPair.account_id) == account_id)
+        if customer:
+            pair_stmt = pair_stmt.where(_sql_func.lower(_sql_func.trim(CRMPair.customer)) == customer.lower())
+        if crm_url:
+            pair_stmt = pair_stmt.where(_sql_func.trim(CRMPair.crm_url) == crm_url)
+        rows = db.exec(pair_stmt).all()
+        if not rows:
+            pair_stmt = select(CRMPair).where(_sql_func.trim(CRMPair.account_id) == account_id)
+            rows = db.exec(pair_stmt).all()
 
-    ordered = sorted(rows, key=_call_order_key)
-    first_row = ordered[0]
-    last_row = ordered[-1]
-    first_agent = str(getattr(first_row, "agent", "") or "").strip()
-    last_agent = str(getattr(last_row, "agent", "") or "").strip()
-    first_call_id = str(getattr(first_row, "call_id", "") or "").strip()
-    last_call_id = str(getattr(last_row, "call_id", "") or "").strip()
-    first_started = str(getattr(first_row, "started_at", "") or "").strip()
-    last_started = str(getattr(last_row, "started_at", "") or "").strip()
+    raw_agents = sorted(
+        {
+            str(getattr(r, "agent", "") or "").strip()
+            for r in rows
+            if str(getattr(r, "agent", "") or "").strip()
+        }
+    )
+    names_for_alias = sorted(
+        {
+            *raw_agents,
+            *( [current_agent] if current_agent else [] ),
+            *( [payload_agent_name] if payload_agent_name else [] ),
+        }
+    )
+
+    alias_map: dict[str, str] = {}
+    if names_for_alias:
+        try:
+            from ui.backend.services.crm_service import _auto_detect_re_aliases, _load_aliases
+
+            alias_map = {**_auto_detect_re_aliases(names_for_alias), **_load_aliases()}
+        except Exception:
+            alias_map = {}
+
+    canonical_set = sorted(
+        {
+            _norm_agent_name(_agent_alias_primary(name, alias_map))
+            for name in raw_agents
+            if _norm_agent_name(_agent_alias_primary(name, alias_map))
+        }
+    )
+    current_canonical = _norm_agent_name(_agent_alias_primary(current_agent, alias_map))
+    payload_canonical = _norm_agent_name(_agent_alias_primary(payload_agent_name, alias_map))
+
     meta = {
         **base_meta,
-        "total_calls": len(ordered),
-        "first_agent": first_agent,
-        "last_agent": last_agent,
-        "first_call_id": first_call_id,
-        "last_call_id": last_call_id,
-        "first_started_at": first_started,
-        "last_started_at": last_started,
+        "history_source": history_source,
+        "history_rows": len(rows),
+        "agents": raw_agents,
+        "agents_canonical": canonical_set,
+        "current_agent_canonical": current_canonical,
+        "payload_agent_canonical": payload_canonical,
     }
-    if _norm_agent_name(first_agent) and _norm_agent_name(last_agent):
-        if _norm_agent_name(first_agent) != _norm_agent_name(last_agent):
-            return False, "agent_changed", meta
-    return True, "agent_stable", meta
+    if not canonical_set:
+        return False, "no_agent_history", meta
+    if len(canonical_set) > 1:
+        return False, "multi_agent_pair", meta
+
+    unique_agent = canonical_set[0]
+    if payload_canonical and payload_canonical != unique_agent:
+        return False, "payload_agent_mismatch", meta
+    if current_canonical and current_canonical != unique_agent:
+        return False, "resolved_agent_mismatch", meta
+    return True, "unique_pair", meta
 
 
 def _resolve_record_path(
@@ -1777,6 +1847,83 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
         if not queue:
             return
 
+        # Re-validate queued webhook items against current continuity policy.
+        # This ensures old queued items are filtered immediately after policy changes.
+        continuity_policy = _load_agent_continuity_policy(cfg)
+        if bool(continuity_policy.get("enabled", True)):
+            try:
+                with Session(_db_engine) as _s:
+                    for item in queue:
+                        if not isinstance(item, dict):
+                            continue
+                        state = str(item.get("state") or "").strip().lower()
+                        if state not in {"queued", "retrying", "preparing"}:
+                            continue
+                        webhook_type = str(item.get("webhook_type") or "").strip().lower()
+                        if webhook_type not in {"call-ended", "call-updated"}:
+                            continue
+
+                        pair_raw = item.get("pair")
+                        pair = pair_raw if isinstance(pair_raw, dict) else {}
+                        pair_obj = {
+                            "account_id": str(pair.get("account_id") or item.get("account_id") or "").strip(),
+                            "crm_url": str(pair.get("crm_url") or item.get("crm_url") or "").strip(),
+                            "agent": str(pair.get("agent") or item.get("sales_agent") or "").strip(),
+                            "customer": str(pair.get("customer") or item.get("customer") or "").strip(),
+                        }
+                        payload_raw = item.get("payload")
+                        payload_obj = payload_raw if isinstance(payload_raw, dict) else {}
+                        payload_agent = str(payload_obj.get("agent") or pair_obj.get("agent") or "").strip()
+                        ok, reason, meta = _agent_continuity_check(
+                            db=_s,
+                            pair=pair_obj,
+                            payload_agent=payload_agent,
+                            policy=continuity_policy,
+                        )
+                        if ok:
+                            continue
+
+                        item["state"] = "failed"
+                        item["last_error"] = f"Rejected by unique-pair filter ({reason})."
+                        item["updated_at"] = _utc_now_iso()
+                        changed = True
+
+                        if not bool(item.get("continuity_rejected_logged")):
+                            _append_rejected_webhook(
+                                {
+                                    "source": "queue_revalidation",
+                                    "reason": reason,
+                                    "status": "rejected",
+                                    "webhook_type": webhook_type,
+                                    "event_id": str(item.get("event_id") or ""),
+                                    "event_file": str(item.get("event_file") or ""),
+                                    "sales_agent": str(pair_obj.get("agent") or item.get("sales_agent") or ""),
+                                    "customer": str(pair_obj.get("customer") or item.get("customer") or ""),
+                                    "call_id": str(item.get("call_id") or ""),
+                                    "account_id": str(pair_obj.get("account_id") or ""),
+                                    "crm_url": str(pair_obj.get("crm_url") or ""),
+                                    "pipeline_ids": [str(item.get("pipeline_id") or "")] if str(item.get("pipeline_id") or "").strip() else [],
+                                    "run_id": str(item.get("run_id") or ""),
+                                    "payload": payload_obj,
+                                    "continuity_meta": meta,
+                                    "message": "Rejected from live queue by unique-pair policy.",
+                                }
+                            )
+                            item["continuity_rejected_logged"] = True
+
+                        _upsert_pipeline_run_stub(
+                            run_id=str(item.get("run_id") or ""),
+                            pipeline_id=str(item.get("pipeline_id") or ""),
+                            pipeline_name=str(item.get("pipeline_name") or ""),
+                            sales_agent=str(pair_obj.get("agent") or item.get("sales_agent") or ""),
+                            customer=str(pair_obj.get("customer") or item.get("customer") or ""),
+                            call_id=str(item.get("call_id") or ""),
+                            status="failed",
+                            log_line=f"Rejected by unique-pair filter during queue revalidation ({reason})",
+                        )
+            except Exception:
+                pass
+
         # Reconcile running/retrying/finalized items.
         for item in queue:
             state = str(item.get("state") or "queued").strip().lower()
@@ -2092,7 +2239,8 @@ async def _handle_call_webhook(
     if payload.crm_url and str(payload.crm_url).strip():
         pair["crm_url"] = str(payload.crm_url).strip()
 
-    continuity_filter_enabled = _load_agent_continuity_filter_enabled(cfg)
+    continuity_policy = _load_agent_continuity_policy(cfg)
+    continuity_filter_enabled = bool(continuity_policy.get("enabled", True))
     continuity_ok = True
     continuity_reason = "disabled"
     continuity_meta: dict[str, Any] = {}
@@ -2101,6 +2249,7 @@ async def _handle_call_webhook(
             db=db,
             pair=pair,
             payload_agent=str(payload.agent or "").strip(),
+            policy=continuity_policy,
         )
         if not continuity_ok:
             _append_rejected_webhook(
@@ -2119,7 +2268,7 @@ async def _handle_call_webhook(
                     "pipeline_ids": _resolve_live_pipeline_ids(cfg),
                     "payload": payload.model_dump(),
                     "continuity_meta": continuity_meta,
-                    "message": "Rejected by agent continuity filter.",
+                    "message": "Rejected by unique-pair filter.",
                 }
             )
             return {
@@ -2141,6 +2290,7 @@ async def _handle_call_webhook(
                     "passed": False,
                     "reason": continuity_reason,
                     "meta": continuity_meta,
+                    "policy": continuity_policy,
                 },
                 "transcription": {
                     "used_cached_transcript": _transcript_exists(
@@ -2150,14 +2300,14 @@ async def _handle_call_webhook(
                     ),
                     "job_id": "",
                     "status": "rejected_by_filter",
-                    "message": "Rejected by agent continuity filter.",
+                    "message": "Rejected by unique-pair filter.",
                 },
                 "pipeline": {
                     "triggered": False,
                     "pipeline_id": "",
                     "run_id": "",
                     "pipelines": [],
-                    "message": "Rejected by agent continuity filter.",
+                    "message": "Rejected by unique-pair filter.",
                 },
             }
     else:
@@ -2236,6 +2386,8 @@ async def _handle_call_webhook(
                     queue_item = {
                         "id": str(uuid.uuid4()),
                         "webhook_type": webhook_type,
+                        "event_id": str(stored.get("event_id") or ""),
+                        "event_file": str(stored.get("file") or ""),
                         "created_at": queued_at,
                         "updated_at": queued_at,
                         "state": "queued",
@@ -2250,6 +2402,8 @@ async def _handle_call_webhook(
                         "sales_agent": pair["agent"],
                         "customer": pair["customer"],
                         "call_id": call_id,
+                        "account_id": pair["account_id"],
+                        "crm_url": pair["crm_url"],
                         "pair": {
                             "crm_url": pair["crm_url"],
                             "account_id": pair["account_id"],
@@ -2378,6 +2532,7 @@ async def _handle_call_webhook(
             "passed": bool(continuity_ok),
             "reason": continuity_reason,
             "meta": continuity_meta,
+            "policy": continuity_policy,
         },
         "transcription": transcription_info,
         "pipeline": pipeline_info,
