@@ -92,6 +92,40 @@ const RUNTIME_META: Record<RuntimeStatus, { label: string; className: string; do
   cancelled: { label: "Cancelled", className: "text-slate-200 border-slate-600/70 bg-slate-900/70", dot: "bg-slate-300" },
 };
 
+function normalizeStateToken(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isCancelledLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s.includes("cancel") || s.includes("abort") || s.includes("stop");
+}
+
+function isRunningLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "running" || s === "loading" || s === "started" || s.includes("in_progress");
+}
+
+function isFailedLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "failed" || s === "error" || s === "fail" || s.includes("exception");
+}
+
+function isCompletedLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "completed" || s === "done" || s === "pass" || s === "success" || s === "ok";
+}
+
+function isActiveRunLike(value: unknown): boolean {
+  const s = normalizeStateToken(value);
+  if (!s) return false;
+  return s === "running" || s === "queued" || s === "preparing" || s === "retrying";
+}
+
 // ── Universal agent types & constants ────────────────────────────────────────
 
 interface AgentInput { key: string; source: string; agent_id?: string; }
@@ -2191,7 +2225,7 @@ function PipelineCanvas() {
   }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
 
   const runsUrl = useMemo(() => {
-    const qp = new URLSearchParams({ limit: "2000" });
+    const qp = new URLSearchParams({ limit: "300" });
     if (pipelineId) qp.set("pipeline_id", pipelineId);
     if (salesAgent) qp.set("sales_agent", salesAgent);
     if (customer) qp.set("customer", customer);
@@ -2422,6 +2456,16 @@ function PipelineCanvas() {
     const out = new Map<string, RunTimeline>();
     for (const run of historyRuns) {
       const steps = parsedRunStepsById.get(run.id) ?? [];
+      const runState = normalizeStateToken(run.status);
+      const runFinishedAtMs = parseIsoMs(run.finished_at);
+      const runIsActive = isActiveRunLike(runState) && runFinishedAtMs == null;
+      const runIsCancelled = isCancelledLike(runState);
+      const runIsFailed = isFailedLike(runState);
+      const runIsCompleted = isCompletedLike(runState);
+      const runIsPreflight =
+        runState === "preparing"
+        || runState === "queued"
+        || runState === "retrying";
       let procNodesOrdered: Array<{ id: string; label: string; stageIndex: number | null }> = [];
       let outputsByProcId: Record<string, string[]> = {};
 
@@ -2474,28 +2518,35 @@ function PipelineCanvas() {
         outputsByProcId = {};
       }
 
-      const runState = String(run.status || "").trim().toLowerCase();
-      const runIsPreflight = ["preparing", "queued", "retrying"].includes(runState);
-
       const rows: StepTimelineRow[] = [];
       const total = Math.max(steps.length, procNodesOrdered.length);
       for (let i = 0; i < total; i += 1) {
         const step = (steps[i] || {}) as PipelineRunStep;
         const proc = procNodesOrdered[i];
-        const rawState = String(step.state || step.status || "").trim().toLowerCase();
+        const rawState = normalizeStateToken(step.state || step.status);
         const hasCache = Array.isArray(step.cached_locations) && step.cached_locations.length > 0;
-        const isFailed = ["failed", "error", "fail"].includes(rawState);
-        const isCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(rawState);
-        const isRunning = ["running", "loading", "started"].includes(rawState);
-        const isCompleted = ["completed", "done", "pass", "success"].includes(rawState);
+        const isFailed = isFailedLike(rawState);
+        const isCancelled = isCancelledLike(rawState);
+        const isRunning = isRunningLike(rawState);
+        const isCompleted = isCompletedLike(rawState);
 
         let status: StepTimelineRow["status"] = "not_run";
         if (isFailed) status = "failed";
         else if (isCancelled) status = "cancelled";
-        else if (isRunning) status = runIsPreflight ? "not_run" : "running";
+        else if (isRunning) status = "running";
         else if (hasCache || rawState.includes("cache")) status = "cached";
         else if (isCompleted) status = "finished";
         else status = "not_run";
+
+        // If the overall run was cancelled, stale in-flight step states should
+        // no longer be presented as running in history/timeline.
+        if (status === "running") {
+          if (runIsPreflight) status = "not_run";
+          else if (runIsCancelled) status = "cancelled";
+          else if (runIsFailed) status = "failed";
+          else if (runIsCompleted) status = hasCache ? "cached" : "finished";
+          else if (!runIsActive) status = "cancelled";
+        }
 
         const statusMeta = {
           finished: {
@@ -2733,12 +2784,14 @@ function PipelineCanvas() {
       runContextMode === "historical"
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
-    const sourceRunRecord =
-      runContextMode === "historical"
-        ? selectedCacheRun
-        : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
-    const sourceRunStatus = String(sourceRunRecord?.status || "").trim().toLowerCase();
-    const sourceRunIsPreflight = ["preparing", "queued", "retrying"].includes(sourceRunStatus);
+    const sourceRunRecord = runContextMode === "historical"
+      ? selectedCacheRun
+      : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
+    const sourceRunStatus = normalizeStateToken(sourceRunRecord?.status || "");
+    const sourceRunIsPreflight =
+      sourceRunStatus === "preparing"
+      || sourceRunStatus === "queued"
+      || sourceRunStatus === "retrying";
 
     const runtimeByNodeId: Record<string, RuntimeStatus> = {};
 
@@ -2800,15 +2853,24 @@ function PipelineCanvas() {
       runContextMode === "historical"
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
-    const sourceRunRecord =
-      runContextMode === "historical"
-        ? selectedCacheRun
-        : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
-    const sourceRunStatus = String(sourceRunRecord?.status || "").trim().toLowerCase();
-    const sourceRunIsPreflight = ["preparing", "queued", "retrying"].includes(sourceRunStatus);
-    const sourceRunIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(sourceRunStatus);
-    const sourceRunIsFailed = ["failed", "error", "fail"].includes(sourceRunStatus);
-    const sourceRunIsCompleted = ["done", "completed", "pass", "success"].includes(sourceRunStatus);
+    const sourceRunRecord = runContextMode === "historical"
+      ? selectedCacheRun
+      : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
+    const sourceRunStatus = normalizeStateToken(sourceRunRecord?.status || "");
+    const sourceRunFinishedAtMs = (() => {
+      const raw = String(sourceRunRecord?.finished_at || "").trim();
+      if (!raw) return null;
+      const ts = Date.parse(raw);
+      return Number.isFinite(ts) ? ts : null;
+    })();
+    const sourceRunIsActive = isActiveRunLike(sourceRunStatus) && sourceRunFinishedAtMs == null;
+    const sourceRunIsCancelled = isCancelledLike(sourceRunStatus);
+    const sourceRunIsFailed = isFailedLike(sourceRunStatus);
+    const sourceRunIsCompleted = isCompletedLike(sourceRunStatus);
+    const sourceRunIsPreflight =
+      sourceRunStatus === "preparing"
+      || sourceRunStatus === "queued"
+      || sourceRunStatus === "retrying";
     if (sourceRunId && !parsedRunStepsById.has(sourceRunId)) {
       // Do not keep stale in-memory statuses (can incorrectly show "running" forever).
       // Reset from current run terminal state while waiting for step payload to load.
@@ -2828,25 +2890,26 @@ function PipelineCanvas() {
       const runSteps = parsedRunStepsById.get(sourceRunId) ?? [];
       runSteps.forEach((row, idx) => {
         if (idx >= next.length || !row) return;
-        const rawState = String(row.state || row.status || "").toLowerCase();
+        const rawState = normalizeStateToken(row.state || row.status);
         if (!rawState) return;
         const hasCachedLocations = Array.isArray((row as any).cached_locations)
           ? ((row as any).cached_locations as any[]).length > 0
           : !!(row as any).cached_locations;
-        if (["cached", "cache_hit"].includes(rawState) || (rawState === "completed" && hasCachedLocations)) {
+        if (rawState === "cached" || rawState === "cache_hit" || (isCompletedLike(rawState) && hasCachedLocations)) {
           next[idx] = "cached";
-        } else if (["done", "completed", "pass", "success"].includes(rawState)) {
+        } else if (isCompletedLike(rawState)) {
           next[idx] = "done";
         }
-        else if (["running", "loading", "started"].includes(rawState)) {
+        else if (isRunningLike(rawState)) {
           if (sourceRunIsPreflight) next[idx] = "pending";
           else if (sourceRunIsCancelled) next[idx] = "cancelled";
           else if (sourceRunIsFailed) next[idx] = "error";
           else if (sourceRunIsCompleted) next[idx] = hasCachedLocations ? "cached" : "done";
+          else if (!sourceRunIsActive) next[idx] = "cancelled";
           else next[idx] = "loading";
         }
-        else if (["cancelled", "canceled", "aborted", "stopped"].includes(rawState)) next[idx] = "cancelled";
-        else if (["error", "failed", "fail"].includes(rawState)) next[idx] = "error";
+        else if (isCancelledLike(rawState)) next[idx] = "cancelled";
+        else if (isFailedLike(rawState)) next[idx] = "error";
         nextInputReady[idx] = !!row.input_ready || next[idx] === "done" || next[idx] === "cached";
       });
     }
@@ -2860,7 +2923,6 @@ function PipelineCanvas() {
     runContextMode,
     selectedCacheRun,
     currentRunId,
-    historyRuns,
     parsedRunStepsById,
   ]);
 
@@ -5077,15 +5139,7 @@ function PipelineCanvas() {
     }
   }, []);
 
-  function RenderResultContent({
-    content,
-    sourceHint = "",
-    expand = false,
-  }: {
-    content: string;
-    sourceHint?: string;
-    expand?: boolean;
-  }) {
+  function RenderResultContent({ content, sourceHint = "", expand = false }: { content: string; sourceHint?: string; expand?: boolean }) {
     const text = String(content || "");
     const hint = sourceHint.toLowerCase();
     const unwrapped = unwrapResponseEnvelope(text);
@@ -5111,24 +5165,20 @@ function PipelineCanvas() {
     }
     if (resultViewMode === "raw") {
       return (
-        <pre
-          className={cn(
-            "w-full overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
-            expand ? "h-full min-h-0" : "max-h-80",
-          )}
-        >
+        <pre className={cn(
+          "w-full overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
+          expand ? "h-full min-h-[300px]" : "max-h-80",
+        )}>
           {text}
         </pre>
       );
     }
     if (hint.includes("transcript")) {
       return (
-        <div
-          className={cn(
-            "border border-gray-700 rounded-lg overflow-hidden bg-gray-900",
-            expand ? "h-full min-h-0" : "h-80",
-          )}
-        >
+        <div className={cn(
+          "border border-gray-700 rounded-lg overflow-hidden bg-gray-900",
+          expand ? "h-full min-h-[300px]" : "h-80",
+        )}>
           <TranscriptViewer content={text} format="txt" className="h-full" />
         </div>
       );
@@ -5154,12 +5204,10 @@ function PipelineCanvas() {
             LLM render unavailable ({cacheEntry.error}). Showing local rendered view.
           </p>
         )}
-        <div
-          className={cn(
-            "overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
-            expand ? "flex-1 min-h-0" : "max-h-80",
-          )}
-        >
+        <div className={cn(
+          "overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
+          expand ? "flex-1 min-h-[300px]" : "max-h-80",
+        )}>
           <SectionContent content={renderedMarkdown} format="markdown" />
         </div>
       </div>
@@ -5201,7 +5249,10 @@ function PipelineCanvas() {
     return (
       <div className={cn("space-y-2", expand && "h-full min-h-0 flex flex-col")}>
         {(originLabel || cacheFile || resolvedCallId || fileRefText || fileRefsError) && (
-          <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1 shrink-0">
+          <div className={cn(
+            "rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1",
+            expand && "shrink-0",
+          )}>
             {originLabel && (
               <p className="text-[10px] text-gray-300">
                 Source: <span className="text-indigo-300">{originLabel}</span>
@@ -5412,13 +5463,9 @@ function PipelineCanvas() {
               </div>
             </div>
 
-            <div className="lg:col-span-7 min-h-0 h-full flex flex-col">
-              <PropertiesSection
-                title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
-                className="h-full flex flex-col"
-                bodyClassName="h-full min-h-0 flex flex-col"
-              >
-                <div className="space-y-2 h-full min-h-0 flex flex-col">
+            <div className="lg:col-span-7 min-h-0 overflow-y-auto space-y-2.5">
+              <PropertiesSection title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}>
+                <div className="space-y-2">
                   {selKind !== "input" ? renderCacheRunSelector() : null}
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] text-gray-500">
@@ -5450,7 +5497,7 @@ function PipelineCanvas() {
                         {processingCache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{processingCache.errorMsg}</p>
                         )}
-                        <RenderResultContent content={processingCache.content || ""} />
+                        <RenderResultContent content={processingCache.content || ""} expand />
                         {renderStepRuntimeDiagnostics(processingCache, processingStepIndex)}
                       </>
                     ) : (
@@ -5797,13 +5844,9 @@ function PipelineCanvas() {
               </div>
 
               {/* Right: agent response only */}
-              <div className="lg:col-span-3 min-h-0 h-full flex flex-col">
-                <PropertiesSection
-                  title="Agent Response"
-                  className="h-full flex flex-col"
-                  bodyClassName="h-full min-h-0 flex flex-col"
-                >
-                  <div className="space-y-2 h-full min-h-0 flex flex-col">
+              <div className="lg:col-span-3 min-h-0 overflow-y-auto space-y-2.5">
+                <PropertiesSection title="Agent Response">
+                  <div className="space-y-2">
                     {renderCacheRunSelector()}
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[10px] text-gray-500">
@@ -5859,7 +5902,11 @@ function PipelineCanvas() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
           <div className={cn(
             "min-h-0 overflow-y-auto pr-1 space-y-4",
-            selKind === "input" ? "lg:col-span-3" : "lg:col-span-8",
+            selKind === "input"
+              ? "lg:col-span-3"
+              : selKind === "output"
+                ? "lg:col-span-7"
+                : "lg:col-span-8",
           )}>
             <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
               <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
@@ -6041,8 +6088,12 @@ function PipelineCanvas() {
           </div>
 
           <div className={cn(
-            "min-h-0 h-full flex flex-col",
-            selKind === "input" ? "lg:col-span-9" : "lg:col-span-4",
+            "min-h-0 overflow-y-auto space-y-2.5",
+            selKind === "input"
+              ? "lg:col-span-9 h-full flex flex-col"
+              : selKind === "output"
+                ? "lg:col-span-5 h-full flex flex-col"
+                : "lg:col-span-4",
           )}>
             {selKind === "input" && (
               <PropertiesSection
@@ -6057,7 +6108,7 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  <div className="flex-1 min-h-0 overflow-y-auto">
+                  <div className="flex-1 min-h-0">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
                     return renderInputPreview(src, true);
@@ -6075,40 +6126,42 @@ function PipelineCanvas() {
               >
                 <div className="space-y-2 h-full min-h-0 flex flex-col">
                   {renderCacheRunSelector()}
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2 shrink-0">
                     <p className="text-[10px] text-gray-500">
                       {ioCacheTarget ? `${ioCacheTarget.title} · ${ioCacheTarget.subtitle}` : "No producer connected"}
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  {!ioCacheTarget ? (
-                    <p className="text-[11px] text-gray-500">
-                      Connect this artifact to a processing node to resolve its result.
-                    </p>
-                  ) : (() => {
-                    const cache = getStepCacheDisplay(ioCacheTarget.stepIndex);
-                    if (!cache) {
-                      return <p className="text-[10px] text-gray-500">No artifact result for this step in the current context.</p>;
-                    }
-                    return (
-                      <>
-                        <p className="text-[10px] text-gray-500">
-                          {cache.source === "selected_run"
-                            ? `Run ${String(cache.runId || "").slice(0, 8)}`
-                            : cache.source === "current_run"
-                              ? `Current run ${String(cache.runId || "").slice(0, 8)}`
-                              : "Latest cache"}
-                          {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
-                        </p>
-                        {cache.errorMsg && (
-                          <p className="text-[10px] text-red-300 whitespace-pre-wrap">{cache.errorMsg}</p>
-                        )}
-                        <div className="flex-1 min-h-0">
-                          <RenderResultContent content={cache.content || ""} expand />
+                  <div className="flex-1 min-h-0 overflow-y-auto">
+                    {!ioCacheTarget ? (
+                      <p className="text-[11px] text-gray-500">
+                        Connect this artifact to a processing node to resolve its result.
+                      </p>
+                    ) : (() => {
+                      const cache = getStepCacheDisplay(ioCacheTarget.stepIndex);
+                      if (!cache) {
+                        return <p className="text-[10px] text-gray-500">No artifact result for this step in the current context.</p>;
+                      }
+                      return (
+                        <div className="space-y-2 h-full min-h-0 flex flex-col">
+                          <p className="text-[10px] text-gray-500 shrink-0">
+                            {cache.source === "selected_run"
+                              ? `Run ${String(cache.runId || "").slice(0, 8)}`
+                              : cache.source === "current_run"
+                                ? `Current run ${String(cache.runId || "").slice(0, 8)}`
+                                : "Latest cache"}
+                            {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
+                          </p>
+                          {cache.errorMsg && (
+                            <p className="text-[10px] text-red-300 whitespace-pre-wrap shrink-0">{cache.errorMsg}</p>
+                          )}
+                          <div className="flex-1 min-h-0">
+                            <RenderResultContent content={cache.content || ""} expand />
+                          </div>
                         </div>
-                      </>
-                    );
-                  })()}
+                      );
+                    })()}
+                  </div>
                 </div>
               </PropertiesSection>
             )}
@@ -7274,18 +7327,36 @@ function PipelineCanvas() {
                     const expanded = !!expandedHistoryRunIds[run.id];
                     const historicalSelected = runContextMode === "historical" && selectedCacheRunId === run.id;
                     const timeline = runTimelineById.get(run.id);
-                    const runStatus = String(run.status || "").toLowerCase();
-                    const runStatusClass = runStatus === "done" || runStatus === "completed"
+                    const runStatus = normalizeStateToken(run.status);
+                    const rowStatuses = timeline?.rows.map((r) => r.status) ?? [];
+                    const hasRowCancelled = rowStatuses.includes("cancelled");
+                    const hasRowFailed = rowStatuses.includes("failed");
+                    const hasRowRunning = rowStatuses.includes("running");
+                    const runFinishedTs = (() => {
+                      const raw = String(run.finished_at || "").trim();
+                      if (!raw) return null;
+                      const ts = Date.parse(raw);
+                      return Number.isFinite(ts) ? ts : null;
+                    })();
+                    const runIsActive = isActiveRunLike(runStatus) && runFinishedTs == null;
+                    const displayStatus = hasRowCancelled
+                      ? "cancelled"
+                      : hasRowFailed
+                        ? "failed"
+                        : hasRowRunning && !runIsActive
+                          ? "cancelled"
+                          : runStatus;
+                    const runStatusClass = isCompletedLike(displayStatus)
                       ? "text-emerald-300 border-emerald-700/50 bg-emerald-950/40"
-                      : runStatus === "error" || runStatus === "failed"
+                      : isFailedLike(displayStatus)
                         ? "text-red-300 border-red-700/50 bg-red-950/40"
-                        : runStatus === "cancelled" || runStatus === "canceled"
+                        : isCancelledLike(displayStatus)
                           ? "text-slate-200 border-slate-700/50 bg-slate-900/50"
-                        : runStatus === "queued"
+                        : displayStatus === "queued"
                           ? "text-sky-200 border-sky-700/50 bg-sky-950/40"
-                          : runStatus === "preparing"
+                          : displayStatus === "preparing"
                             ? "text-cyan-200 border-cyan-700/50 bg-cyan-950/40"
-                            : runStatus === "retrying"
+                            : displayStatus === "retrying"
                               ? "text-violet-200 border-violet-700/50 bg-violet-950/40"
                               : "text-orange-300 border-orange-700/50 bg-orange-950/40";
                     return (
@@ -7339,7 +7410,7 @@ function PipelineCanvas() {
                             {run.id.slice(0, 8)}
                           </button>
                           <span className={cn("inline-flex items-center px-1 py-0.5 rounded text-[9px] font-semibold border shrink-0", runStatusClass)}>
-                            {run.status}
+                            {displayStatus || run.status}
                           </span>
                         </div>
                         <p className="mt-1 text-[9px] text-gray-500 truncate">
