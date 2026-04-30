@@ -4,9 +4,7 @@ import json
 import re
 import time
 import uuid
-from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from threading import Lock
 from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 
@@ -26,20 +24,13 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
-_WEBHOOK_STATS_FILE = _WEBHOOK_DIR / "stats.json"
-_REJECTED_WEBHOOKS_FILE = _WEBHOOK_DIR / "rejections.json"
 _WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
 _LIVE_QUEUE_FILE = _WEBHOOK_DIR / "live_queue.json"
+_REJECTED_WEBHOOKS_FILE = _WEBHOOK_DIR / "rejections.json"
 _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
 _WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
 _LIVE_QUEUE_LOCK = asyncio.Lock()
 _LIVE_DISPATCHER_TASK: Optional[asyncio.Task] = None
-_WEBHOOK_RATE_LOCK = Lock()
-_WEBHOOK_STATS_LOCK = Lock()
-_WEBHOOK_RATE_WINDOW_S = 60.0
-_WEBHOOK_RATE_PER_IP = 60
-_WEBHOOK_RATE: dict[str, deque[float]] = defaultdict(deque)
-_LIVE_QUEUE_MAX_ITEMS = 10_000
 
 
 class CallEndedWebhookPayload(BaseModel):
@@ -57,6 +48,7 @@ class CallEndedWebhookConfig(BaseModel):
     enabled: bool = True
     ingest_only: bool = True
     trigger_pipeline: bool = True
+    agent_continuity_filter_enabled: bool = True
     live_pipeline_ids: list[str] = Field(default_factory=list)
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = Field(default_factory=dict)
@@ -67,7 +59,6 @@ class CallEndedWebhookConfig(BaseModel):
     backfill_timeout_s: int = 5400
     backfill_no_progress_timeout_s: int = 300
     max_live_running: int = 5
-    agent_continuity_filter_enabled: bool = True
     auto_retry_enabled: bool = True
     retry_max_attempts: int = 2
     retry_delay_s: int = 45
@@ -82,6 +73,7 @@ def _default_call_ended_config() -> dict[str, Any]:
         "enabled": True,
         "ingest_only": True,
         "trigger_pipeline": True,
+        "agent_continuity_filter_enabled": True,
         "live_pipeline_ids": [],
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
@@ -92,7 +84,6 @@ def _default_call_ended_config() -> dict[str, Any]:
         "backfill_timeout_s": 5400,
         "backfill_no_progress_timeout_s": 300,
         "max_live_running": 5,
-        "agent_continuity_filter_enabled": True,
         "auto_retry_enabled": True,
         "retry_max_attempts": 2,
         "retry_delay_s": 45,
@@ -121,6 +112,7 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
     base["enabled"] = bool(base.get("enabled", True))
     base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
+    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
     live_ids = base.get("live_pipeline_ids")
     if isinstance(live_ids, list):
         dedup: list[str] = []
@@ -163,7 +155,6 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
         base["max_live_running"] = max(1, min(int(base.get("max_live_running") or 5), 64))
     except Exception:
         base["max_live_running"] = 5
-    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
     base["auto_retry_enabled"] = bool(base.get("auto_retry_enabled", True))
     try:
         base["retry_max_attempts"] = max(0, min(int(base.get("retry_max_attempts") or 2), 10))
@@ -216,187 +207,6 @@ def _save_call_ended_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return norm
 
 
-def _default_webhook_stats() -> dict[str, Any]:
-    return {
-        "rejected_webhooks_total": 0,
-        "rejected_by_reason": {},
-        "updated_at": "",
-    }
-
-
-def _normalize_webhook_stats(raw: Any) -> dict[str, Any]:
-    base = _default_webhook_stats()
-    if isinstance(raw, dict):
-        base.update(raw)
-    try:
-        base["rejected_webhooks_total"] = max(0, int(base.get("rejected_webhooks_total") or 0))
-    except Exception:
-        base["rejected_webhooks_total"] = 0
-    by_reason = base.get("rejected_by_reason")
-    if isinstance(by_reason, dict):
-        norm_by_reason: dict[str, int] = {}
-        for k, v in by_reason.items():
-            kk = str(k or "").strip()
-            if not kk:
-                continue
-            try:
-                norm_by_reason[kk] = max(0, int(v or 0))
-            except Exception:
-                norm_by_reason[kk] = 0
-        base["rejected_by_reason"] = norm_by_reason
-    else:
-        base["rejected_by_reason"] = {}
-    base["updated_at"] = str(base.get("updated_at") or "").strip()
-    return base
-
-
-def _load_webhook_stats() -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
-    if not _WEBHOOK_STATS_FILE.exists():
-        stats = _default_webhook_stats()
-        _WEBHOOK_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
-        return stats
-    try:
-        raw = json.loads(_WEBHOOK_STATS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        raw = {}
-    stats = _normalize_webhook_stats(raw)
-    _WEBHOOK_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
-    return stats
-
-
-def _save_webhook_stats(stats: dict[str, Any]) -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
-    norm = _normalize_webhook_stats(stats)
-    _WEBHOOK_STATS_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
-    return norm
-
-
-def _inc_rejected_webhook(reason: str) -> dict[str, Any]:
-    reason_key = str(reason or "").strip().lower() or "unknown"
-    with _WEBHOOK_STATS_LOCK:
-        stats = _load_webhook_stats()
-        stats["rejected_webhooks_total"] = int(stats.get("rejected_webhooks_total") or 0) + 1
-        by_reason = stats.get("rejected_by_reason")
-        if not isinstance(by_reason, dict):
-            by_reason = {}
-        by_reason[reason_key] = int(by_reason.get(reason_key) or 0) + 1
-        stats["rejected_by_reason"] = by_reason
-        stats["updated_at"] = _utc_now_iso()
-        return _save_webhook_stats(stats)
-
-
-def _default_rejections_store() -> dict[str, Any]:
-    return {
-        "items": [],
-        "updated_at": "",
-    }
-
-
-def _normalize_rejections_store(raw: Any) -> dict[str, Any]:
-    base = _default_rejections_store()
-    if isinstance(raw, dict):
-        base.update(raw)
-    items = base.get("items")
-    norm_items: list[dict[str, Any]] = []
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict):
-                norm_items.append(dict(item))
-    base["items"] = norm_items
-    base["updated_at"] = str(base.get("updated_at") or "").strip()
-    return base
-
-
-def _load_rejections_store() -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
-    if not _REJECTED_WEBHOOKS_FILE.exists():
-        data = _default_rejections_store()
-        _REJECTED_WEBHOOKS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        return data
-    try:
-        raw = json.loads(_REJECTED_WEBHOOKS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        raw = {}
-    data = _normalize_rejections_store(raw)
-    _REJECTED_WEBHOOKS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    return data
-
-
-def _save_rejections_store(data: dict[str, Any]) -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
-    norm = _normalize_rejections_store(data)
-    _REJECTED_WEBHOOKS_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
-    return norm
-
-
-def _append_rejected_webhook(item: dict[str, Any]) -> dict[str, Any]:
-    data = _load_rejections_store()
-    items = data.get("items")
-    if not isinstance(items, list):
-        items = []
-    rec = dict(item or {})
-    rec_id = str(rec.get("id") or "").strip() or str(uuid.uuid4())
-    rec["id"] = rec_id
-    rec["created_at"] = str(rec.get("created_at") or _utc_now_iso())
-    rec["updated_at"] = str(rec.get("updated_at") or rec["created_at"])
-    rec["status"] = str(rec.get("status") or "rejected").strip().lower()
-    items.append(rec)
-    # Keep newest at end, bounded size.
-    if len(items) > 20000:
-        items = items[-20000:]
-    data["items"] = items
-    data["updated_at"] = _utc_now_iso()
-    _save_rejections_store(data)
-    return rec
-
-
-def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipeline_ids: list[str]) -> bool:
-    rid = str(rejection_id or "").strip()
-    if not rid:
-        return False
-    data = _load_rejections_store()
-    items = data.get("items")
-    if not isinstance(items, list):
-        return False
-    changed = False
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("id") or "").strip() != rid:
-            continue
-        item["status"] = "queued_manual"
-        item["moved_to_run_ids"] = [str(x) for x in (run_ids or []) if str(x).strip()]
-        item["moved_to_pipeline_ids"] = [str(x) for x in (pipeline_ids or []) if str(x).strip()]
-        item["moved_at"] = _utc_now_iso()
-        item["updated_at"] = _utc_now_iso()
-        changed = True
-        break
-    if changed:
-        data["items"] = items
-        data["updated_at"] = _utc_now_iso()
-        _save_rejections_store(data)
-    return changed
-
-
-def _list_rejected_webhooks(limit: int = 200, include_non_rejected: bool = True) -> list[dict[str, Any]]:
-    data = _load_rejections_store()
-    items = data.get("items")
-    if not isinstance(items, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in reversed(items):
-        if not isinstance(item, dict):
-            continue
-        st = str(item.get("status") or "rejected").strip().lower()
-        if not include_non_rejected and st != "rejected":
-            continue
-        out.append(dict(item))
-        if len(out) >= max(1, min(int(limit or 200), 2000)):
-            break
-    return out
-
-
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -440,51 +250,120 @@ def _save_live_queue(items: list[dict[str, Any]]) -> None:
     )
 
 
-async def _load_live_queue_async() -> list[dict[str, Any]]:
-    return await asyncio.to_thread(_load_live_queue)
+def _default_rejections_store() -> dict[str, Any]:
+    return {
+        "updated_at": _utc_now_iso(),
+        "items": [],
+    }
 
 
-async def _save_live_queue_async(items: list[dict[str, Any]]) -> None:
-    await asyncio.to_thread(_save_live_queue, items)
+def _normalize_rejections_store(raw: Any) -> dict[str, Any]:
+    base = _default_rejections_store()
+    if not isinstance(raw, dict):
+        return base
+    items_raw = raw.get("items")
+    items: list[dict[str, Any]] = []
+    if isinstance(items_raw, list):
+        for row in items_raw:
+            if isinstance(row, dict):
+                items.append(dict(row))
+    base["updated_at"] = str(raw.get("updated_at") or _utc_now_iso())
+    base["items"] = items
+    return base
 
 
-def _item_ts(item: dict[str, Any]) -> float:
-    dt = _parse_iso(item.get("created_at")) or _parse_iso(item.get("updated_at"))
-    return dt.timestamp() if dt else 0.0
+def _load_rejections_store() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _REJECTED_WEBHOOKS_FILE.exists():
+        data = _default_rejections_store()
+        _REJECTED_WEBHOOKS_FILE.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return data
+    try:
+        raw = json.loads(_REJECTED_WEBHOOKS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    data = _normalize_rejections_store(raw)
+    _REJECTED_WEBHOOKS_FILE.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return data
 
 
-def _enforce_live_queue_limit(
-    items: list[dict[str, Any]],
-    max_items: int = _LIVE_QUEUE_MAX_ITEMS,
-) -> tuple[list[dict[str, Any]], int]:
-    if len(items) <= max_items:
-        return items, 0
+def _save_rejections_store(data: dict[str, Any]) -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    norm = _normalize_rejections_store(data)
+    norm["updated_at"] = _utc_now_iso()
+    _REJECTED_WEBHOOKS_FILE.write_text(
+        json.dumps(norm, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return norm
 
-    protected_states = {"running", "preparing"}
-    protected: list[dict[str, Any]] = []
-    droppable: list[dict[str, Any]] = []
-    for item in items:
-        state = str(item.get("state") or "").strip().lower()
-        if state in protected_states:
-            protected.append(item)
-        else:
-            droppable.append(item)
 
-    protected_sorted = sorted(protected, key=_item_ts, reverse=True)
-    droppable_sorted = sorted(droppable, key=_item_ts, reverse=True)
+def _append_rejected_webhook(item: dict[str, Any]) -> dict[str, Any]:
+    now_iso = _utc_now_iso()
+    store = _load_rejections_store()
+    items = store.get("items")
+    if not isinstance(items, list):
+        items = []
+    row = dict(item or {})
+    row.setdefault("id", str(uuid.uuid4()))
+    row.setdefault("status", "rejected")
+    row.setdefault("created_at", now_iso)
+    row["updated_at"] = now_iso
+    items.append(row)
+    # Keep recent 20k rows.
+    if len(items) > 20000:
+        items = items[-20000:]
+    store["items"] = items
+    _save_rejections_store(store)
+    return row
 
-    keep_count = max_items
-    kept: list[dict[str, Any]] = []
-    if protected_sorted:
-        kept.extend(protected_sorted[:keep_count])
-        keep_count -= len(kept)
-    if keep_count > 0 and droppable_sorted:
-        kept.extend(droppable_sorted[:keep_count])
 
-    keep_ids = {id(x) for x in kept}
-    out = [x for x in items if id(x) in keep_ids]
-    dropped = max(0, len(items) - len(out))
-    return out, dropped
+def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipeline_ids: list[str]) -> Optional[dict[str, Any]]:
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        return None
+    store = _load_rejections_store()
+    items = store.get("items")
+    if not isinstance(items, list):
+        return None
+    for idx, row in enumerate(items):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() != rid:
+            continue
+        updated = dict(row)
+        updated["status"] = "queued_manual"
+        updated["updated_at"] = _utc_now_iso()
+        updated["moved_run_ids"] = [str(x) for x in (run_ids or []) if str(x)]
+        updated["moved_pipeline_ids"] = [str(x) for x in (pipeline_ids or []) if str(x)]
+        items[idx] = updated
+        store["items"] = items
+        _save_rejections_store(store)
+        return updated
+    return None
+
+
+def _list_rejected_webhooks(limit: int = 200, include_non_rejected: bool = True) -> list[dict[str, Any]]:
+    lim = max(1, min(int(limit or 200), 20000))
+    store = _load_rejections_store()
+    items_raw = store.get("items")
+    items: list[dict[str, Any]] = []
+    if isinstance(items_raw, list):
+        for row in items_raw:
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("status") or "rejected").strip().lower()
+            if not include_non_rejected and status != "rejected":
+                continue
+            items.append(dict(row))
+    items.sort(key=lambda r: str(r.get("created_at") or r.get("updated_at") or ""), reverse=True)
+    return items[:lim]
 
 
 async def _touch_live_queue_item(
@@ -498,7 +377,7 @@ async def _touch_live_queue_item(
         return
     now_iso = _utc_now_iso()
     async with _LIVE_QUEUE_LOCK:
-        queue = await _load_live_queue_async()
+        queue = _load_live_queue()
         changed = False
         for row in queue:
             if not isinstance(row, dict):
@@ -513,8 +392,7 @@ async def _touch_live_queue_item(
             changed = True
             break
         if changed:
-            queue, _ = _enforce_live_queue_limit(queue)
-            await _save_live_queue_async(queue)
+            _save_live_queue(queue)
 
 
 def _build_step_skeleton(pipeline_id: str) -> list[dict[str, Any]]:
@@ -562,6 +440,8 @@ def _upsert_pipeline_run_stub(
             if row is None:
                 _steps = _build_step_skeleton(pipeline_id)
                 if _status == "preparing" and _steps:
+                    # Preflight/backfill is active, but no pipeline step has started yet.
+                    # Keep step execution idle to avoid showing agent nodes as running.
                     _steps[0]["state"] = "preparing"
                     _steps[0]["status"] = "preparing"
                 row = PipelineRun(
@@ -608,6 +488,7 @@ def _upsert_pipeline_run_stub(
                         if isinstance(first, dict):
                             prev = str(first.get("state") or first.get("status") or "").strip().lower()
                             if prev in {"", "waiting", "pending"}:
+                                # Preflight should not imply an agent step is executing yet.
                                 first["state"] = "preparing"
                                 first["status"] = "preparing"
                                 changed_steps = True
@@ -793,8 +674,8 @@ async def _wait_for_jobs(
         done = sum(1 for _id in _ids if status_by_id.get(_id) in {"complete", "failed"})
         failed = sum(1 for _id in _ids if status_by_id.get(_id) == "failed")
         # Progress must include status transitions, not only completed count.
-        # In large queues, jobs can stay pending while waiting for workers.
-        # That should not be marked as a hard stall.
+        # In large queues, jobs can remain pending for minutes before workers pick
+        # them up; that should not be treated as a hard stall.
         status_signature = "|".join(f"{_id}:{status_by_id.get(_id,'')}" for _id in _ids)
         if (
             done != _last_done
@@ -834,9 +715,9 @@ async def _wait_for_jobs(
                 "timed_out": False,
                 "stalled": False,
             }
-        # Only mark "stalled" when at least one job is actively running and no
-        # status changes were observed for too long. If all jobs are still
-        # pending due queue backlog, keep waiting until the global timeout.
+        # Only mark stalled when there are active workers but no observable status
+        # changes for too long. If all jobs are still pending (queue backlog), keep
+        # waiting until the global timeout instead of failing early.
         if running > 0 and (time.monotonic() - _last_progress_at) >= stall_deadline:
             return {
                 "ok": False,
@@ -946,14 +827,7 @@ def _event_file_name(webhook_type: str, call_id: str, account_id: str) -> str:
     return f"{ts}_{w}_{a}_{c}_{uuid.uuid4().hex[:10]}.json"
 
 
-def _sanitize_webhook_payload_for_storage(payload: dict[str, Any]) -> dict[str, Any]:
-    safe = dict(payload or {})
-    if "token" in safe:
-        safe["token"] = "***redacted***"
-    return safe
-
-
-async def _persist_webhook_event(
+def _persist_webhook_event(
     *,
     webhook_type: str,
     compat_mode: str,
@@ -978,26 +852,19 @@ async def _persist_webhook_event(
         "path": str(request.url.path or ""),
         "source_ip": str(getattr(request.client, "host", "") or ""),
         "content_type": str(request.headers.get("content-type") or ""),
-        "payload": _sanitize_webhook_payload_for_storage(payload),
+        "payload": payload,
     }
-    await asyncio.to_thread(
-        file_path.write_text,
-        json.dumps(event, indent=2, ensure_ascii=False),
-        "utf-8",
-    )
+    file_path.write_text(json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Also mirror to webhook_test/ if a test session is active and not expired
     try:
         if _WEBHOOK_TEST_SESSION_FILE.exists():
-            session = json.loads(
-                await asyncio.to_thread(_WEBHOOK_TEST_SESSION_FILE.read_text, "utf-8")
-            )
+            session = json.loads(_WEBHOOK_TEST_SESSION_FILE.read_text(encoding="utf-8"))
             expires_at = datetime.fromisoformat(session["expires_at"])
             if datetime.now(timezone.utc) <= expires_at:
                 _WEBHOOK_TEST_DIR.mkdir(parents=True, exist_ok=True)
                 test_fname = f"capture_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{event_id[:12]}.json"
-                await asyncio.to_thread(
-                    (_WEBHOOK_TEST_DIR / test_fname).write_text,
+                (_WEBHOOK_TEST_DIR / test_fname).write_text(
                     json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
     except Exception:
@@ -1097,19 +964,6 @@ def _assert_webhook_admin_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid webhook token.")
 
 
-def _assert_webhook_rate_limit(request: Request) -> None:
-    ip = str(getattr(request.client, "host", "") or "unknown")
-    now = time.monotonic()
-    with _WEBHOOK_RATE_LOCK:
-        bucket = _WEBHOOK_RATE[ip]
-        window_start = now - _WEBHOOK_RATE_WINDOW_S
-        while bucket and bucket[0] < window_start:
-            bucket.popleft()
-        if len(bucket) >= _WEBHOOK_RATE_PER_IP:
-            raise HTTPException(status_code=429, detail="Webhook rate limit exceeded. Try again shortly.")
-        bucket.append(now)
-
-
 def _agent_candidate_names(agent: str) -> list[str]:
     raw = str(agent or "").strip()
     if not raw:
@@ -1127,96 +981,6 @@ def _agent_candidate_names(agent: str) -> list[str]:
         if str(target or "").strip() == primary:
             names.add(str(alias_name or "").strip())
     return sorted([n for n in names if n])
-
-
-def _agent_name_key(agent: str) -> str:
-    raw = str(agent or "").strip().lower()
-    if not raw:
-        return ""
-    return re.sub(r"\s+", " ", raw)
-
-
-def _same_agent_name(a: str, b: str) -> bool:
-    aa = _agent_name_key(a)
-    bb = _agent_name_key(b)
-    if not aa or not bb:
-        return False
-    if aa == bb:
-        return True
-    anames = {_agent_name_key(x) for x in _agent_candidate_names(a)}
-    bnames = {_agent_name_key(x) for x in _agent_candidate_names(b)}
-    anames.discard("")
-    bnames.discard("")
-    return bool(anames & bnames)
-
-
-def _call_sort_key(row: CRMCall) -> tuple[float, str]:
-    started_raw = str(getattr(row, "started_at", "") or "").strip()
-    dt = _parse_iso(started_raw)
-    if dt is not None:
-        return (dt.timestamp(), str(getattr(row, "call_id", "") or ""))
-    call_id = str(getattr(row, "call_id", "") or "")
-    try:
-        return (float(int(call_id)), call_id)
-    except Exception:
-        return (0.0, call_id)
-
-
-def _agent_continuity_check(
-    db: Session,
-    *,
-    pair: dict[str, str],
-    payload_agent: str,
-) -> tuple[bool, str, dict[str, Any]]:
-    account_id = str(pair.get("account_id") or "").strip()
-    customer = str(pair.get("customer") or "").strip()
-    resolved_agent = str(pair.get("agent") or payload_agent or "").strip()
-    if not account_id:
-        return False, "missing_account_id", {"account_id": account_id}
-
-    stmt = select(CRMCall).where(_sql_func.trim(CRMCall.account_id) == account_id)
-    if customer:
-        stmt = stmt.where(_sql_func.lower(_sql_func.trim(CRMCall.customer)) == customer.lower())
-    rows = db.exec(stmt).all()
-    rows = [r for r in rows if str(getattr(r, "agent", "") or "").strip()]
-    if not rows:
-        # Do not reject when there is no history. This filter should only reject
-        # when we can prove first/last agent continuity is broken.
-        return True, "no_call_history", {"account_id": account_id, "customer": customer}
-
-    rows.sort(key=_call_sort_key)
-    first = rows[0]
-    last = rows[-1]
-    first_agent = str(getattr(first, "agent", "") or "").strip()
-    last_agent = str(getattr(last, "agent", "") or "").strip()
-    if not _same_agent_name(first_agent, last_agent):
-        return False, "agent_changed", {
-            "account_id": account_id,
-            "customer": customer,
-            "first_agent": first_agent,
-            "last_agent": last_agent,
-            "resolved_agent": resolved_agent,
-            "history_calls": len(rows),
-        }
-    # Only continuity break (first != last) should reject.
-    # Current payload/row agent mismatch is informational only.
-    if resolved_agent and not _same_agent_name(last_agent, resolved_agent):
-        return True, "agent_mismatch_current", {
-            "account_id": account_id,
-            "customer": customer,
-            "first_agent": first_agent,
-            "last_agent": last_agent,
-            "resolved_agent": resolved_agent,
-            "history_calls": len(rows),
-        }
-    return True, "ok", {
-        "account_id": account_id,
-        "customer": customer,
-        "first_agent": first_agent,
-        "last_agent": last_agent,
-        "resolved_agent": resolved_agent,
-        "history_calls": len(rows),
-    }
 
 
 def _resolve_pair(db: Session, payload: CallEndedWebhookPayload) -> dict[str, str]:
@@ -1255,6 +1019,92 @@ def _resolve_pair(db: Session, payload: CallEndedWebhookPayload) -> dict[str, st
         "customer": str(best.customer or "").strip(),
         "crm_url": str(best.crm_url or "").strip(),
     }
+
+
+def _load_agent_continuity_filter_enabled(fallback_cfg: Optional[dict[str, Any]] = None) -> bool:
+    """
+    Source of truth is the live-webhook config used by Jobs page.
+    Fallback to call-ended config for backward compatibility.
+    """
+    try:
+        from ui.backend.routers.pipelines import _load_live_webhook_config as _load_live_cfg
+
+        live_cfg = _load_live_cfg()
+        if isinstance(live_cfg, dict):
+            return bool(live_cfg.get("agent_continuity_filter_enabled", True))
+    except Exception:
+        pass
+
+    if isinstance(fallback_cfg, dict):
+        return bool(fallback_cfg.get("agent_continuity_filter_enabled", True))
+    return True
+
+
+def _call_order_key(row: CRMCall) -> tuple[Any, ...]:
+    started = _parse_iso(getattr(row, "started_at", None))
+    if started is not None:
+        return (0, started.timestamp(), str(getattr(row, "call_id", "") or ""))
+    call_id = str(getattr(row, "call_id", "") or "").strip()
+    if call_id.isdigit():
+        return (1, int(call_id), call_id)
+    return (2, call_id)
+
+
+def _norm_agent_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _agent_continuity_check(
+    db: Session,
+    pair: dict[str, str],
+    payload_agent: str = "",
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    Allow by default. Reject only when historical first/last agents differ.
+    """
+    account_id = str(pair.get("account_id") or "").strip()
+    crm_url = str(pair.get("crm_url") or "").strip()
+    customer = str(pair.get("customer") or "").strip()
+    current_agent = str(pair.get("agent") or payload_agent or "").strip()
+    base_meta: dict[str, Any] = {
+        "account_id": account_id,
+        "crm_url": crm_url,
+        "customer": customer,
+        "current_agent": current_agent,
+    }
+    if not account_id:
+        return True, "missing_account_id", base_meta
+
+    stmt = select(CRMCall).where(_sql_func.trim(CRMCall.account_id) == account_id)
+    if crm_url:
+        stmt = stmt.where(_sql_func.trim(CRMCall.crm_url) == crm_url)
+    rows = db.exec(stmt).all()
+    if not rows:
+        return True, "no_call_history", base_meta
+
+    ordered = sorted(rows, key=_call_order_key)
+    first_row = ordered[0]
+    last_row = ordered[-1]
+    first_agent = str(getattr(first_row, "agent", "") or "").strip()
+    last_agent = str(getattr(last_row, "agent", "") or "").strip()
+    first_call_id = str(getattr(first_row, "call_id", "") or "").strip()
+    last_call_id = str(getattr(last_row, "call_id", "") or "").strip()
+    first_started = str(getattr(first_row, "started_at", "") or "").strip()
+    last_started = str(getattr(last_row, "started_at", "") or "").strip()
+    meta = {
+        **base_meta,
+        "total_calls": len(ordered),
+        "first_agent": first_agent,
+        "last_agent": last_agent,
+        "first_call_id": first_call_id,
+        "last_call_id": last_call_id,
+        "first_started_at": first_started,
+        "last_started_at": last_started,
+    }
+    if _norm_agent_name(first_agent) and _norm_agent_name(last_agent):
+        if _norm_agent_name(first_agent) != _norm_agent_name(last_agent):
+            return False, "agent_changed", meta
+    return True, "agent_stable", meta
 
 
 def _resolve_record_path(
@@ -1415,7 +1265,7 @@ async def _trigger_pipeline_run(
                 if evt_type == "error":
                     msg = str((event.get("data") or {}).get("msg") or "unknown pipeline startup error")
                     raise HTTPException(status_code=502, detail=f"Pipeline startup failed: {msg}")
-                if asyncio.get_running_loop().time() - started > 300:
+                if asyncio.get_running_loop().time() - started > 15:
                     break
 
     return {
@@ -1444,7 +1294,7 @@ async def _enqueue_live_item(item: dict[str, Any]) -> tuple[bool, dict[str, Any]
     # Single-writer guard: webhook requests can arrive concurrently.
     # Without this lock, read-modify-write races can drop queue entries.
     async with _LIVE_QUEUE_LOCK:
-        queue = await _load_live_queue_async()
+        queue = _load_live_queue()
         run_id = str(item.get("run_id") or "").strip()
         pipeline_id = str(item.get("pipeline_id") or "").strip()
         sales_agent = str(item.get("sales_agent") or "").strip()
@@ -1506,15 +1356,7 @@ async def _enqueue_live_item(item: dict[str, Any]) -> tuple[bool, dict[str, Any]
 
         queue.append(item)
         queue.sort(key=_queue_item_sort_key)
-        queue, dropped = _enforce_live_queue_limit(queue)
-        if dropped > 0:
-            try:
-                item["last_error"] = (
-                    f"{dropped} older queue item(s) were dropped due to queue size limit ({_LIVE_QUEUE_MAX_ITEMS})."
-                )
-            except Exception:
-                pass
-        await _save_live_queue_async(queue)
+        _save_live_queue(queue)
         return True, {
             "run_id": run_id,
             "state": str(item.get("state") or "queued"),
@@ -1536,30 +1378,6 @@ def _steps_json_is_webhook_origin(raw_steps_json: Any) -> bool:
         if origin in {"webhook", "production"}:
             return True
     return False
-
-
-def _row_looks_like_webhook_run(row: PipelineRun, cfg: dict[str, Any]) -> bool:
-    if _steps_json_is_webhook_origin(getattr(row, "steps_json", "")):
-        return True
-
-    # Recovery fallback for legacy/partial rows that were created while runtime
-    # pipeline files were missing (steps_json can be empty, so run_origin is absent).
-    pipeline_id = str(getattr(row, "pipeline_id", "") or "").strip()
-    sales_agent = str(getattr(row, "sales_agent", "") or "").strip()
-    customer = str(getattr(row, "customer", "") or "").strip()
-    call_id = str(getattr(row, "call_id", "") or "").strip()
-    if not (pipeline_id and sales_agent and customer and call_id):
-        return False
-
-    allowed_pipeline_ids = set(_resolve_live_pipeline_ids(cfg))
-    default_pid = str(cfg.get("default_pipeline_id") or "").strip()
-    if default_pid:
-        allowed_pipeline_ids.add(default_pid)
-    if not allowed_pipeline_ids:
-        return False
-    if pipeline_id not in allowed_pipeline_ids:
-        return False
-    return True
 
 
 def _iso_from_dt(dt: Any, fallback_iso: str) -> str:
@@ -1663,7 +1481,7 @@ def _recover_orphaned_live_queue_items(
         run_id = str(getattr(row, "id", "") or "").strip()
         if not run_id or run_id in existing_run_ids:
             continue
-        if not _row_looks_like_webhook_run(row, cfg):
+        if not _steps_json_is_webhook_origin(getattr(row, "steps_json", "")):
             continue
 
         row_status = str(getattr(row, "status", "") or "").strip().lower()
@@ -1949,7 +1767,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     candidates: list[dict[str, Any]] = []
 
     async with _LIVE_QUEUE_LOCK:
-        queue = await _load_live_queue_async()
+        queue = _load_live_queue()
         recovered = _recover_orphaned_live_queue_items(
             queue=queue,
             cfg=cfg,
@@ -1958,87 +1776,6 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
         changed = bool(recovered)
         if not queue:
             return
-
-        # Enforce continuity filter on queued items (safety sweep for pre-existing queue rows).
-        if bool(cfg.get("agent_continuity_filter_enabled", True)):
-            try:
-                with Session(_db_engine) as _s:
-                    for item in queue:
-                        state = str(item.get("state") or "queued").strip().lower()
-                        if state not in {"queued", "retrying"}:
-                            continue
-                        run_id = str(item.get("run_id") or "").strip()
-                        pipeline_id = str(item.get("pipeline_id") or "").strip()
-                        sales_agent = str(item.get("sales_agent") or "").strip()
-                        customer = str(item.get("customer") or "").strip()
-                        call_id = str(item.get("call_id") or "").strip()
-                        pair = item.get("pair") if isinstance(item.get("pair"), dict) else {}
-                        pair_data = {
-                            "account_id": str(pair.get("account_id") or "").strip(),
-                            "agent": str(pair.get("agent") or sales_agent or "").strip(),
-                            "customer": str(pair.get("customer") or customer or "").strip(),
-                            "crm_url": str(pair.get("crm_url") or "").strip(),
-                        }
-                        if not pair_data["account_id"] and pair_data["agent"] and pair_data["customer"]:
-                            pair_data = _pair_from_names(pair_data["agent"], pair_data["customer"])
-
-                        ok_cont, reason, meta = _agent_continuity_check(
-                            _s,
-                            pair=pair_data,
-                            payload_agent=sales_agent,
-                        )
-                        if ok_cont:
-                            continue
-
-                        stats = _inc_rejected_webhook(reason)
-                        _append_rejected_webhook(
-                            {
-                                "source": "queue_sweep",
-                                "reason": reason,
-                                "status": "rejected",
-                                "event_id": str(item.get("event_id") or ""),
-                                "event_file": str(item.get("event_file") or ""),
-                                "pipeline_id": pipeline_id,
-                                "pipeline_name": str(item.get("pipeline_name") or ""),
-                                "run_id": run_id,
-                                "sales_agent": sales_agent,
-                                "customer": customer,
-                                "call_id": call_id,
-                                "account_id": str(pair_data.get("account_id") or ""),
-                                "crm_url": str(pair_data.get("crm_url") or ""),
-                                "payload": {
-                                    "sales_agent": sales_agent,
-                                    "customer": customer,
-                                    "call_id": call_id,
-                                    "account_id": str(pair_data.get("account_id") or ""),
-                                },
-                                "continuity_meta": meta,
-                            }
-                        )
-                        item["state"] = "cancelled"
-                        item["updated_at"] = _utc_now_iso()
-                        item["last_error"] = (
-                            f"Rejected by agent continuity filter ({reason}). "
-                            f"first={str(meta.get('first_agent') or '?')} "
-                            f"last={str(meta.get('last_agent') or '?')}"
-                        )
-                        _upsert_pipeline_run_stub(
-                            run_id=run_id,
-                            pipeline_id=pipeline_id,
-                            pipeline_name=str(item.get("pipeline_name") or ""),
-                            sales_agent=sales_agent,
-                            customer=customer,
-                            call_id=call_id,
-                            status="cancelled",
-                            log_line=(
-                                "Rejected by agent continuity filter "
-                                f"({reason}); rejected total: {int(stats.get('rejected_webhooks_total') or 0)}"
-                            ),
-                        )
-                        changed = True
-            except Exception:
-                # Do not block dispatcher on continuity sweep errors.
-                pass
 
         # Reconcile running/retrying/finalized items.
         for item in queue:
@@ -2212,9 +1949,8 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 changed = True
 
         pruned = _prune_live_queue_items(queue)
-        pruned, _ = _enforce_live_queue_limit(pruned)
         if changed or len(pruned) != len(queue):
-            await _save_live_queue_async(pruned)
+            _save_live_queue(pruned)
 
     if not candidates:
         return
@@ -2225,7 +1961,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     )
 
     async with _LIVE_QUEUE_LOCK:
-        queue = await _load_live_queue_async()
+        queue = _load_live_queue()
         changed = False
         for res in results:
             if isinstance(res, Exception):
@@ -2255,9 +1991,8 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 changed = True
 
         pruned = _prune_live_queue_items(queue)
-        pruned, _ = _enforce_live_queue_limit(pruned)
         if changed or len(pruned) != len(queue):
-            await _save_live_queue_async(pruned)
+            _save_live_queue(pruned)
 
 
 async def _live_dispatcher_loop() -> None:
@@ -2265,8 +2000,12 @@ async def _live_dispatcher_loop() -> None:
         try:
             await _dispatch_live_queue_once()
         except Exception as e:
-            # Keep dispatcher alive even if one cycle fails.
-            print(f"[live-dispatcher] cycle error: {e}")
+            # Keep dispatcher alive even if one cycle fails, but do not swallow
+            # the error silently — this is critical for queue debugging.
+            try:
+                print(f"[live-dispatcher] cycle error: {e}")
+            except Exception:
+                pass
         await asyncio.sleep(2.0)
 
 
@@ -2319,25 +2058,6 @@ def list_webhook_events(
     return {"ok": True, "count": len(out), "events": out}
 
 
-@router.get("/queue-depth")
-async def webhook_queue_depth(request: Request) -> dict[str, Any]:
-    _assert_webhook_admin_auth(request)
-    async with _LIVE_QUEUE_LOCK:
-        queue = await _load_live_queue_async()
-    counts: dict[str, int] = {}
-    for item in queue:
-        if not isinstance(item, dict):
-            continue
-        st = str(item.get("state") or "unknown").strip().lower() or "unknown"
-        counts[st] = counts.get(st, 0) + 1
-    return {
-        "ok": True,
-        "depth": len(queue),
-        "limit": _LIVE_QUEUE_MAX_ITEMS,
-        "by_state": counts,
-    }
-
-
 async def _handle_call_webhook(
     payload: CallEndedWebhookPayload,
     request: Request,
@@ -2346,12 +2066,11 @@ async def _handle_call_webhook(
     compat_mode: str = "",
 ) -> dict[str, Any]:
     _assert_webhook_auth(request, payload)
-    _assert_webhook_rate_limit(request)
     cfg = _load_call_ended_config()
     if not cfg.get("enabled", True):
         raise HTTPException(status_code=403, detail="Call-ended webhook flow is disabled in config.")
 
-    stored = await _persist_webhook_event(
+    stored = _persist_webhook_event(
         webhook_type=webhook_type,
         compat_mode=compat_mode,
         payload=payload.model_dump(),
@@ -2373,42 +2092,34 @@ async def _handle_call_webhook(
     if payload.crm_url and str(payload.crm_url).strip():
         pair["crm_url"] = str(payload.crm_url).strip()
 
-    call_id = str(payload.call_id or "").strip()
-    if not call_id:
-        raise HTTPException(status_code=400, detail="Missing call_id in webhook payload.")
-
+    continuity_filter_enabled = _load_agent_continuity_filter_enabled(cfg)
+    continuity_ok = True
+    continuity_reason = "disabled"
     continuity_meta: dict[str, Any] = {}
-    if bool(cfg.get("agent_continuity_filter_enabled", True)):
+    if continuity_filter_enabled:
         continuity_ok, continuity_reason, continuity_meta = _agent_continuity_check(
-            db,
+            db=db,
             pair=pair,
-            payload_agent=str(payload.agent or ""),
+            payload_agent=str(payload.agent or "").strip(),
         )
         if not continuity_ok:
-            stats = _inc_rejected_webhook(continuity_reason)
-            configured_live_ids = _resolve_live_pipeline_ids(cfg)
-            target_pipeline_ids: list[str] = []
-            if configured_live_ids:
-                target_pipeline_ids = configured_live_ids
-            else:
-                mapped_id = _resolve_pipeline_id(cfg, payload.agent, pair.get("agent", ""))
-                if mapped_id:
-                    target_pipeline_ids = [mapped_id]
             _append_rejected_webhook(
                 {
                     "source": "ingress",
                     "reason": continuity_reason,
                     "status": "rejected",
+                    "webhook_type": webhook_type,
                     "event_id": str(stored.get("event_id") or ""),
                     "event_file": str(stored.get("file") or ""),
-                    "sales_agent": str(pair.get("agent") or payload.agent or ""),
-                    "customer": str(pair.get("customer") or payload.customer or ""),
-                    "call_id": call_id,
-                    "account_id": str(pair.get("account_id") or payload.account_id or ""),
-                    "crm_url": str(pair.get("crm_url") or payload.crm_url or ""),
-                    "pipeline_ids": target_pipeline_ids,
-                    "payload": _sanitize_webhook_payload_for_storage(payload.model_dump()),
+                    "sales_agent": pair.get("agent") or "",
+                    "customer": pair.get("customer") or "",
+                    "call_id": str(payload.call_id or "").strip(),
+                    "account_id": pair.get("account_id") or "",
+                    "crm_url": pair.get("crm_url") or "",
+                    "pipeline_ids": _resolve_live_pipeline_ids(cfg),
+                    "payload": payload.model_dump(),
                     "continuity_meta": continuity_meta,
+                    "message": "Rejected by agent continuity filter.",
                 }
             )
             return {
@@ -2417,16 +2128,44 @@ async def _handle_call_webhook(
                 "compat_mode": compat_mode or "",
                 "ingest_only": False,
                 "stored": stored,
-                "ignored": True,
-                "rejected": True,
-                "rejection_reason": continuity_reason,
-                "rejection_meta": continuity_meta,
-                "filter": {
-                    "agent_continuity_filter_enabled": True,
+                "received": {
+                    "call_id": str(payload.call_id or "").strip(),
+                    "account_id": pair.get("account_id") or "",
+                    "agent": payload.agent,
+                    "record_path": str(payload.record_path or "").strip(),
+                    "duration": payload.duration,
                 },
-                "rejected_webhooks_total": int(stats.get("rejected_webhooks_total") or 0),
-                "message": "Webhook ignored by agent continuity filter.",
+                "resolved_pair": pair,
+                "continuity_filter": {
+                    "enabled": True,
+                    "passed": False,
+                    "reason": continuity_reason,
+                    "meta": continuity_meta,
+                },
+                "transcription": {
+                    "used_cached_transcript": _transcript_exists(
+                        pair.get("agent") or "",
+                        pair.get("customer") or "",
+                        str(payload.call_id or "").strip(),
+                    ),
+                    "job_id": "",
+                    "status": "rejected_by_filter",
+                    "message": "Rejected by agent continuity filter.",
+                },
+                "pipeline": {
+                    "triggered": False,
+                    "pipeline_id": "",
+                    "run_id": "",
+                    "pipelines": [],
+                    "message": "Rejected by agent continuity filter.",
+                },
             }
+    else:
+        continuity_reason = "disabled"
+
+    call_id = str(payload.call_id or "").strip()
+    if not call_id:
+        raise HTTPException(status_code=400, detail="Missing call_id in webhook payload.")
 
     record_path = _resolve_record_path(db, payload, pair)
 
@@ -2496,8 +2235,6 @@ async def _handle_call_webhook(
                     max_attempts = int(cfg.get("retry_max_attempts") or 2)
                     queue_item = {
                         "id": str(uuid.uuid4()),
-                        "event_id": str(stored.get("event_id") or ""),
-                        "event_file": str(stored.get("file") or ""),
                         "webhook_type": webhook_type,
                         "created_at": queued_at,
                         "updated_at": queued_at,
@@ -2544,6 +2281,28 @@ async def _handle_call_webhook(
                         }
                     )
                 except Exception as e:
+                    _append_rejected_webhook(
+                        {
+                            "source": "ingress",
+                            "reason": "pipeline_enqueue_failed",
+                            "message": str(getattr(e, "detail", "") or str(e) or "pipeline enqueue failed"),
+                            "webhook_type": webhook_type,
+                            "event_id": str(stored.get("event_id") or ""),
+                            "event_file": str(stored.get("file") or ""),
+                            "pipeline_ids": [pipeline_id],
+                            "run_id": str(run_id),
+                            "sales_agent": pair["agent"],
+                            "customer": pair["customer"],
+                            "call_id": call_id,
+                            "pair": {
+                                "crm_url": pair.get("crm_url") or "",
+                                "account_id": pair.get("account_id") or "",
+                                "agent": pair.get("agent") or "",
+                                "customer": pair.get("customer") or "",
+                            },
+                            "payload": payload.model_dump(),
+                        }
+                    )
                     entry["error"] = str(getattr(e, "detail", "") or str(e) or "pipeline trigger failed")
                 pipeline_runs.append(entry)
 
@@ -2576,6 +2335,28 @@ async def _handle_call_webhook(
             pipeline_info["pipelines"] = pipeline_runs
             pipeline_info["triggered"] = any(bool(x.get("triggered")) for x in pipeline_runs)
         else:
+            _append_rejected_webhook(
+                {
+                    "source": "ingress",
+                    "reason": "no_pipeline_mapping",
+                    "message": "No pipeline mapping found for this agent.",
+                    "webhook_type": webhook_type,
+                    "event_id": str(stored.get("event_id") or ""),
+                    "event_file": str(stored.get("file") or ""),
+                    "pipeline_ids": [],
+                    "run_id": "",
+                    "sales_agent": pair["agent"],
+                    "customer": pair["customer"],
+                    "call_id": call_id,
+                    "pair": {
+                        "crm_url": pair.get("crm_url") or "",
+                        "account_id": pair.get("account_id") or "",
+                        "agent": pair.get("agent") or "",
+                        "customer": pair.get("customer") or "",
+                    },
+                    "payload": payload.model_dump(),
+                }
+            )
             pipeline_info["message"] = "No pipeline mapping found for this agent."
 
     return {
@@ -2592,9 +2373,11 @@ async def _handle_call_webhook(
             "duration": payload.duration,
         },
         "resolved_pair": pair,
-        "filter": {
-            "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
-            "continuity": continuity_meta,
+        "continuity_filter": {
+            "enabled": bool(continuity_filter_enabled),
+            "passed": bool(continuity_ok),
+            "reason": continuity_reason,
+            "meta": continuity_meta,
         },
         "transcription": transcription_info,
         "pipeline": pipeline_info,

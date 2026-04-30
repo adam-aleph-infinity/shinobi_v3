@@ -57,6 +57,7 @@ interface LiveWebhookConfig {
   enabled: boolean;
   ingest_only: boolean;
   trigger_pipeline: boolean;
+  agent_continuity_filter_enabled: boolean;
   live_pipeline_ids: string[];
   default_pipeline_id: string;
   pipeline_by_agent: Record<string, string>;
@@ -67,56 +68,61 @@ interface LiveWebhookConfig {
   backfill_historical_transcripts: boolean;
   backfill_timeout_s: number;
   max_live_running: number;
-  agent_continuity_filter_enabled: boolean;
   auto_retry_enabled: boolean;
   retry_max_attempts: number;
   retry_delay_s: number;
   retry_on_server_error: boolean;
   retry_on_rate_limit: boolean;
   retry_on_timeout: boolean;
-  rejected_webhooks_total?: number;
-  rejected_by_reason?: Record<string, number>;
-  rejected_updated_at?: string;
   read_only?: boolean;
   mirror_source?: string;
 }
 
 interface RejectedWebhookItem {
   id: string;
+  status?: string;
   source?: string;
   reason?: string;
-  status?: string;
-  created_at?: string;
-  updated_at?: string;
+  message?: string;
+  webhook_type?: string;
   event_id?: string;
   event_file?: string;
-  pipeline_id?: string;
-  pipeline_name?: string;
-  pipeline_ids?: string[];
-  run_id?: string;
-  moved_to_run_ids?: string[];
   sales_agent?: string;
   customer?: string;
   call_id?: string;
-  account_id?: string;
-  crm_url?: string;
+  pipeline_ids?: string[];
+  moved_pipeline_ids?: string[];
+  moved_run_ids?: string[];
+  created_at?: string;
+  updated_at?: string;
   payload?: Record<string, any>;
-  continuity_meta?: Record<string, any>;
 }
 
 function statusTone(status: string): string {
-  const s = String(status || "").toLowerCase();
+  const s = String(status || "").trim().toLowerCase();
   if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
   if (s === "preparing") return "text-cyan-200 border-cyan-700/50 bg-cyan-950/40";
   if (s === "retrying") return "text-violet-200 border-violet-700/50 bg-violet-950/40";
-  if (s === "done" || s === "completed") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
-  if (s === "error" || s === "failed") return "text-red-300 border-red-700/50 bg-red-950/40";
+  if (s === "done" || s === "completed" || s === "success" || s === "ok") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
+  if (s === "error" || s === "failed" || s.includes("exception")) return "text-red-300 border-red-700/50 bg-red-950/40";
+  if (s.includes("cancel") || s.includes("abort") || s.includes("stop")) return "text-slate-200 border-slate-700/50 bg-slate-900/50";
   return "text-amber-300 border-amber-700/50 bg-amber-950/40";
 }
 
 function isCompletedRun(status: string): boolean {
-  const s = String(status || "").toLowerCase();
-  return s === "done" || s === "completed" || s === "error" || s === "failed" || s === "stopped" || s === "cancelled";
+  const s = String(status || "").trim().toLowerCase();
+  return (
+    s === "done"
+    || s === "completed"
+    || s === "success"
+    || s === "ok"
+    || s === "error"
+    || s === "failed"
+    || s.includes("cancel")
+    || s.includes("abort")
+    || s.includes("stop")
+    || s.includes("exception")
+  );
 }
 
 function isQueuedRun(status: string): boolean {
@@ -311,15 +317,26 @@ export default function LivePage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [nowMs, setNowMs] = useState<number | null>(null);
-  const [selectedRejectedId, setSelectedRejectedId] = useState<string>("");
-  const [replayRejectedId, setReplayRejectedId] = useState<string>("");
-  const [rejectionMessage, setRejectionMessage] = useState("");
-  const [rejectionMessageError, setRejectionMessageError] = useState(false);
+  const [hostReadOnly, setHostReadOnly] = useState(false);
+  const [expandedRejectedId, setExpandedRejectedId] = useState("");
+  const [requeueingRejectedId, setRequeueingRejectedId] = useState("");
+  const [rejectionActionMsg, setRejectionActionMsg] = useState("");
+  const [rejectionActionErr, setRejectionActionErr] = useState(false);
 
   useEffect(() => {
     setNowMs(Date.now());
     const ticker = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(ticker);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const host = String(window.location.hostname || "").toLowerCase();
+      // Dev mirror host should never allow changing live webhook execution config.
+      setHostReadOnly(host === "shinobi.aleph-infinity.com");
+    } catch {
+      setHostReadOnly(false);
+    }
   }, []);
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
@@ -328,23 +345,26 @@ export default function LivePage() {
     fetcher,
     { refreshInterval: 7000 },
   );
-  const { data: rejectedData, mutate: mutateRejected } = useSWR<{ ok: boolean; count: number; items: RejectedWebhookItem[] }>(
+  const {
+    data: rejectedData,
+    mutate: mutateRejected,
+  } = useSWR<{ ok?: boolean; count?: number; items?: RejectedWebhookItem[] }>(
     "/api/pipelines/live-webhook/rejections?limit=200&status=all",
     fetcher,
     { refreshInterval: 7000 },
   );
-  const liveReadOnly = !!liveCfg?.read_only;
+  const liveReadOnly = hostReadOnly || !!liveCfg?.read_only;
 
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=10000&compact=1&mirror=1";
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=300&compact=1&mirror=1";
 
-  const { data: runsData, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
+  const { data: runsData, mutate: mutateRuns, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
     refreshInterval: 2500,
     keepPreviousData: true,
   });
 
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
   const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
-  const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData!.items : [];
+  const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData.items : [];
 
   const pipelineNameById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -398,7 +418,7 @@ export default function LivePage() {
   const applyLivePipelineSelection = async (pipelineIds: string[]) => {
     if (liveReadOnly) {
       setLiveMessageError(true);
-      setLiveMessage("Jobs mirror mode is read-only in this environment.");
+      setLiveMessage("Live mirror mode is read-only in this environment.");
       return;
     }
     const cleaned = Array.from(new Set((pipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
@@ -415,6 +435,7 @@ export default function LivePage() {
           enabled: true,
           ingest_only: cleaned.length === 0,
           trigger_pipeline: true,
+          agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
           live_pipeline_ids: cleaned,
           default_pipeline_id: cleaned[0] || "",
           pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
@@ -425,7 +446,6 @@ export default function LivePage() {
           transcription_timeout_s: Number(liveCfg?.transcription_timeout_s || 900),
           transcription_poll_interval_s: Number(liveCfg?.transcription_poll_interval_s || 2),
           max_live_running: Number(liveCfg?.max_live_running || 5),
-          agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
           auto_retry_enabled: !!(liveCfg?.auto_retry_enabled ?? true),
           retry_max_attempts: Number(liveCfg?.retry_max_attempts || 2),
           retry_delay_s: Number(liveCfg?.retry_delay_s || 45),
@@ -443,13 +463,78 @@ export default function LivePage() {
       setLiveMessageError(false);
       setLiveMessage(
         cleaned.length
-          ? `Jobs enabled for ${cleaned.length} pipeline(s).`
-          : "Jobs disabled (ingest-only mode).",
+          ? `Live enabled for ${cleaned.length} pipeline(s).`
+          : "Live disabled (ingest-only mode).",
       );
       await mutateLiveCfg();
     } catch (e: any) {
       setLiveMessageError(true);
       setLiveMessage(String(e?.message || "Failed to update live pipeline selection."));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
+
+  const toggleContinuityFilter = async () => {
+    if (liveReadOnly) {
+      setLiveMessageError(true);
+      setLiveMessage("Live mirror mode is read-only in this environment.");
+      return;
+    }
+    const currentEnabled = !!(liveCfg?.agent_continuity_filter_enabled ?? true);
+    const nextEnabled = !currentEnabled;
+    const ok = window.confirm(
+      nextEnabled
+        ? "Enable continuity filter? Only webhooks whose customer first/last historical agents are the same will auto-run."
+        : "Disable continuity filter? Webhooks will run regardless of first/last historical agent continuity.",
+    );
+    if (!ok) return;
+
+    setLiveSaving(true);
+    setLiveMessage("");
+    try {
+      const currentRunPayload = (liveCfg && typeof liveCfg.run_payload === "object" && liveCfg.run_payload)
+        ? liveCfg.run_payload
+        : { resume_partial: true };
+      const selected = Array.from(new Set((liveSelectedPipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean)));
+      const res = await fetch("/api/pipelines/live-webhook/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          ingest_only: selected.length === 0,
+          trigger_pipeline: true,
+          agent_continuity_filter_enabled: nextEnabled,
+          live_pipeline_ids: selected,
+          default_pipeline_id: selected[0] || "",
+          pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
+            ? liveCfg.pipeline_by_agent
+            : {},
+          run_payload: currentRunPayload,
+          transcription_model: String(liveCfg?.transcription_model || "gpt-5.4"),
+          transcription_timeout_s: Number(liveCfg?.transcription_timeout_s || 900),
+          transcription_poll_interval_s: Number(liveCfg?.transcription_poll_interval_s || 2),
+          max_live_running: Number(liveCfg?.max_live_running || 5),
+          auto_retry_enabled: !!(liveCfg?.auto_retry_enabled ?? true),
+          retry_max_attempts: Number(liveCfg?.retry_max_attempts || 2),
+          retry_delay_s: Number(liveCfg?.retry_delay_s || 45),
+          backfill_historical_transcripts: !!(liveCfg?.backfill_historical_transcripts ?? true),
+          backfill_timeout_s: Number(liveCfg?.backfill_timeout_s || 5400),
+          retry_on_server_error: !!(liveCfg?.retry_on_server_error ?? true),
+          retry_on_rate_limit: !!(liveCfg?.retry_on_rate_limit ?? true),
+          retry_on_timeout: !!(liveCfg?.retry_on_timeout ?? true),
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setLiveMessageError(false);
+      setLiveMessage(nextEnabled ? "Continuity filter enabled." : "Continuity filter disabled.");
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to update continuity filter."));
     } finally {
       setLiveSaving(false);
     }
@@ -470,109 +555,46 @@ export default function LivePage() {
     await applyLivePipelineSelection(next);
   };
 
-  const toggleContinuityFilter = async () => {
+  const moveRejectedToRun = async (item: RejectedWebhookItem) => {
+    const rejectionId = String(item?.id || "").trim();
+    if (!rejectionId) return;
     if (liveReadOnly) {
-      setLiveMessageError(true);
-      setLiveMessage("Jobs mirror mode is read-only in this environment.");
+      setRejectionActionErr(true);
+      setRejectionActionMsg("Read-only mirror mode: cannot enqueue rejected webhook from this environment.");
       return;
     }
-    const current = !!(liveCfg?.agent_continuity_filter_enabled ?? true);
-    const next = !current;
+    const preferredPipelineId =
+      String(item?.pipeline_ids?.[0] || "").trim()
+      || String(liveSelectedPipelineIds?.[0] || "").trim();
     const ok = window.confirm(
-      next
-        ? "Enable agent continuity filter? (Reject only when historical first-agent and last-agent are different)"
-        : "Disable agent continuity filter? (All webhook jobs will pass this filter)",
+      `Move rejected webhook ${rejectionId.slice(0, 8)} to run queue${preferredPipelineId ? ` using pipeline ${preferredPipelineId}` : ""}?`,
     );
     if (!ok) return;
 
-    setLiveSaving(true);
-    setLiveMessage("");
+    setRequeueingRejectedId(rejectionId);
+    setRejectionActionMsg("");
     try {
-      const currentRunPayload = (liveCfg && typeof liveCfg.run_payload === "object" && liveCfg.run_payload)
-        ? liveCfg.run_payload
-        : { resume_partial: true };
-      const res = await fetch("/api/pipelines/live-webhook/config", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          enabled: !!(liveCfg?.enabled ?? true),
-          ingest_only: !!(liveCfg?.ingest_only ?? false),
-          trigger_pipeline: !!(liveCfg?.trigger_pipeline ?? true),
-          live_pipeline_ids: Array.isArray(liveCfg?.live_pipeline_ids) ? liveCfg!.live_pipeline_ids : [],
-          default_pipeline_id: String(liveCfg?.default_pipeline_id || ""),
-          pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
-            ? liveCfg.pipeline_by_agent
-            : {},
-          run_payload: currentRunPayload,
-          transcription_model: String(liveCfg?.transcription_model || "gpt-5.4"),
-          transcription_timeout_s: Number(liveCfg?.transcription_timeout_s || 900),
-          transcription_poll_interval_s: Number(liveCfg?.transcription_poll_interval_s || 2),
-          max_live_running: Number(liveCfg?.max_live_running || 5),
-          agent_continuity_filter_enabled: next,
-          auto_retry_enabled: !!(liveCfg?.auto_retry_enabled ?? true),
-          retry_max_attempts: Number(liveCfg?.retry_max_attempts || 2),
-          retry_delay_s: Number(liveCfg?.retry_delay_s || 45),
-          backfill_historical_transcripts: !!(liveCfg?.backfill_historical_transcripts ?? true),
-          backfill_timeout_s: Number(liveCfg?.backfill_timeout_s || 5400),
-          retry_on_server_error: !!(liveCfg?.retry_on_server_error ?? true),
-          retry_on_rate_limit: !!(liveCfg?.retry_on_rate_limit ?? true),
-          retry_on_timeout: !!(liveCfg?.retry_on_timeout ?? true),
-        }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
-      setLiveMessageError(false);
-      setLiveMessage(`Agent continuity filter is now ${next ? "ON" : "OFF"}.`);
-      await mutateLiveCfg();
-    } catch (e: any) {
-      setLiveMessageError(true);
-      setLiveMessage(String(e?.message || "Failed to update continuity filter."));
-    } finally {
-      setLiveSaving(false);
-    }
-  };
-
-  const replayRejectedWebhook = async (item: RejectedWebhookItem) => {
-    const rid = String(item?.id || "").trim();
-    if (!rid) return;
-    if (liveReadOnly) {
-      setRejectionMessageError(true);
-      setRejectionMessage("Jobs mirror mode is read-only in this environment.");
-      return;
-    }
-    const preferred = Array.isArray(item?.pipeline_ids)
-      ? item.pipeline_ids.find((x) => String(x || "").trim())
-      : "";
-    const fallback = liveSelectedPipelineIds[0] || "";
-    const targetPipelineId = String(preferred || fallback || "").trim();
-    const name = `${String(item?.sales_agent || "unknown")} · ${String(item?.customer || "unknown")} · ${String(item?.call_id || "—")}`;
-    const ok = window.confirm(`Move rejected webhook to run queue?\n${name}`);
-    if (!ok) return;
-
-    setReplayRejectedId(rid);
-    setRejectionMessage("");
-    try {
-      const res = await fetch(`/api/pipelines/live-webhook/rejections/${encodeURIComponent(rid)}/enqueue`, {
+      const res = await fetch(`/api/pipelines/live-webhook/rejections/${encodeURIComponent(rejectionId)}/enqueue`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          pipeline_id: targetPipelineId,
+          pipeline_id: preferredPipelineId || "",
           run_all: false,
         }),
       });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
-      const runIds = Array.isArray(body?.run_ids) ? body.run_ids : [];
-      setRejectionMessageError(false);
-      setRejectionMessage(
-        `Rejected webhook moved to queue${runIds.length ? ` (run ${String(runIds[0]).slice(0, 8)})` : ""}.`,
-      );
-      await mutateRejected();
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      const runCount = Array.isArray(body?.run_ids) ? body.run_ids.length : 0;
+      setRejectionActionErr(false);
+      setRejectionActionMsg(`Moved to run queue (${runCount} run${runCount === 1 ? "" : "s"}).`);
+      await Promise.allSettled([mutateRejected(), mutateRuns()]);
     } catch (e: any) {
-      setRejectionMessageError(true);
-      setRejectionMessage(String(e?.message || "Failed to move rejected webhook to run queue."));
+      setRejectionActionErr(true);
+      setRejectionActionMsg(String(e?.message || "Failed moving rejected webhook to run queue."));
     } finally {
-      setReplayRejectedId("");
+      setRequeueingRejectedId("");
     }
   };
 
@@ -606,9 +628,7 @@ export default function LivePage() {
     () => filteredRuns.filter((r) => !isCompletedRun(r.status) && !isQueuedRun(r.status)),
     [filteredRuns],
   );
-  // Completed history should always show the full available history (date-folded),
-  // independent of transient queue/running filters.
-  const completedRuns = useMemo(() => runs.filter((r) => isCompletedRun(r.status)), [runs]);
+  const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
   const queuedProductionRuns = useMemo(
     () => queuedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
     [queuedRuns],
@@ -789,7 +809,7 @@ export default function LivePage() {
       <div className="px-5 py-3 border-b border-gray-800 bg-gray-900 shrink-0">
         <div className="flex items-center gap-2">
           <Activity className="w-5 h-5 text-emerald-400" />
-          <h1 className="text-lg font-semibold text-white">Jobs</h1>
+          <h1 className="text-lg font-semibold text-white">Live</h1>
           <span className="text-xs text-gray-500">Queued, running + completed pipeline runs</span>
         </div>
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-8 gap-2">
@@ -898,7 +918,7 @@ export default function LivePage() {
         </div>
         {runsError && (
           <div className="mt-2 text-[11px] text-red-300 border border-red-800/60 bg-red-950/40 rounded px-2 py-1">
-            Jobs run history fetch failed: {String((runsError as any)?.message || "unknown error")}.
+            Live run history fetch failed: {String((runsError as any)?.message || "unknown error")}.
             {runs.length > 0 ? " Showing last known data." : ""}
           </div>
         )}
@@ -915,7 +935,7 @@ export default function LivePage() {
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
-                <p className="text-sm font-semibold text-gray-100">Jobs Pipelines</p>
+                <p className="text-sm font-semibold text-gray-100">Live Pipelines</p>
                 <span className="text-xs text-gray-500">{pipelineList.length}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
@@ -950,109 +970,110 @@ export default function LivePage() {
                     {liveMessage}
                   </p>
                 ) : null}
-                <div className="pt-2 text-[11px] space-y-1">
-                  <p className={cn(
-                    "inline-flex items-center rounded border px-2 py-0.5",
-                    liveCfg?.agent_continuity_filter_enabled
-                      ? "text-emerald-300 border-emerald-800/60 bg-emerald-950/30"
-                      : "text-amber-300 border-amber-800/60 bg-amber-950/30",
-                  )}>
-                    Agent continuity filter: {liveCfg?.agent_continuity_filter_enabled ? "ON" : "OFF"}
+                {liveReadOnly ? (
+                  <p className="pt-1 text-[11px] text-amber-300">
+                    Read-only mirror from {String(liveCfg?.mirror_source || "production")}. Live toggles are locked in this environment.
                   </p>
-                  <p className="text-gray-400">
-                    Rejected webhooks: {Number(liveCfg?.rejected_webhooks_total || 0)}
-                  </p>
+                ) : null}
+
+                <div className="mt-3 pt-3 border-t border-gray-800 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-amber-200">Continuity Filter</span>
+                    <span
+                      className={cn(
+                        "text-[10px] px-1.5 py-0.5 rounded border font-semibold",
+                        !!(liveCfg?.agent_continuity_filter_enabled ?? true)
+                          ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                          : "text-gray-300 border-gray-700/60 bg-gray-900/40",
+                      )}
+                    >
+                      {!!(liveCfg?.agent_continuity_filter_enabled ?? true) ? "ON" : "OFF"}
+                    </span>
+                  </div>
                   <button
                     type="button"
                     disabled={liveSaving || liveReadOnly}
                     onClick={() => { void toggleContinuityFilter(); }}
-                    className={cn(
-                      "text-[11px] px-2 py-1 rounded border transition-colors",
-                      liveCfg?.agent_continuity_filter_enabled
-                        ? "border-emerald-700/70 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-900/40"
-                        : "border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40",
-                      (liveSaving || liveReadOnly) && "opacity-60 cursor-not-allowed",
-                    )}
-                    title="Toggle agent continuity filter"
+                    className="text-[11px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-60"
                   >
-                    Toggle Filter ({liveCfg?.agent_continuity_filter_enabled ? "ON" : "OFF"})
+                    Toggle Filter
                   </button>
                   <details className="rounded border border-gray-800 bg-gray-950/40 px-2 py-1">
-                    <summary className="cursor-pointer text-gray-300 text-[11px]">Filter Logic</summary>
-                    <div className="mt-1 text-[10px] text-gray-400 space-y-0.5">
-                      <p>Pass when there is no call history.</p>
-                      <p>Pass when historical first-agent and last-agent are the same.</p>
-                      <p>Reject only when historical first-agent and last-agent are different.</p>
+                    <summary className="cursor-pointer text-[11px] text-gray-300">Filter Logic</summary>
+                    <div className="mt-1 space-y-1 text-[10px] text-gray-400">
+                      <p>1. If no call history exists: webhook passes.</p>
+                      <p>2. If first historical agent equals last historical agent: webhook passes.</p>
+                      <p>3. If first historical agent differs from last historical agent: webhook is rejected.</p>
                     </div>
                   </details>
                 </div>
-                {liveReadOnly ? (
-                  <p className="pt-1 text-[11px] text-amber-300">
-                    Read-only mirror from {String(liveCfg?.mirror_source || "production")}.
-                  </p>
-                ) : null}
-                <div className="pt-3 border-t border-gray-800/70 mt-2 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[11px] font-semibold text-gray-200">Rejected Webhooks</p>
+
+                <div className="mt-3 pt-3 border-t border-gray-800 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-red-200">Rejected Webhooks</span>
                     <span className="text-[10px] text-gray-500">{rejectedItems.length}</span>
                   </div>
-                  {rejectionMessage ? (
-                    <p className={cn("text-[11px]", rejectionMessageError ? "text-red-300" : "text-emerald-300")}>
-                      {rejectionMessage}
+                  {rejectionActionMsg ? (
+                    <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
+                      {rejectionActionMsg}
                     </p>
                   ) : null}
-                  <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                    {rejectedItems.length === 0 ? (
-                      <p className="text-[11px] text-gray-500 italic">No rejected webhook records.</p>
-                    ) : (
-                      rejectedItems.map((item) => {
+                  {rejectedItems.length === 0 ? (
+                    <p className="text-[11px] text-gray-500 italic">No rejected webhook records.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {rejectedItems.map((item) => {
                         const rid = String(item.id || "");
-                        const expanded = selectedRejectedId === rid;
-                        const st = String(item.status || "rejected");
+                        const expanded = expandedRejectedId === rid;
+                        const status = String(item.status || "rejected").toLowerCase();
+                        const statusCls = status === "queued_manual"
+                          ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                          : "text-red-300 border-red-700/60 bg-red-950/30";
                         return (
-                          <div key={rid} className="rounded-lg border border-gray-800 bg-gray-950/50 p-2">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(st))}>
-                                {st}
-                              </span>
-                              <span className="text-[10px] text-gray-400">
-                                {String(item.reason || "unknown_reason")}
-                              </span>
-                              <span className="text-[10px] text-gray-500">
-                                {String(item.sales_agent || "—")} · {String(item.customer || "—")} · {String(item.call_id || "—")}
-                              </span>
-                            </div>
-                            <div className="mt-1 flex items-center gap-2">
+                          <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                            <div className="flex items-start gap-1.5">
                               <button
                                 type="button"
-                                onClick={() => setSelectedRejectedId(expanded ? "" : rid)}
-                                className="text-[10px] px-2 py-0.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800"
+                                onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
+                                className="mt-0.5 text-gray-500 hover:text-gray-300"
+                                title={expanded ? "Hide payload" : "View payload"}
                               >
-                                {expanded ? "Hide" : "View"}
+                                <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
                               </button>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
+                                    {rid.slice(0, 8)}
+                                  </span>
+                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
+                                    {status}
+                                  </span>
+                                  <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+                                </div>
+                                <div className="text-[10px] text-gray-500 mt-1 truncate">
+                                  {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
+                                </div>
+                              </div>
                               <button
                                 type="button"
-                                disabled={!!replayRejectedId || liveReadOnly}
-                                onClick={() => void replayRejectedWebhook(item)}
-                                className={cn(
-                                  "text-[10px] px-2 py-0.5 rounded border",
-                                  "border-indigo-700/60 text-indigo-200 hover:bg-indigo-950/40",
-                                  (!!replayRejectedId || liveReadOnly) && "opacity-50 cursor-not-allowed",
-                                )}
+                                disabled={requeueingRejectedId === rid}
+                                onClick={() => { void moveRejectedToRun(item); }}
+                                className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
+                                title="Move this rejected webhook to run queue"
                               >
-                                {replayRejectedId === rid ? "Moving…" : "Move To Run"}
+                                {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
                               </button>
                             </div>
                             {expanded ? (
-                              <pre className="mt-1.5 max-h-44 overflow-auto rounded border border-gray-800 bg-gray-950 p-2 text-[10px] text-gray-300 whitespace-pre-wrap">
+                              <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
 {JSON.stringify(item, null, 2)}
                               </pre>
                             ) : null}
                           </div>
                         );
-                      })
-                    )}
-                  </div>
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </section>

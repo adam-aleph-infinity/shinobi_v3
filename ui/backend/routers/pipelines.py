@@ -212,6 +212,7 @@ def _default_live_webhook_config() -> dict[str, Any]:
         "enabled": True,
         "ingest_only": True,
         "trigger_pipeline": True,
+        "agent_continuity_filter_enabled": True,
         "live_pipeline_ids": [],
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
@@ -242,6 +243,7 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
     base["enabled"] = bool(base.get("enabled", True))
     base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
+    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
     live_ids = base.get("live_pipeline_ids")
     if isinstance(live_ids, list):
         dedup: list[str] = []
@@ -2621,6 +2623,7 @@ class LiveWebhookConfigIn(BaseModel):
     enabled: bool = True
     ingest_only: bool = True
     trigger_pipeline: bool = True
+    agent_continuity_filter_enabled: bool = True
     live_pipeline_ids: list[str] = []
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = {}
@@ -4442,6 +4445,7 @@ def get_live_webhook_config(request: Request):
         "enabled": bool(cfg.get("enabled", True)),
         "ingest_only": bool(cfg.get("ingest_only", True)),
         "trigger_pipeline": bool(cfg.get("trigger_pipeline", True)),
+        "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
         "live_pipeline_ids": cfg.get("live_pipeline_ids") if isinstance(cfg.get("live_pipeline_ids"), list) else [],
         "default_pipeline_id": str(cfg.get("default_pipeline_id") or "").strip(),
         "pipeline_by_agent": cfg.get("pipeline_by_agent") if isinstance(cfg.get("pipeline_by_agent"), dict) else {},
@@ -4669,6 +4673,7 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
             "enabled": bool(saved.get("enabled", True)),
             "ingest_only": bool(saved.get("ingest_only", True)),
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
             "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
             "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
             "pipeline_by_agent": (
@@ -4730,6 +4735,7 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
             "enabled": bool(saved.get("enabled", True)),
             "ingest_only": bool(saved.get("ingest_only", True)),
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
             "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
             "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
             "pipeline_by_agent": (
@@ -4749,6 +4755,189 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
             "retry_on_rate_limit": bool(saved.get("retry_on_rate_limit", True)),
             "retry_on_timeout": bool(saved.get("retry_on_timeout", True)),
         },
+    }
+
+
+@router.get("/live-webhook/rejections")
+def list_live_webhook_rejections(
+    request: Request,
+    limit: int = Query(200, ge=1, le=20000),
+    status: str = Query("all"),
+):
+    if _is_live_mirror_mode(request):
+        path = f"/api/pipelines/live-webhook/rejections?limit={int(limit)}&status={status}"
+        return _live_mirror_request_json("GET", path, request=request)
+
+    from ui.backend.routers import webhooks as _wh
+
+    wanted_status = str(status or "all").strip().lower() or "all"
+    include_non_rejected = wanted_status == "all"
+    fetch_limit = int(limit) if include_non_rejected else 20000
+    items = _wh._list_rejected_webhooks(limit=fetch_limit, include_non_rejected=include_non_rejected)
+    if not include_non_rejected:
+        items = [
+            row for row in items
+            if str((row or {}).get("status") or "rejected").strip().lower() == wanted_status
+        ]
+    items = items[: int(limit)]
+    return {"ok": True, "count": len(items), "items": items}
+
+
+@router.post("/live-webhook/rejections/{rejection_id}/enqueue")
+async def enqueue_live_webhook_rejection(
+    rejection_id: str,
+    req: LiveWebhookRejectionEnqueueIn,
+    request: Request,
+):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook requeue is read-only in mirror mode.")
+
+    from ui.backend.routers import webhooks as _wh
+
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection_id.")
+
+    store = _wh._load_rejections_store()
+    items_raw = store.get("items")
+    items = items_raw if isinstance(items_raw, list) else []
+    row: Optional[dict[str, Any]] = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() == rid:
+            row = dict(item)
+            break
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Rejected webhook not found: {rid}")
+
+    target_pipeline_ids: list[str] = []
+    if bool(req.run_all):
+        raw = row.get("pipeline_ids")
+        if isinstance(raw, list):
+            target_pipeline_ids.extend([str(x or "").strip() for x in raw if str(x or "").strip()])
+    requested_pipeline_id = str(req.pipeline_id or "").strip()
+    if requested_pipeline_id:
+        target_pipeline_ids.append(requested_pipeline_id)
+    if not target_pipeline_ids:
+        raw = row.get("pipeline_ids")
+        if isinstance(raw, list):
+            target_pipeline_ids.extend([str(x or "").strip() for x in raw if str(x or "").strip()])
+    if not target_pipeline_ids:
+        cfg = _load_live_webhook_config()
+        live_ids = cfg.get("live_pipeline_ids")
+        if isinstance(live_ids, list):
+            target_pipeline_ids.extend([str(x or "").strip() for x in live_ids if str(x or "").strip()])
+        default_pid = str(cfg.get("default_pipeline_id") or "").strip()
+        if default_pid:
+            target_pipeline_ids.append(default_pid)
+
+    dedup_ids: list[str] = []
+    seen: set[str] = set()
+    for pid in target_pipeline_ids:
+        p = str(pid or "").strip()
+        if not p or p in seen:
+            continue
+        _find_file(p)
+        seen.add(p)
+        dedup_ids.append(p)
+    target_pipeline_ids = dedup_ids
+    if not target_pipeline_ids:
+        raise HTTPException(status_code=400, detail="No target pipeline id was resolved for this rejection.")
+
+    pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+    raw_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    sales_agent = str(row.get("sales_agent") or pair.get("agent") or raw_payload.get("agent") or "").strip()
+    customer = str(row.get("customer") or pair.get("customer") or raw_payload.get("customer") or "").strip()
+    call_id = str(row.get("call_id") or raw_payload.get("call_id") or "").strip()
+    pair_data = {
+        "crm_url": str(pair.get("crm_url") or raw_payload.get("crm_url") or ""),
+        "account_id": str(pair.get("account_id") or raw_payload.get("account_id") or ""),
+        "agent": sales_agent,
+        "customer": customer,
+    }
+
+    cfg = _load_live_webhook_config()
+    max_attempts = int(cfg.get("retry_max_attempts") or 2)
+    queued_at = datetime.now(timezone.utc).isoformat()
+    pipelines_out: list[dict[str, Any]] = []
+    run_ids: list[str] = []
+    request_base_url = str(request.base_url or "")
+
+    for pipeline_id in target_pipeline_ids:
+        _, pdef = _find_file(pipeline_id)
+        pipeline_name = str(pdef.get("name") or pipeline_id)
+        run_id = str(uuid.uuid4())
+        run_payload = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "resume_partial": True,
+            "run_origin": "webhook",
+            "run_id": run_id,
+            "manual_replay": True,
+            "rejection_id": rid,
+        }
+        queue_item = {
+            "id": str(uuid.uuid4()),
+            "webhook_type": "rejected-replay",
+            "created_at": queued_at,
+            "updated_at": queued_at,
+            "state": "queued",
+            "attempts": 0,
+            "max_attempts": max_attempts,
+            "next_attempt_at": queued_at,
+            "last_error": "",
+            "request_base_url": request_base_url,
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "run_id": run_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "pair": pair_data,
+            "payload": run_payload,
+            "event_id": str(row.get("event_id") or ""),
+            "event_file": str(row.get("event_file") or ""),
+            "manual_replay": True,
+            "rejection_id": rid,
+        }
+        created, meta = await _wh._enqueue_live_item(queue_item)
+        effective_run_id = str(meta.get("run_id") or run_id)
+        if created:
+            _wh._upsert_pipeline_run_stub(
+                run_id=effective_run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=pipeline_name,
+                sales_agent=sales_agent,
+                customer=customer,
+                call_id=call_id,
+                status="queued",
+                log_line="Queued from rejected webhook replay.",
+            )
+        pipelines_out.append(
+            {
+                "pipeline_id": pipeline_id,
+                "pipeline_name": pipeline_name,
+                "run_id": effective_run_id,
+                "state": str(meta.get("state") or ("queued" if created else "")),
+                "message": str(meta.get("message") or ""),
+                "deduplicated": (not created),
+            }
+        )
+        if effective_run_id:
+            run_ids.append(effective_run_id)
+
+    _wh._mark_rejection_queued_manual(rid, run_ids, target_pipeline_ids)
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "rejection_id": rid,
+        "pipeline_count": len(pipelines_out),
+        "run_ids": run_ids,
+        "pipelines": pipelines_out,
     }
 
 
@@ -5173,6 +5362,29 @@ async def run_pipeline(
                 "output": output,
             }
 
+        _last_log_snapshot_ts = 0.0
+
+        def _persist_run_log_snapshot(force: bool = False) -> None:
+            """Persist in-flight pipeline logs so UI keeps live context across refresh/navigation."""
+            nonlocal _last_log_snapshot_ts
+            try:
+                now_m = time.monotonic()
+                if (not force) and (now_m - _last_log_snapshot_ts < 1.5):
+                    return
+                _last_log_snapshot_ts = now_m
+                _lines = [
+                    {"ts": l.ts, "text": l.text, "level": l.level}
+                    for l in log_buffer.get_after(start_seq)
+                ]
+                with Session(_db_engine) as _s:
+                    _s.execute(
+                        _sql_text("UPDATE pipeline_run SET log_json = :log_json WHERE id = :id"),
+                        {"log_json": json.dumps(_lines[-400:]), "id": run_id},
+                    )
+                    _s.commit()
+            except Exception:
+                pass
+
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
             Always written with status='running'; the state file is only promoted to
@@ -5187,6 +5399,7 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                     pass
+            _persist_run_log_snapshot()
             _save_state(
                 pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
                 start_datetime=run_start_dt, node_states=_build_node_states(),
@@ -5425,6 +5638,7 @@ async def run_pipeline(
                     log_buffer.emit(
                         f"[PIPELINE] … auto-transcription running ({_done}/{len(_ids)} complete) · {cid_short}"
                     )
+                    _persist_run_log_snapshot(force=True)
                 if time.monotonic() >= _deadline:
                     return False, _failed
                 await asyncio.sleep(2.0)
@@ -5464,6 +5678,7 @@ async def run_pipeline(
                     "needs_merged_transcript": bool(_needs_merged),
                 },
             )
+            _persist_run_log_snapshot(force=True)
             yield _sse("progress", {"msg": yield_msg})
 
             _file_aliases = _crm_load_aliases()
@@ -5541,6 +5756,7 @@ async def run_pipeline(
                     "job_count": len(_job_ids),
                 },
             )
+            _persist_run_log_snapshot(force=True)
             yield _sse("progress", {
                 "msg": f"Auto-transcription ready (submitted {_submitted}, skipped {_skipped})",
             })
