@@ -296,11 +296,22 @@ export default function LivePage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [nowMs, setNowMs] = useState<number | null>(null);
+  const [hostReadOnly, setHostReadOnly] = useState(false);
 
   useEffect(() => {
     setNowMs(Date.now());
     const ticker = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(ticker);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const host = String(window.location.hostname || "").toLowerCase();
+      // Dev mirror host should never allow changing live webhook execution config.
+      setHostReadOnly(host === "shinobi.aleph-infinity.com");
+    } catch {
+      setHostReadOnly(false);
+    }
   }, []);
 
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
@@ -309,7 +320,7 @@ export default function LivePage() {
     fetcher,
     { refreshInterval: 7000 },
   );
-  const liveReadOnly = !!liveCfg?.read_only;
+  const liveReadOnly = hostReadOnly || !!liveCfg?.read_only;
 
   const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=300&compact=1&mirror=1";
 
@@ -811,7 +822,7 @@ export default function LivePage() {
                 ) : null}
                 {liveReadOnly ? (
                   <p className="pt-1 text-[11px] text-amber-300">
-                    Read-only mirror from {String(liveCfg?.mirror_source || "production")}.
+                    Read-only mirror from {String(liveCfg?.mirror_source || "production")}. Live toggles are locked in this environment.
                   </p>
                 ) : null}
               </div>
