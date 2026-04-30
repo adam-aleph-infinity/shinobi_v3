@@ -27,6 +27,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
 _WEBHOOK_STATS_FILE = _WEBHOOK_DIR / "stats.json"
+_REJECTED_WEBHOOKS_FILE = _WEBHOOK_DIR / "rejections.json"
 _WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
 _LIVE_QUEUE_FILE = _WEBHOOK_DIR / "live_queue.json"
 _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
@@ -283,6 +284,117 @@ def _inc_rejected_webhook(reason: str) -> dict[str, Any]:
         stats["rejected_by_reason"] = by_reason
         stats["updated_at"] = _utc_now_iso()
         return _save_webhook_stats(stats)
+
+
+def _default_rejections_store() -> dict[str, Any]:
+    return {
+        "items": [],
+        "updated_at": "",
+    }
+
+
+def _normalize_rejections_store(raw: Any) -> dict[str, Any]:
+    base = _default_rejections_store()
+    if isinstance(raw, dict):
+        base.update(raw)
+    items = base.get("items")
+    norm_items: list[dict[str, Any]] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                norm_items.append(dict(item))
+    base["items"] = norm_items
+    base["updated_at"] = str(base.get("updated_at") or "").strip()
+    return base
+
+
+def _load_rejections_store() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _REJECTED_WEBHOOKS_FILE.exists():
+        data = _default_rejections_store()
+        _REJECTED_WEBHOOKS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return data
+    try:
+        raw = json.loads(_REJECTED_WEBHOOKS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    data = _normalize_rejections_store(raw)
+    _REJECTED_WEBHOOKS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return data
+
+
+def _save_rejections_store(data: dict[str, Any]) -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    norm = _normalize_rejections_store(data)
+    _REJECTED_WEBHOOKS_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
+    return norm
+
+
+def _append_rejected_webhook(item: dict[str, Any]) -> dict[str, Any]:
+    data = _load_rejections_store()
+    items = data.get("items")
+    if not isinstance(items, list):
+        items = []
+    rec = dict(item or {})
+    rec_id = str(rec.get("id") or "").strip() or str(uuid.uuid4())
+    rec["id"] = rec_id
+    rec["created_at"] = str(rec.get("created_at") or _utc_now_iso())
+    rec["updated_at"] = str(rec.get("updated_at") or rec["created_at"])
+    rec["status"] = str(rec.get("status") or "rejected").strip().lower()
+    items.append(rec)
+    # Keep newest at end, bounded size.
+    if len(items) > 20000:
+        items = items[-20000:]
+    data["items"] = items
+    data["updated_at"] = _utc_now_iso()
+    _save_rejections_store(data)
+    return rec
+
+
+def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipeline_ids: list[str]) -> bool:
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        return False
+    data = _load_rejections_store()
+    items = data.get("items")
+    if not isinstance(items, list):
+        return False
+    changed = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() != rid:
+            continue
+        item["status"] = "queued_manual"
+        item["moved_to_run_ids"] = [str(x) for x in (run_ids or []) if str(x).strip()]
+        item["moved_to_pipeline_ids"] = [str(x) for x in (pipeline_ids or []) if str(x).strip()]
+        item["moved_at"] = _utc_now_iso()
+        item["updated_at"] = _utc_now_iso()
+        changed = True
+        break
+    if changed:
+        data["items"] = items
+        data["updated_at"] = _utc_now_iso()
+        _save_rejections_store(data)
+    return changed
+
+
+def _list_rejected_webhooks(limit: int = 200, include_non_rejected: bool = True) -> list[dict[str, Any]]:
+    data = _load_rejections_store()
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in reversed(items):
+        if not isinstance(item, dict):
+            continue
+        st = str(item.get("status") or "rejected").strip().lower()
+        if not include_non_rejected and st != "rejected":
+            continue
+        out.append(dict(item))
+        if len(out) >= max(1, min(int(limit or 200), 2000)):
+            break
+    return out
 
 
 def _utc_now_iso() -> str:
@@ -1875,6 +1987,30 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                             continue
 
                         stats = _inc_rejected_webhook(reason)
+                        _append_rejected_webhook(
+                            {
+                                "source": "queue_sweep",
+                                "reason": reason,
+                                "status": "rejected",
+                                "event_id": str(item.get("event_id") or ""),
+                                "event_file": str(item.get("event_file") or ""),
+                                "pipeline_id": pipeline_id,
+                                "pipeline_name": str(item.get("pipeline_name") or ""),
+                                "run_id": run_id,
+                                "sales_agent": sales_agent,
+                                "customer": customer,
+                                "call_id": call_id,
+                                "account_id": str(pair_data.get("account_id") or ""),
+                                "crm_url": str(pair_data.get("crm_url") or ""),
+                                "payload": {
+                                    "sales_agent": sales_agent,
+                                    "customer": customer,
+                                    "call_id": call_id,
+                                    "account_id": str(pair_data.get("account_id") or ""),
+                                },
+                                "continuity_meta": meta,
+                            }
+                        )
                         item["state"] = "cancelled"
                         item["updated_at"] = _utc_now_iso()
                         item["last_error"] = (
@@ -2246,6 +2382,31 @@ async def _handle_call_webhook(
         )
         if not continuity_ok:
             stats = _inc_rejected_webhook(continuity_reason)
+            configured_live_ids = _resolve_live_pipeline_ids(cfg)
+            target_pipeline_ids: list[str] = []
+            if configured_live_ids:
+                target_pipeline_ids = configured_live_ids
+            else:
+                mapped_id = _resolve_pipeline_id(cfg, payload.agent, pair.get("agent", ""))
+                if mapped_id:
+                    target_pipeline_ids = [mapped_id]
+            _append_rejected_webhook(
+                {
+                    "source": "ingress",
+                    "reason": continuity_reason,
+                    "status": "rejected",
+                    "event_id": str(stored.get("event_id") or ""),
+                    "event_file": str(stored.get("file") or ""),
+                    "sales_agent": str(pair.get("agent") or payload.agent or ""),
+                    "customer": str(pair.get("customer") or payload.customer or ""),
+                    "call_id": call_id,
+                    "account_id": str(pair.get("account_id") or payload.account_id or ""),
+                    "crm_url": str(pair.get("crm_url") or payload.crm_url or ""),
+                    "pipeline_ids": target_pipeline_ids,
+                    "payload": _sanitize_webhook_payload_for_storage(payload.model_dump()),
+                    "continuity_meta": continuity_meta,
+                }
+            )
             return {
                 "ok": True,
                 "webhook_type": webhook_type,
@@ -2331,6 +2492,8 @@ async def _handle_call_webhook(
                     max_attempts = int(cfg.get("retry_max_attempts") or 2)
                     queue_item = {
                         "id": str(uuid.uuid4()),
+                        "event_id": str(stored.get("event_id") or ""),
+                        "event_file": str(stored.get("file") or ""),
                         "webhook_type": webhook_type,
                         "created_at": queued_at,
                         "updated_at": queued_at,

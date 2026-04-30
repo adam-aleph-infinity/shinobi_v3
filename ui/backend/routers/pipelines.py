@@ -2644,6 +2644,11 @@ class LiveWebhookQuickSetIn(BaseModel):
     clear_agent_mappings: bool = True
 
 
+class LiveWebhookRejectionEnqueueIn(BaseModel):
+    pipeline_id: str = ""
+    run_all: bool = False
+
+
 @router.get("/{pipeline_id}/results")
 def get_pipeline_results(
     pipeline_id: str,
@@ -4460,6 +4465,173 @@ def get_live_webhook_config(request: Request):
         ),
         "rejected_updated_at": str(stats.get("updated_at") or ""),
         "read_only": False,
+    }
+
+
+@router.get("/live-webhook/rejections")
+def get_live_webhook_rejections(
+    request: Request,
+    limit: int = Query(200, ge=1, le=2000),
+    status: str = Query("all"),
+):
+    status_norm = str(status or "all").strip().lower() or "all"
+    if _is_live_mirror_mode(request):
+        path = f"/api/pipelines/live-webhook/rejections?limit={int(limit)}&status={status_norm}"
+        return _live_mirror_request_json("GET", path, request=request)
+    from ui.backend.routers import webhooks as _wh
+
+    items = _wh._list_rejected_webhooks(limit=limit, include_non_rejected=True)
+    if status_norm != "all":
+        items = [it for it in items if str((it or {}).get("status") or "").strip().lower() == status_norm]
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.post("/live-webhook/rejections/{rejection_id}/enqueue")
+async def enqueue_live_webhook_rejection(
+    rejection_id: str,
+    req: LiveWebhookRejectionEnqueueIn,
+    request: Request,
+):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook rejections are read-only in mirror mode.")
+
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection id.")
+
+    from ui.backend.routers import webhooks as _wh
+
+    store = _wh._load_rejections_store()
+    rows = store.get("items") if isinstance(store.get("items"), list) else []
+    row = None
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() == rid:
+            row = item
+            break
+    if row is None:
+        raise HTTPException(status_code=404, detail="Rejected webhook record not found.")
+
+    cfg = _wh._load_call_ended_config()
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    sales_agent = str(row.get("sales_agent") or payload.get("agent") or payload.get("sales_agent") or "").strip()
+    customer = str(row.get("customer") or payload.get("customer") or "").strip()
+    call_id = str(row.get("call_id") or payload.get("call_id") or "").strip()
+    account_id = str(row.get("account_id") or payload.get("account_id") or "").strip()
+    crm_url = str(row.get("crm_url") or payload.get("crm_url") or "").strip()
+    if not (sales_agent and customer and call_id):
+        raise HTTPException(status_code=400, detail="Rejected record is missing agent/customer/call context.")
+
+    requested_pipeline_id = str(req.pipeline_id or "").strip()
+    pipeline_ids: list[str] = []
+    if requested_pipeline_id:
+        pipeline_ids = [requested_pipeline_id]
+    else:
+        stored_pipeline_ids = row.get("pipeline_ids") if isinstance(row.get("pipeline_ids"), list) else []
+        clean_stored = [str(x or "").strip() for x in stored_pipeline_ids if str(x or "").strip()]
+        if clean_stored:
+            pipeline_ids = clean_stored if bool(req.run_all) else [clean_stored[0]]
+        else:
+            live_ids = _resolve_live_pipeline_ids(cfg)
+            if live_ids:
+                pipeline_ids = live_ids if bool(req.run_all) else [live_ids[0]]
+            else:
+                mapped = _wh._resolve_pipeline_id(cfg, sales_agent, sales_agent)
+                if mapped:
+                    pipeline_ids = [mapped]
+    if not pipeline_ids:
+        raise HTTPException(status_code=400, detail="No pipeline resolved for rejected webhook replay.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cfg_run_payload = cfg.get("run_payload") if isinstance(cfg.get("run_payload"), dict) else {}
+    run_ids: list[str] = []
+    results: list[dict[str, Any]] = []
+    for pipeline_id in pipeline_ids:
+        _wh._assert_pipeline_exists(pipeline_id)
+        _, pdef = _find_file(pipeline_id)
+        pipeline_name = str(pdef.get("name") or pipeline_id)
+        run_id = str(uuid.uuid4())
+        run_payload: dict[str, Any] = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "resume_partial": True,
+            "run_origin": "webhook",
+            "run_id": run_id,
+        }
+        for k, v in cfg_run_payload.items():
+            run_payload[str(k)] = v
+        queue_item = {
+            "id": str(uuid.uuid4()),
+            "event_id": str(row.get("event_id") or ""),
+            "event_file": str(row.get("event_file") or ""),
+            "webhook_type": "rejected-replay",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "state": "queued",
+            "attempts": 0,
+            "max_attempts": int(cfg.get("retry_max_attempts") or 2),
+            "next_attempt_at": now_iso,
+            "last_error": "",
+            "request_base_url": str(request.base_url or ""),
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "run_id": run_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "pair": {
+                "crm_url": crm_url,
+                "account_id": account_id,
+                "agent": sales_agent,
+                "customer": customer,
+            },
+            "payload": run_payload,
+            "record_path": str(payload.get("record_path") or ""),
+            "manual_replay": True,
+            "rejection_id": rid,
+        }
+        created, meta = await _wh._enqueue_live_item(queue_item)
+        if created:
+            _wh._upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=pipeline_name,
+                sales_agent=sales_agent,
+                customer=customer,
+                call_id=call_id,
+                status="queued",
+                log_line=f"Queued manually from rejected webhook ({rid[:8]})",
+            )
+            run_ids.append(run_id)
+        meta_run_id = str(meta.get("run_id") or run_id)
+        if meta_run_id and meta_run_id not in run_ids:
+            run_ids.append(meta_run_id)
+        results.append(
+            {
+                "pipeline_id": pipeline_id,
+                "pipeline_name": pipeline_name,
+                "run_id": meta_run_id,
+                "state": str(meta.get("state") or ("queued" if created else "queued")),
+                "message": str(meta.get("message") or ""),
+                "created": bool(created),
+            }
+        )
+
+    _wh._mark_rejection_queued_manual(rid, run_ids, pipeline_ids)
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "rejection_id": rid,
+        "run_ids": run_ids,
+        "pipelines": results,
     }
 
 

@@ -81,6 +81,29 @@ interface LiveWebhookConfig {
   mirror_source?: string;
 }
 
+interface RejectedWebhookItem {
+  id: string;
+  source?: string;
+  reason?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  event_id?: string;
+  event_file?: string;
+  pipeline_id?: string;
+  pipeline_name?: string;
+  pipeline_ids?: string[];
+  run_id?: string;
+  moved_to_run_ids?: string[];
+  sales_agent?: string;
+  customer?: string;
+  call_id?: string;
+  account_id?: string;
+  crm_url?: string;
+  payload?: Record<string, any>;
+  continuity_meta?: Record<string, any>;
+}
+
 function statusTone(status: string): string {
   const s = String(status || "").toLowerCase();
   if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
@@ -288,6 +311,10 @@ export default function LivePage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [nowMs, setNowMs] = useState<number | null>(null);
+  const [selectedRejectedId, setSelectedRejectedId] = useState<string>("");
+  const [replayRejectedId, setReplayRejectedId] = useState<string>("");
+  const [rejectionMessage, setRejectionMessage] = useState("");
+  const [rejectionMessageError, setRejectionMessageError] = useState(false);
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -298,6 +325,11 @@ export default function LivePage() {
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
   const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
     "/api/pipelines/live-webhook/config",
+    fetcher,
+    { refreshInterval: 7000 },
+  );
+  const { data: rejectedData, mutate: mutateRejected } = useSWR<{ ok: boolean; count: number; items: RejectedWebhookItem[] }>(
+    "/api/pipelines/live-webhook/rejections?limit=200&status=all",
     fetcher,
     { refreshInterval: 7000 },
   );
@@ -312,6 +344,7 @@ export default function LivePage() {
 
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
   const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
+  const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData!.items : [];
 
   const pipelineNameById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -435,6 +468,50 @@ export default function LivePage() {
       : [...liveSelectedPipelineIds, pid];
     setLiveSelectedPipelineIds(next);
     await applyLivePipelineSelection(next);
+  };
+
+  const replayRejectedWebhook = async (item: RejectedWebhookItem) => {
+    const rid = String(item?.id || "").trim();
+    if (!rid) return;
+    if (liveReadOnly) {
+      setRejectionMessageError(true);
+      setRejectionMessage("Jobs mirror mode is read-only in this environment.");
+      return;
+    }
+    const preferred = Array.isArray(item?.pipeline_ids)
+      ? item.pipeline_ids.find((x) => String(x || "").trim())
+      : "";
+    const fallback = liveSelectedPipelineIds[0] || "";
+    const targetPipelineId = String(preferred || fallback || "").trim();
+    const name = `${String(item?.sales_agent || "unknown")} · ${String(item?.customer || "unknown")} · ${String(item?.call_id || "—")}`;
+    const ok = window.confirm(`Move rejected webhook to run queue?\n${name}`);
+    if (!ok) return;
+
+    setReplayRejectedId(rid);
+    setRejectionMessage("");
+    try {
+      const res = await fetch(`/api/pipelines/live-webhook/rejections/${encodeURIComponent(rid)}/enqueue`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pipeline_id: targetPipelineId,
+          run_all: false,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      const runIds = Array.isArray(body?.run_ids) ? body.run_ids : [];
+      setRejectionMessageError(false);
+      setRejectionMessage(
+        `Rejected webhook moved to queue${runIds.length ? ` (run ${String(runIds[0]).slice(0, 8)})` : ""}.`,
+      );
+      await mutateRejected();
+    } catch (e: any) {
+      setRejectionMessageError(true);
+      setRejectionMessage(String(e?.message || "Failed to move rejected webhook to run queue."));
+    } finally {
+      setReplayRejectedId("");
+    }
   };
 
   const filteredRuns = useMemo(() => {
@@ -829,6 +906,69 @@ export default function LivePage() {
                     Read-only mirror from {String(liveCfg?.mirror_source || "production")}.
                   </p>
                 ) : null}
+                <div className="pt-3 border-t border-gray-800/70 mt-2 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[11px] font-semibold text-gray-200">Rejected Webhooks</p>
+                    <span className="text-[10px] text-gray-500">{rejectedItems.length}</span>
+                  </div>
+                  {rejectionMessage ? (
+                    <p className={cn("text-[11px]", rejectionMessageError ? "text-red-300" : "text-emerald-300")}>
+                      {rejectionMessage}
+                    </p>
+                  ) : null}
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                    {rejectedItems.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic">No rejected webhook records.</p>
+                    ) : (
+                      rejectedItems.map((item) => {
+                        const rid = String(item.id || "");
+                        const expanded = selectedRejectedId === rid;
+                        const st = String(item.status || "rejected");
+                        return (
+                          <div key={rid} className="rounded-lg border border-gray-800 bg-gray-950/50 p-2">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(st))}>
+                                {st}
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {String(item.reason || "unknown_reason")}
+                              </span>
+                              <span className="text-[10px] text-gray-500">
+                                {String(item.sales_agent || "—")} · {String(item.customer || "—")} · {String(item.call_id || "—")}
+                              </span>
+                            </div>
+                            <div className="mt-1 flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedRejectedId(expanded ? "" : rid)}
+                                className="text-[10px] px-2 py-0.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800"
+                              >
+                                {expanded ? "Hide" : "View"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!!replayRejectedId || liveReadOnly}
+                                onClick={() => void replayRejectedWebhook(item)}
+                                className={cn(
+                                  "text-[10px] px-2 py-0.5 rounded border",
+                                  "border-indigo-700/60 text-indigo-200 hover:bg-indigo-950/40",
+                                  (!!replayRejectedId || liveReadOnly) && "opacity-50 cursor-not-allowed",
+                                )}
+                              >
+                                {replayRejectedId === rid ? "Moving…" : "Move To Run"}
+                              </button>
+                            </div>
+                            {expanded ? (
+                              <pre className="mt-1.5 max-h-44 overflow-auto rounded border border-gray-800 bg-gray-950 p-2 text-[10px] text-gray-300 whitespace-pre-wrap">
+{JSON.stringify(item, null, 2)}
+                              </pre>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
               </div>
             </section>
 
