@@ -593,14 +593,29 @@ async def _wait_for_jobs(
     _last_emit = 0.0
     _last_done = -1
     _last_failed = -1
+    _last_running = -1
+    _last_pending = -1
+    _last_status_signature = ""
     _last_progress_at = time.monotonic()
     while True:
         with Session(_db_engine) as s:
             rows = s.exec(select(Job).where(Job.id.in_(_ids))).all()
         status_by_id = {str(r.id): _job_status_text(r.status) for r in rows}
+        running = sum(1 for _id in _ids if status_by_id.get(_id) == "running")
+        pending = sum(1 for _id in _ids if status_by_id.get(_id) == "pending")
         done = sum(1 for _id in _ids if status_by_id.get(_id) in {"complete", "failed"})
         failed = sum(1 for _id in _ids if status_by_id.get(_id) == "failed")
-        if done != _last_done:
+        # Progress must include status transitions, not only completed count.
+        # In large queues, jobs can stay pending while waiting for workers.
+        # That should not be marked as a hard stall.
+        status_signature = "|".join(f"{_id}:{status_by_id.get(_id,'')}" for _id in _ids)
+        if (
+            done != _last_done
+            or failed != _last_failed
+            or running != _last_running
+            or pending != _last_pending
+            or status_signature != _last_status_signature
+        ):
             _last_progress_at = time.monotonic()
         if progress_cb and (
             done != _last_done
@@ -613,7 +628,16 @@ async def _wait_for_jobs(
                 pass
             _last_done = done
             _last_failed = failed
+            _last_running = running
+            _last_pending = pending
+            _last_status_signature = status_signature
             _last_emit = time.monotonic()
+        else:
+            _last_done = done
+            _last_failed = failed
+            _last_running = running
+            _last_pending = pending
+            _last_status_signature = status_signature
         if done >= len(_ids):
             return {
                 "ok": failed == 0,
@@ -623,7 +647,10 @@ async def _wait_for_jobs(
                 "timed_out": False,
                 "stalled": False,
             }
-        if (time.monotonic() - _last_progress_at) >= stall_deadline:
+        # Only mark "stalled" when at least one job is actively running and no
+        # status changes were observed for too long. If all jobs are still
+        # pending due queue backlog, keep waiting until the global timeout.
+        if running > 0 and (time.monotonic() - _last_progress_at) >= stall_deadline:
             return {
                 "ok": False,
                 "failed": failed,
