@@ -4480,9 +4480,10 @@ def get_live_webhook_rejections(
         return _live_mirror_request_json("GET", path, request=request)
     from ui.backend.routers import webhooks as _wh
 
-    items = _wh._list_rejected_webhooks(limit=limit, include_non_rejected=True)
+    pull_limit = 20000 if status_norm != "all" else limit
+    items = _wh._list_rejected_webhooks(limit=pull_limit, include_non_rejected=True)
     if status_norm != "all":
-        items = [it for it in items if str((it or {}).get("status") or "").strip().lower() == status_norm]
+        items = [it for it in items if str((it or {}).get("status") or "").strip().lower() == status_norm][:limit]
     return {
         "ok": True,
         "count": len(items),
