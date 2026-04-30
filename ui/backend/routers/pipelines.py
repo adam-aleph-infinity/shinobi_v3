@@ -41,6 +41,7 @@ _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _WEBHOOK_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
+_WEBHOOK_STATS_FILE = _WEBHOOK_DIR / "stats.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
@@ -220,6 +221,7 @@ def _default_live_webhook_config() -> dict[str, Any]:
         "backfill_historical_transcripts": True,
         "backfill_timeout_s": 5400,
         "max_live_running": 5,
+        "agent_continuity_filter_enabled": True,
         "auto_retry_enabled": True,
         "retry_max_attempts": 2,
         "retry_delay_s": 45,
@@ -275,6 +277,7 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
         base["max_live_running"] = max(1, min(int(base.get("max_live_running") or 5), 64))
     except Exception:
         base["max_live_running"] = 5
+    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
     base["auto_retry_enabled"] = bool(base.get("auto_retry_enabled", True))
     try:
         base["retry_max_attempts"] = max(0, min(int(base.get("retry_max_attempts") or 2), 10))
@@ -325,6 +328,45 @@ def _save_live_webhook_config(cfg: dict[str, Any]) -> dict[str, Any]:
     norm = _normalize_live_webhook_config(cfg)
     _WEBHOOK_CONFIG_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
     return norm
+
+
+def _default_live_webhook_stats() -> dict[str, Any]:
+    return {
+        "rejected_webhooks_total": 0,
+        "rejected_by_reason": {},
+        "updated_at": "",
+    }
+
+
+def _load_live_webhook_stats() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _WEBHOOK_STATS_FILE.exists():
+        return _default_live_webhook_stats()
+    try:
+        raw = json.loads(_WEBHOOK_STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return _default_live_webhook_stats()
+    if not isinstance(raw, dict):
+        return _default_live_webhook_stats()
+    out = _default_live_webhook_stats()
+    try:
+        out["rejected_webhooks_total"] = max(0, int(raw.get("rejected_webhooks_total") or 0))
+    except Exception:
+        out["rejected_webhooks_total"] = 0
+    by_reason = raw.get("rejected_by_reason")
+    if isinstance(by_reason, dict):
+        norm_reason: dict[str, int] = {}
+        for k, v in by_reason.items():
+            kk = str(k or "").strip()
+            if not kk:
+                continue
+            try:
+                norm_reason[kk] = max(0, int(v or 0))
+            except Exception:
+                norm_reason[kk] = 0
+        out["rejected_by_reason"] = norm_reason
+    out["updated_at"] = str(raw.get("updated_at") or "").strip()
+    return out
 
 
 _CALL_ID_PRESERVATION_PERSONA = """
@@ -2585,6 +2627,7 @@ class LiveWebhookConfigIn(BaseModel):
     backfill_historical_transcripts: bool = True
     backfill_timeout_s: int = 5400
     max_live_running: int = 5
+    agent_continuity_filter_enabled: bool = True
     auto_retry_enabled: bool = True
     retry_max_attempts: int = 2
     retry_delay_s: int = 45
@@ -4389,6 +4432,7 @@ def get_live_webhook_config(request: Request):
             mirrored["mirror_source"] = str(settings.live_mirror_base_url or "").strip()
         return mirrored
     cfg = _load_live_webhook_config()
+    stats = _load_live_webhook_stats()
     return {
         "enabled": bool(cfg.get("enabled", True)),
         "ingest_only": bool(cfg.get("ingest_only", True)),
@@ -4403,12 +4447,18 @@ def get_live_webhook_config(request: Request):
         "backfill_historical_transcripts": bool(cfg.get("backfill_historical_transcripts", True)),
         "backfill_timeout_s": int(cfg.get("backfill_timeout_s") or 5400),
         "max_live_running": int(cfg.get("max_live_running") or 5),
+        "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
         "auto_retry_enabled": bool(cfg.get("auto_retry_enabled", True)),
         "retry_max_attempts": int(cfg.get("retry_max_attempts") or 2),
         "retry_delay_s": int(cfg.get("retry_delay_s") or 45),
         "retry_on_server_error": bool(cfg.get("retry_on_server_error", True)),
         "retry_on_rate_limit": bool(cfg.get("retry_on_rate_limit", True)),
         "retry_on_timeout": bool(cfg.get("retry_on_timeout", True)),
+        "rejected_webhooks_total": int(stats.get("rejected_webhooks_total") or 0),
+        "rejected_by_reason": (
+            stats.get("rejected_by_reason") if isinstance(stats.get("rejected_by_reason"), dict) else {}
+        ),
+        "rejected_updated_at": str(stats.get("updated_at") or ""),
         "read_only": False,
     }
 
@@ -4458,6 +4508,7 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
             "backfill_historical_transcripts": bool(saved.get("backfill_historical_transcripts", True)),
             "backfill_timeout_s": int(saved.get("backfill_timeout_s") or 5400),
             "max_live_running": int(saved.get("max_live_running") or 5),
+            "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
             "auto_retry_enabled": bool(saved.get("auto_retry_enabled", True)),
             "retry_max_attempts": int(saved.get("retry_max_attempts") or 2),
             "retry_delay_s": int(saved.get("retry_delay_s") or 45),

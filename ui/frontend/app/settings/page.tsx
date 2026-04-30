@@ -45,12 +45,16 @@ interface LiveWebhookConfig {
   backfill_historical_transcripts: boolean;
   backfill_timeout_s: number;
   max_live_running: number;
+  agent_continuity_filter_enabled: boolean;
   auto_retry_enabled: boolean;
   retry_max_attempts: number;
   retry_delay_s: number;
   retry_on_server_error: boolean;
   retry_on_rate_limit: boolean;
   retry_on_timeout: boolean;
+  rejected_webhooks_total?: number;
+  rejected_by_reason?: Record<string, number>;
+  rejected_updated_at?: string;
 }
 
 export default function SettingsPage() {
@@ -180,6 +184,7 @@ export default function SettingsPage() {
           transcription_timeout_s: Number(liveCfg.transcription_timeout_s || 900),
           transcription_poll_interval_s: Number(liveCfg.transcription_poll_interval_s || 2),
           max_live_running: Math.max(1, Math.min(64, Number(settingMaxLiveRunning || 5))),
+          agent_continuity_filter_enabled: !!(liveCfg.agent_continuity_filter_enabled ?? true),
           auto_retry_enabled: !!settingAutoRetry,
           retry_max_attempts: Math.max(0, Math.min(10, Number(settingRetryMaxAttempts || 2))),
           retry_delay_s: Math.max(5, Math.min(3600, Number(settingRetryDelay || 45))),
@@ -419,6 +424,26 @@ export default function SettingsPage() {
             onChange={(e) => setSettingRetryOnTimeout(e.target.checked)}
             className="accent-indigo-500"
           />
+        </Row>
+        <Row
+          label="Agent continuity filter"
+          sub="Only allows webhook jobs when the customer's first and latest CRM calls are under the same sales agent."
+        >
+          <div className="text-xs">
+            <span
+              className={cn(
+                "inline-flex rounded border px-2 py-0.5",
+                liveCfg?.agent_continuity_filter_enabled
+                  ? "text-emerald-300 border-emerald-800/60 bg-emerald-950/30"
+                  : "text-amber-300 border-amber-800/60 bg-amber-950/30",
+              )}
+            >
+              {liveCfg?.agent_continuity_filter_enabled ? "ON" : "OFF"}
+            </span>
+            <span className="ml-2 text-gray-500">
+              rejected: {Number(liveCfg?.rejected_webhooks_total || 0)}
+            </span>
+          </div>
         </Row>
         <Row
           label="Backfill historical transcripts"

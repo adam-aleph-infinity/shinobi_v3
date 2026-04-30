@@ -26,6 +26,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
+_WEBHOOK_STATS_FILE = _WEBHOOK_DIR / "stats.json"
 _WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
 _LIVE_QUEUE_FILE = _WEBHOOK_DIR / "live_queue.json"
 _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
@@ -33,6 +34,7 @@ _WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
 _LIVE_QUEUE_LOCK = asyncio.Lock()
 _LIVE_DISPATCHER_TASK: Optional[asyncio.Task] = None
 _WEBHOOK_RATE_LOCK = Lock()
+_WEBHOOK_STATS_LOCK = Lock()
 _WEBHOOK_RATE_WINDOW_S = 60.0
 _WEBHOOK_RATE_PER_IP = 60
 _WEBHOOK_RATE: dict[str, deque[float]] = defaultdict(deque)
@@ -64,6 +66,7 @@ class CallEndedWebhookConfig(BaseModel):
     backfill_timeout_s: int = 5400
     backfill_no_progress_timeout_s: int = 300
     max_live_running: int = 5
+    agent_continuity_filter_enabled: bool = True
     auto_retry_enabled: bool = True
     retry_max_attempts: int = 2
     retry_delay_s: int = 45
@@ -88,6 +91,7 @@ def _default_call_ended_config() -> dict[str, Any]:
         "backfill_timeout_s": 5400,
         "backfill_no_progress_timeout_s": 300,
         "max_live_running": 5,
+        "agent_continuity_filter_enabled": True,
         "auto_retry_enabled": True,
         "retry_max_attempts": 2,
         "retry_delay_s": 45,
@@ -158,6 +162,7 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
         base["max_live_running"] = max(1, min(int(base.get("max_live_running") or 5), 64))
     except Exception:
         base["max_live_running"] = 5
+    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
     base["auto_retry_enabled"] = bool(base.get("auto_retry_enabled", True))
     try:
         base["retry_max_attempts"] = max(0, min(int(base.get("retry_max_attempts") or 2), 10))
@@ -208,6 +213,76 @@ def _save_call_ended_config(cfg: dict[str, Any]) -> dict[str, Any]:
     norm = _normalize_call_ended_config(cfg)
     _CALL_ENDED_CONFIG_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
     return norm
+
+
+def _default_webhook_stats() -> dict[str, Any]:
+    return {
+        "rejected_webhooks_total": 0,
+        "rejected_by_reason": {},
+        "updated_at": "",
+    }
+
+
+def _normalize_webhook_stats(raw: Any) -> dict[str, Any]:
+    base = _default_webhook_stats()
+    if isinstance(raw, dict):
+        base.update(raw)
+    try:
+        base["rejected_webhooks_total"] = max(0, int(base.get("rejected_webhooks_total") or 0))
+    except Exception:
+        base["rejected_webhooks_total"] = 0
+    by_reason = base.get("rejected_by_reason")
+    if isinstance(by_reason, dict):
+        norm_by_reason: dict[str, int] = {}
+        for k, v in by_reason.items():
+            kk = str(k or "").strip()
+            if not kk:
+                continue
+            try:
+                norm_by_reason[kk] = max(0, int(v or 0))
+            except Exception:
+                norm_by_reason[kk] = 0
+        base["rejected_by_reason"] = norm_by_reason
+    else:
+        base["rejected_by_reason"] = {}
+    base["updated_at"] = str(base.get("updated_at") or "").strip()
+    return base
+
+
+def _load_webhook_stats() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _WEBHOOK_STATS_FILE.exists():
+        stats = _default_webhook_stats()
+        _WEBHOOK_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+        return stats
+    try:
+        raw = json.loads(_WEBHOOK_STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    stats = _normalize_webhook_stats(raw)
+    _WEBHOOK_STATS_FILE.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
+    return stats
+
+
+def _save_webhook_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    norm = _normalize_webhook_stats(stats)
+    _WEBHOOK_STATS_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
+    return norm
+
+
+def _inc_rejected_webhook(reason: str) -> dict[str, Any]:
+    reason_key = str(reason or "").strip().lower() or "unknown"
+    with _WEBHOOK_STATS_LOCK:
+        stats = _load_webhook_stats()
+        stats["rejected_webhooks_total"] = int(stats.get("rejected_webhooks_total") or 0) + 1
+        by_reason = stats.get("rejected_by_reason")
+        if not isinstance(by_reason, dict):
+            by_reason = {}
+        by_reason[reason_key] = int(by_reason.get(reason_key) or 0) + 1
+        stats["rejected_by_reason"] = by_reason
+        stats["updated_at"] = _utc_now_iso()
+        return _save_webhook_stats(stats)
 
 
 def _utc_now_iso() -> str:
@@ -940,6 +1015,92 @@ def _agent_candidate_names(agent: str) -> list[str]:
         if str(target or "").strip() == primary:
             names.add(str(alias_name or "").strip())
     return sorted([n for n in names if n])
+
+
+def _agent_name_key(agent: str) -> str:
+    raw = str(agent or "").strip().lower()
+    if not raw:
+        return ""
+    return re.sub(r"\s+", " ", raw)
+
+
+def _same_agent_name(a: str, b: str) -> bool:
+    aa = _agent_name_key(a)
+    bb = _agent_name_key(b)
+    if not aa or not bb:
+        return False
+    if aa == bb:
+        return True
+    anames = {_agent_name_key(x) for x in _agent_candidate_names(a)}
+    bnames = {_agent_name_key(x) for x in _agent_candidate_names(b)}
+    anames.discard("")
+    bnames.discard("")
+    return bool(anames & bnames)
+
+
+def _call_sort_key(row: CRMCall) -> tuple[float, str]:
+    started_raw = str(getattr(row, "started_at", "") or "").strip()
+    dt = _parse_iso(started_raw)
+    if dt is not None:
+        return (dt.timestamp(), str(getattr(row, "call_id", "") or ""))
+    call_id = str(getattr(row, "call_id", "") or "")
+    try:
+        return (float(int(call_id)), call_id)
+    except Exception:
+        return (0.0, call_id)
+
+
+def _agent_continuity_check(
+    db: Session,
+    *,
+    pair: dict[str, str],
+    payload_agent: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    account_id = str(pair.get("account_id") or "").strip()
+    customer = str(pair.get("customer") or "").strip()
+    resolved_agent = str(pair.get("agent") or payload_agent or "").strip()
+    if not account_id:
+        return False, "missing_account_id", {"account_id": account_id}
+
+    stmt = select(CRMCall).where(_sql_func.trim(CRMCall.account_id) == account_id)
+    if customer:
+        stmt = stmt.where(_sql_func.lower(_sql_func.trim(CRMCall.customer)) == customer.lower())
+    rows = db.exec(stmt).all()
+    rows = [r for r in rows if str(getattr(r, "agent", "") or "").strip()]
+    if not rows:
+        return False, "no_call_history", {"account_id": account_id, "customer": customer}
+
+    rows.sort(key=_call_sort_key)
+    first = rows[0]
+    last = rows[-1]
+    first_agent = str(getattr(first, "agent", "") or "").strip()
+    last_agent = str(getattr(last, "agent", "") or "").strip()
+    if not _same_agent_name(first_agent, last_agent):
+        return False, "agent_changed", {
+            "account_id": account_id,
+            "customer": customer,
+            "first_agent": first_agent,
+            "last_agent": last_agent,
+            "resolved_agent": resolved_agent,
+            "history_calls": len(rows),
+        }
+    if resolved_agent and not _same_agent_name(last_agent, resolved_agent):
+        return False, "agent_mismatch_current", {
+            "account_id": account_id,
+            "customer": customer,
+            "first_agent": first_agent,
+            "last_agent": last_agent,
+            "resolved_agent": resolved_agent,
+            "history_calls": len(rows),
+        }
+    return True, "ok", {
+        "account_id": account_id,
+        "customer": customer,
+        "first_agent": first_agent,
+        "last_agent": last_agent,
+        "resolved_agent": resolved_agent,
+        "history_calls": len(rows),
+    }
 
 
 def _resolve_pair(db: Session, payload: CallEndedWebhookPayload) -> dict[str, str]:
@@ -1682,6 +1843,63 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
         if not queue:
             return
 
+        # Enforce continuity filter on queued items (safety sweep for pre-existing queue rows).
+        if bool(cfg.get("agent_continuity_filter_enabled", True)):
+            try:
+                with Session(_db_engine) as _s:
+                    for item in queue:
+                        state = str(item.get("state") or "queued").strip().lower()
+                        if state not in {"queued", "retrying"}:
+                            continue
+                        run_id = str(item.get("run_id") or "").strip()
+                        pipeline_id = str(item.get("pipeline_id") or "").strip()
+                        sales_agent = str(item.get("sales_agent") or "").strip()
+                        customer = str(item.get("customer") or "").strip()
+                        call_id = str(item.get("call_id") or "").strip()
+                        pair = item.get("pair") if isinstance(item.get("pair"), dict) else {}
+                        pair_data = {
+                            "account_id": str(pair.get("account_id") or "").strip(),
+                            "agent": str(pair.get("agent") or sales_agent or "").strip(),
+                            "customer": str(pair.get("customer") or customer or "").strip(),
+                            "crm_url": str(pair.get("crm_url") or "").strip(),
+                        }
+                        if not pair_data["account_id"] and pair_data["agent"] and pair_data["customer"]:
+                            pair_data = _pair_from_names(pair_data["agent"], pair_data["customer"])
+
+                        ok_cont, reason, meta = _agent_continuity_check(
+                            _s,
+                            pair=pair_data,
+                            payload_agent=sales_agent,
+                        )
+                        if ok_cont:
+                            continue
+
+                        stats = _inc_rejected_webhook(reason)
+                        item["state"] = "cancelled"
+                        item["updated_at"] = _utc_now_iso()
+                        item["last_error"] = (
+                            f"Rejected by agent continuity filter ({reason}). "
+                            f"first={str(meta.get('first_agent') or '?')} "
+                            f"last={str(meta.get('last_agent') or '?')}"
+                        )
+                        _upsert_pipeline_run_stub(
+                            run_id=run_id,
+                            pipeline_id=pipeline_id,
+                            pipeline_name=str(item.get("pipeline_name") or ""),
+                            sales_agent=sales_agent,
+                            customer=customer,
+                            call_id=call_id,
+                            status="cancelled",
+                            log_line=(
+                                "Rejected by agent continuity filter "
+                                f"({reason}); rejected total: {int(stats.get('rejected_webhooks_total') or 0)}"
+                            ),
+                        )
+                        changed = True
+            except Exception:
+                # Do not block dispatcher on continuity sweep errors.
+                pass
+
         # Reconcile running/retrying/finalized items.
         for item in queue:
             state = str(item.get("state") or "queued").strip().lower()
@@ -2019,6 +2237,32 @@ async def _handle_call_webhook(
     if not call_id:
         raise HTTPException(status_code=400, detail="Missing call_id in webhook payload.")
 
+    continuity_meta: dict[str, Any] = {}
+    if bool(cfg.get("agent_continuity_filter_enabled", True)):
+        continuity_ok, continuity_reason, continuity_meta = _agent_continuity_check(
+            db,
+            pair=pair,
+            payload_agent=str(payload.agent or ""),
+        )
+        if not continuity_ok:
+            stats = _inc_rejected_webhook(continuity_reason)
+            return {
+                "ok": True,
+                "webhook_type": webhook_type,
+                "compat_mode": compat_mode or "",
+                "ingest_only": False,
+                "stored": stored,
+                "ignored": True,
+                "rejected": True,
+                "rejection_reason": continuity_reason,
+                "rejection_meta": continuity_meta,
+                "filter": {
+                    "agent_continuity_filter_enabled": True,
+                },
+                "rejected_webhooks_total": int(stats.get("rejected_webhooks_total") or 0),
+                "message": "Webhook ignored by agent continuity filter.",
+            }
+
     record_path = _resolve_record_path(db, payload, pair)
 
     # Always async from webhook path: enqueue quickly, process heavy steps in dispatcher.
@@ -2181,6 +2425,10 @@ async def _handle_call_webhook(
             "duration": payload.duration,
         },
         "resolved_pair": pair,
+        "filter": {
+            "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
+            "continuity": continuity_meta,
+        },
         "transcription": transcription_info,
         "pipeline": pipeline_info,
     }

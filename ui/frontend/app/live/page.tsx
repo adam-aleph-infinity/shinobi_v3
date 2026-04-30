@@ -67,12 +67,16 @@ interface LiveWebhookConfig {
   backfill_historical_transcripts: boolean;
   backfill_timeout_s: number;
   max_live_running: number;
+  agent_continuity_filter_enabled: boolean;
   auto_retry_enabled: boolean;
   retry_max_attempts: number;
   retry_delay_s: number;
   retry_on_server_error: boolean;
   retry_on_rate_limit: boolean;
   retry_on_timeout: boolean;
+  rejected_webhooks_total?: number;
+  rejected_by_reason?: Record<string, number>;
+  rejected_updated_at?: string;
   read_only?: boolean;
   mirror_source?: string;
 }
@@ -388,6 +392,7 @@ export default function LivePage() {
           transcription_timeout_s: Number(liveCfg?.transcription_timeout_s || 900),
           transcription_poll_interval_s: Number(liveCfg?.transcription_poll_interval_s || 2),
           max_live_running: Number(liveCfg?.max_live_running || 5),
+          agent_continuity_filter_enabled: !!(liveCfg?.agent_continuity_filter_enabled ?? true),
           auto_retry_enabled: !!(liveCfg?.auto_retry_enabled ?? true),
           retry_max_attempts: Number(liveCfg?.retry_max_attempts || 2),
           retry_delay_s: Number(liveCfg?.retry_delay_s || 45),
@@ -806,6 +811,19 @@ export default function LivePage() {
                     {liveMessage}
                   </p>
                 ) : null}
+                <div className="pt-2 text-[11px] space-y-1">
+                  <p className={cn(
+                    "inline-flex items-center rounded border px-2 py-0.5",
+                    liveCfg?.agent_continuity_filter_enabled
+                      ? "text-emerald-300 border-emerald-800/60 bg-emerald-950/30"
+                      : "text-amber-300 border-amber-800/60 bg-amber-950/30",
+                  )}>
+                    Agent continuity filter: {liveCfg?.agent_continuity_filter_enabled ? "ON" : "OFF"}
+                  </p>
+                  <p className="text-gray-400">
+                    Rejected webhooks: {Number(liveCfg?.rejected_webhooks_total || 0)}
+                  </p>
+                </div>
                 {liveReadOnly ? (
                   <p className="pt-1 text-[11px] text-amber-300">
                     Read-only mirror from {String(liveCfg?.mirror_source || "production")}.
