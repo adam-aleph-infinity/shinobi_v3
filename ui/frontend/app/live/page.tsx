@@ -1026,7 +1026,14 @@ export default function LivePage() {
             Loading live runs…
           </div>
         ) : (
-          <div className="h-full grid grid-cols-1 2xl:grid-cols-[300px_340px_1fr_1fr_1fr] gap-0">
+          <div
+            className={cn(
+              "h-full grid grid-cols-1 gap-0",
+              collapsedRejectedFilters
+                ? "2xl:grid-cols-[300px_56px_1fr_1fr_1fr]"
+                : "2xl:grid-cols-[300px_340px_1fr_1fr_1fr]",
+            )}
+          >
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
@@ -1120,82 +1127,88 @@ export default function LivePage() {
             </section>
 
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
-              <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
-                <XCircle className="w-4 h-4 text-red-400" />
-                <p className="text-sm font-semibold text-gray-100">Rejected</p>
-                <span className="text-xs text-gray-500">{rejectedItems.length}</span>
+              <div
+                className={cn(
+                  "border-b border-gray-800 bg-gray-900/70 flex items-center shrink-0",
+                  collapsedRejectedFilters ? "px-2 py-2 justify-center gap-1" : "px-4 py-2 gap-2",
+                )}
+              >
+                <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+                {!collapsedRejectedFilters ? <p className="text-sm font-semibold text-gray-100">Rejected</p> : null}
+                {!collapsedRejectedFilters ? <span className="text-xs text-gray-500">{rejectedItems.length}</span> : null}
+                {collapsedRejectedFilters ? <span className="text-[9px] text-gray-500 shrink-0">{rejectedItems.length}</span> : null}
                 <button
                   type="button"
                   onClick={() => setCollapsedRejectedFilters((v) => !v)}
-                  className="ml-auto text-gray-500 hover:text-gray-300"
+                  className={cn("text-gray-500 hover:text-gray-300", collapsedRejectedFilters ? "" : "ml-auto")}
                   title={collapsedRejectedFilters ? "Expand rejected webhooks" : "Collapse rejected webhooks"}
                 >
                   <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", !collapsedRejectedFilters && "rotate-90")} />
                 </button>
               </div>
-              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                {rejectionActionMsg ? (
-                  <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
-                    {rejectionActionMsg}
-                  </p>
-                ) : null}
-                {collapsedRejectedFilters ? (
-                  <p className="text-xs text-gray-500 italic">Rejected list is collapsed.</p>
-                ) : rejectedItems.length === 0 ? (
-                  <p className="text-xs text-gray-600 italic">No rejected webhooks.</p>
-                ) : (
-                  rejectedItems.map((item) => {
-                    const rid = String(item.id || "");
-                    const expanded = expandedRejectedId === rid;
-                    const status = String(item.status || "rejected").toLowerCase();
-                    const statusCls = status === "queued_manual"
-                      ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
-                      : "text-red-300 border-red-700/60 bg-red-950/30";
-                    return (
-                      <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
-                        <div className="flex items-start gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
-                            className="mt-0.5 text-gray-500 hover:text-gray-300"
-                            title={expanded ? "Hide payload" : "View payload"}
-                          >
-                            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
-                          </button>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1 flex-wrap">
-                              <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
-                                {rid.slice(0, 8)}
-                              </span>
-                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
-                                {status}
-                              </span>
-                              <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+              {!collapsedRejectedFilters ? (
+                <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                  {rejectionActionMsg ? (
+                    <p className={cn("text-[11px]", rejectionActionErr ? "text-red-300" : "text-emerald-300")}>
+                      {rejectionActionMsg}
+                    </p>
+                  ) : null}
+                  {rejectedItems.length === 0 ? (
+                    <p className="text-xs text-gray-600 italic">No rejected webhooks.</p>
+                  ) : (
+                    rejectedItems.map((item) => {
+                      const rid = String(item.id || "");
+                      const expanded = expandedRejectedId === rid;
+                      const status = String(item.status || "rejected").toLowerCase();
+                      const statusCls = status === "queued_manual"
+                        ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                        : "text-red-300 border-red-700/60 bg-red-950/30";
+                      return (
+                        <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                          <div className="flex items-start gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
+                              className="mt-0.5 text-gray-500 hover:text-gray-300"
+                              title={expanded ? "Hide payload" : "View payload"}
+                            >
+                              <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+                            </button>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
+                                  {rid.slice(0, 8)}
+                                </span>
+                                <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
+                                  {status}
+                                </span>
+                                <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+                              </div>
+                              <div className="text-[10px] text-gray-500 mt-1 truncate">
+                                {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
+                              </div>
                             </div>
-                            <div className="text-[10px] text-gray-500 mt-1 truncate">
-                              {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
-                            </div>
+                            <button
+                              type="button"
+                              disabled={requeueingRejectedId === rid}
+                              onClick={() => { void moveRejectedToRun(item); }}
+                              className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
+                              title="Move this rejected webhook to run queue"
+                            >
+                              {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
+                            </button>
                           </div>
-                          <button
-                            type="button"
-                            disabled={requeueingRejectedId === rid}
-                            onClick={() => { void moveRejectedToRun(item); }}
-                            className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
-                            title="Move this rejected webhook to run queue"
-                          >
-                            {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
-                          </button>
-                        </div>
-                        {expanded ? (
-                          <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
+                          {expanded ? (
+                            <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
 {JSON.stringify(item, null, 2)}
-                          </pre>
-                        ) : null}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
+                            </pre>
+                          ) : null}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              ) : null}
             </section>
 
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
