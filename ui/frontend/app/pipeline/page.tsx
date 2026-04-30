@@ -2779,6 +2779,14 @@ function PipelineCanvas() {
       runContextMode === "historical"
         ? String(selectedCacheRun?.id || "").trim()
         : String(currentRunId || "").trim();
+    const sourceRunRecord =
+      runContextMode === "historical"
+        ? selectedCacheRun
+        : historyRuns.find((r) => String(r.id || "").trim() === sourceRunId);
+    const sourceRunStatus = String(sourceRunRecord?.status || "").trim().toLowerCase();
+    const sourceRunIsCancelled = ["cancelled", "canceled", "aborted", "stopped"].includes(sourceRunStatus);
+    const sourceRunIsFailed = ["failed", "error", "fail"].includes(sourceRunStatus);
+    const sourceRunIsCompleted = ["done", "completed", "pass", "success"].includes(sourceRunStatus);
     if (sourceRunId && !parsedRunStepsById.has(sourceRunId)) {
       // Do not keep stale in-memory statuses (can incorrectly show "running" forever).
       // Reset from current run terminal state while waiting for step payload to load.
@@ -2824,6 +2832,7 @@ function PipelineCanvas() {
     runContextMode,
     selectedCacheRun,
     currentRunId,
+    historyRuns,
     parsedRunStepsById,
   ]);
 
