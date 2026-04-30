@@ -1180,7 +1180,9 @@ def _agent_continuity_check(
     rows = db.exec(stmt).all()
     rows = [r for r in rows if str(getattr(r, "agent", "") or "").strip()]
     if not rows:
-        return False, "no_call_history", {"account_id": account_id, "customer": customer}
+        # Do not reject when there is no history. This filter should only reject
+        # when we can prove first/last agent continuity is broken.
+        return True, "no_call_history", {"account_id": account_id, "customer": customer}
 
     rows.sort(key=_call_sort_key)
     first = rows[0]
@@ -1196,8 +1198,10 @@ def _agent_continuity_check(
             "resolved_agent": resolved_agent,
             "history_calls": len(rows),
         }
+    # Only continuity break (first != last) should reject.
+    # Current payload/row agent mismatch is informational only.
     if resolved_agent and not _same_agent_name(last_agent, resolved_agent):
-        return False, "agent_mismatch_current", {
+        return True, "agent_mismatch_current", {
             "account_id": account_id,
             "customer": customer,
             "first_agent": first_agent,
