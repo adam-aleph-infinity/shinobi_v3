@@ -17,9 +17,8 @@ from sqlmodel import Session, select
 from ui.backend.config import settings
 from ui.backend.database import engine as _db_engine, get_session
 from ui.backend.models.crm import CRMCall, CRMPair
-from ui.backend.models.job import Job, JobStatus
+from ui.backend.models.job import Job
 from ui.backend.models.pipeline_run import PipelineRun
-from ui.backend.routers.transcription_process import CreateJobRequest, create_transcription_job
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -722,35 +721,6 @@ def _transcript_exists(agent: str, customer: str, call_id: str) -> bool:
     return p.exists()
 
 
-async def _wait_for_job(job_id: str, timeout_s: int, poll_s: float) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + float(timeout_s)
-    while True:
-        with Session(_db_engine) as s:
-            job = s.get(Job, job_id)
-            if not job:
-                raise HTTPException(status_code=404, detail=f"Transcription job {job_id} not found.")
-            status = _enum_value(job.status)
-            if job.status == JobStatus.complete:
-                return {
-                    "job_id": job_id,
-                    "status": status,
-                    "error": "",
-                    "completed_at": str(getattr(job, "completed_at", None) or ""),
-                }
-            if job.status == JobStatus.failed:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Transcription failed for job {job_id}: {str(job.error or 'unknown error')}",
-                )
-
-        if asyncio.get_running_loop().time() >= deadline:
-            raise HTTPException(
-                status_code=504,
-                detail=f"Timed out waiting for transcription job {job_id}.",
-            )
-        await asyncio.sleep(float(poll_s))
-
-
 def _resolve_pipeline_id(cfg: dict[str, Any], payload_agent: str, resolved_agent: str) -> str:
     mapping = cfg.get("pipeline_by_agent")
     if not isinstance(mapping, dict):
@@ -815,7 +785,11 @@ async def _trigger_pipeline_run(
     run_id = ""
     event_tail: list[str] = []
     status_code = 0
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(15.0, read=None)) as client:
+    # Keep webhook dispatcher responsive: do not allow indefinite stream waits.
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0),
+    ) as client:
         async with client.stream(
             "POST",
             endpoint,
@@ -1194,7 +1168,11 @@ async def _execute_live_queue_item(
                 status="preparing",
                 log_line="Backfilling historical transcripts (skipping existing)",
             )
-            backfill = await _backfill_pair_transcripts(pair, cfg)
+            # Guard backfill so a stuck CRM/transcription dependency cannot pin live slots forever.
+            backfill = await asyncio.wait_for(
+                _backfill_pair_transcripts(pair, cfg),
+                timeout=max(120, int(cfg.get("backfill_timeout_s") or 5400) + 60),
+            )
             if not bool(backfill.get("ok")):
                 raise RuntimeError(
                     f"Backfill failed ({int(backfill.get('failed') or 0)} failed jobs)."
@@ -1637,40 +1615,20 @@ async def _handle_call_webhook(
         raise HTTPException(status_code=400, detail="Missing call_id in webhook payload.")
 
     record_path = _resolve_record_path(db, payload, pair)
-    if not record_path:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing record_path in webhook payload and CRM call record.",
-        )
 
+    # Always async from webhook path: enqueue quickly, process heavy steps in dispatcher.
+    # This avoids webhook request timeouts that can take the backend out of LB health.
+    transcript_cached = _transcript_exists(pair["agent"], pair["customer"], call_id)
     transcription_info: dict[str, Any] = {
-        "used_cached_transcript": False,
+        "used_cached_transcript": transcript_cached,
         "job_id": "",
-        "status": "",
+        "status": "queued_async",
+        "message": (
+            "Transcript already exists; pipeline preflight will continue in background."
+            if transcript_cached
+            else "Transcription/backfill queued for background preflight."
+        ),
     }
-    if _transcript_exists(pair["agent"], pair["customer"], call_id):
-        transcription_info["used_cached_transcript"] = True
-        transcription_info["status"] = "complete"
-    else:
-        create_req = CreateJobRequest(
-            crm_url=pair["crm_url"],
-            account_id=pair["account_id"],
-            agent=pair["agent"],
-            customer=pair["customer"],
-            call_id=call_id,
-            record_path=record_path,
-            smooth_model=str(cfg.get("transcription_model") or "gpt-5.4"),
-        )
-        job_resp = await create_transcription_job(create_req, db)
-        job_id = str(job_resp.get("job_id") or "")
-        transcription_info["job_id"] = job_id
-        transcription_info["status"] = _enum_value(job_resp.get("status") or "")
-        waited = await _wait_for_job(
-            job_id=job_id,
-            timeout_s=int(cfg.get("transcription_timeout_s") or 900),
-            poll_s=float(cfg.get("transcription_poll_interval_s") or 2.0),
-        )
-        transcription_info.update(waited)
 
     pipeline_info: dict[str, Any] = {
         "triggered": False,
@@ -1746,6 +1704,7 @@ async def _handle_call_webhook(
                             "customer": pair["customer"],
                         },
                         "payload": queued_payload,
+                        "record_path": record_path,
                     }
                     created, meta = await _enqueue_live_item(queue_item)
                     if created:
@@ -1780,7 +1739,8 @@ async def _handle_call_webhook(
                         pipeline_info["message"] = str(entry.get("message") or "")
 
             ensure_live_dispatcher_started()
-            await _dispatch_live_queue_once(str(request.base_url or ""))
+            # Kick dispatcher in background; webhook response must return immediately.
+            asyncio.create_task(_dispatch_live_queue_once(str(request.base_url or "")))
 
             # Refresh state after dispatch attempt (some queued runs may become running immediately).
             for entry in pipeline_runs:
