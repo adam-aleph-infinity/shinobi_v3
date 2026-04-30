@@ -442,10 +442,13 @@ def get_raw_input(
     call_id: str = Query(""),
     merged_scope: str = Query("auto"),
     merged_until_call_id: str = Query(""),
+    model: str = Query(""),
+    include_file_refs: bool = Query(False),
     db: Session = Depends(get_session),
 ):
     """Resolve and return the raw text for a single input source."""
     try:
+        meta: dict[str, Any] = {}
         content = _resolve_input(
             source,
             agent_id,
@@ -456,8 +459,35 @@ def get_raw_input(
             db,
             merged_scope=merged_scope,
             merged_until_call_id=merged_until_call_id,
+            meta=meta,
         )
-        return {"content": content, "chars": len(content)}
+        payload: dict[str, Any] = {
+            "content": content,
+            "chars": len(content),
+            "meta": meta,
+        }
+        src = _normalize_input_source(source)
+        if include_file_refs and src in _FILE_SOURCES and content:
+            provider_model = str(model or "gpt-5.4").strip() or "gpt-5.4"
+            input_key = src
+            db._agent_run_ctx = {
+                "sales_agent": sales_agent,
+                "customer": customer,
+                "call_id": str(meta.get("resolved_call_id") or call_id or "").strip(),
+                "source_for_key": {input_key: src},
+            }
+            try:
+                payload["file_refs"] = _resolve_provider_file_refs(
+                    provider_model,
+                    {input_key: content},
+                    db,
+                )
+            except Exception as refs_exc:
+                payload["file_refs"] = {}
+                payload["file_refs_error"] = str(refs_exc)
+        else:
+            payload["file_refs"] = {}
+        return payload
     except RuntimeError as e:
         raise HTTPException(404, str(e))
 
@@ -2580,7 +2610,8 @@ def _resolve_input(source: str, agent_id: Optional[str],
                    manual_inputs: dict, db: Session,
                    input_key: str = "",
                    merged_scope: str = "auto",
-                   merged_until_call_id: str = "") -> str:
+                   merged_until_call_id: str = "",
+                   meta: Optional[dict[str, Any]] = None) -> str:
     """Resolve one declared input to its text content."""
     from ui.backend.models.note import Note
     from ui.backend.models.persona import Persona
@@ -2589,11 +2620,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
     source = _normalize_input_source(source)
     merged_scope_norm = _normalize_merged_scope(merged_scope)
     fixed_merged_call_id = _norm_call_id(merged_until_call_id)
+    if meta is not None:
+        meta.clear()
+        meta["source"] = source
 
     if source == "transcript":
         if not call_id:
             # Per-pair context: fall back to merged transcript
             source = "merged_transcript"
+            if meta is not None:
+                meta["source"] = source
         else:
             llm_dir = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final"
             path = llm_dir / "smoothed.txt"
@@ -2604,6 +2640,13 @@ def _resolve_input(source: str, agent_id: Optional[str],
             if not path.exists():
                 raise RuntimeError(f"Transcript not found for call {call_id}")
             content = path.read_text(encoding="utf-8").strip()
+            if meta is not None:
+                meta["origin"] = "cache"
+                try:
+                    meta["cache_file"] = str(path.relative_to(ui_data))
+                except Exception:
+                    meta["cache_file"] = str(path)
+                meta["resolved_call_id"] = call_id
             if not content:
                 return content
             try:
@@ -2622,6 +2665,8 @@ def _resolve_input(source: str, agent_id: Optional[str],
             cutoff_call_id = ""
         elif merged_scope_norm == "upto_call" and fixed_merged_call_id:
             cutoff_call_id = fixed_merged_call_id
+        if meta is not None:
+            meta["resolved_call_id"] = cutoff_call_id
 
         if not cutoff_call_id:
             merged = pair_dir / "merged_transcript.txt"
@@ -2630,6 +2675,12 @@ def _resolve_input(source: str, agent_id: Optional[str],
                     cached = merged.read_text(encoding="utf-8").strip()
                     # Rich merged transcript cache marker
                     if "CALL STATUS INDEX" in cached[:2000]:
+                        if meta is not None:
+                            meta["origin"] = "cache"
+                            try:
+                                meta["cache_file"] = str(merged.relative_to(ui_data))
+                            except Exception:
+                                meta["cache_file"] = str(merged)
                         return cached
                 except Exception:
                     pass
@@ -2653,8 +2704,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
             else:
                 out_path = pair_dir / "merged_transcript.txt"
             out_path.write_text(content, encoding="utf-8")
+            if meta is not None:
+                meta["origin"] = "computed"
+                try:
+                    meta["cache_file"] = str(out_path.relative_to(ui_data))
+                except Exception:
+                    meta["cache_file"] = str(out_path)
         except Exception:
             pass
+        if meta is not None and "origin" not in meta:
+            meta["origin"] = "computed"
         return content
 
     if source == "notes":
@@ -2693,8 +2752,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
             else:
                 out_path = pair_dir / "merged_notes.txt"
             out_path.write_text(content, encoding="utf-8")
+            if meta is not None:
+                meta["origin"] = "computed"
+                try:
+                    meta["cache_file"] = str(out_path.relative_to(ui_data))
+                except Exception:
+                    meta["cache_file"] = str(out_path)
         except Exception:
             pass
+        if meta is not None and "origin" not in meta:
+            meta["origin"] = "computed"
         return content
 
     if source == "agent_output":

@@ -318,6 +318,12 @@ interface InputPreviewState {
   loading: boolean;
   content: string;
   error: string;
+  source?: string;
+  origin?: string;
+  cacheFile?: string;
+  resolvedCallId?: string;
+  fileRefs?: Record<string, string>;
+  fileRefsError?: string;
 }
 
 interface RenderedLlmCacheEntry {
@@ -4620,7 +4626,7 @@ function PipelineCanvas() {
         `Merged input recalculation requested${runCall ? ` for call ${runCall}` : ""}`,
         "pipeline",
       );
-      void fetchInputPreviewForSource("merged_transcript");
+      void fetchInputPreviewForSource("merged_transcript", true);
     }
     void runPipeline("default", {
       executeStepIndices,
@@ -4830,7 +4836,7 @@ function PipelineCanvas() {
     return String(callId || "").trim();
   }, [runContextMode, selectedCacheRun, callId]);
 
-  const fetchInputPreviewForSource = useCallback(async (source: string) => {
+  const fetchInputPreviewForSource = useCallback(async (source: string, includeFileRefs = false) => {
     const src = String(source || "").trim();
     if (!src) return;
 
@@ -4844,7 +4850,17 @@ function PipelineCanvas() {
 
     setInputPreviewBySource((prev) => ({
       ...prev,
-      [src]: { loading: true, content: "", error: "" },
+      [src]: {
+        loading: true,
+        content: "",
+        error: "",
+        source: src,
+        origin: "",
+        cacheFile: "",
+        resolvedCallId: "",
+        fileRefs: {},
+        fileRefsError: "",
+      },
     }));
 
     try {
@@ -4854,6 +4870,10 @@ function PipelineCanvas() {
         customer,
       });
       if (previewCallId) params.set("call_id", previewCallId);
+      if (includeFileRefs) {
+        params.set("model", "gpt-5.4");
+        params.set("include_file_refs", "1");
+      }
       const res = await fetch(`/api/universal-agents/raw-input?${params.toString()}`);
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
@@ -4861,14 +4881,38 @@ function PipelineCanvas() {
       }
       const data = await res.json();
       const content = String(data?.content || "");
+      const meta = (data?.meta && typeof data.meta === "object") ? data.meta : {};
+      const fileRefs = (data?.file_refs && typeof data.file_refs === "object")
+        ? (data.file_refs as Record<string, string>)
+        : {};
       setInputPreviewBySource((prev) => ({
         ...prev,
-        [src]: { loading: false, content, error: "" },
+        [src]: {
+          loading: false,
+          content,
+          error: "",
+          source: src,
+          origin: String(meta?.origin || ""),
+          cacheFile: String(meta?.cache_file || ""),
+          resolvedCallId: String(meta?.resolved_call_id || ""),
+          fileRefs,
+          fileRefsError: String(data?.file_refs_error || ""),
+        },
       }));
     } catch (e: any) {
       setInputPreviewBySource((prev) => ({
         ...prev,
-        [src]: { loading: false, content: "", error: `Could not load input preview: ${e?.message || "fetch failed"}` },
+        [src]: {
+          loading: false,
+          content: "",
+          error: `Could not load input preview: ${e?.message || "fetch failed"}`,
+          source: src,
+          origin: "",
+          cacheFile: "",
+          resolvedCallId: "",
+          fileRefs: {},
+          fileRefsError: "",
+        },
       }));
     }
   }, [salesAgent, customer, previewCallId]);
@@ -4895,13 +4939,9 @@ function PipelineCanvas() {
         });
     }
 
+    const shouldIncludeFileRefs = selKind === "input";
     Array.from(wantedSources).forEach((src) => {
-      // Merged preview is intentionally computed only when the merged input
-      // element is explicitly played.
-      if (src === "merged_transcript") {
-        return;
-      }
-      void fetchInputPreviewForSource(src);
+      void fetchInputPreviewForSource(src, shouldIncludeFileRefs);
     });
   }, [selectedNode, selKind, edges, nodes, fetchInputPreviewForSource]);
 
@@ -5099,6 +5139,66 @@ function PipelineCanvas() {
         <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5">
           <SectionContent content={renderedMarkdown} format="markdown" />
         </div>
+      </div>
+    );
+  }
+
+  function renderInputPreview(source: string) {
+    const src = String(source || "").trim();
+    const preview = src ? inputPreviewBySource[src] : null;
+    if (!src) return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
+    if (preview?.loading) {
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Loading input preview…
+          </div>
+        </div>
+      );
+    }
+    if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
+
+    const origin = String(preview?.origin || "").trim().toLowerCase();
+    const originLabel = origin === "cache"
+      ? "Pulled from cache"
+      : origin === "computed"
+        ? "Calculated now"
+        : "";
+    const cacheFile = String(preview?.cacheFile || "").trim();
+    const resolvedCallId = String(preview?.resolvedCallId || "").trim();
+    const fileRefs = preview?.fileRefs && typeof preview.fileRefs === "object"
+      ? Object.entries(preview.fileRefs).filter(([k, v]) => String(k).trim() && String(v).trim())
+      : [];
+    const fileRefText = fileRefs.length
+      ? fileRefs.map(([k, v]) => `${k}=${v}`).join(", ")
+      : "";
+    const fileRefsError = String(preview?.fileRefsError || "").trim();
+
+    return (
+      <div className="space-y-2">
+        {(originLabel || cacheFile || resolvedCallId || fileRefText || fileRefsError) && (
+          <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1">
+            {originLabel && (
+              <p className="text-[10px] text-gray-300">
+                Source: <span className="text-indigo-300">{originLabel}</span>
+              </p>
+            )}
+            {resolvedCallId && (
+              <p className="text-[10px] text-gray-400">Resolved call: {resolvedCallId}</p>
+            )}
+            {cacheFile && (
+              <p className="text-[10px] text-gray-500 break-all">Cache file: {cacheFile}</p>
+            )}
+            {fileRefText && (
+              <p className="text-[10px] text-emerald-300 break-all">File refs: {fileRefText}</p>
+            )}
+            {fileRefsError && (
+              <p className="text-[10px] text-amber-300 break-all">File ref warning: {fileRefsError}</p>
+            )}
+          </div>
+        )}
+        <RenderResultContent content={preview?.content || ""} sourceHint={src} />
       </div>
     );
   }
@@ -5304,18 +5404,7 @@ function PipelineCanvas() {
 
                   {selKind === "input" ? (() => {
                     const src = String(selData.inputSource || "").trim();
-                    const preview = src ? inputPreviewBySource[src] : null;
-                    if (!src) return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
-                    if (preview?.loading) {
-                      return (
-                        <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Loading input preview…
-                        </div>
-                      );
-                    }
-                    if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
-                    return <RenderResultContent content={preview?.content || ""} sourceHint={src} />;
+                    return renderInputPreview(src);
                   })() : null}
 
                   {selKind === "processing" ? (
@@ -5938,18 +6027,7 @@ function PipelineCanvas() {
                   <div className="flex-1 min-h-0 overflow-y-auto">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
-                    const preview = src ? inputPreviewBySource[src] : null;
-                    if (!src) return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
-                    if (preview?.loading) {
-                      return (
-                        <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Loading input preview…
-                        </div>
-                      );
-                    }
-                    if (preview?.error) return <p className="text-[10px] text-amber-300 whitespace-pre-wrap">{preview.error}</p>;
-                    return <RenderResultContent content={preview?.content || ""} sourceHint={src} />;
+                    return renderInputPreview(src);
                   })()}
                   </div>
                 </div>
