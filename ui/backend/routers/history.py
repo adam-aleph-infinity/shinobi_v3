@@ -190,7 +190,7 @@ def list_runs(
     date_to: str = Query(""),
     sort_by: str = Query("started_at"),
     sort_dir: str = Query("desc"),
-    limit: int = Query(200, ge=1, le=2000),
+    limit: int = Query(1000, ge=1, le=10000),
     compact: int = Query(0),
     mirror: int = Query(0),
     db: Session = Depends(get_session),

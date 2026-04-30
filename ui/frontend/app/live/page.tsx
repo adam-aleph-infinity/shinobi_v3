@@ -299,7 +299,7 @@ export default function LivePage() {
   );
   const liveReadOnly = !!liveCfg?.read_only;
 
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=300&compact=1&mirror=1";
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=2000&compact=1&mirror=1";
 
   const { data: runsData, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
     refreshInterval: 2500,

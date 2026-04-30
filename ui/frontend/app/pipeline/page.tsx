@@ -2185,7 +2185,7 @@ function PipelineCanvas() {
   }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
 
   const runsUrl = useMemo(() => {
-    const qp = new URLSearchParams({ limit: "300" });
+    const qp = new URLSearchParams({ limit: "2000" });
     if (pipelineId) qp.set("pipeline_id", pipelineId);
     if (salesAgent) qp.set("sales_agent", salesAgent);
     if (customer) qp.set("customer", customer);
