@@ -279,6 +279,8 @@ async def on_startup():
                 orphans = db.exec(
                     select(_PR).where(_PR.status == "running")
                 ).all()
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                _now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
                 for run in orphans:
                     # Flip any "loading" steps to "error"
                     try:
@@ -288,10 +290,28 @@ async def on_startup():
                                 s["state"] = "failed"
                                 s["status"] = "error"
                                 s["error_msg"] = "interrupted by server restart"
+                                if not s.get("end_time"):
+                                    s["end_time"] = _now_iso
                         run.steps_json = _json.dumps(rss)
                     except Exception:
                         pass
+                    try:
+                        _logs = _json.loads(run.log_json) if run.log_json else []
+                        if not isinstance(_logs, list):
+                            _logs = []
+                    except Exception:
+                        _logs = []
+                    _logs.append(
+                        {
+                            "ts": _now_iso,
+                            "text": "Run interrupted by backend restart; marked as error on startup.",
+                            "level": "pipeline",
+                        }
+                    )
+                    run.log_json = _json.dumps(_logs[-400:], ensure_ascii=False)
                     run.status = "error"
+                    if getattr(run, "finished_at", None) is None:
+                        run.finished_at = _now_naive
                     db.add(run)
                     print(f"[startup] Marked orphaned pipeline run {run.id[:8]} as error")
                 if orphans:

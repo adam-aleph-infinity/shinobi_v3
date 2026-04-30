@@ -272,6 +272,8 @@ def _upsert_pipeline_run_stub(
     log_line: str = "",
 ) -> None:
     now_iso = _utc_now_iso()
+    _status = str(status or "").strip().lower()
+    _terminal_statuses = {"done", "completed", "error", "failed", "cancelled"}
     try:
         with Session(_db_engine) as s:
             row = s.get(PipelineRun, run_id)
@@ -285,6 +287,11 @@ def _upsert_pipeline_run_stub(
                     call_id=call_id,
                     status=status,
                     started_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    finished_at=(
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        if _status in _terminal_statuses
+                        else None
+                    ),
                     steps_json=json.dumps(_build_step_skeleton(pipeline_id), ensure_ascii=False),
                     log_json=json.dumps(
                         ([{"ts": now_iso, "text": log_line, "level": "pipeline"}] if log_line else []),
@@ -299,6 +306,10 @@ def _upsert_pipeline_run_stub(
                 row.customer = customer
                 row.call_id = call_id
                 row.status = status
+                if _status in _terminal_statuses:
+                    row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                else:
+                    row.finished_at = None
                 if log_line:
                     logs = []
                     try:
@@ -396,13 +407,28 @@ def _extract_run_error(run_row: Optional[PipelineRun]) -> str:
     try:
         parsed_logs = json.loads(str(run_row.log_json or "[]"))
         if isinstance(parsed_logs, list):
+            _keywords = (
+                "error",
+                "failed",
+                "timeout",
+                "timed out",
+                "cancel",
+                "interrupted",
+                "restart",
+                "exception",
+            )
             for row in reversed(parsed_logs):
                 if isinstance(row, dict):
                     txt = str(row.get("text") or "")
-                    if txt:
+                    if txt and any(k in txt.lower() for k in _keywords):
                         return txt
     except Exception:
         pass
+    _status = str(getattr(run_row, "status", "") or "").strip().lower()
+    if _status == "cancelled":
+        return "Run was cancelled."
+    if _status in {"error", "failed"}:
+        return "Run ended with an error before a step-level error was recorded (likely interrupted)."
     return ""
 
 
