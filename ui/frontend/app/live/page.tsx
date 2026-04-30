@@ -470,6 +470,68 @@ export default function LivePage() {
     await applyLivePipelineSelection(next);
   };
 
+  const toggleContinuityFilter = async () => {
+    if (liveReadOnly) {
+      setLiveMessageError(true);
+      setLiveMessage("Jobs mirror mode is read-only in this environment.");
+      return;
+    }
+    const current = !!(liveCfg?.agent_continuity_filter_enabled ?? true);
+    const next = !current;
+    const ok = window.confirm(
+      next
+        ? "Enable agent continuity filter? (Reject only when historical first-agent and last-agent are different)"
+        : "Disable agent continuity filter? (All webhook jobs will pass this filter)",
+    );
+    if (!ok) return;
+
+    setLiveSaving(true);
+    setLiveMessage("");
+    try {
+      const currentRunPayload = (liveCfg && typeof liveCfg.run_payload === "object" && liveCfg.run_payload)
+        ? liveCfg.run_payload
+        : { resume_partial: true };
+      const res = await fetch("/api/pipelines/live-webhook/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: !!(liveCfg?.enabled ?? true),
+          ingest_only: !!(liveCfg?.ingest_only ?? false),
+          trigger_pipeline: !!(liveCfg?.trigger_pipeline ?? true),
+          live_pipeline_ids: Array.isArray(liveCfg?.live_pipeline_ids) ? liveCfg!.live_pipeline_ids : [],
+          default_pipeline_id: String(liveCfg?.default_pipeline_id || ""),
+          pipeline_by_agent: (liveCfg?.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
+            ? liveCfg.pipeline_by_agent
+            : {},
+          run_payload: currentRunPayload,
+          transcription_model: String(liveCfg?.transcription_model || "gpt-5.4"),
+          transcription_timeout_s: Number(liveCfg?.transcription_timeout_s || 900),
+          transcription_poll_interval_s: Number(liveCfg?.transcription_poll_interval_s || 2),
+          max_live_running: Number(liveCfg?.max_live_running || 5),
+          agent_continuity_filter_enabled: next,
+          auto_retry_enabled: !!(liveCfg?.auto_retry_enabled ?? true),
+          retry_max_attempts: Number(liveCfg?.retry_max_attempts || 2),
+          retry_delay_s: Number(liveCfg?.retry_delay_s || 45),
+          backfill_historical_transcripts: !!(liveCfg?.backfill_historical_transcripts ?? true),
+          backfill_timeout_s: Number(liveCfg?.backfill_timeout_s || 5400),
+          retry_on_server_error: !!(liveCfg?.retry_on_server_error ?? true),
+          retry_on_rate_limit: !!(liveCfg?.retry_on_rate_limit ?? true),
+          retry_on_timeout: !!(liveCfg?.retry_on_timeout ?? true),
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      setLiveMessageError(false);
+      setLiveMessage(`Agent continuity filter is now ${next ? "ON" : "OFF"}.`);
+      await mutateLiveCfg();
+    } catch (e: any) {
+      setLiveMessageError(true);
+      setLiveMessage(String(e?.message || "Failed to update continuity filter."));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
+
   const replayRejectedWebhook = async (item: RejectedWebhookItem) => {
     const rid = String(item?.id || "").trim();
     if (!rid) return;
@@ -900,6 +962,29 @@ export default function LivePage() {
                   <p className="text-gray-400">
                     Rejected webhooks: {Number(liveCfg?.rejected_webhooks_total || 0)}
                   </p>
+                  <button
+                    type="button"
+                    disabled={liveSaving || liveReadOnly}
+                    onClick={() => { void toggleContinuityFilter(); }}
+                    className={cn(
+                      "text-[11px] px-2 py-1 rounded border transition-colors",
+                      liveCfg?.agent_continuity_filter_enabled
+                        ? "border-emerald-700/70 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-900/40"
+                        : "border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40",
+                      (liveSaving || liveReadOnly) && "opacity-60 cursor-not-allowed",
+                    )}
+                    title="Toggle agent continuity filter"
+                  >
+                    Toggle Filter ({liveCfg?.agent_continuity_filter_enabled ? "ON" : "OFF"})
+                  </button>
+                  <details className="rounded border border-gray-800 bg-gray-950/40 px-2 py-1">
+                    <summary className="cursor-pointer text-gray-300 text-[11px]">Filter Logic</summary>
+                    <div className="mt-1 text-[10px] text-gray-400 space-y-0.5">
+                      <p>Pass when there is no call history.</p>
+                      <p>Pass when historical first-agent and last-agent are the same.</p>
+                      <p>Reject only when historical first-agent and last-agent are different.</p>
+                    </div>
+                  </details>
                 </div>
                 {liveReadOnly ? (
                   <p className="pt-1 text-[11px] text-amber-300">
