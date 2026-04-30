@@ -357,7 +357,8 @@ export default function LivePage() {
   );
   const liveReadOnly = hostReadOnly || !!liveCfg?.read_only;
 
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=300&compact=1&mirror=1";
+  // Use backend max (2000) so older date folders remain visible in Jobs history.
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=2000&compact=1&mirror=1";
 
   const { data: runsData, mutate: mutateRuns, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
     refreshInterval: 2500,
