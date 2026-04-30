@@ -99,6 +99,14 @@ interface RejectedWebhookItem {
   payload?: Record<string, any>;
 }
 
+function rejectedItemTs(item: RejectedWebhookItem): number {
+  const primary = parseServerDate(item.created_at || item.updated_at);
+  if (primary) return primary.getTime();
+  const secondary = parseServerDate(item.updated_at || item.created_at);
+  if (secondary) return secondary.getTime();
+  return 0;
+}
+
 function statusTone(status: string): string {
   const s = String(status || "").trim().toLowerCase();
   if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
@@ -325,6 +333,7 @@ export default function LivePage() {
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
+  const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -369,6 +378,26 @@ export default function LivePage() {
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
   const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
   const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData.items : [];
+  const rejectedByDay = useMemo(() => {
+    const sorted = [...rejectedItems].sort((a, b) => rejectedItemTs(b) - rejectedItemTs(a));
+    const byDay = new Map<string, RejectedWebhookItem[]>();
+    for (const item of sorted) {
+      const d = parseServerDate(item.created_at || item.updated_at);
+      const dayId = d
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+        : "unknown";
+      const arr = byDay.get(dayId) || [];
+      arr.push(item);
+      byDay.set(dayId, arr);
+    }
+    const groups = Array.from(byDay.entries()).map(([dayId, dayItems]) => ({
+      dayId,
+      label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
+      items: dayItems,
+    }));
+    groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
+    return groups;
+  }, [rejectedItems]);
 
   const pipelineNameById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -1153,56 +1182,74 @@ export default function LivePage() {
                       {rejectionActionMsg}
                     </p>
                   ) : null}
-                  {rejectedItems.length === 0 ? (
+                  {rejectedByDay.length === 0 ? (
                     <p className="text-xs text-gray-600 italic">No rejected webhooks.</p>
                   ) : (
-                    rejectedItems.map((item) => {
-                      const rid = String(item.id || "");
-                      const expanded = expandedRejectedId === rid;
-                      const status = String(item.status || "rejected").toLowerCase();
-                      const statusCls = status === "queued_manual"
-                        ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
-                        : "text-red-300 border-red-700/60 bg-red-950/30";
+                    rejectedByDay.map((group) => {
+                      const groupCollapsed = !!collapsedRejectedDayIds[group.dayId];
                       return (
-                        <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
-                          <div className="flex items-start gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
-                              className="mt-0.5 text-gray-500 hover:text-gray-300"
-                              title={expanded ? "Hide payload" : "View payload"}
-                            >
-                              <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
-                            </button>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1 flex-wrap">
-                                <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
-                                  {rid.slice(0, 8)}
-                                </span>
-                                <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
-                                  {status}
-                                </span>
-                                <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
-                              </div>
-                              <div className="text-[10px] text-gray-500 mt-1 truncate">
-                                {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              disabled={requeueingRejectedId === rid}
-                              onClick={() => { void moveRejectedToRun(item); }}
-                              className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
-                              title="Move this rejected webhook to run queue"
-                            >
-                              {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
-                            </button>
-                          </div>
-                          {expanded ? (
-                            <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
+                        <div key={group.dayId} className="space-y-1.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCollapsedRejectedDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-gray-800 bg-gray-900/70 hover:bg-gray-800 text-left"
+                            title={groupCollapsed ? "Expand date folder" : "Collapse date folder"}
+                          >
+                            <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform", !groupCollapsed && "rotate-90")} />
+                            <span className="text-[11px] text-gray-300 font-semibold">{group.label}</span>
+                            <span className="ml-auto text-[10px] text-gray-500">{group.items.length}</span>
+                          </button>
+                          {!groupCollapsed && group.items.map((item) => {
+                            const rid = String(item.id || "");
+                            const expanded = expandedRejectedId === rid;
+                            const status = String(item.status || "rejected").toLowerCase();
+                            const statusCls = status === "queued_manual"
+                              ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                              : "text-red-300 border-red-700/60 bg-red-950/30";
+                            return (
+                              <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                                <div className="flex items-start gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
+                                    className="mt-0.5 text-gray-500 hover:text-gray-300"
+                                    title={expanded ? "Hide payload" : "View payload"}
+                                  >
+                                    <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+                                  </button>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1 flex-wrap">
+                                      <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
+                                        {rid.slice(0, 8)}
+                                      </span>
+                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
+                                        {status}
+                                      </span>
+                                      <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+                                    </div>
+                                    <div className="text-[10px] text-gray-500 mt-1 truncate">
+                                      {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={requeueingRejectedId === rid}
+                                    onClick={() => { void moveRejectedToRun(item); }}
+                                    className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
+                                    title="Move this rejected webhook to run queue"
+                                  >
+                                    {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
+                                  </button>
+                                </div>
+                                {expanded ? (
+                                  <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
 {JSON.stringify(item, null, 2)}
-                            </pre>
-                          ) : null}
+                                  </pre>
+                                ) : null}
+                              </div>
+                            );
+                          })}
                         </div>
                       );
                     })
