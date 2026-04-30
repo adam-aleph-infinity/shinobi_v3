@@ -4949,6 +4949,29 @@ async def run_pipeline(
                 "output": output,
             }
 
+        _last_log_snapshot_ts = 0.0
+
+        def _persist_run_log_snapshot(force: bool = False) -> None:
+            """Persist in-flight pipeline logs so UI keeps live context across refresh/navigation."""
+            nonlocal _last_log_snapshot_ts
+            try:
+                now_m = time.monotonic()
+                if (not force) and (now_m - _last_log_snapshot_ts < 1.5):
+                    return
+                _last_log_snapshot_ts = now_m
+                _lines = [
+                    {"ts": l.ts, "text": l.text, "level": l.level}
+                    for l in log_buffer.get_after(start_seq)
+                ]
+                with Session(_db_engine) as _s:
+                    _s.execute(
+                        _sql_text("UPDATE pipeline_run SET log_json = :log_json WHERE id = :id"),
+                        {"log_json": json.dumps(_lines[-400:]), "id": run_id},
+                    )
+                    _s.commit()
+            except Exception:
+                pass
+
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
             Always written with status='running'; the state file is only promoted to
@@ -4963,6 +4986,7 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                     pass
+            _persist_run_log_snapshot()
             _save_state(
                 pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
                 start_datetime=run_start_dt, node_states=_build_node_states(),
@@ -5197,6 +5221,7 @@ async def run_pipeline(
                     log_buffer.emit(
                         f"[PIPELINE] … auto-transcription running ({_done}/{len(_ids)} complete) · {cid_short}"
                     )
+                    _persist_run_log_snapshot(force=True)
                 if time.monotonic() >= _deadline:
                     return False, _failed
                 await asyncio.sleep(2.0)
@@ -5236,6 +5261,7 @@ async def run_pipeline(
                     "needs_merged_transcript": bool(_needs_merged),
                 },
             )
+            _persist_run_log_snapshot(force=True)
             yield _sse("progress", {"msg": yield_msg})
 
             _file_aliases = _crm_load_aliases()
@@ -5313,6 +5339,7 @@ async def run_pipeline(
                     "job_count": len(_job_ids),
                 },
             )
+            _persist_run_log_snapshot(force=True)
             yield _sse("progress", {
                 "msg": f"Auto-transcription ready (submitted {_submitted}, skipped {_skipped})",
             })
