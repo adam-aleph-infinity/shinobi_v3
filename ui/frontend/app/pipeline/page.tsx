@@ -5077,7 +5077,15 @@ function PipelineCanvas() {
     }
   }, []);
 
-  function RenderResultContent({ content, sourceHint = "" }: { content: string; sourceHint?: string }) {
+  function RenderResultContent({
+    content,
+    sourceHint = "",
+    expand = false,
+  }: {
+    content: string;
+    sourceHint?: string;
+    expand?: boolean;
+  }) {
     const text = String(content || "");
     const hint = sourceHint.toLowerCase();
     const unwrapped = unwrapResponseEnvelope(text);
@@ -5103,14 +5111,24 @@ function PipelineCanvas() {
     }
     if (resultViewMode === "raw") {
       return (
-        <pre className="w-full max-h-80 overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+        <pre
+          className={cn(
+            "w-full overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
+            expand ? "h-full min-h-0" : "max-h-80",
+          )}
+        >
           {text}
         </pre>
       );
     }
     if (hint.includes("transcript")) {
       return (
-        <div className="h-80 border border-gray-700 rounded-lg overflow-hidden bg-gray-900">
+        <div
+          className={cn(
+            "border border-gray-700 rounded-lg overflow-hidden bg-gray-900",
+            expand ? "h-full min-h-0" : "h-80",
+          )}
+        >
           <TranscriptViewer content={text} format="txt" className="h-full" />
         </div>
       );
@@ -5124,7 +5142,7 @@ function PipelineCanvas() {
       : baseText;
 
     return (
-      <div className="space-y-1.5">
+      <div className={cn("space-y-1.5", expand && "h-full min-h-0 flex flex-col")}>
         {cacheEntry?.status === "loading" && (
           <div className="flex items-center gap-1.5 text-[10px] text-indigo-300">
             <Loader2 className="w-3 h-3 animate-spin" />
@@ -5136,14 +5154,19 @@ function PipelineCanvas() {
             LLM render unavailable ({cacheEntry.error}). Showing local rendered view.
           </p>
         )}
-        <div className="max-h-80 overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5">
+        <div
+          className={cn(
+            "overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
+            expand ? "flex-1 min-h-0" : "max-h-80",
+          )}
+        >
           <SectionContent content={renderedMarkdown} format="markdown" />
         </div>
       </div>
     );
   }
 
-  function renderInputPreview(source: string) {
+  function renderInputPreview(source: string, expand = false) {
     const src = String(source || "").trim();
     const preview = src ? inputPreviewBySource[src] : null;
     if (!src) return <p className="text-[11px] text-gray-500">Select an input source type first.</p>;
@@ -5176,9 +5199,9 @@ function PipelineCanvas() {
     const fileRefsError = String(preview?.fileRefsError || "").trim();
 
     return (
-      <div className="space-y-2">
+      <div className={cn("space-y-2", expand && "h-full min-h-0 flex flex-col")}>
         {(originLabel || cacheFile || resolvedCallId || fileRefText || fileRefsError) && (
-          <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1">
+          <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1 shrink-0">
             {originLabel && (
               <p className="text-[10px] text-gray-300">
                 Source: <span className="text-indigo-300">{originLabel}</span>
@@ -5198,7 +5221,9 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <RenderResultContent content={preview?.content || ""} sourceHint={src} />
+        <div className={cn(expand && "flex-1 min-h-0")}>
+          <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
+        </div>
       </div>
     );
   }
@@ -5387,9 +5412,13 @@ function PipelineCanvas() {
               </div>
             </div>
 
-            <div className="lg:col-span-7 min-h-0 overflow-y-auto space-y-2.5">
-              <PropertiesSection title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}>
-                <div className="space-y-2">
+            <div className="lg:col-span-7 min-h-0 h-full flex flex-col">
+              <PropertiesSection
+                title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
+                className="h-full flex flex-col"
+                bodyClassName="h-full min-h-0 flex flex-col"
+              >
+                <div className="space-y-2 h-full min-h-0 flex flex-col">
                   {selKind !== "input" ? renderCacheRunSelector() : null}
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] text-gray-500">
@@ -5404,7 +5433,7 @@ function PipelineCanvas() {
 
                   {selKind === "input" ? (() => {
                     const src = String(selData.inputSource || "").trim();
-                    return renderInputPreview(src);
+                    return renderInputPreview(src, true);
                   })() : null}
 
                   {selKind === "processing" ? (
@@ -5443,7 +5472,7 @@ function PipelineCanvas() {
                         {outputCache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{outputCache.errorMsg}</p>
                         )}
-                        <RenderResultContent content={outputCache.content || ""} />
+                        <RenderResultContent content={outputCache.content || ""} expand />
                       </>
                     ) : (
                       <p className="text-[11px] text-gray-500">No artifact result found for this step in the current context.</p>
@@ -5768,9 +5797,13 @@ function PipelineCanvas() {
               </div>
 
               {/* Right: agent response only */}
-              <div className="lg:col-span-3 min-h-0 overflow-y-auto space-y-2.5">
-                <PropertiesSection title="Agent Response">
-                  <div className="space-y-2">
+              <div className="lg:col-span-3 min-h-0 h-full flex flex-col">
+                <PropertiesSection
+                  title="Agent Response"
+                  className="h-full flex flex-col"
+                  bodyClassName="h-full min-h-0 flex flex-col"
+                >
+                  <div className="space-y-2 h-full min-h-0 flex flex-col">
                     {renderCacheRunSelector()}
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[10px] text-gray-500">
@@ -6008,8 +6041,8 @@ function PipelineCanvas() {
           </div>
 
           <div className={cn(
-            "min-h-0 overflow-y-auto space-y-2.5",
-            selKind === "input" ? "lg:col-span-9 h-full flex flex-col" : "lg:col-span-4",
+            "min-h-0 h-full flex flex-col",
+            selKind === "input" ? "lg:col-span-9" : "lg:col-span-4",
           )}>
             {selKind === "input" && (
               <PropertiesSection
@@ -6027,7 +6060,7 @@ function PipelineCanvas() {
                   <div className="flex-1 min-h-0 overflow-y-auto">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
-                    return renderInputPreview(src);
+                    return renderInputPreview(src, true);
                   })()}
                   </div>
                 </div>
@@ -6035,8 +6068,12 @@ function PipelineCanvas() {
             )}
 
             {selKind === "output" && (
-              <PropertiesSection title="Artifact Result">
-                <div className="space-y-2">
+              <PropertiesSection
+                title="Artifact Result"
+                className="h-full flex flex-col"
+                bodyClassName="h-full min-h-0 flex flex-col"
+              >
+                <div className="space-y-2 h-full min-h-0 flex flex-col">
                   {renderCacheRunSelector()}
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] text-gray-500">
@@ -6066,7 +6103,9 @@ function PipelineCanvas() {
                         {cache.errorMsg && (
                           <p className="text-[10px] text-red-300 whitespace-pre-wrap">{cache.errorMsg}</p>
                         )}
-                        <RenderResultContent content={cache.content || ""} />
+                        <div className="flex-1 min-h-0">
+                          <RenderResultContent content={cache.content || ""} expand />
+                        </div>
                       </>
                     );
                   })()}
