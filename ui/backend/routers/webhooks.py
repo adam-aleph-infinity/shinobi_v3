@@ -4,7 +4,9 @@ import json
 import re
 import time
 import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 
@@ -30,6 +32,11 @@ _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
 _WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
 _LIVE_QUEUE_LOCK = asyncio.Lock()
 _LIVE_DISPATCHER_TASK: Optional[asyncio.Task] = None
+_WEBHOOK_RATE_LOCK = Lock()
+_WEBHOOK_RATE_WINDOW_S = 60.0
+_WEBHOOK_RATE_PER_IP = 60
+_WEBHOOK_RATE: dict[str, deque[float]] = defaultdict(deque)
+_LIVE_QUEUE_MAX_ITEMS = 10_000
 
 
 class CallEndedWebhookPayload(BaseModel):
@@ -246,6 +253,53 @@ def _save_live_queue(items: list[dict[str, Any]]) -> None:
     )
 
 
+async def _load_live_queue_async() -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_load_live_queue)
+
+
+async def _save_live_queue_async(items: list[dict[str, Any]]) -> None:
+    await asyncio.to_thread(_save_live_queue, items)
+
+
+def _item_ts(item: dict[str, Any]) -> float:
+    dt = _parse_iso(item.get("created_at")) or _parse_iso(item.get("updated_at"))
+    return dt.timestamp() if dt else 0.0
+
+
+def _enforce_live_queue_limit(
+    items: list[dict[str, Any]],
+    max_items: int = _LIVE_QUEUE_MAX_ITEMS,
+) -> tuple[list[dict[str, Any]], int]:
+    if len(items) <= max_items:
+        return items, 0
+
+    protected_states = {"running", "preparing"}
+    protected: list[dict[str, Any]] = []
+    droppable: list[dict[str, Any]] = []
+    for item in items:
+        state = str(item.get("state") or "").strip().lower()
+        if state in protected_states:
+            protected.append(item)
+        else:
+            droppable.append(item)
+
+    protected_sorted = sorted(protected, key=_item_ts, reverse=True)
+    droppable_sorted = sorted(droppable, key=_item_ts, reverse=True)
+
+    keep_count = max_items
+    kept: list[dict[str, Any]] = []
+    if protected_sorted:
+        kept.extend(protected_sorted[:keep_count])
+        keep_count -= len(kept)
+    if keep_count > 0 and droppable_sorted:
+        kept.extend(droppable_sorted[:keep_count])
+
+    keep_ids = {id(x) for x in kept}
+    out = [x for x in items if id(x) in keep_ids]
+    dropped = max(0, len(items) - len(out))
+    return out, dropped
+
+
 async def _touch_live_queue_item(
     *,
     run_id: str,
@@ -257,7 +311,7 @@ async def _touch_live_queue_item(
         return
     now_iso = _utc_now_iso()
     async with _LIVE_QUEUE_LOCK:
-        queue = _load_live_queue()
+        queue = await _load_live_queue_async()
         changed = False
         for row in queue:
             if not isinstance(row, dict):
@@ -272,7 +326,8 @@ async def _touch_live_queue_item(
             changed = True
             break
         if changed:
-            _save_live_queue(queue)
+            queue, _ = _enforce_live_queue_limit(queue)
+            await _save_live_queue_async(queue)
 
 
 def _build_step_skeleton(pipeline_id: str) -> list[dict[str, Any]]:
@@ -673,7 +728,14 @@ def _event_file_name(webhook_type: str, call_id: str, account_id: str) -> str:
     return f"{ts}_{w}_{a}_{c}_{uuid.uuid4().hex[:10]}.json"
 
 
-def _persist_webhook_event(
+def _sanitize_webhook_payload_for_storage(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(payload or {})
+    if "token" in safe:
+        safe["token"] = "***redacted***"
+    return safe
+
+
+async def _persist_webhook_event(
     *,
     webhook_type: str,
     compat_mode: str,
@@ -698,19 +760,26 @@ def _persist_webhook_event(
         "path": str(request.url.path or ""),
         "source_ip": str(getattr(request.client, "host", "") or ""),
         "content_type": str(request.headers.get("content-type") or ""),
-        "payload": payload,
+        "payload": _sanitize_webhook_payload_for_storage(payload),
     }
-    file_path.write_text(json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8")
+    await asyncio.to_thread(
+        file_path.write_text,
+        json.dumps(event, indent=2, ensure_ascii=False),
+        "utf-8",
+    )
 
     # Also mirror to webhook_test/ if a test session is active and not expired
     try:
         if _WEBHOOK_TEST_SESSION_FILE.exists():
-            session = json.loads(_WEBHOOK_TEST_SESSION_FILE.read_text(encoding="utf-8"))
+            session = json.loads(
+                await asyncio.to_thread(_WEBHOOK_TEST_SESSION_FILE.read_text, "utf-8")
+            )
             expires_at = datetime.fromisoformat(session["expires_at"])
             if datetime.now(timezone.utc) <= expires_at:
                 _WEBHOOK_TEST_DIR.mkdir(parents=True, exist_ok=True)
                 test_fname = f"capture_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{event_id[:12]}.json"
-                (_WEBHOOK_TEST_DIR / test_fname).write_text(
+                await asyncio.to_thread(
+                    (_WEBHOOK_TEST_DIR / test_fname).write_text,
                     json.dumps(event, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
     except Exception:
@@ -808,6 +877,19 @@ def _assert_webhook_admin_auth(request: Request) -> None:
     token = _extract_webhook_token_from_headers(request)
     if not token or not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="Invalid webhook token.")
+
+
+def _assert_webhook_rate_limit(request: Request) -> None:
+    ip = str(getattr(request.client, "host", "") or "unknown")
+    now = time.monotonic()
+    with _WEBHOOK_RATE_LOCK:
+        bucket = _WEBHOOK_RATE[ip]
+        window_start = now - _WEBHOOK_RATE_WINDOW_S
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if len(bucket) >= _WEBHOOK_RATE_PER_IP:
+            raise HTTPException(status_code=429, detail="Webhook rate limit exceeded. Try again shortly.")
+        bucket.append(now)
 
 
 def _agent_candidate_names(agent: str) -> list[str]:
@@ -1025,7 +1107,7 @@ async def _trigger_pipeline_run(
                 if evt_type == "error":
                     msg = str((event.get("data") or {}).get("msg") or "unknown pipeline startup error")
                     raise HTTPException(status_code=502, detail=f"Pipeline startup failed: {msg}")
-                if asyncio.get_running_loop().time() - started > 15:
+                if asyncio.get_running_loop().time() - started > 300:
                     break
 
     return {
@@ -1054,7 +1136,7 @@ async def _enqueue_live_item(item: dict[str, Any]) -> tuple[bool, dict[str, Any]
     # Single-writer guard: webhook requests can arrive concurrently.
     # Without this lock, read-modify-write races can drop queue entries.
     async with _LIVE_QUEUE_LOCK:
-        queue = _load_live_queue()
+        queue = await _load_live_queue_async()
         run_id = str(item.get("run_id") or "").strip()
         pipeline_id = str(item.get("pipeline_id") or "").strip()
         sales_agent = str(item.get("sales_agent") or "").strip()
@@ -1116,7 +1198,15 @@ async def _enqueue_live_item(item: dict[str, Any]) -> tuple[bool, dict[str, Any]
 
         queue.append(item)
         queue.sort(key=_queue_item_sort_key)
-        _save_live_queue(queue)
+        queue, dropped = _enforce_live_queue_limit(queue)
+        if dropped > 0:
+            try:
+                item["last_error"] = (
+                    f"{dropped} older queue item(s) were dropped due to queue size limit ({_LIVE_QUEUE_MAX_ITEMS})."
+                )
+            except Exception:
+                pass
+        await _save_live_queue_async(queue)
         return True, {
             "run_id": run_id,
             "state": str(item.get("state") or "queued"),
@@ -1527,7 +1617,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     candidates: list[dict[str, Any]] = []
 
     async with _LIVE_QUEUE_LOCK:
-        queue = _load_live_queue()
+        queue = await _load_live_queue_async()
         recovered = _recover_orphaned_live_queue_items(
             queue=queue,
             cfg=cfg,
@@ -1709,8 +1799,9 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 changed = True
 
         pruned = _prune_live_queue_items(queue)
+        pruned, _ = _enforce_live_queue_limit(pruned)
         if changed or len(pruned) != len(queue):
-            _save_live_queue(pruned)
+            await _save_live_queue_async(pruned)
 
     if not candidates:
         return
@@ -1721,7 +1812,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
     )
 
     async with _LIVE_QUEUE_LOCK:
-        queue = _load_live_queue()
+        queue = await _load_live_queue_async()
         changed = False
         for res in results:
             if isinstance(res, Exception):
@@ -1751,8 +1842,9 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 changed = True
 
         pruned = _prune_live_queue_items(queue)
+        pruned, _ = _enforce_live_queue_limit(pruned)
         if changed or len(pruned) != len(queue):
-            _save_live_queue(pruned)
+            await _save_live_queue_async(pruned)
 
 
 async def _live_dispatcher_loop() -> None:
@@ -1814,6 +1906,25 @@ def list_webhook_events(
     return {"ok": True, "count": len(out), "events": out}
 
 
+@router.get("/queue-depth")
+async def webhook_queue_depth(request: Request) -> dict[str, Any]:
+    _assert_webhook_admin_auth(request)
+    async with _LIVE_QUEUE_LOCK:
+        queue = await _load_live_queue_async()
+    counts: dict[str, int] = {}
+    for item in queue:
+        if not isinstance(item, dict):
+            continue
+        st = str(item.get("state") or "unknown").strip().lower() or "unknown"
+        counts[st] = counts.get(st, 0) + 1
+    return {
+        "ok": True,
+        "depth": len(queue),
+        "limit": _LIVE_QUEUE_MAX_ITEMS,
+        "by_state": counts,
+    }
+
+
 async def _handle_call_webhook(
     payload: CallEndedWebhookPayload,
     request: Request,
@@ -1822,11 +1933,12 @@ async def _handle_call_webhook(
     compat_mode: str = "",
 ) -> dict[str, Any]:
     _assert_webhook_auth(request, payload)
+    _assert_webhook_rate_limit(request)
     cfg = _load_call_ended_config()
     if not cfg.get("enabled", True):
         raise HTTPException(status_code=403, detail="Call-ended webhook flow is disabled in config.")
 
-    stored = _persist_webhook_event(
+    stored = await _persist_webhook_event(
         webhook_type=webhook_type,
         compat_mode=compat_mode,
         payload=payload.model_dump(),
