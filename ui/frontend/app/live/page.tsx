@@ -324,8 +324,9 @@ export default function LivePage() {
 
   const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=300&compact=1&mirror=1";
 
-  const { data: runsData, isLoading } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
+  const { data: runsData, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
     refreshInterval: 2500,
+    keepPreviousData: true,
   });
 
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
@@ -772,6 +773,12 @@ export default function LivePage() {
         <div className="mt-2 text-[11px] text-gray-500">
           Showing {filteredRuns.length} of {runs.length} runs
         </div>
+        {runsError && (
+          <div className="mt-2 text-[11px] text-red-300 border border-red-800/60 bg-red-950/40 rounded px-2 py-1">
+            Live run history fetch failed: {String((runsError as any)?.message || "unknown error")}.
+            {runs.length > 0 ? " Showing last known data." : ""}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-hidden">

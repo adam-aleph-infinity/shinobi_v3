@@ -55,6 +55,7 @@ class CallEndedWebhookConfig(BaseModel):
     transcription_poll_interval_s: float = 2.0
     backfill_historical_transcripts: bool = True
     backfill_timeout_s: int = 5400
+    backfill_no_progress_timeout_s: int = 300
     max_live_running: int = 5
     auto_retry_enabled: bool = True
     retry_max_attempts: int = 2
@@ -78,6 +79,7 @@ def _default_call_ended_config() -> dict[str, Any]:
         "transcription_poll_interval_s": float(settings.crm_webhook_transcription_poll_interval_s or 2.0),
         "backfill_historical_transcripts": True,
         "backfill_timeout_s": 5400,
+        "backfill_no_progress_timeout_s": 300,
         "max_live_running": 5,
         "auto_retry_enabled": True,
         "retry_max_attempts": 2,
@@ -138,6 +140,13 @@ def _normalize_call_ended_config(raw: Any) -> dict[str, Any]:
         base["backfill_timeout_s"] = max(120, min(int(base.get("backfill_timeout_s") or 5400), 21600))
     except Exception:
         base["backfill_timeout_s"] = 5400
+    try:
+        base["backfill_no_progress_timeout_s"] = max(
+            30,
+            min(int(base.get("backfill_no_progress_timeout_s") or 300), 3600),
+        )
+    except Exception:
+        base["backfill_no_progress_timeout_s"] = 300
     try:
         base["max_live_running"] = max(1, min(int(base.get("max_live_running") or 5), 64))
     except Exception:
@@ -237,6 +246,35 @@ def _save_live_queue(items: list[dict[str, Any]]) -> None:
     )
 
 
+async def _touch_live_queue_item(
+    *,
+    run_id: str,
+    state: Optional[str] = None,
+    last_error: Optional[str] = None,
+) -> None:
+    rid = str(run_id or "").strip()
+    if not rid:
+        return
+    now_iso = _utc_now_iso()
+    async with _LIVE_QUEUE_LOCK:
+        queue = _load_live_queue()
+        changed = False
+        for row in queue:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("run_id") or "").strip() != rid:
+                continue
+            row["updated_at"] = now_iso
+            if state:
+                row["state"] = str(state)
+            if last_error is not None:
+                row["last_error"] = str(last_error)
+            changed = True
+            break
+        if changed:
+            _save_live_queue(queue)
+
+
 def _build_step_skeleton(pipeline_id: str) -> list[dict[str, Any]]:
     try:
         from ui.backend.routers.pipelines import _find_file
@@ -274,10 +312,16 @@ def _upsert_pipeline_run_stub(
     now_iso = _utc_now_iso()
     _status = str(status or "").strip().lower()
     _terminal_statuses = {"done", "completed", "error", "failed", "cancelled"}
+    _running_like = {"running", "loading", "started", "in_progress", "queued", "preparing", "retrying"}
+    _cancel_like = {"cancelled", "canceled"}
     try:
         with Session(_db_engine) as s:
             row = s.get(PipelineRun, run_id)
             if row is None:
+                _steps = _build_step_skeleton(pipeline_id)
+                if _status == "preparing" and _steps:
+                    _steps[0]["state"] = "running"
+                    _steps[0]["status"] = "running"
                 row = PipelineRun(
                     id=run_id,
                     pipeline_id=pipeline_id,
@@ -292,7 +336,7 @@ def _upsert_pipeline_run_stub(
                         if _status in _terminal_statuses
                         else None
                     ),
-                    steps_json=json.dumps(_build_step_skeleton(pipeline_id), ensure_ascii=False),
+                    steps_json=json.dumps(_steps, ensure_ascii=False),
                     log_json=json.dumps(
                         ([{"ts": now_iso, "text": log_line, "level": "pipeline"}] if log_line else []),
                         ensure_ascii=False,
@@ -310,6 +354,43 @@ def _upsert_pipeline_run_stub(
                     row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 else:
                     row.finished_at = None
+                try:
+                    parsed_steps = json.loads(str(row.steps_json or "[]"))
+                except Exception:
+                    parsed_steps = []
+                if isinstance(parsed_steps, list) and parsed_steps:
+                    changed_steps = False
+                    if _status == "preparing":
+                        # Show visible progress on canvas while backfill/transcription is active.
+                        first = parsed_steps[0] if isinstance(parsed_steps[0], dict) else None
+                        if isinstance(first, dict):
+                            prev = str(first.get("state") or first.get("status") or "").strip().lower()
+                            if prev in {"", "waiting", "pending"}:
+                                first["state"] = "running"
+                                first["status"] = "running"
+                                changed_steps = True
+                    if _status in _cancel_like:
+                        for step in parsed_steps:
+                            if not isinstance(step, dict):
+                                continue
+                            prev = str(step.get("state") or step.get("status") or "").strip().lower()
+                            if prev in _running_like:
+                                step["state"] = "cancelled"
+                                step["status"] = "cancelled"
+                                changed_steps = True
+                    elif _status in {"failed", "error"}:
+                        for step in parsed_steps:
+                            if not isinstance(step, dict):
+                                continue
+                            prev = str(step.get("state") or step.get("status") or "").strip().lower()
+                            if prev in _running_like:
+                                step["state"] = "error"
+                                step["status"] = "error"
+                                if not str(step.get("error_msg") or "").strip():
+                                    step["error_msg"] = "Run failed during preflight or dispatch."
+                                changed_steps = True
+                    if changed_steps:
+                        row.steps_json = json.dumps(parsed_steps, ensure_ascii=False)
                 if log_line:
                     logs = []
                     try:
@@ -435,21 +516,33 @@ def _extract_run_error(run_row: Optional[PipelineRun]) -> str:
 async def _wait_for_jobs(
     job_ids: list[str],
     timeout_s: int = 5400,
+    no_progress_timeout_s: int = 300,
     progress_cb: Optional[Callable[[int, int, int], None]] = None,
-) -> tuple[bool, int]:
+) -> dict[str, Any]:
     _ids = [str(x) for x in job_ids if str(x)]
     if not _ids:
-        return True, 0
+        return {
+            "ok": True,
+            "failed": 0,
+            "done": 0,
+            "total": 0,
+            "timed_out": False,
+            "stalled": False,
+        }
     deadline = time.monotonic() + max(60, int(timeout_s))
+    stall_deadline = max(30, int(no_progress_timeout_s))
     _last_emit = 0.0
     _last_done = -1
     _last_failed = -1
+    _last_progress_at = time.monotonic()
     while True:
         with Session(_db_engine) as s:
             rows = s.exec(select(Job).where(Job.id.in_(_ids))).all()
         status_by_id = {str(r.id): str(r.status) for r in rows}
         done = sum(1 for _id in _ids if status_by_id.get(_id) in {"complete", "failed"})
         failed = sum(1 for _id in _ids if status_by_id.get(_id) == "failed")
+        if done != _last_done:
+            _last_progress_at = time.monotonic()
         if progress_cb and (
             done != _last_done
             or failed != _last_failed
@@ -463,9 +556,32 @@ async def _wait_for_jobs(
             _last_failed = failed
             _last_emit = time.monotonic()
         if done >= len(_ids):
-            return failed == 0, failed
+            return {
+                "ok": failed == 0,
+                "failed": failed,
+                "done": done,
+                "total": len(_ids),
+                "timed_out": False,
+                "stalled": False,
+            }
+        if (time.monotonic() - _last_progress_at) >= stall_deadline:
+            return {
+                "ok": False,
+                "failed": failed,
+                "done": done,
+                "total": len(_ids),
+                "timed_out": False,
+                "stalled": True,
+            }
         if time.monotonic() >= deadline:
-            return False, failed
+            return {
+                "ok": False,
+                "failed": failed,
+                "done": done,
+                "total": len(_ids),
+                "timed_out": True,
+                "stalled": False,
+            }
         await asyncio.sleep(2.0)
 
 
@@ -475,6 +591,23 @@ async def _backfill_pair_transcripts(
     progress_cb: Optional[Callable[[int, int, int], None]] = None,
 ) -> dict[str, Any]:
     from ui.backend.routers.transcription_process import BatchPairsRequest, PairSpec, batch_transcribe_pairs
+    from ui.backend.services.crm_service import refresh_calls
+
+    refresh_result: dict[str, Any] = {}
+    # Best-effort sync from CRM before backfill so missing historical calls are discovered.
+    try:
+        refresh_result = await asyncio.wait_for(
+            asyncio.to_thread(
+                refresh_calls,
+                str(pair.get("account_id") or ""),
+                str(pair.get("crm_url") or ""),
+                str(pair.get("agent") or ""),
+                str(pair.get("customer") or ""),
+            ),
+            timeout=120,
+        )
+    except Exception as exc:
+        refresh_result = {"count": 0, "error": f"refresh_calls failed: {exc}"}
 
     req = BatchPairsRequest(
         pairs=[
@@ -492,20 +625,33 @@ async def _backfill_pair_transcripts(
     submitted = int(batch_res.get("submitted") or 0)
     skipped = int(batch_res.get("skipped") or 0)
     job_ids = [str(x) for x in (batch_res.get("job_ids") or []) if str(x)]
-    ok = True
-    failed = 0
+    wait_meta: dict[str, Any] = {
+        "ok": True,
+        "failed": 0,
+        "done": 0,
+        "total": len(job_ids),
+        "timed_out": False,
+        "stalled": False,
+    }
     if job_ids:
-        ok, failed = await _wait_for_jobs(
+        wait_meta = await _wait_for_jobs(
             job_ids,
             timeout_s=int(cfg.get("backfill_timeout_s") or 5400),
+            no_progress_timeout_s=int(cfg.get("backfill_no_progress_timeout_s") or 300),
             progress_cb=progress_cb,
         )
     return {
         "submitted": submitted,
         "skipped": skipped,
         "job_ids": job_ids,
-        "ok": ok,
-        "failed": failed,
+        "ok": bool(wait_meta.get("ok")),
+        "failed": int(wait_meta.get("failed") or 0),
+        "done": int(wait_meta.get("done") or 0),
+        "total": int(wait_meta.get("total") or len(job_ids)),
+        "timed_out": bool(wait_meta.get("timed_out")),
+        "stalled": bool(wait_meta.get("stalled")),
+        "refresh_count": int(refresh_result.get("count") or 0) if isinstance(refresh_result, dict) else 0,
+        "refresh_error": str((refresh_result or {}).get("error") or "") if isinstance(refresh_result, dict) else "",
     }
 
 
@@ -1212,6 +1358,11 @@ async def _execute_live_queue_item(
     try:
         if bool(cfg.get("backfill_historical_transcripts", True)) and pair:
             def _on_backfill_progress(done: int, total: int, failed_jobs: int) -> None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_touch_live_queue_item(run_id=run_id, state="preparing"))
+                except Exception:
+                    pass
                 _upsert_pipeline_run_stub(
                     run_id=run_id,
                     pipeline_id=pipeline_id,
@@ -1239,8 +1390,15 @@ async def _execute_live_queue_item(
                 timeout=max(120, int(cfg.get("backfill_timeout_s") or 5400) + 60),
             )
             if not bool(backfill.get("ok")):
+                reason = (
+                    "stalled with no progress"
+                    if bool(backfill.get("stalled"))
+                    else ("timed out" if bool(backfill.get("timed_out")) else "failed")
+                )
                 raise RuntimeError(
-                    f"Backfill failed ({int(backfill.get('failed') or 0)} failed jobs)."
+                    "Backfill "
+                    f"{reason} ({int(backfill.get('done') or 0)}/{int(backfill.get('total') or 0)} complete, "
+                    f"{int(backfill.get('failed') or 0)} failed jobs)."
                 )
             _upsert_pipeline_run_stub(
                 run_id=run_id,
@@ -1252,9 +1410,21 @@ async def _execute_live_queue_item(
                 status="preparing",
                 log_line=(
                     f"Backfill done: submitted {int(backfill.get('submitted') or 0)}, "
-                    f"skipped {int(backfill.get('skipped') or 0)}."
+                    f"skipped {int(backfill.get('skipped') or 0)}, "
+                    f"refresh added {int(backfill.get('refresh_count') or 0)} call(s)."
                 ),
             )
+            if str(backfill.get("refresh_error") or "").strip():
+                _upsert_pipeline_run_stub(
+                    run_id=run_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=str(item.get("pipeline_name") or ""),
+                    sales_agent=str(item.get("sales_agent") or ""),
+                    customer=str(item.get("customer") or ""),
+                    call_id=str(item.get("call_id") or ""),
+                    status="preparing",
+                    log_line=f"Backfill refresh warning: {str(backfill.get('refresh_error'))[:240]}",
+                )
 
         req_base = str(item.get("request_base_url") or request_base_url or "").strip()
         fake_req = type("WebhookReq", (), {"base_url": req_base or "http://127.0.0.1:8000"})()
@@ -1349,7 +1519,10 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
 
     max_running = int(cfg.get("max_live_running") or 5)
     now = datetime.now(timezone.utc)
-    preparing_stale_after_s = 90
+    preparing_stale_after_s = max(
+        180,
+        int(cfg.get("backfill_no_progress_timeout_s") or 300) + 30,
+    )
     running_stale_after_s = max(180, int(cfg.get("running_stale_after_s") or 600))
     candidates: list[dict[str, Any]] = []
 
