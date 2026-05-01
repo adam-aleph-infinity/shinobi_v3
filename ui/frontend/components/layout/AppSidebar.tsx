@@ -39,7 +39,7 @@ const GROUPS = [
 ];
 
 const FOOTER_ITEMS = [
-  { href: "/populate",  icon: DatabaseZap, label: "Populate" },
+  { href: "/automations",  icon: DatabaseZap, label: "Automations" },
   { href: "/logs",      icon: Terminal,    label: "Logs" },
   { href: "/workspace", icon: FolderOpen,  label: "Workspace" },
   { href: "/settings",  icon: Settings,    label: "Settings" },
