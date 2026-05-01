@@ -1467,9 +1467,13 @@ export default function LivePage() {
                     const rid = String(item.id || "");
                     const expanded = expandedRejectedId === rid;
                     const status = String(item.status || "rejected").toLowerCase();
+                    const source = String((item as { source?: string }).source || "active").toLowerCase();
                     const statusCls = status === "queued_manual"
                       ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
                       : "text-red-300 border-red-700/60 bg-red-950/30";
+                    const sourceCls = source === "archive"
+                      ? "text-violet-300 border-violet-700/60 bg-violet-950/30"
+                      : "text-sky-300 border-sky-700/60 bg-sky-950/30";
                     return (
                       <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
                         <div className="flex items-start gap-1.5">
@@ -1488,6 +1492,9 @@ export default function LivePage() {
                               </span>
                               <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
                                 {status}
+                              </span>
+                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", sourceCls)}>
+                                {source}
                               </span>
                               <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
                             </div>
