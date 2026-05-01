@@ -4798,6 +4798,7 @@ function PipelineCanvas() {
 
   useEffect(() => {
     if (!pendingOpenRunPayload) return;
+    let cancelled = false;
 
     const targetAgent = String(pendingOpenRunPayload.sales_agent || "").trim();
     const targetCustomer = String(pendingOpenRunPayload.customer || "").trim();
@@ -4817,11 +4818,26 @@ function PipelineCanvas() {
       setCallId(targetCallId);
     }
 
+    let resolvedPipelineId = targetPipelineId;
+    let resolvedPipelineName = targetPipelineName;
+    let needsRunCanvasFallback = false;
+
     if (targetPipelineId) {
-      const existing = allPipelines.find((p) => p.id === targetPipelineId);
-      if (!existing) return; // Wait for pipelines to load
-      loadPipelineToCanvas(targetPipelineId);
-      setActivePipeline(targetPipelineId, targetPipelineName || existing.name || "");
+      const existingById = allPipelines.find((p) => p.id === targetPipelineId);
+      const existingByName = !existingById && targetPipelineName
+        ? allPipelines.find((p) => String(p.name || "").trim() === targetPipelineName)
+        : undefined;
+      const existing = existingById || existingByName;
+      if (existing) {
+        resolvedPipelineId = existing.id;
+        resolvedPipelineName = targetPipelineName || existing.name || "";
+        loadPipelineToCanvas(existing.id);
+        setActivePipeline(existing.id, resolvedPipelineName);
+      } else {
+        // Dev mirror can receive runs from production with pipeline ids not present locally.
+        // Fall back to opening by historical run canvas snapshot below.
+        needsRunCanvasFallback = true;
+      }
     }
 
     if (targetRunId) {
@@ -4832,7 +4848,45 @@ function PipelineCanvas() {
       setRunContextMode("historical");
     }
 
+    if (needsRunCanvasFallback && targetRunId) {
+      void (async () => {
+        try {
+          const qs = new URLSearchParams({ mirror: "1" });
+          const runRow = await fetcher(
+            `/api/history/runs/${encodeURIComponent(targetRunId)}?${qs.toString()}`,
+          ) as PipelineRunRecord;
+          if (cancelled || !runRow) return;
+          const rawCanvas = JSON.parse(String(runRow.canvas_json || "{}"));
+          const canvas = (rawCanvas && typeof rawCanvas === "object")
+            ? {
+                nodes: Array.isArray((rawCanvas as any).nodes) ? (rawCanvas as any).nodes : [],
+                edges: Array.isArray((rawCanvas as any).edges) ? (rawCanvas as any).edges : [],
+                stages: Array.isArray((rawCanvas as any).stages) ? (rawCanvas as any).stages : [],
+              }
+            : { nodes: [], edges: [], stages: [] };
+          if (!Array.isArray(canvas.nodes) || canvas.nodes.length === 0) return;
+          const fallbackPipelineId =
+            String(runRow.pipeline_id || resolvedPipelineId || targetPipelineId || `run-${targetRunId}`).trim();
+          const fallbackPipelineName =
+            String(runRow.pipeline_name || resolvedPipelineName || targetPipelineName || `Historical ${targetRunId.slice(0, 8)}`).trim();
+          loadPipelineToCanvas(fallbackPipelineId, {
+            id: fallbackPipelineId,
+            name: fallbackPipelineName || `Historical ${targetRunId.slice(0, 8)}`,
+            folder: "",
+            steps: [],
+            canvas,
+          });
+          setActivePipeline(fallbackPipelineId, fallbackPipelineName || `Historical ${targetRunId.slice(0, 8)}`);
+        } catch {
+          // If fallback fails we still keep historical run context selected.
+        }
+      })();
+    }
+
     setPendingOpenRunPayload(null);
+    return () => {
+      cancelled = true;
+    };
   }, [pendingOpenRunPayload, allPipelines, setCustomer, setCallId, setActivePipeline, setPendingRunCallId]);
 
   useEffect(() => {
@@ -5305,7 +5359,7 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div className={cn(expand && "flex-1 min-h-0")}>
+        <div className={cn(expand && "flex-1 min-h-0 overflow-y-auto")}>
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>

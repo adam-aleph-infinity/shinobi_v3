@@ -665,6 +665,8 @@ async def _wait_for_jobs(
             "total": 0,
             "timed_out": False,
             "stalled": False,
+            "failed_job_ids": [],
+            "failed_job_errors": [],
         }
     deadline = time.monotonic() + max(60, int(timeout_s))
     stall_deadline = max(30, int(no_progress_timeout_s))
@@ -679,6 +681,14 @@ async def _wait_for_jobs(
         with Session(_db_engine) as s:
             rows = s.exec(select(Job).where(Job.id.in_(_ids))).all()
         status_by_id = {str(r.id): _job_status_text(r.status) for r in rows}
+        failed_rows = [r for r in rows if _job_status_text(r.status) == "failed"]
+        failed_job_ids = [str(r.id) for r in failed_rows]
+        failed_job_errors: list[str] = []
+        for r in failed_rows:
+            rid = str(r.id)
+            err = str(r.error or r.message or "").strip()
+            if err:
+                failed_job_errors.append(f"{rid[:8]}: {err[:220]}")
         running = sum(1 for _id in _ids if status_by_id.get(_id) == "running")
         pending = sum(1 for _id in _ids if status_by_id.get(_id) == "pending")
         done = sum(1 for _id in _ids if status_by_id.get(_id) in {"complete", "failed"})
@@ -724,6 +734,8 @@ async def _wait_for_jobs(
                 "total": len(_ids),
                 "timed_out": False,
                 "stalled": False,
+                "failed_job_ids": failed_job_ids,
+                "failed_job_errors": failed_job_errors,
             }
         # Only mark stalled when there are active workers but no observable status
         # changes for too long. If all jobs are still pending (queue backlog), keep
@@ -736,6 +748,8 @@ async def _wait_for_jobs(
                 "total": len(_ids),
                 "timed_out": False,
                 "stalled": True,
+                "failed_job_ids": failed_job_ids,
+                "failed_job_errors": failed_job_errors,
             }
         if time.monotonic() >= deadline:
             return {
@@ -745,6 +759,8 @@ async def _wait_for_jobs(
                 "total": len(_ids),
                 "timed_out": True,
                 "stalled": False,
+                "failed_job_ids": failed_job_ids,
+                "failed_job_errors": failed_job_errors,
             }
         await asyncio.sleep(2.0)
 
@@ -814,6 +830,12 @@ async def _backfill_pair_transcripts(
         "total": int(wait_meta.get("total") or len(job_ids)),
         "timed_out": bool(wait_meta.get("timed_out")),
         "stalled": bool(wait_meta.get("stalled")),
+        "failed_job_ids": [
+            str(x) for x in (wait_meta.get("failed_job_ids") or []) if str(x).strip()
+        ],
+        "failed_job_errors": [
+            str(x) for x in (wait_meta.get("failed_job_errors") or []) if str(x).strip()
+        ],
         "refresh_count": int(refresh_result.get("count") or 0) if isinstance(refresh_result, dict) else 0,
         "refresh_error": str((refresh_result or {}).get("error") or "") if isinstance(refresh_result, dict) else "",
     }
@@ -1705,10 +1727,22 @@ async def _execute_live_queue_item(
                     if bool(backfill.get("stalled"))
                     else ("timed out" if bool(backfill.get("timed_out")) else "failed")
                 )
+                failed_ids = [str(x) for x in (backfill.get("failed_job_ids") or []) if str(x).strip()]
+                failed_errs = [str(x) for x in (backfill.get("failed_job_errors") or []) if str(x).strip()]
+                detail_parts: list[str] = []
+                if failed_ids:
+                    failed_ids_short = ", ".join(x[:8] for x in failed_ids[:8])
+                    if len(failed_ids) > 8:
+                        failed_ids_short += ", …"
+                    detail_parts.append(f"failed job ids: {failed_ids_short}")
+                if failed_errs:
+                    detail_parts.append(f"first error: {failed_errs[0]}")
+                detail_suffix = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
                 raise RuntimeError(
                     "Backfill "
                     f"{reason} ({int(backfill.get('done') or 0)}/{int(backfill.get('total') or 0)} complete, "
                     f"{int(backfill.get('failed') or 0)} failed jobs)."
+                    f"{detail_suffix}"
                 )
             _upsert_pipeline_run_stub(
                 run_id=run_id,
@@ -1786,7 +1820,7 @@ async def _execute_live_queue_item(
                 customer=str(item.get("customer") or ""),
                 call_id=str(item.get("call_id") or ""),
                 status="retrying",
-                log_line=f"Dispatch retry scheduled: {err_text[:220]}",
+                log_line=f"Dispatch retry scheduled: {err_text[:420]}",
             )
         else:
             item["state"] = "failed"
@@ -1800,7 +1834,7 @@ async def _execute_live_queue_item(
                 customer=str(item.get("customer") or ""),
                 call_id=str(item.get("call_id") or ""),
                 status="failed",
-                log_line=f"Dispatch failed: {err_text[:220]}",
+                log_line=f"Dispatch failed: {err_text[:420]}",
             )
         return item
 
