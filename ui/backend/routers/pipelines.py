@@ -2681,6 +2681,14 @@ class LiveWebhookRunEnqueueIn(BaseModel):
     pipeline_id: str = ""
 
 
+class LiveWebhookRunCancelIn(BaseModel):
+    reason: str = "Cancelled by user."
+
+
+class LiveWebhookRunRetryIn(BaseModel):
+    pipeline_id: str = ""
+
+
 @router.get("/{pipeline_id}/results")
 def get_pipeline_results(
     pipeline_id: str,
@@ -4907,6 +4915,248 @@ async def enqueue_live_webhook_run(
         "pipeline_name": pipeline_name,
         "state": str(meta.get("state") or ("queued" if created else "")),
         "deduplicated": (not created),
+        "message": str(meta.get("message") or ""),
+    }
+
+
+@router.post("/live-webhook/runs/{run_id}/cancel")
+async def cancel_live_webhook_run(
+    run_id: str,
+    req: LiveWebhookRunCancelIn,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in mirror mode.")
+
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing run id.")
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.routers import webhooks as _wh
+
+    reason = str(req.reason or "Cancelled by user.").strip() or "Cancelled by user."
+    row = db.get(PR, rid)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    queue_found = False
+    queue_prev_state = ""
+    queue_changed = False
+    async with _wh._LIVE_QUEUE_LOCK:
+        queue = _wh._load_live_queue()
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("run_id") or "").strip() != rid:
+                continue
+            queue_found = True
+            queue_prev_state = str(item.get("state") or "").strip().lower()
+            if queue_prev_state != "cancelled":
+                item["state"] = "cancelled"
+                item["updated_at"] = now_iso
+                item["next_attempt_at"] = now_iso
+                item["last_error"] = reason
+                queue_changed = True
+            break
+        if queue_changed:
+            _wh._save_live_queue(queue)
+
+    cancelled_task = False
+    slot = ""
+    if row is not None:
+        slot = _run_slot_key(
+            str(row.pipeline_id or ""),
+            str(row.sales_agent or ""),
+            str(row.customer or ""),
+            str(row.call_id or ""),
+        )
+        with _ACTIVE_RUN_LOCK:
+            ev = _STOP_REQUESTED.get(slot)
+            if ev:
+                ev.set()
+            task = _ACTIVE_RUN_TASKS.get(slot)
+        if task and not task.done():
+            task.cancel()
+            cancelled_task = True
+
+        _wh._upsert_pipeline_run_stub(
+            run_id=rid,
+            pipeline_id=str(row.pipeline_id or ""),
+            pipeline_name=str(row.pipeline_name or row.pipeline_id or ""),
+            sales_agent=str(row.sales_agent or ""),
+            customer=str(row.customer or ""),
+            call_id=str(row.call_id or ""),
+            status="cancelled",
+            log_line=f"Cancelled by user: {reason[:300]}",
+        )
+    elif queue_found:
+        # Keep a visible history row even when DB row was not created yet.
+        _wh._upsert_pipeline_run_stub(
+            run_id=rid,
+            pipeline_id="",
+            pipeline_name="",
+            sales_agent="",
+            customer="",
+            call_id="",
+            status="cancelled",
+            log_line=f"Cancelled from queue by user: {reason[:300]}",
+        )
+
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "run_id": rid,
+        "queue_found": queue_found,
+        "queue_prev_state": queue_prev_state,
+        "queue_updated": queue_changed,
+        "cancelled_task": cancelled_task,
+        "slot": slot,
+        "reason": reason,
+    }
+
+
+@router.post("/live-webhook/runs/{run_id}/retry")
+async def retry_live_webhook_run(
+    run_id: str,
+    req: LiveWebhookRunRetryIn,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in mirror mode.")
+
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing run id.")
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.routers import webhooks as _wh
+
+    row = db.get(PR, rid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    queue_found = False
+    queue_changed = False
+    queue_prev_state = ""
+    async with _wh._LIVE_QUEUE_LOCK:
+        queue = _wh._load_live_queue()
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("run_id") or "").strip() != rid:
+                continue
+            queue_found = True
+            queue_prev_state = str(item.get("state") or "").strip().lower()
+            if queue_prev_state in {"running", "preparing"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Run is currently {queue_prev_state}; cancel it first before retrying.",
+                )
+            if queue_prev_state != "retrying":
+                item["state"] = "retrying"
+                item["updated_at"] = now_iso
+                item["next_attempt_at"] = now_iso
+                if not str(item.get("last_error") or "").strip():
+                    item["last_error"] = "Manual retry requested."
+                queue_changed = True
+            break
+        if queue_changed:
+            _wh._save_live_queue(queue)
+
+    pipeline_id = str(req.pipeline_id or row.pipeline_id or "").strip()
+    if not pipeline_id:
+        raise HTTPException(status_code=400, detail="No pipeline id resolved for retry.")
+    _, pdef = _find_file(pipeline_id)
+    pipeline_name = str(pdef.get("name") or row.pipeline_name or pipeline_id)
+    sales_agent = str(row.sales_agent or "").strip()
+    customer = str(row.customer or "").strip()
+    call_id = str(row.call_id or "").strip()
+
+    cfg = _load_live_webhook_config()
+    created = False
+    meta: dict[str, Any] = {}
+    if not queue_found:
+        run_payload: dict[str, Any] = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "resume_partial": True,
+            "run_origin": "webhook",
+            "run_id": rid,
+            "manual_replay": True,
+            "source_run_id": rid,
+        }
+        cfg_run_payload = cfg.get("run_payload")
+        if isinstance(cfg_run_payload, dict):
+            for k, v in cfg_run_payload.items():
+                run_payload[str(k)] = v
+
+        queue_item = {
+            "id": str(uuid.uuid4()),
+            "event_id": "",
+            "event_file": "",
+            "webhook_type": "failed-retry",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "state": "retrying",
+            "attempts": 0,
+            "max_attempts": int(cfg.get("retry_max_attempts") or 2),
+            "next_attempt_at": now_iso,
+            "last_error": "Manual retry requested.",
+            "request_base_url": str(request.base_url or ""),
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "run_id": rid,
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "pair": _wh._pair_from_names(sales_agent, customer),
+            "payload": run_payload,
+            "manual_replay": True,
+            "source_run_id": rid,
+        }
+        created, meta = await _wh._enqueue_live_item(queue_item)
+    else:
+        meta = {
+            "run_id": rid,
+            "state": "retrying",
+            "message": "Moved to retry queue.",
+        }
+
+    _wh._upsert_pipeline_run_stub(
+        run_id=rid,
+        pipeline_id=pipeline_id,
+        pipeline_name=pipeline_name,
+        sales_agent=sales_agent,
+        customer=customer,
+        call_id=call_id,
+        status="retrying",
+        log_line=(
+            "Manual retry requested; moved to retry queue."
+            if queue_found
+            else "Manual retry requested; queued for retry dispatch."
+        ),
+    )
+
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "run_id": str(meta.get("run_id") or rid),
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "queue_found": queue_found,
+        "queue_prev_state": queue_prev_state,
+        "queue_updated": queue_changed,
+        "created_queue_item": bool(created),
+        "state": str(meta.get("state") or ("retrying" if (queue_found or created) else "")),
+        "deduplicated": (not created and not queue_found),
         "message": str(meta.get("message") or ""),
     }
 
