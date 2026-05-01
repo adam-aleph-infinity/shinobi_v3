@@ -502,6 +502,50 @@ export default function CRMBrowserPage({
     }
   }
 
+  function selectAgentOnly(agent: string) {
+    const nextAgent = String(agent || "").trim();
+    if (!nextAgent) return;
+    setSelectedIds(new Set());
+    ctx.setSalesAgent(nextAgent);
+    if (!pairPickerMode) return;
+    try {
+      if (typeof window !== "undefined" && window.parent && window.parent !== window) {
+        window.parent.postMessage(
+          {
+            type: "shinobi:select-agent",
+            agent: nextAgent,
+          },
+          window.location.origin,
+        );
+      }
+    } catch {
+      // no-op: keep local context update even if parent postMessage fails
+    }
+  }
+
+  function selectCustomerOnly(customer: string, agentHint = "") {
+    const nextCustomer = String(customer || "").trim();
+    const nextAgent = String(agentHint || "").trim();
+    if (!nextCustomer) return;
+    if (nextAgent) ctx.setCustomer(nextCustomer, nextAgent);
+    else ctx.setCustomer(nextCustomer);
+    if (!pairPickerMode) return;
+    try {
+      if (typeof window !== "undefined" && window.parent && window.parent !== window) {
+        window.parent.postMessage(
+          {
+            type: "shinobi:select-customer",
+            customer: nextCustomer,
+            agent: nextAgent,
+          },
+          window.location.origin,
+        );
+      }
+    } catch {
+      // no-op: keep local context update even if parent postMessage fails
+    }
+  }
+
   function clearFilters() {
     setAgentFilter(""); setCustomerFilter(""); setAccountIdFilter(""); setCrmFilter("");
     setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
@@ -1209,7 +1253,20 @@ export default function CRMBrowserPage({
                             : <Square className="w-4 h-4" />}
                         </button>
                       </td>
-                      <td className="px-3 py-3 text-white font-medium">{pair.agent}</td>
+                      <td className="px-3 py-3 text-white font-medium">
+                        {pairPickerMode ? (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); selectAgentOnly(pair.agent); }}
+                            className="text-left text-white hover:text-indigo-300 transition-colors underline-offset-2 hover:underline"
+                            title={`Select agent: ${pair.agent}`}
+                          >
+                            {pair.agent}
+                          </button>
+                        ) : (
+                          pair.agent
+                        )}
+                      </td>
                       <td className="px-3 py-3">
                         {pair.pair_is_unique ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-700/60 bg-emerald-950/40 text-emerald-300">
@@ -1224,7 +1281,20 @@ export default function CRMBrowserPage({
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-3 text-gray-300">{pair.customer}</td>
+                      <td className="px-3 py-3 text-gray-300">
+                        {pairPickerMode ? (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); selectCustomerOnly(pair.customer, pair.agent); }}
+                            className="text-left text-gray-300 hover:text-cyan-300 transition-colors underline-offset-2 hover:underline"
+                            title={`Select customer: ${pair.customer}`}
+                          >
+                            {pair.customer}
+                          </button>
+                        ) : (
+                          pair.customer
+                        )}
+                      </td>
                       <td className="px-3 py-3 font-mono text-xs text-gray-400">{pair.account_id || "—"}</td>
                       <td className="px-3 py-3">
                         <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">
