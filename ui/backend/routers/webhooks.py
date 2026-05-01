@@ -820,6 +820,36 @@ async def _backfill_pair_transcripts(
             no_progress_timeout_s=int(cfg.get("backfill_no_progress_timeout_s") or 300),
             progress_cb=progress_cb,
         )
+    # Fallback: if aggregate says failures occurred but detailed failed ids/errors
+    # are missing, re-scan the known job ids so callers can surface actionable logs.
+    try:
+        _failed_count = int(wait_meta.get("failed") or 0)
+    except Exception:
+        _failed_count = 0
+    _failed_ids = [str(x) for x in (wait_meta.get("failed_job_ids") or []) if str(x).strip()]
+    _failed_errs = [str(x) for x in (wait_meta.get("failed_job_errors") or []) if str(x).strip()]
+    if _failed_count > 0 and (not _failed_ids or not _failed_errs) and job_ids:
+        try:
+            with Session(_db_engine) as _s:
+                _rows = _s.exec(select(Job).where(Job.id.in_(job_ids))).all()
+            _rescanned_failed_ids: list[str] = []
+            _rescanned_failed_errs: list[str] = []
+            for _r in _rows:
+                _st = str(getattr(getattr(_r, "status", None), "value", getattr(_r, "status", "")) or "").strip().lower()
+                if _st != "failed":
+                    continue
+                _rid = str(getattr(_r, "id", "") or "").strip()
+                if _rid:
+                    _rescanned_failed_ids.append(_rid)
+                _err = str(getattr(_r, "error", "") or getattr(_r, "message", "") or "").strip()
+                if _err and _rid:
+                    _rescanned_failed_errs.append(f"{_rid[:8]}: {_err[:220]}")
+            if _rescanned_failed_ids:
+                _failed_ids = _rescanned_failed_ids
+            if _rescanned_failed_errs:
+                _failed_errs = _rescanned_failed_errs
+        except Exception:
+            pass
     return {
         "submitted": submitted,
         "skipped": skipped,
@@ -830,12 +860,8 @@ async def _backfill_pair_transcripts(
         "total": int(wait_meta.get("total") or len(job_ids)),
         "timed_out": bool(wait_meta.get("timed_out")),
         "stalled": bool(wait_meta.get("stalled")),
-        "failed_job_ids": [
-            str(x) for x in (wait_meta.get("failed_job_ids") or []) if str(x).strip()
-        ],
-        "failed_job_errors": [
-            str(x) for x in (wait_meta.get("failed_job_errors") or []) if str(x).strip()
-        ],
+        "failed_job_ids": _failed_ids,
+        "failed_job_errors": _failed_errs,
         "refresh_count": int(refresh_result.get("count") or 0) if isinstance(refresh_result, dict) else 0,
         "refresh_error": str((refresh_result or {}).get("error") or "") if isinstance(refresh_result, dict) else "",
     }
@@ -1729,6 +1755,31 @@ async def _execute_live_queue_item(
                 )
                 failed_ids = [str(x) for x in (backfill.get("failed_job_ids") or []) if str(x).strip()]
                 failed_errs = [str(x) for x in (backfill.get("failed_job_errors") or []) if str(x).strip()]
+                if failed_ids:
+                    failed_ids_short = ", ".join(x[:8] for x in failed_ids[:12])
+                    if len(failed_ids) > 12:
+                        failed_ids_short += ", …"
+                    _upsert_pipeline_run_stub(
+                        run_id=run_id,
+                        pipeline_id=pipeline_id,
+                        pipeline_name=str(item.get("pipeline_name") or ""),
+                        sales_agent=str(item.get("sales_agent") or ""),
+                        customer=str(item.get("customer") or ""),
+                        call_id=str(item.get("call_id") or ""),
+                        status="preparing",
+                        log_line=f"Backfill failed job ids: {failed_ids_short}",
+                    )
+                if failed_errs:
+                    _upsert_pipeline_run_stub(
+                        run_id=run_id,
+                        pipeline_id=pipeline_id,
+                        pipeline_name=str(item.get("pipeline_name") or ""),
+                        sales_agent=str(item.get("sales_agent") or ""),
+                        customer=str(item.get("customer") or ""),
+                        call_id=str(item.get("call_id") or ""),
+                        status="preparing",
+                        log_line=f"Backfill first error: {failed_errs[0][:300]}",
+                    )
                 detail_parts: list[str] = []
                 if failed_ids:
                     failed_ids_short = ", ".join(x[:8] for x in failed_ids[:8])
@@ -1737,6 +1788,8 @@ async def _execute_live_queue_item(
                     detail_parts.append(f"failed job ids: {failed_ids_short}")
                 if failed_errs:
                     detail_parts.append(f"first error: {failed_errs[0]}")
+                if not detail_parts and int(backfill.get("failed") or 0) > 0:
+                    detail_parts.append("failed job details unavailable (inspect Jobs list for this pair)")
                 detail_suffix = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
                 raise RuntimeError(
                     "Backfill "
