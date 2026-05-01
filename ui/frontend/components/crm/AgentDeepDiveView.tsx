@@ -275,6 +275,7 @@ export default function AgentDeepDiveView({
     customer,
     callId,
     activePipelineId,
+    setSalesAgent,
     setCustomer,
     setCallId,
     setActivePipeline,
@@ -438,6 +439,22 @@ export default function AgentDeepDiveView({
         setShowCrmPanel(false);
         return;
       }
+      if (payload.type === "shinobi:select-agent") {
+        const nextAgent = String(payload.agent || "").trim();
+        if (!nextAgent) return;
+        setSalesAgent(nextAgent);
+        setShowCrmPanel(false);
+        return;
+      }
+      if (payload.type === "shinobi:select-customer") {
+        const nextAgent = String(payload.agent || "").trim();
+        const nextCustomer = String(payload.customer || "").trim();
+        if (!nextCustomer) return;
+        if (nextAgent) setCustomer(nextCustomer, nextAgent);
+        else setCustomer(nextCustomer);
+        setShowCrmPanel(false);
+        return;
+      }
 
       if (payload.type === "shinobi:calls-context") {
         const nextAgent = String(payload.agent || "").trim();
@@ -452,7 +469,7 @@ export default function AgentDeepDiveView({
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [customer, salesAgent, setCallId, setCustomer]);
+  }, [customer, salesAgent, setCallId, setCustomer, setSalesAgent]);
 
   useEffect(() => {
     if (!callId) {
