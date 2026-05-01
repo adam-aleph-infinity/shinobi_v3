@@ -5254,9 +5254,10 @@ function PipelineCanvas() {
     if (resultViewMode === "raw") {
       return (
         <pre className={cn(
-          "w-full overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
+          "w-full overflow-y-auto overscroll-contain nowheel bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
           expand ? "flex-1 min-h-0" : "max-h-80",
-        )}>
+        )}
+        onWheelCapture={(e) => e.stopPropagation()}>
           {text}
         </pre>
       );
@@ -5293,9 +5294,10 @@ function PipelineCanvas() {
           </p>
         )}
         <div className={cn(
-          "overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
+          "overflow-y-auto overscroll-contain nowheel rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
           expand ? "flex-1 min-h-0" : "max-h-80",
-        )}>
+        )}
+        onWheelCapture={(e) => e.stopPropagation()}>
           <SectionContent content={renderedMarkdown} format="markdown" />
         </div>
       </div>
@@ -5360,7 +5362,10 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div className={cn(expand && "flex-1 min-h-0 overflow-auto")}>
+        <div
+          className={cn(expand && "flex-1 min-h-0 overflow-y-auto overscroll-contain nowheel")}
+          onWheelCapture={(e) => e.stopPropagation()}
+        >
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>
