@@ -212,6 +212,13 @@ function deriveEffectiveRunStatus(run: PipelineRunRecord): string {
   const hasCancelledStep = stepStates.some((s) => isCancelledLike(s));
   const hasActiveStep = stepStates.some((s) => isActiveLike(s));
   const runIsActive = isActiveLike(base) && !finished;
+  const baseIsRetry = base === "retrying";
+  const baseIsLive = base === "running" || base === "preparing" || base === "queued" || baseIsRetry;
+
+  // Manual retry/requeue should be reflected immediately in Jobs, even if
+  // stale failed step states still exist on the same run row.
+  if (baseIsRetry) return "retrying";
+  if (baseIsLive && !finished) return base;
 
   if (hasCancelledStep) return "cancelled";
   if (hasFailedStep) return "failed";

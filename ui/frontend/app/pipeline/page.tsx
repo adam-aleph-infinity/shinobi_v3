@@ -1324,11 +1324,11 @@ function PropertiesSection({
   children: React.ReactNode;
 }) {
   return (
-    <details open={defaultOpen} className={cn("border border-gray-800 rounded-lg overflow-hidden", className)}>
+    <details open={defaultOpen} className={cn("border border-gray-800 rounded-lg overflow-hidden min-h-0", className)}>
       <summary className="list-none cursor-pointer px-2.5 py-1.5 bg-gray-900/70 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
         {title}
       </summary>
-      <div className={cn("p-2.5", bodyClassName)}>{children}</div>
+      <div className={cn("p-2.5 min-h-0", bodyClassName)}>{children}</div>
     </details>
   );
 }
@@ -5213,40 +5213,59 @@ function PipelineCanvas() {
     if (!text.trim()) {
       return <p className="text-[10px] text-gray-500">No content.</p>;
     }
+
+    const viewportClass = cn(
+      "rounded-lg border border-gray-700 bg-gray-900/60",
+      expand
+        ? "flex-1 min-h-0 overflow-y-auto overscroll-contain nowheel"
+        : "max-h-80 overflow-y-auto overscroll-contain nowheel",
+    );
+
+    const renderRawText = (rawText: string) => (
+      <div
+        className={viewportClass}
+        onWheelCapture={(e) => e.stopPropagation()}
+      >
+        <pre className="w-full px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+          {rawText}
+        </pre>
+      </div>
+    );
+
     if (resultViewMode === "raw") {
       return (
-        <pre className={cn(
-          "w-full overflow-y-auto overscroll-contain nowheel bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
-          expand ? "h-full min-h-0" : "max-h-80",
-        )}
-        onWheelCapture={(e) => e.stopPropagation()}>
-          {text}
-        </pre>
-      );
-    }
-    // Merged transcript can be extremely long; show it as raw full text to guarantee
-    // complete visibility + reliable scrolling in canvas floating panels.
-    if (hint.includes("merged_transcript")) {
-      return (
-        <pre className={cn(
-          "w-full overflow-y-auto overscroll-contain nowheel bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
-          expand ? "h-full min-h-0" : "max-h-80",
-        )}
-        onWheelCapture={(e) => e.stopPropagation()}>
-          {text}
-        </pre>
-      );
-    }
-    if (hint.includes("transcript")) {
-      return (
-        <div className={cn(
-          "border border-gray-700 rounded-lg bg-gray-900 overflow-y-auto overscroll-contain nowheel",
-          expand ? "h-full min-h-0" : "h-80",
-        )}>
-          <TranscriptViewer content={text} format="txt" className={expand ? "h-full min-h-0" : "h-full"} />
+        <div className={cn(expand && "h-full min-h-0 flex flex-col")}>
+          {renderRawText(text)}
         </div>
       );
     }
+
+    // Merged transcript can be extremely long; keep it in raw layout with a
+    // dedicated viewport so scrolling is always deterministic.
+    if (hint.includes("merged_transcript")) {
+      return (
+        <div className={cn(expand && "h-full min-h-0 flex flex-col")}>
+          {renderRawText(text)}
+        </div>
+      );
+    }
+
+    if (hint.includes("transcript")) {
+      return (
+        <div className={cn(expand && "h-full min-h-0 flex flex-col")}>
+          <div
+            className={cn(
+              "rounded-lg border border-gray-700 bg-gray-900/60",
+              expand ? "flex-1 min-h-0 overflow-hidden" : "h-80",
+            )}
+            onWheelCapture={(e) => e.stopPropagation()}
+          >
+            <TranscriptViewer content={text} format="txt" className="h-full min-h-0" />
+          </div>
+        </div>
+      );
+    }
+
     if (!baseText) {
       return <p className="text-[10px] text-gray-500">No content.</p>;
     }
@@ -5258,22 +5277,23 @@ function PipelineCanvas() {
     return (
       <div className={cn("space-y-1.5", expand && "h-full min-h-0 flex flex-col")}>
         {cacheEntry?.status === "loading" && (
-          <div className="flex items-center gap-1.5 text-[10px] text-indigo-300">
+          <div className="shrink-0 flex items-center gap-1.5 text-[10px] text-indigo-300">
             <Loader2 className="w-3 h-3 animate-spin" />
             Enhancing rendered layout with LLM…
           </div>
         )}
         {cacheEntry?.status === "error" && (
-          <p className="text-[10px] text-amber-300">
+          <p className="shrink-0 text-[10px] text-amber-300">
             LLM render unavailable ({cacheEntry.error}). Showing local rendered view.
           </p>
         )}
-        <div className={cn(
-          "overflow-y-auto overscroll-contain nowheel rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
-          expand ? "h-full min-h-0" : "max-h-80",
-        )}
-        onWheelCapture={(e) => e.stopPropagation()}>
-          <SectionContent content={renderedMarkdown} format="markdown" />
+        <div
+          className={viewportClass}
+          onWheelCapture={(e) => e.stopPropagation()}
+        >
+          <div className="px-2 py-1.5">
+            <SectionContent content={renderedMarkdown} format="markdown" />
+          </div>
         </div>
       </div>
     );
@@ -5312,7 +5332,7 @@ function PipelineCanvas() {
     const fileRefsError = String(preview?.fileRefsError || "").trim();
 
     return (
-      <div className={cn("space-y-2", expand && "flex-1 min-h-0 flex flex-col overflow-hidden")}>
+      <div className={cn("space-y-2", expand && "h-full min-h-0 flex flex-col")}>
         {(originLabel || cacheFile || resolvedCallId || fileRefText || fileRefsError) && (
           <div className={cn(
             "rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1",
@@ -5337,7 +5357,7 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div className={cn(expand && "flex-1 min-h-0 overflow-hidden")}>
+        <div className={cn(expand && "flex-1 min-h-0")}>
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>
@@ -5551,7 +5571,7 @@ function PipelineCanvas() {
                   </div>
 
                   {selKind === "input" ? (
-                    <div className="flex-1 min-h-0 overflow-hidden">
+                    <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
                       {(() => {
                         const src = String(selData.inputSource || "").trim();
                         return renderInputPreview(src, true);
@@ -6184,7 +6204,7 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  <div className="flex-1 min-h-0 overflow-hidden">
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
                     return renderInputPreview(src, true);
