@@ -46,6 +46,8 @@ interface PipelineRunRecord {
   steps_json: string;
   log_json?: string;
   run_origin?: string;
+  note_sent?: boolean;
+  note_sent_at?: string | null;
 }
 
 interface PhaseBadge {
@@ -183,6 +185,30 @@ function _safeJsonArray(raw: unknown): any[] {
   } catch {
     return [];
   }
+}
+
+function inferNotePushState(run: PipelineRunRecord): { sent: boolean; sentAt: string } {
+  const directSent = !!(run.note_sent === true);
+  const directSentAt = String(run.note_sent_at || "").trim();
+  if (directSent) {
+    return { sent: true, sentAt: directSentAt };
+  }
+
+  const logs = _safeJsonArray(run.log_json);
+  let sent = false;
+  let sentAt = "";
+  for (const line of logs) {
+    const text = typeof line === "string"
+      ? line
+      : String((line && (line.text || line.message || line.msg)) || "");
+    if (!text.includes("[CRM-PUSH] ✓ Sent note ")) continue;
+    sent = true;
+    const ts = typeof line === "object" && line
+      ? String((line.ts || line.timestamp || line.time || "") || "").trim()
+      : "";
+    if (ts) sentAt = ts;
+  }
+  return { sent, sentAt };
 }
 
 function _phaseTone(label: string): string {
@@ -887,6 +913,7 @@ export default function LivePage() {
 
   const renderRunCard = (run: PipelineRunRecord) => {
     const runCallId = inferRunCallId(run);
+    const notePush = inferNotePushState(run);
     const selectable = !!String(run.id || "").trim();
     return (
     <button
@@ -917,6 +944,14 @@ export default function LivePage() {
         <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(run.status))}>
           {run.status}
         </span>
+        {isCompletedRun(run.status) && notePush.sent && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-cyan-200 border-cyan-700/60 bg-cyan-950/40"
+            title={notePush.sentAt ? `CRM note sent at ${notePush.sentAt}` : "CRM note sent"}
+          >
+            NOTE SENT
+          </span>
+        )}
         <span className="text-xs text-gray-100 font-semibold truncate">{run.pipeline_name}</span>
       </div>
       <div className="mt-1.5 text-[11px] text-gray-400 flex flex-wrap gap-x-3 gap-y-1">
