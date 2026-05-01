@@ -6,17 +6,16 @@ import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { SectionContent } from "@/components/shared/SectionCards";
+import ContextTopBar from "@/components/shared/ContextTopBar";
 import {
   BarChart3,
   Bot,
-  ChevronRight,
   FileText,
   Loader2,
   PhoneCall,
   ShieldCheck,
   StickyNote,
   User,
-  Users,
   Workflow,
   X,
 } from "lucide-react";
@@ -890,53 +889,19 @@ export default function AgentDeepDiveView({
 
   return (
     <div className="relative h-full flex flex-col overflow-hidden bg-gray-950">
-      <div className="flex flex-nowrap items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900 shrink-0 overflow-x-auto">
-        <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
-        <span className="text-sm font-bold text-white shrink-0">{title}</span>
-        <span className="text-[10px] text-gray-500 shrink-0">{subtitle}</span>
-
-        <button
-          type="button"
-          onClick={openCrmOverlay}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
-          title="Pick sales agent + customer from CRM"
-        >
-          <Users className="w-3 h-3 text-indigo-400 shrink-0" />
-          <span className="text-[11px] text-gray-200 truncate">{salesAgent || "Sales agent…"}</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={openCrmOverlay}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40 hover:bg-gray-900 transition-colors min-w-[170px]"
-          title="Pick customer from CRM"
-        >
-          <User className="w-3 h-3 text-cyan-400 shrink-0" />
-          <span className="text-[11px] text-gray-200 truncate">
-            {customer || (salesAgent ? "Customer…" : "Select agent first")}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={openCallsOverlay}
-          disabled={!salesAgent || !customer}
-          className={cn(
-            "flex items-center gap-1.5 px-2 py-1 rounded-lg border transition-colors min-w-[190px]",
-            (!salesAgent || !customer)
-              ? "border-gray-800 bg-gray-950/20 text-gray-600 cursor-not-allowed"
-              : "border-gray-800 bg-gray-950/40 hover:bg-gray-900",
-          )}
-          title="Open calls browser"
-        >
-          <PhoneCall className="w-3 h-3 text-amber-400 shrink-0" />
-          <span className="text-[11px] text-gray-200 truncate">
-            {callId ? `Call ${callId}` : "Call ID…"}
-          </span>
-          <ChevronRight className="w-3 h-3 text-gray-500 ml-auto" />
-        </button>
-
-        <div className="ml-auto flex items-center gap-1.5">
+      <div className="shrink-0 border-b border-gray-800 bg-gray-900">
+        <ContextTopBar
+          salesAgent={salesAgent}
+          customer={customer}
+          callId={callId}
+          onOpenCrm={openCrmOverlay}
+          onOpenCalls={openCallsOverlay}
+        />
+        <div className="flex flex-nowrap items-center gap-2 px-3 py-2 overflow-x-auto">
+          <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
+          <span className="text-sm font-bold text-white shrink-0">{title}</span>
+          <span className="text-[10px] text-gray-500 shrink-0">{subtitle}</span>
+          <div className="ml-auto flex items-center gap-1.5">
           <span className="text-[10px] text-gray-500 uppercase tracking-wide">Pipeline</span>
           <select
             value={activePipelineId || ""}
@@ -954,6 +919,7 @@ export default function AgentDeepDiveView({
               </option>
             ))}
           </select>
+        </div>
         </div>
       </div>
 
