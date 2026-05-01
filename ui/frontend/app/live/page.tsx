@@ -138,38 +138,19 @@ function isCompletedRun(status: string): boolean {
   );
 }
 
-function runHasRetrySignal(run: PipelineRunRecord): boolean {
-  const s = String(run.status || "").trim().toLowerCase();
-  if (s.includes("retry")) return true;
-  const logs = _safeJsonArray(run.log_json);
-  for (const line of logs) {
-    const text = typeof line === "string"
-      ? line
-      : String((line && (line.text || line.message || line.msg)) || "");
-    if (/\bretry\b/i.test(text) || /\bretrying\b/i.test(text)) return true;
-  }
-  return false;
+function isRetryRun(status: string): boolean {
+  const s = String(status || "").trim().toLowerCase();
+  return s === "retrying";
 }
 
-type CompletedOutcome = "failed" | "retry" | "success";
+function isSuccessCompletedRun(status: string): boolean {
+  const s = String(status || "").trim().toLowerCase();
+  return s === "done" || s === "completed" || s === "success" || s === "ok";
+}
 
-function completedOutcome(run: PipelineRunRecord): CompletedOutcome {
-  const s = String(run.status || "").trim().toLowerCase();
-  if (s.includes("retry")) return "retry";
-  if (
-    s === "error"
-    || s === "failed"
-    || s.includes("exception")
-    || s.includes("cancel")
-    || s.includes("abort")
-    || s.includes("stop")
-  ) {
-    return "failed";
-  }
-  if (s === "done" || s === "completed" || s === "success" || s === "ok") {
-    return runHasRetrySignal(run) ? "retry" : "success";
-  }
-  return runHasRetrySignal(run) ? "retry" : "failed";
+function isFailedCompletedRun(status: string): boolean {
+  const s = String(status || "").trim().toLowerCase();
+  return isCompletedRun(s) && !isSuccessCompletedRun(s);
 }
 
 function isQueuedRun(status: string): boolean {
@@ -392,9 +373,12 @@ export default function LivePage() {
   const [requeueingRejectedId, setRequeueingRejectedId] = useState("");
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
-  const [requeueingFailedRunId, setRequeueingFailedRunId] = useState("");
+  const [retryingFailedRunId, setRetryingFailedRunId] = useState("");
+  const [cancellingRunId, setCancellingRunId] = useState("");
   const [failedRunActionMsg, setFailedRunActionMsg] = useState("");
   const [failedRunActionErr, setFailedRunActionErr] = useState(false);
+  const [runControlActionMsg, setRunControlActionMsg] = useState("");
+  const [runControlActionErr, setRunControlActionErr] = useState(false);
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
   const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
 
@@ -799,28 +783,28 @@ export default function LivePage() {
     }
   };
 
-  const moveFailedRunToRun = async (run: PipelineRunRecord) => {
+  const moveFailedRunToRetry = async (run: PipelineRunRecord) => {
     const sourceRunId = String(run?.id || "").trim();
     if (!sourceRunId) return;
     if (liveReadOnly) {
       setFailedRunActionErr(true);
-      setFailedRunActionMsg("Read-only mirror mode: cannot enqueue failed run from this environment.");
+      setFailedRunActionMsg("Read-only mirror mode: cannot move failed run to retry from this environment.");
       return;
     }
     if (normalizeRunOrigin(run.run_origin) !== "webhook") {
       setFailedRunActionErr(true);
-      setFailedRunActionMsg("Only production/webhook failed runs can be moved back to queue.");
+      setFailedRunActionMsg("Only production/webhook failed runs can be moved to retry.");
       return;
     }
     const ok = window.confirm(
-      `Move failed run ${sourceRunId.slice(0, 8)} back to queue for pipeline "${run.pipeline_name}"?`,
+      `Move failed run ${sourceRunId.slice(0, 8)} to retry for pipeline "${run.pipeline_name}"?`,
     );
     if (!ok) return;
 
-    setRequeueingFailedRunId(sourceRunId);
+    setRetryingFailedRunId(sourceRunId);
     setFailedRunActionMsg("");
     try {
-      const res = await fetch(`/api/pipelines/live-webhook/runs/${encodeURIComponent(sourceRunId)}/enqueue`, {
+      const res = await fetch(`/api/pipelines/live-webhook/runs/${encodeURIComponent(sourceRunId)}/retry`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -831,19 +815,60 @@ export default function LivePage() {
       if (!res.ok) {
         throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
       }
-      const newRunId = String(body?.run_id || "").trim();
+      const retryRunId = String(body?.run_id || sourceRunId).trim();
       setFailedRunActionErr(false);
       setFailedRunActionMsg(
-        newRunId
-          ? `Moved to queue as run ${newRunId.slice(0, 8)}.`
-          : "Moved failed run back to queue.",
+        retryRunId
+          ? `Moved to retry as run ${retryRunId.slice(0, 8)}.`
+          : "Moved failed run to retry.",
       );
       await mutateRuns();
     } catch (e: any) {
       setFailedRunActionErr(true);
-      setFailedRunActionMsg(String(e?.message || "Failed moving run back to queue."));
+      setFailedRunActionMsg(String(e?.message || "Failed moving run to retry."));
     } finally {
-      setRequeueingFailedRunId("");
+      setRetryingFailedRunId("");
+    }
+  };
+
+  const cancelLiveRun = async (run: PipelineRunRecord) => {
+    const runId = String(run?.id || "").trim();
+    if (!runId) return;
+    if (liveReadOnly) {
+      setRunControlActionErr(true);
+      setRunControlActionMsg("Read-only mirror mode: cannot cancel runs from this environment.");
+      return;
+    }
+    if (normalizeRunOrigin(run.run_origin) !== "webhook") {
+      setRunControlActionErr(true);
+      setRunControlActionMsg("Only production/webhook runs can be cancelled from Jobs.");
+      return;
+    }
+    const ok = window.confirm(`Cancel run ${runId.slice(0, 8)}?`);
+    if (!ok) return;
+
+    setCancellingRunId(runId);
+    setRunControlActionMsg("");
+    try {
+      const res = await fetch(`/api/pipelines/live-webhook/runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          reason: "Cancelled by user from Jobs page.",
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      setRunControlActionErr(false);
+      setRunControlActionMsg(`Cancelled run ${runId.slice(0, 8)}.`);
+      await mutateRuns();
+    } catch (e: any) {
+      setRunControlActionErr(true);
+      setRunControlActionMsg(String(e?.message || "Failed cancelling run."));
+    } finally {
+      setCancellingRunId("");
     }
   };
 
@@ -873,8 +898,9 @@ export default function LivePage() {
   }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo]);
 
   const queuedRuns = useMemo(() => filteredRuns.filter((r) => isQueuedRun(r.status)), [filteredRuns]);
+  const retryRuns = useMemo(() => filteredRuns.filter((r) => isRetryRun(r.status)), [filteredRuns]);
   const runningRuns = useMemo(
-    () => filteredRuns.filter((r) => !isCompletedRun(r.status) && !isQueuedRun(r.status)),
+    () => filteredRuns.filter((r) => !isCompletedRun(r.status) && !isQueuedRun(r.status) && !isRetryRun(r.status)),
     [filteredRuns],
   );
   const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
@@ -894,6 +920,37 @@ export default function LivePage() {
     () => runningRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
     [runningRuns],
   );
+  const retryProductionRuns = useMemo(
+    () => retryRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
+    [retryRuns],
+  );
+  const retryTestRuns = useMemo(
+    () => retryRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
+    [retryRuns],
+  );
+  const retryRunsByDay = useMemo(() => {
+    const byDay = new Map<string, PipelineRunRecord[]>();
+    for (const run of retryRuns) {
+      const d = parseServerDate(run.finished_at || run.started_at);
+      const dayId = d
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+        : "unknown";
+      const arr = byDay.get(dayId) || [];
+      arr.push(run);
+      byDay.set(dayId, arr);
+    }
+    const groups = Array.from(byDay.entries()).map(([dayId, dayRuns]) => ({
+      dayId,
+      label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
+      runs: [...dayRuns].sort((a, b) => {
+        const ta = parseServerDate(a.finished_at || a.started_at)?.getTime() ?? 0;
+        const tb = parseServerDate(b.finished_at || b.started_at)?.getTime() ?? 0;
+        return tb - ta;
+      }),
+    }));
+    groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
+    return groups;
+  }, [retryRuns]);
   const completedRunsByDay = useMemo(() => {
     const byDay = new Map<string, PipelineRunRecord[]>();
     for (const run of completedRuns) {
@@ -911,15 +968,13 @@ export default function LivePage() {
         const tb = parseServerDate(b.finished_at || b.started_at)?.getTime() ?? 0;
         return tb - ta;
       });
-      const failedRuns = sorted.filter((r) => completedOutcome(r) === "failed");
-      const retryRuns = sorted.filter((r) => completedOutcome(r) === "retry");
-      const successRuns = sorted.filter((r) => completedOutcome(r) === "success");
+      const failedRuns = sorted.filter((r) => isFailedCompletedRun(r.status));
+      const successRuns = sorted.filter((r) => isSuccessCompletedRun(r.status));
       return {
         dayId,
         label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
         runs: sorted,
         failedRuns,
-        retryRuns,
         successRuns,
       };
     });
@@ -934,17 +989,6 @@ export default function LivePage() {
           dayId: group.dayId,
           label: group.label,
           runs: group.failedRuns,
-        }))
-        .filter((group) => group.runs.length > 0),
-    [completedRunsByDay],
-  );
-  const completedRetryByDay = useMemo(
-    () =>
-      completedRunsByDay
-        .map((group) => ({
-          dayId: group.dayId,
-          label: group.label,
-          runs: group.retryRuns,
         }))
         .filter((group) => group.runs.length > 0),
     [completedRunsByDay],
@@ -964,21 +1008,16 @@ export default function LivePage() {
     () => completedFailedByDay.reduce((n, group) => n + group.runs.length, 0),
     [completedFailedByDay],
   );
-  const completedRetryCount = useMemo(
-    () => completedRetryByDay.reduce((n, group) => n + group.runs.length, 0),
-    [completedRetryByDay],
-  );
   const completedSuccessCount = useMemo(
     () => completedSuccessByDay.reduce((n, group) => n + group.runs.length, 0),
     [completedSuccessByDay],
   );
-  const hideRetryColumn = completedRetryCount === 0;
 
   useEffect(() => {
-    setCollapsedCompletedFailedDayIds((prev) => {
+    setCollapsedCompletedRetryDayIds((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const group of completedRunsByDay) {
+      for (const group of retryRunsByDay) {
         if (next[group.dayId] == null) {
           next[group.dayId] = true;
           changed = true;
@@ -986,7 +1025,10 @@ export default function LivePage() {
       }
       return changed ? next : prev;
     });
-    setCollapsedCompletedRetryDayIds((prev) => {
+  }, [retryRunsByDay]);
+
+  useEffect(() => {
+    setCollapsedCompletedFailedDayIds((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const group of completedRunsByDay) {
@@ -1243,12 +1285,7 @@ export default function LivePage() {
           </div>
         ) : (
           <div
-            className={cn(
-              "h-full grid grid-cols-1 gap-0",
-              hideRetryColumn
-                ? "2xl:grid-cols-[300px_340px_1fr_1fr_1fr_1fr]"
-                : "2xl:grid-cols-[300px_340px_1fr_1fr_1fr_1fr_1fr]",
-            )}
+            className="h-full grid grid-cols-1 gap-0 2xl:grid-cols-[300px_340px_1fr_1fr_1fr_1fr_1fr]"
           >
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
@@ -1456,6 +1493,11 @@ export default function LivePage() {
                 <span className="text-xs text-gray-500">{runningRuns.length}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                {runControlActionMsg ? (
+                  <p className={cn("text-[11px]", runControlActionErr ? "text-red-300" : "text-emerald-300")}>
+                    {runControlActionMsg}
+                  </p>
+                ) : null}
                 {runningRuns.length === 0 ? (
                   <p className="text-xs text-gray-600 italic">No running runs.</p>
                 ) : (
@@ -1466,7 +1508,26 @@ export default function LivePage() {
                     {runningProductionRuns.length === 0 ? (
                       <p className="text-[11px] text-gray-500 italic px-1">No production runs.</p>
                     ) : (
-                      runningProductionRuns.map(renderRunCard)
+                      runningProductionRuns.map((run) => {
+                        const canCancel = normalizeRunOrigin(run.run_origin) === "webhook";
+                        const busy = cancellingRunId === run.id;
+                        return (
+                          <div key={`running-${run.id}`} className="space-y-1">
+                            {renderRunCard(run)}
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                disabled={!canCancel || busy || liveReadOnly}
+                                onClick={() => { void cancelLiveRun(run); }}
+                                className="text-[10px] px-2 py-1 rounded border border-red-700/70 bg-red-950/30 text-red-200 hover:bg-red-900/40 disabled:opacity-50"
+                                title="Cancel this running run"
+                              >
+                                {busy ? "Cancelling..." : "Cancel"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
                     )}
                     <div className="pt-2 text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
                       TEST · local ({runningTestRuns.length})
@@ -1474,7 +1535,11 @@ export default function LivePage() {
                     {runningTestRuns.length === 0 ? (
                       <p className="text-[11px] text-gray-500 italic px-1">No test runs.</p>
                     ) : (
-                      runningTestRuns.map(renderRunCard)
+                      runningTestRuns.map((run) => (
+                        <div key={`running-test-${run.id}`} className="space-y-1">
+                          {renderRunCard(run)}
+                        </div>
+                      ))
                     )}
                   </>
                 )}
@@ -1520,7 +1585,7 @@ export default function LivePage() {
                             {group.runs.map((run) => {
                               const runKey = String(run.id || "").trim() || `${group.dayId}-${run.pipeline_id}-${run.call_id}-${run.started_at || ""}`;
                               const canMove = normalizeRunOrigin(run.run_origin) === "webhook";
-                              const busy = requeueingFailedRunId === run.id;
+                              const busy = retryingFailedRunId === run.id;
                               return (
                                 <div key={`failed-run-${runKey}`} className="space-y-1">
                                   {renderRunCard(run)}
@@ -1528,15 +1593,15 @@ export default function LivePage() {
                                     <button
                                       type="button"
                                       disabled={!canMove || busy || liveReadOnly}
-                                      onClick={() => { void moveFailedRunToRun(run); }}
+                                      onClick={() => { void moveFailedRunToRetry(run); }}
                                       className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
                                       title={
                                         !canMove
-                                          ? "Only production/webhook runs can be moved back to queue"
-                                          : "Move failed run back to queue"
+                                          ? "Only production/webhook runs can be moved to retry"
+                                          : "Move failed run to retry"
                                       }
                                     >
-                                      {busy ? "Moving..." : "Move To Run"}
+                                      {busy ? "Moving..." : "Move To Retry"}
                                     </button>
                                   </div>
                                 </div>
@@ -1551,44 +1616,92 @@ export default function LivePage() {
               </div>
             </section>
 
-            {!hideRetryColumn && (
-              <section className="min-h-0 border-r border-gray-800 flex flex-col">
-                <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
-                  <Loader2 className="w-4 h-4 text-fuchsia-400" />
-                  <p className="text-sm font-semibold text-gray-100">Retry</p>
-                  <span className="text-xs text-gray-500">{completedRetryCount}</span>
-                </div>
-                <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                  {completedRetryByDay.map((group) => {
-                    const collapsed = !!collapsedCompletedRetryDayIds[group.dayId];
-                    return (
-                      <div key={`retry-${group.dayId}`} className="space-y-1.5">
-                        <button
-                          onClick={() =>
-                            setCollapsedCompletedRetryDayIds((prev) => ({
-                              ...prev,
-                              [group.dayId]: !prev[group.dayId],
-                            }))}
-                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-fuchsia-800/50 bg-fuchsia-950/20 hover:bg-fuchsia-900/20 text-left"
-                          title={collapsed ? "Expand date folder" : "Collapse date folder"}
-                        >
-                          <ChevronRight
-                            className={cn("w-3.5 h-3.5 text-fuchsia-300 transition-transform", !collapsed && "rotate-90")}
-                          />
-                          <span className="text-[11px] text-fuchsia-200 font-semibold">{group.label}</span>
-                          <span className="ml-auto text-[10px] text-fuchsia-300">{group.runs.length}</span>
-                        </button>
-                        {!collapsed && (
-                          <div className="space-y-2 pl-2">
-                            {group.runs.map(renderRunCard)}
+            <section className="min-h-0 border-r border-gray-800 flex flex-col">
+              <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
+                <Loader2 className="w-4 h-4 text-fuchsia-400" />
+                <p className="text-sm font-semibold text-gray-100">Retry</p>
+                <span className="text-xs text-gray-500">{retryRuns.length}</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                {runControlActionMsg ? (
+                  <p className={cn("text-[11px]", runControlActionErr ? "text-red-300" : "text-emerald-300")}>
+                    {runControlActionMsg}
+                  </p>
+                ) : null}
+                {retryRuns.length === 0 ? (
+                  <p className="text-xs text-gray-600 italic">No retry runs.</p>
+                ) : (
+                  <>
+                    <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
+                      PRODUCTION · webhook ({retryProductionRuns.length})
+                    </div>
+                    {retryProductionRuns.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic px-1">No production retry runs.</p>
+                    ) : (
+                      retryRunsByDay.map((group) => {
+                        const collapsed = !!collapsedCompletedRetryDayIds[group.dayId];
+                        const onlyProd = group.runs.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook");
+                        if (onlyProd.length === 0) return null;
+                        return (
+                          <div key={`retry-${group.dayId}`} className="space-y-1.5">
+                            <button
+                              onClick={() =>
+                                setCollapsedCompletedRetryDayIds((prev) => ({
+                                  ...prev,
+                                  [group.dayId]: !prev[group.dayId],
+                                }))}
+                              className="w-full flex items-center gap-2 px-2 py-1 rounded border border-fuchsia-800/50 bg-fuchsia-950/20 hover:bg-fuchsia-900/20 text-left"
+                              title={collapsed ? "Expand date folder" : "Collapse date folder"}
+                            >
+                              <ChevronRight
+                                className={cn("w-3.5 h-3.5 text-fuchsia-300 transition-transform", !collapsed && "rotate-90")}
+                              />
+                              <span className="text-[11px] text-fuchsia-200 font-semibold">{group.label}</span>
+                              <span className="ml-auto text-[10px] text-fuchsia-300">{onlyProd.length}</span>
+                            </button>
+                            {!collapsed && (
+                              <div className="space-y-2 pl-2">
+                                {onlyProd.map((run) => {
+                                  const busy = cancellingRunId === run.id;
+                                  return (
+                                    <div key={`retry-run-${run.id}`} className="space-y-1">
+                                      {renderRunCard(run)}
+                                      <div className="flex justify-end">
+                                        <button
+                                          type="button"
+                                          disabled={busy || liveReadOnly}
+                                          onClick={() => { void cancelLiveRun(run); }}
+                                          className="text-[10px] px-2 py-1 rounded border border-red-700/70 bg-red-950/30 text-red-200 hover:bg-red-900/40 disabled:opacity-50"
+                                          title="Cancel this retry run"
+                                        >
+                                          {busy ? "Cancelling..." : "Cancel"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
+                        );
+                      })
+                    )}
+                    <div className="pt-2 text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
+                      TEST · local ({retryTestRuns.length})
+                    </div>
+                    {retryTestRuns.length === 0 ? (
+                      <p className="text-[11px] text-gray-500 italic px-1">No test retry runs.</p>
+                    ) : (
+                      retryTestRuns.map((run) => (
+                        <div key={`retry-test-${run.id}`} className="space-y-1">
+                          {renderRunCard(run)}
+                        </div>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+            </section>
 
             <section className="min-h-0 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
