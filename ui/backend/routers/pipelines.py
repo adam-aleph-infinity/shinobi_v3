@@ -213,6 +213,8 @@ def _default_live_webhook_config() -> dict[str, Any]:
         "ingest_only": True,
         "trigger_pipeline": True,
         "agent_continuity_filter_enabled": True,
+        "agent_continuity_pair_tag_fallback_enabled": True,
+        "agent_continuity_reject_multi_agent_pair_tags": True,
         "live_pipeline_ids": [],
         "default_pipeline_id": "",
         "pipeline_by_agent": {},
@@ -245,6 +247,12 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
     base["ingest_only"] = bool(base.get("ingest_only", True))
     base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
     base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
+    base["agent_continuity_pair_tag_fallback_enabled"] = bool(
+        base.get("agent_continuity_pair_tag_fallback_enabled", True)
+    )
+    base["agent_continuity_reject_multi_agent_pair_tags"] = bool(
+        base.get("agent_continuity_reject_multi_agent_pair_tags", True)
+    )
     live_ids = base.get("live_pipeline_ids")
     if isinstance(live_ids, list):
         dedup: list[str] = []
@@ -2638,6 +2646,8 @@ class LiveWebhookConfigIn(BaseModel):
     ingest_only: bool = True
     trigger_pipeline: bool = True
     agent_continuity_filter_enabled: bool = True
+    agent_continuity_pair_tag_fallback_enabled: bool = True
+    agent_continuity_reject_multi_agent_pair_tags: bool = True
     live_pipeline_ids: list[str] = []
     default_pipeline_id: str = ""
     pipeline_by_agent: dict[str, str] = {}
@@ -2665,6 +2675,10 @@ class LiveWebhookQuickSetIn(BaseModel):
 class LiveWebhookRejectionEnqueueIn(BaseModel):
     pipeline_id: str = ""
     run_all: bool = False
+
+
+class LiveWebhookRunEnqueueIn(BaseModel):
+    pipeline_id: str = ""
 
 
 @router.get("/{pipeline_id}/results")
@@ -3584,7 +3598,12 @@ def get_pipeline_artifact_status(
     artifact_step_ids = set(artifact_types_by_step.keys())
     artifact_total = len(artifact_step_ids)
 
-    def _state(step_ids: set[int], last_at: Optional[str]) -> dict[str, Any]:
+    def _state(
+        step_ids: set[int],
+        last_at: Optional[str],
+        note_sent: bool = False,
+        note_sent_at: Optional[str] = None,
+    ) -> dict[str, Any]:
         valid_step_ids = {s for s in step_ids if 0 <= s < total_steps}
         step_count = len(valid_step_ids)
         agent_step_count = step_count
@@ -3608,11 +3627,19 @@ def get_pipeline_artifact_status(
             "artifact_complete": artifact_complete,
             "artifact_types": artifact_types,
             "last_at": last_at,
+            "note_sent": bool(note_sent),
+            "note_sent_at": note_sent_at,
         }
 
     grouped_step_ids: dict[str, set[int]] = {}
     grouped_last_at: dict[str, Optional[str]] = {}
     grouped_raw_call_id: dict[str, str] = {}
+    grouped_note_sent: dict[str, bool] = {}
+    grouped_note_sent_at: dict[str, Optional[str]] = {}
+
+    def _mark_note_sent(norm_call_id: str, ts: Optional[str]) -> None:
+        grouped_note_sent[norm_call_id] = True
+        grouped_note_sent_at[norm_call_id] = _max_iso(grouped_note_sent_at.get(norm_call_id), ts)
 
     def _merge_grouped_rows(rows: list[Any], call_key: str, step_key: str, last_key: str) -> None:
         for r in rows:
@@ -3719,11 +3746,110 @@ def get_pipeline_artifact_status(
             except Exception:
                 pass
 
+    # Optional note-push status by call, inferred from successful CRM push entries
+    # in pipeline_run.log_json. Keep this best-effort and fully backward compatible.
+    has_pipeline_run_cols = {
+        "id",
+        "pipeline_id",
+        "sales_agent",
+        "customer",
+        "call_id",
+        "status",
+        "started_at",
+        "finished_at",
+        "log_json",
+    }.issubset(_get_table_columns(db, "pipeline_run"))
+    if has_pipeline_run_cols:
+        try:
+            rows = db.execute(
+                _sql_text(
+                    "SELECT call_id, COALESCE(finished_at, started_at) AS last_at, log_json "
+                    "FROM pipeline_run "
+                    "WHERE pipeline_id = :pipeline_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND status = 'done' "
+                    "ORDER BY COALESCE(finished_at, started_at) DESC "
+                    "LIMIT 1000"
+                ),
+                {
+                    "pipeline_id": pipeline_id,
+                    "sales_agent": sales_agent,
+                    "customer": customer,
+                },
+            ).all()
+            for r in rows:
+                m = getattr(r, "_mapping", r)
+                cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                cid = _norm_call_id(cid_raw)
+                if requested_set and cid and cid not in requested_set:
+                    continue
+                last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[1] if len(r) > 1 else None))
+                log_blob = str(m.get("log_json", "") if hasattr(m, "get") else (r[2] if len(r) > 2 else ""))
+                if "[CRM-PUSH] ✓ Sent note " not in log_blob:
+                    continue
+                _mark_note_sent(cid, last_at)
+        except Exception:
+            pass
+
+    # Fallback (file-backed execution logs), for deployments where pipeline_run table
+    # does not exist or is not populated. Reads recent pipeline_run sessions and checks
+    # report.log_lines_tail for CRM push success markers.
+    if not grouped_note_sent:
+        try:
+            recent_sessions = execution_logs.list_recent(limit=2500, action="pipeline_run")
+            for row in recent_sessions:
+                ctx = row.get("context") if isinstance(row.get("context"), dict) else {}
+                if str(ctx.get("pipeline_id") or "").strip() != pipeline_id:
+                    continue
+                if str(ctx.get("sales_agent") or "").strip().lower() != str(sales_agent or "").strip().lower():
+                    continue
+                if str(ctx.get("customer") or "").strip().lower() != str(customer or "").strip().lower():
+                    continue
+                sid = str(row.get("session_id") or "").strip()
+                if not sid:
+                    continue
+
+                full = execution_logs.get_session(sid)
+                if not isinstance(full, dict):
+                    continue
+                report = full.get("report") if isinstance(full.get("report"), dict) else {}
+                tail = report.get("log_lines_tail") if isinstance(report, dict) else []
+                if not isinstance(tail, list):
+                    continue
+                sent_ok = False
+                for item in tail:
+                    if not isinstance(item, dict):
+                        continue
+                    txt = str(item.get("text") or item.get("message") or "")
+                    if "[CRM-PUSH] ✓ Sent note " in txt:
+                        sent_ok = True
+                        break
+                if not sent_ok:
+                    continue
+
+                cid = _norm_call_id(ctx.get("call_id"))
+                if requested_set and cid and cid not in requested_set:
+                    continue
+                ts = (
+                    _to_iso(full.get("finished_at_utc"))
+                    or _to_iso(full.get("updated_at_utc"))
+                    or _to_iso(row.get("updated_at_utc"))
+                )
+                _mark_note_sent(cid, ts)
+        except Exception:
+            pass
+
     calls_out: dict[str, dict[str, Any]] = {}
     source_call_ids = sorted(list(requested_set)) if requested_set else sorted([cid for cid in grouped_step_ids.keys() if cid])
     for norm_cid in source_call_ids:
         out_key = requested_norm_to_raw.get(norm_cid) or grouped_raw_call_id.get(norm_cid) or norm_cid
-        calls_out[out_key] = _state(grouped_step_ids.get(norm_cid, set()), grouped_last_at.get(norm_cid))
+        calls_out[out_key] = _state(
+            grouped_step_ids.get(norm_cid, set()),
+            grouped_last_at.get(norm_cid),
+            grouped_note_sent.get(norm_cid, False),
+            grouped_note_sent_at.get(norm_cid),
+        )
 
     # Include discovered calls too when caller did not pass explicit call_ids.
     if not requested_set:
@@ -3733,13 +3859,23 @@ def get_pipeline_artifact_status(
             out_key = grouped_raw_call_id.get(norm_cid) or norm_cid
             if out_key in calls_out:
                 continue
-            calls_out[out_key] = _state(grouped_step_ids.get(norm_cid, set()), grouped_last_at.get(norm_cid))
+            calls_out[out_key] = _state(
+                grouped_step_ids.get(norm_cid, set()),
+                grouped_last_at.get(norm_cid),
+                grouped_note_sent.get(norm_cid, False),
+                grouped_note_sent_at.get(norm_cid),
+            )
 
     return {
         "pipeline_id": pipeline_id,
         "sales_agent": sales_agent,
         "customer": customer,
-        "pair": _state(grouped_step_ids.get("", set()), grouped_last_at.get("")),
+        "pair": _state(
+            grouped_step_ids.get("", set()),
+            grouped_last_at.get(""),
+            grouped_note_sent.get("", False),
+            grouped_note_sent_at.get(""),
+        ),
         "calls": calls_out,
         "generated_at": datetime.utcnow().isoformat(),
     }
@@ -4461,6 +4597,12 @@ def get_live_webhook_config(request: Request):
         "ingest_only": bool(cfg.get("ingest_only", True)),
         "trigger_pipeline": bool(cfg.get("trigger_pipeline", True)),
         "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
+        "agent_continuity_pair_tag_fallback_enabled": bool(
+            cfg.get("agent_continuity_pair_tag_fallback_enabled", True)
+        ),
+        "agent_continuity_reject_multi_agent_pair_tags": bool(
+            cfg.get("agent_continuity_reject_multi_agent_pair_tags", True)
+        ),
         "live_pipeline_ids": cfg.get("live_pipeline_ids") if isinstance(cfg.get("live_pipeline_ids"), list) else [],
         "send_note_pipeline_ids": (
             cfg.get("send_note_pipeline_ids") if isinstance(cfg.get("send_note_pipeline_ids"), list) else []
@@ -4493,7 +4635,7 @@ def get_live_webhook_config(request: Request):
 @router.get("/live-webhook/rejections")
 def get_live_webhook_rejections(
     request: Request,
-    limit: int = Query(200, ge=1, le=2000),
+    limit: int = Query(20000, ge=1, le=20000),
     status: str = Query("all"),
 ):
     status_norm = str(status or "all").strip().lower() or "all"
@@ -4502,13 +4644,19 @@ def get_live_webhook_rejections(
         return _live_mirror_request_json("GET", path, request=request)
     from ui.backend.routers import webhooks as _wh
 
-    pull_limit = 20000 if status_norm != "all" else limit
-    items = _wh._list_rejected_webhooks(limit=pull_limit, include_non_rejected=True)
+    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=True)
     if status_norm != "all":
-        items = [it for it in items if str((it or {}).get("status") or "").strip().lower() == status_norm][:limit]
+        all_items = [
+            it for it in all_items
+            if str((it or {}).get("status") or "").strip().lower() == status_norm
+        ]
+    total_count = len(all_items)
+    items = all_items[: int(limit)]
     return {
         "ok": True,
-        "count": len(items),
+        "count": total_count,
+        "returned_count": len(items),
+        "total_count": total_count,
         "items": items,
     }
 
@@ -4658,6 +4806,111 @@ async def enqueue_live_webhook_rejection(
     }
 
 
+@router.post("/live-webhook/runs/{run_id}/enqueue")
+async def enqueue_live_webhook_run(
+    run_id: str,
+    req: LiveWebhookRunEnqueueIn,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    if _is_live_mirror_mode(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in mirror mode.")
+
+    source_run_id = str(run_id or "").strip()
+    if not source_run_id:
+        raise HTTPException(status_code=400, detail="Missing run id.")
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.routers import webhooks as _wh
+
+    src = db.get(PR, source_run_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    pipeline_id = str(req.pipeline_id or src.pipeline_id or "").strip()
+    if not pipeline_id:
+        raise HTTPException(status_code=400, detail="No pipeline id resolved from source run.")
+    _, pdef = _find_file(pipeline_id)
+    pipeline_name = str(pdef.get("name") or src.pipeline_name or pipeline_id)
+
+    sales_agent = str(src.sales_agent or "").strip()
+    customer = str(src.customer or "").strip()
+    call_id = str(src.call_id or "").strip()
+    if not (sales_agent and customer):
+        raise HTTPException(status_code=400, detail="Source run missing agent/customer context.")
+
+    cfg = _load_live_webhook_config()
+    queued_at = datetime.now(timezone.utc).isoformat()
+    new_run_id = str(uuid.uuid4())
+    run_payload: dict[str, Any] = {
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "call_id": call_id,
+        "resume_partial": True,
+        "run_origin": "webhook",
+        "run_id": new_run_id,
+        "manual_replay": True,
+        "source_run_id": source_run_id,
+    }
+    cfg_run_payload = cfg.get("run_payload")
+    if isinstance(cfg_run_payload, dict):
+        for k, v in cfg_run_payload.items():
+            run_payload[str(k)] = v
+
+    queue_item = {
+        "id": str(uuid.uuid4()),
+        "event_id": "",
+        "event_file": "",
+        "webhook_type": "failed-replay",
+        "created_at": queued_at,
+        "updated_at": queued_at,
+        "state": "queued",
+        "attempts": 0,
+        "max_attempts": int(cfg.get("retry_max_attempts") or 2),
+        "next_attempt_at": queued_at,
+        "last_error": "",
+        "request_base_url": str(request.base_url or ""),
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "run_id": new_run_id,
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "call_id": call_id,
+        "pair": _wh._pair_from_names(sales_agent, customer),
+        "payload": run_payload,
+        "manual_replay": True,
+        "source_run_id": source_run_id,
+    }
+
+    created, meta = await _wh._enqueue_live_item(queue_item)
+    effective_run_id = str(meta.get("run_id") or new_run_id)
+    if created:
+        _wh._upsert_pipeline_run_stub(
+            run_id=effective_run_id,
+            pipeline_id=pipeline_id,
+            pipeline_name=pipeline_name,
+            sales_agent=sales_agent,
+            customer=customer,
+            call_id=call_id,
+            status="queued",
+            log_line=f"Queued manually from failed run replay ({source_run_id[:8]})",
+        )
+
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "source_run_id": source_run_id,
+        "run_id": effective_run_id,
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "state": str(meta.get("state") or ("queued" if created else "")),
+        "deduplicated": (not created),
+        "message": str(meta.get("message") or ""),
+    }
+
+
 @router.put("/live-webhook/config")
 def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
     if _is_live_mirror_mode(request):
@@ -4697,6 +4950,12 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
             "ingest_only": bool(saved.get("ingest_only", True)),
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
             "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
+            "agent_continuity_pair_tag_fallback_enabled": bool(
+                saved.get("agent_continuity_pair_tag_fallback_enabled", True)
+            ),
+            "agent_continuity_reject_multi_agent_pair_tags": bool(
+                saved.get("agent_continuity_reject_multi_agent_pair_tags", True)
+            ),
             "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
             "send_note_pipeline_ids": (
                 saved.get("send_note_pipeline_ids") if isinstance(saved.get("send_note_pipeline_ids"), list) else []
@@ -4762,6 +5021,12 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
             "ingest_only": bool(saved.get("ingest_only", True)),
             "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
             "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
+            "agent_continuity_pair_tag_fallback_enabled": bool(
+                saved.get("agent_continuity_pair_tag_fallback_enabled", True)
+            ),
+            "agent_continuity_reject_multi_agent_pair_tags": bool(
+                saved.get("agent_continuity_reject_multi_agent_pair_tags", True)
+            ),
             "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
             "send_note_pipeline_ids": (
                 saved.get("send_note_pipeline_ids") if isinstance(saved.get("send_note_pipeline_ids"), list) else []
@@ -4790,7 +5055,7 @@ def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
 @router.get("/live-webhook/rejections")
 def list_live_webhook_rejections(
     request: Request,
-    limit: int = Query(200, ge=1, le=20000),
+    limit: int = Query(20000, ge=1, le=20000),
     status: str = Query("all"),
 ):
     if _is_live_mirror_mode(request):
@@ -4801,15 +5066,21 @@ def list_live_webhook_rejections(
 
     wanted_status = str(status or "all").strip().lower() or "all"
     include_non_rejected = wanted_status == "all"
-    fetch_limit = int(limit) if include_non_rejected else 20000
-    items = _wh._list_rejected_webhooks(limit=fetch_limit, include_non_rejected=include_non_rejected)
+    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=include_non_rejected)
     if not include_non_rejected:
-        items = [
-            row for row in items
+        all_items = [
+            row for row in all_items
             if str((row or {}).get("status") or "rejected").strip().lower() == wanted_status
         ]
-    items = items[: int(limit)]
-    return {"ok": True, "count": len(items), "items": items}
+    total_count = len(all_items)
+    items = all_items[: int(limit)]
+    return {
+        "ok": True,
+        "count": total_count,
+        "returned_count": len(items),
+        "total_count": total_count,
+        "items": items,
+    }
 
 
 @router.post("/live-webhook/rejections/{rejection_id}/enqueue")
@@ -7279,48 +7550,51 @@ async def run_pipeline(
             # For production runs triggered by webhook, optionally push notes back to CRM.
             try:
                 if run_final_status == "done" and run_origin == "webhook":
-                    _cfg = _load_live_webhook_config()
-                    _send_ids = {
-                        str(v or "").strip()
-                        for v in (_cfg.get("send_note_pipeline_ids") or [])
-                        if str(v or "").strip()
-                    }
-                    if pipeline_id in _send_ids:
-                        _note_id = ""
-                        for _st in run_steps:
-                            _nid = str(_st.get("note_id") or "").strip()
-                            if _nid:
-                                _note_id = _nid
-                        if _note_id:
-                            log_buffer.emit(f"[CRM-PUSH] Sending note {_note_id} to CRM…")
-                            try:
-                                from ui.backend.routers.notes import send_note_to_crm_internal
-                                with Session(_db_engine) as _note_s:
-                                    _push = send_note_to_crm_internal(
-                                        note_id=_note_id,
-                                        account_id="",
-                                        db=_note_s,
+                    if bool(settings.live_mirror_enabled):
+                        log_buffer.emit("[CRM-PUSH] Skipped: disabled in development/mirror environment.")
+                    else:
+                        _cfg = _load_live_webhook_config()
+                        _send_ids = {
+                            str(v or "").strip()
+                            for v in (_cfg.get("send_note_pipeline_ids") or [])
+                            if str(v or "").strip()
+                        }
+                        if pipeline_id in _send_ids:
+                            _note_id = ""
+                            for _st in run_steps:
+                                _nid = str(_st.get("note_id") or "").strip()
+                                if _nid:
+                                    _note_id = _nid
+                            if _note_id:
+                                log_buffer.emit(f"[CRM-PUSH] Sending note {_note_id} to CRM…")
+                                try:
+                                    from ui.backend.routers.notes import send_note_to_crm_internal
+                                    with Session(_db_engine) as _note_s:
+                                        _push = send_note_to_crm_internal(
+                                            note_id=_note_id,
+                                            account_id="",
+                                            db=_note_s,
+                                        )
+                                    _crm_status = str(_push.get("crm_status") or "")
+                                    _endpoint = str(_push.get("endpoint") or "")
+                                    log_buffer.emit(
+                                        f"[CRM-PUSH] ✓ Sent note {_note_id} to CRM"
+                                        + (f" (status {_crm_status})" if _crm_status else "")
                                     )
-                                _crm_status = str(_push.get("crm_status") or "")
-                                _endpoint = str(_push.get("endpoint") or "")
-                                log_buffer.emit(
-                                    f"[CRM-PUSH] ✓ Sent note {_note_id} to CRM"
-                                    + (f" (status {_crm_status})" if _crm_status else "")
-                                )
-                                if _endpoint:
-                                    log_buffer.emit(f"[CRM-PUSH] endpoint: {_endpoint}")
-                            except HTTPException as _crm_http_err:
-                                _detail = _crm_http_err.detail
-                                if isinstance(_detail, (dict, list)):
-                                    _detail = json.dumps(_detail, ensure_ascii=False)
-                                log_buffer.emit(
-                                    f"[CRM-PUSH] ✗ Failed for note {_note_id}: "
-                                    f"{_crm_http_err.status_code} {str(_detail or '').strip()}"
-                                )
-                            except Exception as _crm_err:
-                                log_buffer.emit(f"[CRM-PUSH] ✗ Failed for note {_note_id}: {_crm_err}")
-                        else:
-                            log_buffer.emit("[CRM-PUSH] Skipped: no note artifact produced by this run.")
+                                    if _endpoint:
+                                        log_buffer.emit(f"[CRM-PUSH] endpoint: {_endpoint}")
+                                except HTTPException as _crm_http_err:
+                                    _detail = _crm_http_err.detail
+                                    if isinstance(_detail, (dict, list)):
+                                        _detail = json.dumps(_detail, ensure_ascii=False)
+                                    log_buffer.emit(
+                                        f"[CRM-PUSH] ✗ Failed for note {_note_id}: "
+                                        f"{_crm_http_err.status_code} {str(_detail or '').strip()}"
+                                    )
+                                except Exception as _crm_err:
+                                    log_buffer.emit(f"[CRM-PUSH] ✗ Failed for note {_note_id}: {_crm_err}")
+                            else:
+                                log_buffer.emit("[CRM-PUSH] Skipped: no note artifact produced by this run.")
             except Exception as _crm_outer_err:
                 log_buffer.emit(f"[CRM-PUSH] ⚠ Post-run push check failed: {_crm_outer_err}")
             log_lines: list[dict[str, Any]] = []
