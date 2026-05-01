@@ -5201,7 +5201,20 @@ function PipelineCanvas() {
       return (
         <pre className={cn(
           "w-full overflow-y-auto overscroll-contain nowheel bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
-          expand ? "flex-1 min-h-0" : "max-h-80",
+          expand ? "h-full min-h-0" : "max-h-80",
+        )}
+        onWheelCapture={(e) => e.stopPropagation()}>
+          {text}
+        </pre>
+      );
+    }
+    // Merged transcript can be extremely long; show it as raw full text to guarantee
+    // complete visibility + reliable scrolling in canvas floating panels.
+    if (hint.includes("merged_transcript")) {
+      return (
+        <pre className={cn(
+          "w-full overflow-y-auto overscroll-contain nowheel bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
+          expand ? "h-full min-h-0" : "max-h-80",
         )}
         onWheelCapture={(e) => e.stopPropagation()}>
           {text}
@@ -5211,10 +5224,10 @@ function PipelineCanvas() {
     if (hint.includes("transcript")) {
       return (
         <div className={cn(
-          "border border-gray-700 rounded-lg overflow-hidden bg-gray-900",
-          expand ? "flex-1 min-h-0 h-full flex flex-col overflow-hidden" : "h-80",
+          "border border-gray-700 rounded-lg bg-gray-900 overflow-y-auto overscroll-contain nowheel",
+          expand ? "h-full min-h-0" : "h-80",
         )}>
-          <TranscriptViewer content={text} format="txt" className={expand ? "flex-1 min-h-0 h-full max-h-full overflow-y-auto" : "h-full"} />
+          <TranscriptViewer content={text} format="txt" className={expand ? "h-full min-h-0" : "h-full"} />
         </div>
       );
     }
@@ -5241,7 +5254,7 @@ function PipelineCanvas() {
         )}
         <div className={cn(
           "overflow-y-auto overscroll-contain nowheel rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
-          expand ? "flex-1 min-h-0" : "max-h-80",
+          expand ? "h-full min-h-0" : "max-h-80",
         )}
         onWheelCapture={(e) => e.stopPropagation()}>
           <SectionContent content={renderedMarkdown} format="markdown" />
@@ -5308,10 +5321,7 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div
-          className={cn(expand && "flex-1 min-h-0 overflow-y-auto overscroll-contain nowheel")}
-          onWheelCapture={(e) => e.stopPropagation()}
-        >
+        <div className={cn(expand && "flex-1 min-h-0 overflow-hidden")}>
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>
@@ -5502,7 +5512,10 @@ function PipelineCanvas() {
               </div>
             </div>
 
-            <div className="lg:col-span-7 min-h-0 overflow-y-auto space-y-2.5">
+            <div className={cn(
+              "lg:col-span-7 min-h-0 space-y-2.5",
+              selKind === "input" ? "overflow-hidden h-full flex flex-col" : "overflow-y-auto",
+            )}>
               <PropertiesSection
                 title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
                 className={selKind === "input" ? "h-full flex flex-col" : undefined}
@@ -6135,12 +6148,12 @@ function PipelineCanvas() {
           </div>
 
           <div className={cn(
-            "min-h-0 overflow-y-auto space-y-2.5",
+            "min-h-0 space-y-2.5",
             selKind === "input"
-              ? "lg:col-span-9 h-full flex flex-col"
+              ? "lg:col-span-9 h-full flex flex-col overflow-hidden"
               : selKind === "output"
-                ? "lg:col-span-5 h-full flex flex-col"
-                : "lg:col-span-4",
+                ? "lg:col-span-5 h-full flex flex-col overflow-hidden"
+                : "lg:col-span-4 overflow-y-auto",
           )}>
             {selKind === "input" && (
               <PropertiesSection
