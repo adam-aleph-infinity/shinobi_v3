@@ -27,6 +27,7 @@ _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
 _WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
 _LIVE_QUEUE_FILE = _WEBHOOK_DIR / "live_queue.json"
 _REJECTED_WEBHOOKS_FILE = _WEBHOOK_DIR / "rejections.json"
+_REJECTED_WEBHOOKS_CORRUPT_PREFIX = "rejections.corrupt."
 _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
 _WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
 _LIVE_QUEUE_LOCK = asyncio.Lock()
@@ -267,6 +268,13 @@ def _default_rejections_store() -> dict[str, Any]:
     }
 
 
+def _write_json_atomic(path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _normalize_rejections_store(raw: Any) -> dict[str, Any]:
     base = _default_rejections_store()
     if not isinstance(raw, dict):
@@ -286,20 +294,22 @@ def _load_rejections_store() -> dict[str, Any]:
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     if not _REJECTED_WEBHOOKS_FILE.exists():
         data = _default_rejections_store()
-        _REJECTED_WEBHOOKS_FILE.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_json_atomic(_REJECTED_WEBHOOKS_FILE, data)
         return data
     try:
         raw = json.loads(_REJECTED_WEBHOOKS_FILE.read_text(encoding="utf-8"))
     except Exception:
+        # Keep a copy of the bad payload for forensic recovery instead of
+        # silently overwriting it with an empty store.
+        try:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            corrupt_path = _REJECTED_WEBHOOKS_FILE.with_name(f"{_REJECTED_WEBHOOKS_CORRUPT_PREFIX}{ts}.json")
+            _REJECTED_WEBHOOKS_FILE.replace(corrupt_path)
+        except Exception:
+            pass
         raw = {}
     data = _normalize_rejections_store(raw)
-    _REJECTED_WEBHOOKS_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _write_json_atomic(_REJECTED_WEBHOOKS_FILE, data)
     return data
 
 
@@ -307,10 +317,7 @@ def _save_rejections_store(data: dict[str, Any]) -> dict[str, Any]:
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     norm = _normalize_rejections_store(data)
     norm["updated_at"] = _utc_now_iso()
-    _REJECTED_WEBHOOKS_FILE.write_text(
-        json.dumps(norm, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _write_json_atomic(_REJECTED_WEBHOOKS_FILE, norm)
     return norm
 
 

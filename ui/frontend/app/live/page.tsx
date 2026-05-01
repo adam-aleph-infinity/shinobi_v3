@@ -79,6 +79,8 @@ interface LiveWebhookConfig {
   retry_on_server_error: boolean;
   retry_on_rate_limit: boolean;
   retry_on_timeout: boolean;
+  rejected_webhooks_total?: number;
+  rejected_by_reason?: Record<string, number>;
   read_only?: boolean;
   mirror_source?: string;
 }
@@ -486,6 +488,11 @@ export default function LivePage() {
   const rejectedTotalCount = Number(
     rejectedData?.total_count ?? rejectedData?.count ?? rejectedItems.length ?? 0,
   ) || 0;
+  const rejectedStatsTotal = Number((liveCfg?.rejected_webhooks_total as number) || 0) || 0;
+  const rejectedDisplayCount = Math.max(rejectedTotalCount, rejectedStatsTotal);
+  const rejectedByReason = (liveCfg?.rejected_by_reason && typeof liveCfg.rejected_by_reason === "object")
+    ? liveCfg.rejected_by_reason
+    : {};
   const continuityRejectedCount = useMemo(
     () =>
       rejectedItems.filter((r) => {
@@ -1424,7 +1431,7 @@ export default function LivePage() {
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <XCircle className="w-4 h-4 text-red-400" />
                 <p className="text-sm font-semibold text-gray-100">Rejected</p>
-                <span className="text-xs text-gray-500">{rejectedTotalCount}</span>
+                <span className="text-xs text-gray-500">{rejectedDisplayCount}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
                 {rejectionActionMsg ? (
@@ -1433,7 +1440,28 @@ export default function LivePage() {
                   </p>
                 ) : null}
                 {rejectedItems.length === 0 ? (
-                  <p className="text-xs text-gray-600 italic">No rejected webhooks.</p>
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-gray-600 italic">No active rejected webhooks.</p>
+                    {rejectedStatsTotal > 0 && (
+                      <>
+                        <p className="text-[11px] text-amber-300">
+                          Historical rejected count tracked: {rejectedStatsTotal}
+                        </p>
+                        {Object.keys(rejectedByReason).length > 0 && (
+                          <div className="rounded border border-amber-800/50 bg-amber-950/20 px-2 py-1.5 space-y-1">
+                            {Object.entries(rejectedByReason)
+                              .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+                              .map(([reason, count]) => (
+                                <div key={`rej-reason-${reason}`} className="flex items-center justify-between text-[10px]">
+                                  <span className="text-amber-200">{reason}</span>
+                                  <span className="text-amber-300 font-semibold">{Number(count || 0)}</span>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
                 ) : (
                   rejectedItems.map((item) => {
                     const rid = String(item.id || "");
