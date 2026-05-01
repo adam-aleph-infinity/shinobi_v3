@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
 import { Activity, CheckCircle2, ChevronRight, Clock3, Loader2, Workflow, XCircle } from "lucide-react";
@@ -116,7 +116,9 @@ function statusTone(status: string): string {
   if (s === "queued") return "text-sky-200 border-sky-700/50 bg-sky-950/40";
   if (s === "preparing") return "text-cyan-200 border-cyan-700/50 bg-cyan-950/40";
   if (s === "retrying") return "text-violet-200 border-violet-700/50 bg-violet-950/40";
-  if (s === "done" || s === "completed" || s === "success" || s === "ok") return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
+  if (s === "done" || s === "completed" || s === "success" || s === "ok" || s === "finished" || s === "cached") {
+    return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
+  }
   if (s === "error" || s === "failed" || s.includes("exception")) return "text-red-300 border-red-700/50 bg-red-950/40";
   if (s.includes("cancel") || s.includes("abort") || s.includes("stop")) return "text-slate-200 border-slate-700/50 bg-slate-900/50";
   return "text-amber-300 border-amber-700/50 bg-amber-950/40";
@@ -129,6 +131,8 @@ function isCompletedRun(status: string): boolean {
     || s === "completed"
     || s === "success"
     || s === "ok"
+    || s === "finished"
+    || s === "cached"
     || s === "error"
     || s === "failed"
     || s.includes("cancel")
@@ -140,7 +144,7 @@ function isCompletedRun(status: string): boolean {
 
 function isSuccessCompletedRun(status: string): boolean {
   const s = String(status || "").trim().toLowerCase();
-  return s === "done" || s === "completed" || s === "success" || s === "ok";
+  return s === "done" || s === "completed" || s === "success" || s === "ok" || s === "finished" || s === "cached";
 }
 
 function isFailedCompletedRun(status: string): boolean {
@@ -157,6 +161,60 @@ function statusLabel(status: string): string {
   const s = String(status || "").trim().toLowerCase();
   if (s === "retrying") return "retry";
   return status;
+}
+
+function normalizeStateToken(raw: unknown): string {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "_");
+}
+
+function isFailedLike(status: string): boolean {
+  const s = normalizeStateToken(status);
+  return s === "failed" || s === "error" || s === "fail" || s.includes("exception");
+}
+
+function isCancelledLike(status: string): boolean {
+  const s = normalizeStateToken(status);
+  return s.includes("cancel") || s.includes("abort") || s.includes("stop");
+}
+
+function isActiveLike(status: string): boolean {
+  const s = normalizeStateToken(status);
+  return (
+    s === "running"
+    || s === "loading"
+    || s === "started"
+    || s === "queued"
+    || s === "preparing"
+    || s === "retrying"
+    || s.includes("in_progress")
+  );
+}
+
+function deriveEffectiveRunStatus(run: PipelineRunRecord): string {
+  const base = normalizeStateToken(run.status);
+  const finished = parseServerDate(run.finished_at);
+  const steps = _safeJsonArray(run.steps_json);
+  const stepStates = steps
+    .map((step) => {
+      if (!step || typeof step !== "object") return "";
+      const obj = step as Record<string, any>;
+      return normalizeStateToken(obj.state || obj.status || "");
+    })
+    .filter(Boolean);
+
+  const hasFailedStep = stepStates.some((s) => isFailedLike(s));
+  const hasCancelledStep = stepStates.some((s) => isCancelledLike(s));
+  const hasActiveStep = stepStates.some((s) => isActiveLike(s));
+  const runIsActive = isActiveLike(base) && !finished;
+
+  if (hasCancelledStep) return "cancelled";
+  if (hasFailedStep) return "failed";
+  if (hasActiveStep && !runIsActive) return "cancelled";
+  return base || String(run.status || "").trim().toLowerCase();
 }
 
 function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "local" {
@@ -250,8 +308,8 @@ function _phaseFromName(stepName: string, state: string): string {
   return "processing";
 }
 
-function inferPhaseBadges(run: PipelineRunRecord): PhaseBadge[] {
-  const status = String(run.status || "").toLowerCase();
+function inferPhaseBadges(run: PipelineRunRecord, statusOverride?: string): PhaseBadge[] {
+  const status = String(statusOverride || run.status || "").toLowerCase();
   if (status === "queued") return [{ label: "queued", tone: _phaseTone("queued") }];
   if (status === "retrying") return [{ label: "retrying", tone: _phaseTone("retrying") }];
 
@@ -462,6 +520,22 @@ export default function LivePage() {
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [runs, pipelineNameById]);
+
+  const effectiveStatusByRunId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const run of runs) {
+      const rid = String(run.id || "").trim();
+      if (!rid) continue;
+      map.set(rid, deriveEffectiveRunStatus(run));
+    }
+    return map;
+  }, [runs]);
+
+  const getRunStatus = useCallback((run: PipelineRunRecord): string => {
+    const rid = String(run.id || "").trim();
+    if (rid && effectiveStatusByRunId.has(rid)) return String(effectiveStatusByRunId.get(rid) || "");
+    return deriveEffectiveRunStatus(run);
+  }, [effectiveStatusByRunId]);
 
   const salesAgentFilterOptions = useMemo(() => {
     const set = new Set<string>();
@@ -877,9 +951,9 @@ export default function LivePage() {
     const toTs = filterDateTo ? new Date(`${filterDateTo}T23:59:59`).getTime() : null;
     return runs.filter((run) => {
       if (filterStatus) {
-        const rs = String(run.status || "").toLowerCase();
+        const rs = String(getRunStatus(run) || "").toLowerCase();
         const fs = filterStatus.toLowerCase();
-        if (fs === "success" && !["done", "completed"].includes(rs)) return false;
+        if (fs === "success" && !["done", "completed", "success", "ok", "finished", "cached"].includes(rs)) return false;
         else if (fs === "failed" && !["failed", "error"].includes(rs)) return false;
         else if (!["success", "failed"].includes(fs) && rs !== fs) return false;
       }
@@ -895,14 +969,20 @@ export default function LivePage() {
       }
       return true;
     });
-  }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo]);
+  }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo, getRunStatus]);
 
-  const queuedRuns = useMemo(() => filteredRuns.filter((r) => isQueuedRun(r.status)), [filteredRuns]);
-  const runningRuns = useMemo(
-    () => filteredRuns.filter((r) => !isCompletedRun(r.status) && !isQueuedRun(r.status)),
-    [filteredRuns],
+  const queuedRuns = useMemo(
+    () => filteredRuns.filter((r) => isQueuedRun(getRunStatus(r))),
+    [filteredRuns, getRunStatus],
   );
-  const completedRuns = useMemo(() => filteredRuns.filter((r) => isCompletedRun(r.status)), [filteredRuns]);
+  const runningRuns = useMemo(
+    () => filteredRuns.filter((r) => !isCompletedRun(getRunStatus(r)) && !isQueuedRun(getRunStatus(r))),
+    [filteredRuns, getRunStatus],
+  );
+  const completedRuns = useMemo(
+    () => filteredRuns.filter((r) => isCompletedRun(getRunStatus(r))),
+    [filteredRuns, getRunStatus],
+  );
   const queuedProductionRuns = useMemo(
     () => queuedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
     [queuedRuns],
@@ -936,8 +1016,8 @@ export default function LivePage() {
         const tb = parseServerDate(b.finished_at || b.started_at)?.getTime() ?? 0;
         return tb - ta;
       });
-      const failedRuns = sorted.filter((r) => isFailedCompletedRun(r.status));
-      const successRuns = sorted.filter((r) => isSuccessCompletedRun(r.status));
+      const failedRuns = sorted.filter((r) => isFailedCompletedRun(getRunStatus(r)));
+      const successRuns = sorted.filter((r) => isSuccessCompletedRun(getRunStatus(r)));
       return {
         dayId,
         label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
@@ -948,7 +1028,7 @@ export default function LivePage() {
     });
     groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
     return groups;
-  }, [completedRuns]);
+  }, [completedRuns, getRunStatus]);
 
   const completedFailedByDay = useMemo(
     () =>
@@ -1040,6 +1120,7 @@ export default function LivePage() {
   };
 
   const renderRunCard = (run: PipelineRunRecord) => {
+    const runStatus = getRunStatus(run);
     const runCallId = inferRunCallId(run);
     const notePush = inferNotePushState(run);
     const selectable = !!String(run.id || "").trim();
@@ -1069,10 +1150,10 @@ export default function LivePage() {
         <span className="text-[10px] font-mono text-indigo-300 bg-indigo-950/40 border border-indigo-800/40 px-1.5 py-0.5 rounded">
           {run.id.slice(0, 8)}
         </span>
-        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(run.status))}>
-          {statusLabel(run.status)}
+        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(runStatus))}>
+          {statusLabel(runStatus)}
         </span>
-        {isCompletedRun(run.status) && notePush.sent && (
+        {isCompletedRun(runStatus) && notePush.sent && (
           <span
             className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-cyan-200 border-cyan-700/60 bg-cyan-950/40"
             title={notePush.sentAt ? `CRM note sent at ${notePush.sentAt}` : "CRM note sent"}
@@ -1089,7 +1170,7 @@ export default function LivePage() {
         <span>{durationStr(run.started_at, run.finished_at, nowMs)}</span>
       </div>
       {(() => {
-        const phases = inferPhaseBadges(run);
+        const phases = inferPhaseBadges(run, runStatus);
         if (!phases.length) return null;
         return (
           <div className="mt-1.5 flex flex-col gap-1">
