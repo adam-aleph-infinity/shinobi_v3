@@ -137,6 +137,8 @@ export type CRMBrowserPageProps = {
   title?: string;
   subtitle?: string;
   pairPickerMode?: boolean;
+  prefillAgent?: string;
+  prefillCustomer?: string;
 };
 
 export default function CRMBrowserPage({
@@ -145,6 +147,8 @@ export default function CRMBrowserPage({
   title = "CRM Browser",
   subtitle = "Browse agent-customer pairs across all CRMs",
   pairPickerMode = false,
+  prefillAgent = "",
+  prefillCustomer = "",
 }: CRMBrowserPageProps) {
   if (deepDiveMode) {
     return <AgentDeepDiveView title={title} subtitle={subtitle} />;
@@ -154,8 +158,11 @@ export default function CRMBrowserPage({
   const artifactsEnabled = !!artifactMode;
 
   // ── Filters (persisted to sessionStorage) — start from safe defaults; restored post-mount
-  const [agentFilter, _setAgentFilter]         = useState("");
-  const [customerFilter, _setCustomerFilter]   = useState("");
+  const prefillAgentValue = String(prefillAgent || "").trim();
+  const prefillCustomerValue = String(prefillCustomer || "").trim();
+
+  const [agentFilter, _setAgentFilter]         = useState(prefillAgentValue);
+  const [customerFilter, _setCustomerFilter]   = useState(prefillCustomerValue);
   const [accountIdFilter, _setAccountIdFilter] = useState("");
   const [crmFilter, _setCrmFilter]             = useState("");
   const [minCalls, _setMinCalls]             = useState("");
@@ -231,8 +238,10 @@ export default function CRMBrowserPage({
   // Restore all persisted filter + sort state after mount
   useEffect(() => {
     const s = ssLoad();
-    if (s.agentFilter)     _setAgentFilter(s.agentFilter);
-    if (s.customerFilter)  _setCustomerFilter(s.customerFilter);
+    const restoredAgent = String(s.agentFilter || "");
+    const restoredCustomer = String(s.customerFilter || "");
+    _setAgentFilter(prefillAgentValue || restoredAgent);
+    _setCustomerFilter(prefillCustomerValue || restoredCustomer);
     if (s.accountIdFilter) _setAccountIdFilter(s.accountIdFilter);
     if (s.crmFilter)       _setCrmFilter(s.crmFilter);
     if (s.minCalls)       _setMinCalls(s.minCalls);
@@ -267,7 +276,13 @@ export default function CRMBrowserPage({
     if (s.maxArtifactAgentTotalViolations) _setMaxArtifactAgentTotalViolations(s.maxArtifactAgentTotalViolations);
     if (s.sortKey)        _setSortKey(s.sortKey as SortKey);
     if (s.sortDir)        _setSortDir(s.sortDir as SortDir);
-  }, []);
+    if (prefillAgentValue || prefillCustomerValue) {
+      ssSave({
+        ...(prefillAgentValue ? { agentFilter: prefillAgentValue } : {}),
+        ...(prefillCustomerValue ? { customerFilter: prefillCustomerValue } : {}),
+      });
+    }
+  }, [prefillAgentValue, prefillCustomerValue]);
 
   function setSortKey(k: SortKey) { _setSortKey(k); ssSave({ sortKey: k }); }
   function setSortDir(d: SortDir) { _setSortDir(d); ssSave({ sortDir: d }); }
