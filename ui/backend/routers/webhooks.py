@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 
@@ -398,6 +399,128 @@ def _rejection_sort_key(row: dict[str, Any]) -> str:
     )
 
 
+def _load_json_list(path: Path) -> list[dict[str, Any]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in raw:
+        if isinstance(row, dict):
+            out.append(dict(row))
+    return out
+
+
+def _resolve_event_payload(event_file: Any) -> dict[str, Any]:
+    raw = str(event_file or "").strip()
+    if not raw:
+        return {}
+    candidates: list[Path] = []
+    p = Path(raw)
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        candidates.extend(
+            [
+                Path(raw),
+                settings.ui_data_dir / raw,
+                settings.ui_data_dir.parent / raw,
+                _WEBHOOK_DIR / raw,
+            ]
+        )
+    for candidate in candidates:
+        try:
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            obj = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(obj, dict):
+                payload = obj.get("payload")
+                if isinstance(payload, dict):
+                    return dict(payload)
+                if all(k in obj for k in ("call_id", "account_id")):
+                    return dict(obj)
+        except Exception:
+            continue
+    return {}
+
+
+def _infer_rejection_reason(error_text: str) -> str:
+    raw = str(error_text or "").strip().lower()
+    if not raw:
+        return ""
+    known = (
+        "no_call_history",
+        "multi_agent_pair",
+        "payload_agent_mismatch",
+        "resolved_agent_mismatch",
+        "no_agent_history",
+        "missing_account_id",
+    )
+    for key in known:
+        if key in raw:
+            return key
+    if "rejected" in raw:
+        return "rejected"
+    return ""
+
+
+def _derive_rejected_from_live_queue(limit: int = 20000) -> list[dict[str, Any]]:
+    lim = max(1, min(int(limit or 20000), 20000))
+    files: list[Path] = [_LIVE_QUEUE_FILE]
+    files.extend(sorted(_WEBHOOK_DIR.glob("live_queue.pre*.json"), reverse=True))
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+
+    for path in files:
+        for item in _load_json_list(path):
+            last_error = str(item.get("last_error") or "")
+            reason = _infer_rejection_reason(last_error)
+            if not reason:
+                continue
+            base_id = str(item.get("id") or item.get("run_id") or item.get("event_id") or "").strip()
+            if not base_id:
+                continue
+            rid = f"derived:{base_id}"
+            if rid in seen:
+                continue
+            seen.add(rid)
+            event_file = str(item.get("event_file") or "").strip()
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if not payload and event_file:
+                payload = _resolve_event_payload(event_file)
+
+            pipeline_id = str(item.get("pipeline_id") or "").strip()
+            row = {
+                "id": rid,
+                "source": "live_queue_derived",
+                "reason": reason,
+                "status": "rejected",
+                "message": last_error or "Rejected by policy.",
+                "webhook_type": str(item.get("webhook_type") or "call-updated"),
+                "event_id": str(item.get("event_id") or "").strip(),
+                "event_file": event_file,
+                "sales_agent": str(item.get("sales_agent") or "").strip(),
+                "customer": str(item.get("customer") or "").strip(),
+                "call_id": str(item.get("call_id") or "").strip(),
+                "account_id": str(((item.get("pair") or {}).get("account_id") if isinstance(item.get("pair"), dict) else "") or ""),
+                "crm_url": str(((item.get("pair") or {}).get("crm_url") if isinstance(item.get("pair"), dict) else "") or ""),
+                "pipeline_ids": [pipeline_id] if pipeline_id else [],
+                "payload": payload,
+                "created_at": str(item.get("created_at") or item.get("updated_at") or ""),
+                "updated_at": str(item.get("updated_at") or item.get("created_at") or ""),
+            }
+            out.append(row)
+            if len(out) >= lim:
+                break
+        if len(out) >= lim:
+            break
+
+    out.sort(key=_rejection_sort_key, reverse=True)
+    return out[:lim]
+
+
 def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipeline_ids: list[str]) -> Optional[dict[str, Any]]:
     rid = str(rejection_id or "").strip()
     if not rid:
@@ -467,6 +590,8 @@ def _list_rejected_webhooks(
     if include_archive:
         archive = _load_rejections_archive_store()
         _collect(archive.get("items"), "archive")
+    if not items:
+        _collect(_derive_rejected_from_live_queue(limit=20000), "live_queue_derived")
 
     items.sort(key=_rejection_sort_key, reverse=True)
     return items[:lim]
@@ -499,6 +624,12 @@ def _find_rejected_webhook(rejection_id: str, include_archive: bool = True) -> t
             out = dict(row)
             out["source"] = str(out.get("source") or "archive")
             return out, "archive"
+
+    for row in _derive_rejected_from_live_queue(limit=20000):
+        if str((row or {}).get("id") or "").strip() == rid:
+            out = dict(row)
+            out["source"] = str(out.get("source") or "live_queue_derived")
+            return out, "live_queue_derived"
 
     return None, ""
 
