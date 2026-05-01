@@ -5210,9 +5210,9 @@ function PipelineCanvas() {
       return (
         <div className={cn(
           "border border-gray-700 rounded-lg overflow-hidden bg-gray-900",
-          expand ? "flex-1 min-h-0 flex flex-col" : "h-80",
+          expand ? "flex-1 min-h-0 h-full flex flex-col overflow-hidden" : "h-80",
         )}>
-          <TranscriptViewer content={text} format="txt" className={expand ? "flex-1 min-h-0" : "h-full"} />
+          <TranscriptViewer content={text} format="txt" className={expand ? "flex-1 min-h-0 h-full max-h-full overflow-y-auto" : "h-full"} />
         </div>
       );
     }
@@ -5280,7 +5280,7 @@ function PipelineCanvas() {
     const fileRefsError = String(preview?.fileRefsError || "").trim();
 
     return (
-      <div className={cn("space-y-2", expand && "h-full min-h-0 flex flex-col")}>
+      <div className={cn("space-y-2", expand && "flex-1 min-h-0 flex flex-col overflow-hidden")}>
         {(originLabel || cacheFile || resolvedCallId || fileRefText || fileRefsError) && (
           <div className={cn(
             "rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5 space-y-1",
@@ -5305,7 +5305,7 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div className={cn(expand && "flex-1 min-h-0 overflow-hidden")}>
+        <div className={cn(expand && "flex-1 min-h-0 overflow-auto")}>
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>
@@ -5500,7 +5500,7 @@ function PipelineCanvas() {
               <PropertiesSection
                 title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
                 className={selKind === "input" ? "h-full flex flex-col" : undefined}
-                bodyClassName={selKind === "input" ? "h-full min-h-0 flex flex-col" : undefined}
+                bodyClassName={selKind === "input" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : undefined}
               >
                 <div className={cn("space-y-2", selKind === "input" && "h-full min-h-0 flex flex-col")}>
                   {selKind !== "input" ? renderCacheRunSelector() : null}
@@ -6140,7 +6140,7 @@ function PipelineCanvas() {
               <PropertiesSection
                 title="Input Data"
                 className="h-full flex flex-col"
-                bodyClassName="h-full min-h-0 flex flex-col"
+                bodyClassName="flex-1 min-h-0 flex flex-col overflow-hidden"
               >
                 <div className="space-y-2 h-full min-h-0 flex flex-col">
                   <div className="flex items-center justify-between gap-2 shrink-0">
@@ -6163,7 +6163,7 @@ function PipelineCanvas() {
               <PropertiesSection
                 title="Artifact Result"
                 className="h-full flex flex-col"
-                bodyClassName="h-full min-h-0 flex flex-col"
+                bodyClassName="flex-1 min-h-0 flex flex-col overflow-hidden"
               >
                 <div className="space-y-2 h-full min-h-0 flex flex-col">
                   {renderCacheRunSelector()}
@@ -6280,23 +6280,16 @@ function PipelineCanvas() {
   return (
     <div className="flex flex-col h-full w-full">
 
-      {/* ── Top toolbar ───────────────────────────────────────────────── */}
-      <div className="flex flex-nowrap items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900 shrink-0 overflow-x-auto">
-        <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
-        <span className="text-sm font-bold text-white shrink-0">Pipeline</span>
-        <input
-          value={pipelineName}
-          onChange={e => setPipelineName(e.target.value)}
-          placeholder="Name your pipeline…"
-          disabled={canvasLocked}
-          className="flex-1 min-w-[180px] bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
-        />
-        {canvasLocked && (
-          <span className="text-[10px] px-2 py-1 rounded-lg border border-amber-700/60 bg-amber-950/40 text-amber-300 shrink-0">
-            LOCKED VIEW
-          </span>
-        )}
-
+      {/* ── Top toolbar (Context) ─────────────────────────────────────── */}
+      <div className="shrink-0 border-b border-gray-800 bg-gray-900">
+        <div className="flex flex-nowrap items-center gap-2 px-3 py-2 overflow-x-auto border-b border-gray-800/70">
+          <Users className="w-4 h-4 text-indigo-400 shrink-0" />
+          <span className="text-sm font-bold text-white shrink-0">Context</span>
+          {canvasLocked && (
+            <span className="text-[10px] px-2 py-1 rounded-lg border border-amber-700/60 bg-amber-950/40 text-amber-300 shrink-0">
+              LOCKED VIEW
+            </span>
+          )}
         <button
           type="button"
           onClick={openCrmOverlay}
@@ -6336,7 +6329,19 @@ function PipelineCanvas() {
           </span>
           <ChevronRight className="w-3 h-3 text-gray-500 ml-auto" />
         </button>
+        </div>
 
+        {/* ── Top toolbar (Pipeline Controls) ─────────────────────────── */}
+        <div className="flex flex-nowrap items-center gap-2 px-3 py-2 overflow-x-auto">
+          <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
+          <span className="text-sm font-bold text-white shrink-0">Pipeline</span>
+          <input
+            value={pipelineName}
+            onChange={e => setPipelineName(e.target.value)}
+            placeholder="Name your pipeline…"
+            disabled={canvasLocked}
+            className="flex-1 min-w-[180px] bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+          />
         <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
           <History className="w-3 h-3 text-indigo-400 shrink-0" />
           <span className="px-2 py-1 rounded border border-gray-700 bg-gray-900 text-[10px] text-gray-200 min-w-[115px] text-center">
@@ -6509,42 +6514,7 @@ function PipelineCanvas() {
             Last live trigger: {new Date(liveTriggeredAt).toLocaleTimeString()}
           </span>
         )}
-
-        <button onClick={importPresets} title="Import agent presets"
-          disabled={canvasLocked}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0">
-          <Download className="w-3 h-3" /> Presets
-        </button>
-        <button
-          onClick={handleCopyPipelineBundle}
-          disabled={canvasLocked}
-          title="Copy full pipeline bundle (workflow + agents)"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
-        >
-          <ClipboardCopy className="w-3 h-3" /> Copy Bundle
-        </button>
-        <button
-          onClick={() => setShowBundleImport(true)}
-          disabled={canvasLocked}
-          title="Paste bundle from another environment"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
-        >
-          <ClipboardPaste className="w-3 h-3" /> Paste Bundle
-        </button>
-        <button onClick={handleSave}
-          disabled={canvasLocked}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-emerald-400 hover:border-emerald-800 text-xs transition-colors shrink-0">
-          <Check className="w-3 h-3" /> Validate
-        </button>
-        <button onClick={handleSavePipeline} disabled={canvasLocked || pipelineSaving}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-60 shrink-0">
-          {pipelineSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-          Save
-        </button>
-        <button onClick={handleClear} disabled={canvasLocked} title="Clear canvas / new pipeline"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-800 text-gray-600 hover:text-red-400 hover:border-red-900 text-xs transition-colors shrink-0">
-          <Trash2 className="w-3 h-3" /> Clear
-        </button>
+        </div>
       </div>
 
       {/* ── Main content ──────────────────────────────────────────────── */}
@@ -6688,6 +6658,62 @@ function PipelineCanvas() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
+            <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-2 space-y-1.5">
+              <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest px-0.5">Pipeline Actions</p>
+              <button
+                onClick={importPresets}
+                title="Import agent presets"
+                disabled={canvasLocked}
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="w-3 h-3" />
+                Presets
+              </button>
+              <button
+                onClick={handleCopyPipelineBundle}
+                disabled={canvasLocked}
+                title="Copy full pipeline bundle (workflow + agents)"
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ClipboardCopy className="w-3 h-3" />
+                Copy Bundle
+              </button>
+              <button
+                onClick={() => setShowBundleImport(true)}
+                disabled={canvasLocked}
+                title="Paste bundle from another environment"
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ClipboardPaste className="w-3 h-3" />
+                Paste Bundle
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={canvasLocked}
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-800/60 text-emerald-300 hover:text-emerald-200 hover:bg-emerald-950/30 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Check className="w-3 h-3" />
+                Validate
+              </button>
+              <button
+                onClick={handleSavePipeline}
+                disabled={canvasLocked || pipelineSaving}
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {pipelineSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                Save
+              </button>
+              <button
+                onClick={handleClear}
+                disabled={canvasLocked}
+                title="Clear canvas / new pipeline"
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-800 text-gray-500 hover:text-red-400 hover:border-red-900 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Trash2 className="w-3 h-3" />
+                Clear
+              </button>
+            </div>
+
             {PALETTE_GROUPS.map(group => (
               <div key={group.kind}>
                 <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1 mb-1.5">
