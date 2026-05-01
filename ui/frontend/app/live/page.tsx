@@ -138,6 +138,40 @@ function isCompletedRun(status: string): boolean {
   );
 }
 
+function runHasRetrySignal(run: PipelineRunRecord): boolean {
+  const s = String(run.status || "").trim().toLowerCase();
+  if (s.includes("retry")) return true;
+  const logs = _safeJsonArray(run.log_json);
+  for (const line of logs) {
+    const text = typeof line === "string"
+      ? line
+      : String((line && (line.text || line.message || line.msg)) || "");
+    if (/\bretry\b/i.test(text) || /\bretrying\b/i.test(text)) return true;
+  }
+  return false;
+}
+
+type CompletedOutcome = "failed" | "retry" | "success";
+
+function completedOutcome(run: PipelineRunRecord): CompletedOutcome {
+  const s = String(run.status || "").trim().toLowerCase();
+  if (s.includes("retry")) return "retry";
+  if (
+    s === "error"
+    || s === "failed"
+    || s.includes("exception")
+    || s.includes("cancel")
+    || s.includes("abort")
+    || s.includes("stop")
+  ) {
+    return "failed";
+  }
+  if (s === "done" || s === "completed" || s === "success" || s === "ok") {
+    return runHasRetrySignal(run) ? "retry" : "success";
+  }
+  return runHasRetrySignal(run) ? "retry" : "failed";
+}
+
 function isQueuedRun(status: string): boolean {
   const s = String(status || "").toLowerCase();
   return s === "queued";
@@ -343,10 +377,9 @@ export default function LivePage() {
   const [liveMessage, setLiveMessage] = useState("");
   const [liveMessageError, setLiveMessageError] = useState(false);
   const [collapsedCompletedDayIds, setCollapsedCompletedDayIds] = useState<Record<string, boolean>>({});
-  const [collapsedCompletedProductionDayIds, setCollapsedCompletedProductionDayIds] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [collapsedCompletedTestDayIds, setCollapsedCompletedTestDayIds] = useState<Record<string, boolean>>({});
+  const [collapsedCompletedFailedDayIds, setCollapsedCompletedFailedDayIds] = useState<Record<string, boolean>>({});
+  const [collapsedCompletedRetryDayIds, setCollapsedCompletedRetryDayIds] = useState<Record<string, boolean>>({});
+  const [collapsedCompletedSuccessDayIds, setCollapsedCompletedSuccessDayIds] = useState<Record<string, boolean>>({});
   const [filterRunType, setFilterRunType] = useState<"all" | "webhook" | "local">("all");
   const [filterPipelineId, setFilterPipelineId] = useState("");
   const [filterAgent, setFilterAgent] = useState("");
@@ -388,8 +421,8 @@ export default function LivePage() {
   const {
     data: rejectedData,
     mutate: mutateRejected,
-  } = useSWR<{ ok?: boolean; count?: number; items?: RejectedWebhookItem[] }>(
-    "/api/pipelines/live-webhook/rejections?limit=200&status=all",
+  } = useSWR<{ ok?: boolean; count?: number; total_count?: number; returned_count?: number; items?: RejectedWebhookItem[] }>(
+    "/api/pipelines/live-webhook/rejections?limit=20000&status=all",
     fetcher,
     { refreshInterval: 7000 },
   );
@@ -406,6 +439,9 @@ export default function LivePage() {
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
   const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
   const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData.items : [];
+  const rejectedTotalCount = Number(
+    rejectedData?.total_count ?? rejectedData?.count ?? rejectedItems.length ?? 0,
+  ) || 0;
   const continuityRejectedCount = useMemo(
     () =>
       rejectedItems.filter((r) => {
@@ -825,14 +861,16 @@ export default function LivePage() {
         const tb = parseServerDate(b.finished_at || b.started_at)?.getTime() ?? 0;
         return tb - ta;
       });
-      const productionRuns = sorted.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook");
-      const testRuns = sorted.filter((r) => normalizeRunOrigin(r.run_origin) === "local");
+      const failedRuns = sorted.filter((r) => completedOutcome(r) === "failed");
+      const retryRuns = sorted.filter((r) => completedOutcome(r) === "retry");
+      const successRuns = sorted.filter((r) => completedOutcome(r) === "success");
       return {
         dayId,
         label: dayId === "unknown" ? "Unknown date" : new Date(`${dayId}T00:00:00`).toLocaleDateString(),
         runs: sorted,
-        productionRuns,
-        testRuns,
+        failedRuns,
+        retryRuns,
+        successRuns,
       };
     });
     groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
@@ -854,7 +892,7 @@ export default function LivePage() {
   }, [completedRunsByDay]);
 
   useEffect(() => {
-    setCollapsedCompletedProductionDayIds((prev) => {
+    setCollapsedCompletedFailedDayIds((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const group of completedRunsByDay) {
@@ -865,7 +903,18 @@ export default function LivePage() {
       }
       return changed ? next : prev;
     });
-    setCollapsedCompletedTestDayIds((prev) => {
+    setCollapsedCompletedRetryDayIds((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const group of completedRunsByDay) {
+        if (next[group.dayId] == null) {
+          next[group.dayId] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setCollapsedCompletedSuccessDayIds((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const group of completedRunsByDay) {
@@ -1213,7 +1262,7 @@ export default function LivePage() {
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <XCircle className="w-4 h-4 text-red-400" />
                 <p className="text-sm font-semibold text-gray-100">Rejected</p>
-                <span className="text-xs text-gray-500">{rejectedItems.length}</span>
+                <span className="text-xs text-gray-500">{rejectedTotalCount}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
                 {rejectionActionMsg ? (
@@ -1354,8 +1403,9 @@ export default function LivePage() {
                 )}
                 {completedRunsByDay.map((group) => {
                   const collapsed = !!collapsedCompletedDayIds[group.dayId];
-                  const productionCollapsed = !!collapsedCompletedProductionDayIds[group.dayId];
-                  const testCollapsed = !!collapsedCompletedTestDayIds[group.dayId];
+                  const failedCollapsed = !!collapsedCompletedFailedDayIds[group.dayId];
+                  const retryCollapsed = !!collapsedCompletedRetryDayIds[group.dayId];
+                  const successCollapsed = !!collapsedCompletedSuccessDayIds[group.dayId];
                   return (
                     <div key={group.dayId} className="space-y-1.5">
                       <button
@@ -1371,56 +1421,84 @@ export default function LivePage() {
                         <div className="space-y-2 pl-2">
                           <button
                             onClick={() =>
-                              setCollapsedCompletedProductionDayIds((prev) => ({
+                              setCollapsedCompletedFailedDayIds((prev) => ({
                                 ...prev,
                                 [group.dayId]: !prev[group.dayId],
                               }))}
-                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-blue-800/50 bg-blue-950/30 hover:bg-blue-900/30 text-left"
-                            title={productionCollapsed ? "Expand production runs" : "Collapse production runs"}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-red-800/50 bg-red-950/30 hover:bg-red-900/30 text-left"
+                            title={failedCollapsed ? "Expand failed runs" : "Collapse failed runs"}
                           >
                             <ChevronRight
                               className={cn(
-                                "w-3.5 h-3.5 text-blue-300 transition-transform",
-                                !productionCollapsed && "rotate-90",
+                                "w-3.5 h-3.5 text-red-300 transition-transform",
+                                !failedCollapsed && "rotate-90",
                               )}
                             />
-                            <span className="text-[10px] font-semibold text-blue-200">PRODUCTION · webhook</span>
-                            <span className="ml-auto text-[10px] text-blue-300">{group.productionRuns.length}</span>
+                            <span className="text-[10px] font-semibold text-red-200">FAILED</span>
+                            <span className="ml-auto text-[10px] text-red-300">{group.failedRuns.length}</span>
                           </button>
-                          {!productionCollapsed && (
+                          {!failedCollapsed && (
                             <>
-                              {group.productionRuns.length === 0 ? (
-                                <p className="text-[11px] text-gray-500 italic px-1">No production runs on this day.</p>
+                              {group.failedRuns.length === 0 ? (
+                                <p className="text-[11px] text-gray-500 italic px-1">No failed runs on this day.</p>
                               ) : (
-                                group.productionRuns.map(renderRunCard)
+                                group.failedRuns.map(renderRunCard)
                               )}
                             </>
                           )}
 
                           <button
                             onClick={() =>
-                              setCollapsedCompletedTestDayIds((prev) => ({
+                              setCollapsedCompletedRetryDayIds((prev) => ({
                                 ...prev,
                                 [group.dayId]: !prev[group.dayId],
                               }))}
                             className="w-full flex items-center gap-2 px-2 py-1 rounded border border-fuchsia-800/50 bg-fuchsia-950/20 hover:bg-fuchsia-900/20 text-left"
-                            title={testCollapsed ? "Expand test runs" : "Collapse test runs"}
+                            title={retryCollapsed ? "Expand retry runs" : "Collapse retry runs"}
                           >
                             <ChevronRight
                               className={cn(
                                 "w-3.5 h-3.5 text-fuchsia-300 transition-transform",
-                                !testCollapsed && "rotate-90",
+                                !retryCollapsed && "rotate-90",
                               )}
                             />
-                            <span className="text-[10px] font-semibold text-fuchsia-200">TEST · local</span>
-                            <span className="ml-auto text-[10px] text-fuchsia-300">{group.testRuns.length}</span>
+                            <span className="text-[10px] font-semibold text-fuchsia-200">RETRY</span>
+                            <span className="ml-auto text-[10px] text-fuchsia-300">{group.retryRuns.length}</span>
                           </button>
-                          {!testCollapsed && (
+                          {!retryCollapsed && (
                             <>
-                              {group.testRuns.length === 0 ? (
-                                <p className="text-[11px] text-gray-500 italic px-1">No test runs on this day.</p>
+                              {group.retryRuns.length === 0 ? (
+                                <p className="text-[11px] text-gray-500 italic px-1">No retry runs on this day.</p>
                               ) : (
-                                group.testRuns.map(renderRunCard)
+                                group.retryRuns.map(renderRunCard)
+                              )}
+                            </>
+                          )}
+
+                          <button
+                            onClick={() =>
+                              setCollapsedCompletedSuccessDayIds((prev) => ({
+                                ...prev,
+                                [group.dayId]: !prev[group.dayId],
+                              }))}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-emerald-800/50 bg-emerald-950/20 hover:bg-emerald-900/20 text-left"
+                            title={successCollapsed ? "Expand successful runs" : "Collapse successful runs"}
+                          >
+                            <ChevronRight
+                              className={cn(
+                                "w-3.5 h-3.5 text-emerald-300 transition-transform",
+                                !successCollapsed && "rotate-90",
+                              )}
+                            />
+                            <span className="text-[10px] font-semibold text-emerald-200">SUCCESSFUL</span>
+                            <span className="ml-auto text-[10px] text-emerald-300">{group.successRuns.length}</span>
+                          </button>
+                          {!successCollapsed && (
+                            <>
+                              {group.successRuns.length === 0 ? (
+                                <p className="text-[11px] text-gray-500 italic px-1">No successful runs on this day.</p>
+                              ) : (
+                                group.successRuns.map(renderRunCard)
                               )}
                             </>
                           )}
