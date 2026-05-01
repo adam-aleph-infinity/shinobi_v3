@@ -246,10 +246,12 @@ function TurnBubbleList({ turns }: { turns: Turn[] }) {
 export function TranscriptViewer({
   content,
   format,
+  externalScroll = false,
   className = "max-h-96",
 }: {
   content: string;
   format?: string;
+  externalScroll?: boolean;
   className?: string;
 }) {
   if (!content.trim()) return <p className="text-xs text-gray-600 italic">Empty</p>;
@@ -275,9 +277,12 @@ export function TranscriptViewer({
   }
 
   if (turns.length === 0) {
+    const rawClass = externalScroll
+      ? `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
+      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 ${className}`;
     return (
       <pre
-        className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 ${className}`}
+        className={rawClass}
         onWheelCapture={(e) => e.stopPropagation()}
       >
         {content}
@@ -287,9 +292,12 @@ export function TranscriptViewer({
 
   // If no speaker info at all, render as raw pre
   if (!turns.some(t => t.speaker)) {
+    const rawClass = externalScroll
+      ? `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
+      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 ${className}`;
     return (
       <pre
-        className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 ${className}`}
+        className={rawClass}
         onWheelCapture={(e) => e.stopPropagation()}
       >
         {content}
@@ -297,9 +305,13 @@ export function TranscriptViewer({
     );
   }
 
+  const viewportClass = externalScroll
+    ? `min-h-0 pr-1 ${className}`
+    : `overflow-y-auto overscroll-contain nowheel h-full min-h-0 pr-1 ${className}`;
+
   return (
     <div
-      className={`overflow-y-auto overscroll-contain nowheel h-full min-h-0 pr-1 ${className}`}
+      className={viewportClass}
       onWheelCapture={(e) => e.stopPropagation()}
     >
       <TurnBubbleList turns={turns} />

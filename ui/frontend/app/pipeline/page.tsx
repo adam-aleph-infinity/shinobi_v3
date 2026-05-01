@@ -5271,7 +5271,7 @@ function PipelineCanvas() {
     const viewportClass = cn(
       "rounded-lg border border-gray-700 bg-gray-900/60",
       expand
-        ? "flex-1 min-h-0 overflow-y-auto overscroll-contain nowheel"
+        ? "h-full min-h-0 overflow-y-auto overscroll-contain nowheel"
         : "max-h-80 overflow-y-auto overscroll-contain nowheel",
     );
 
@@ -5310,11 +5310,11 @@ function PipelineCanvas() {
           <div
             className={cn(
               "rounded-lg border border-gray-700 bg-gray-900/60",
-              expand ? "flex-1 min-h-0 overflow-hidden" : "h-80",
+              expand ? "h-full min-h-0 overflow-y-auto overscroll-contain nowheel" : "h-80 overflow-y-auto overscroll-contain nowheel",
             )}
             onWheelCapture={(e) => e.stopPropagation()}
           >
-            <TranscriptViewer content={text} format="txt" className="h-full min-h-0" />
+            <TranscriptViewer content={text} format="txt" externalScroll className="min-h-full" />
           </div>
         </div>
       );
@@ -5604,12 +5604,12 @@ function PipelineCanvas() {
 
             <div className={cn(
               "lg:col-span-7 min-h-0 space-y-2.5",
-              selKind === "input" ? "overflow-hidden h-full flex flex-col" : "overflow-y-auto",
+              selKind === "input" ? "h-full flex flex-col" : "overflow-y-auto",
             )}>
               <PropertiesSection
                 title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
                 className={selKind === "input" ? "h-full flex flex-col" : undefined}
-                bodyClassName={selKind === "input" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : undefined}
+                bodyClassName={selKind === "input" ? "flex-1 min-h-0 flex flex-col" : undefined}
               >
                 <div className={cn("space-y-2", selKind === "input" && "h-full min-h-0 flex flex-col")}>
                   {selKind !== "input" ? renderCacheRunSelector() : null}
@@ -5625,7 +5625,7 @@ function PipelineCanvas() {
                   </div>
 
                   {selKind === "input" ? (
-                    <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                    <div className="flex-1 min-h-0 flex flex-col">
                       {(() => {
                         const src = String(selData.inputSource || "").trim();
                         return renderInputPreview(src, true);
@@ -6249,7 +6249,7 @@ function PipelineCanvas() {
               <PropertiesSection
                 title="Input Data"
                 className="h-full flex flex-col"
-                bodyClassName="flex-1 min-h-0 flex flex-col overflow-hidden"
+                bodyClassName="flex-1 min-h-0 flex flex-col"
               >
                 <div className="space-y-2 h-full min-h-0 flex flex-col">
                   <div className="flex items-center justify-between gap-2 shrink-0">
@@ -6258,7 +6258,7 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                  <div className="flex-1 min-h-0 flex flex-col">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
                     return renderInputPreview(src, true);
