@@ -887,7 +887,7 @@ export default function LivePage() {
 
   const renderRunCard = (run: PipelineRunRecord) => {
     const runCallId = inferRunCallId(run);
-    const selectable = !liveReadOnly;
+    const selectable = !!String(run.id || "").trim();
     return (
     <button
       key={run.id}
@@ -899,7 +899,7 @@ export default function LivePage() {
           ? "hover:bg-gray-800 hover:border-indigo-600/60"
           : "opacity-70 cursor-not-allowed",
       )}
-      title={selectable ? "Open this run in Pipeline canvas" : "Read-only on dev mirror"}
+      title={selectable ? "Open this run in Pipeline canvas" : "Run id missing"}
     >
       <div className="flex items-center gap-2 flex-wrap">
         {normalizeRunOrigin(run.run_origin) === "webhook" ? (
