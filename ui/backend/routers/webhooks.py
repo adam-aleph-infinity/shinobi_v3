@@ -561,6 +561,25 @@ def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipelin
         archive["items"] = arch_items
         _save_rejections_archive_store(archive)
         return updated
+    # If this record is derived from queue snapshots (legacy fallback),
+    # persist a concrete row in active rejections so status changes remain visible.
+    derived_row, source = _find_rejected_webhook(rid, include_archive=True)
+    if source == "live_queue_derived" and isinstance(derived_row, dict):
+        new_row = dict(derived_row)
+        new_row["status"] = "queued_manual"
+        new_row["updated_at"] = _utc_now_iso()
+        new_row["moved_run_ids"] = [str(x) for x in (run_ids or []) if str(x)]
+        new_row["moved_pipeline_ids"] = [str(x) for x in (pipeline_ids or []) if str(x)]
+        store = _load_rejections_store()
+        active_items = store.get("items")
+        if not isinstance(active_items, list):
+            active_items = []
+        active_items.append(new_row)
+        if len(active_items) > 20000:
+            active_items = active_items[-20000:]
+        store["items"] = active_items
+        _save_rejections_store(store)
+        return new_row
     return None
 
 
