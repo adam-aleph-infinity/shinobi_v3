@@ -31,6 +31,7 @@ from ui.backend.routers.full_persona_agent import router as full_persona_agent_r
 from ui.backend.routers.persona_agents import router as persona_agents_router
 from ui.backend.routers.notes import router as notes_router
 from ui.backend.routers.populate import router as populate_router
+from ui.backend.routers.automations import router as automations_router
 from ui.backend.routers.universal_agents import router as universal_agents_router
 from ui.backend.routers.pipelines import router as pipelines_router
 from ui.backend.routers.history import router as history_router
@@ -69,6 +70,7 @@ app.include_router(full_persona_agent_router)
 app.include_router(persona_agents_router)
 app.include_router(notes_router)
 app.include_router(populate_router)
+app.include_router(automations_router)
 app.include_router(universal_agents_router)
 app.include_router(pipelines_router)
 app.include_router(history_router)
@@ -439,6 +441,12 @@ async def on_startup():
             ensure_live_dispatcher_started()
         except Exception as e:
             print(f"[startup] live webhook dispatcher start failed: {e}")
+        try:
+            from ui.backend.services.automations import start_scheduler as _start_automation_scheduler
+
+            _start_automation_scheduler()
+        except Exception as e:
+            print(f"[startup] automation scheduler start failed: {e}")
 
     # Re-queue orphaned jobs from previous server runs
     loop = asyncio.get_running_loop()
@@ -459,6 +467,16 @@ async def on_startup():
         for job in pending:
             job_runner.submit_job(job, loop)
             print(f"[startup] Re-queued pending job {job.id[:8]} ({job.call_id})")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        from ui.backend.services.automations import stop_scheduler as _stop_automation_scheduler
+
+        _stop_automation_scheduler()
+    except Exception:
+        pass
 
 
 @app.get("/health")

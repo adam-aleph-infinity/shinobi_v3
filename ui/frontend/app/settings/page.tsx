@@ -35,6 +35,9 @@ interface LiveWebhookConfig {
   enabled: boolean;
   ingest_only: boolean;
   trigger_pipeline: boolean;
+  agent_continuity_filter_enabled: boolean;
+  agent_continuity_pair_tag_fallback_enabled: boolean;
+  agent_continuity_reject_multi_agent_pair_tags: boolean;
   live_pipeline_ids: string[];
   default_pipeline_id: string;
   pipeline_by_agent: Record<string, string>;
@@ -45,7 +48,6 @@ interface LiveWebhookConfig {
   backfill_historical_transcripts: boolean;
   backfill_timeout_s: number;
   max_live_running: number;
-  agent_continuity_filter_enabled: boolean;
   auto_retry_enabled: boolean;
   retry_max_attempts: number;
   retry_delay_s: number;
@@ -174,6 +176,13 @@ export default function SettingsPage() {
           enabled: Boolean(liveCfg.enabled),
           ingest_only: Boolean(liveCfg.ingest_only),
           trigger_pipeline: Boolean(liveCfg.trigger_pipeline),
+          agent_continuity_filter_enabled: Boolean(liveCfg.agent_continuity_filter_enabled ?? true),
+          agent_continuity_pair_tag_fallback_enabled: Boolean(
+            liveCfg.agent_continuity_pair_tag_fallback_enabled ?? true,
+          ),
+          agent_continuity_reject_multi_agent_pair_tags: Boolean(
+            liveCfg.agent_continuity_reject_multi_agent_pair_tags ?? true,
+          ),
           live_pipeline_ids: Array.isArray(liveCfg.live_pipeline_ids) ? liveCfg.live_pipeline_ids : [],
           default_pipeline_id: String(liveCfg.default_pipeline_id || ""),
           pipeline_by_agent: (liveCfg.pipeline_by_agent && typeof liveCfg.pipeline_by_agent === "object")
@@ -184,7 +193,6 @@ export default function SettingsPage() {
           transcription_timeout_s: Number(liveCfg.transcription_timeout_s || 900),
           transcription_poll_interval_s: Number(liveCfg.transcription_poll_interval_s || 2),
           max_live_running: Math.max(1, Math.min(64, Number(settingMaxLiveRunning || 5))),
-          agent_continuity_filter_enabled: !!(liveCfg.agent_continuity_filter_enabled ?? true),
           auto_retry_enabled: !!settingAutoRetry,
           retry_max_attempts: Math.max(0, Math.min(10, Number(settingRetryMaxAttempts || 2))),
           retry_delay_s: Math.max(5, Math.min(3600, Number(settingRetryDelay || 45))),
