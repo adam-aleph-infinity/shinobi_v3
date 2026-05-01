@@ -4652,7 +4652,7 @@ def get_live_webhook_rejections(
         return _live_mirror_request_json("GET", path, request=request)
     from ui.backend.routers import webhooks as _wh
 
-    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=True)
+    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=True, include_archive=True)
     if status_norm != "all":
         all_items = [
             it for it in all_items
@@ -4684,15 +4684,7 @@ async def enqueue_live_webhook_rejection(
 
     from ui.backend.routers import webhooks as _wh
 
-    store = _wh._load_rejections_store()
-    rows = store.get("items") if isinstance(store.get("items"), list) else []
-    row = None
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("id") or "").strip() == rid:
-            row = item
-            break
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
     if row is None:
         raise HTTPException(status_code=404, detail="Rejected webhook record not found.")
 
@@ -5316,7 +5308,11 @@ def list_live_webhook_rejections(
 
     wanted_status = str(status or "all").strip().lower() or "all"
     include_non_rejected = wanted_status == "all"
-    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=include_non_rejected)
+    all_items = _wh._list_rejected_webhooks(
+        limit=20000,
+        include_non_rejected=include_non_rejected,
+        include_archive=True,
+    )
     if not include_non_rejected:
         all_items = [
             row for row in all_items
@@ -5348,16 +5344,7 @@ async def enqueue_live_webhook_rejection(
     if not rid:
         raise HTTPException(status_code=400, detail="Missing rejection_id.")
 
-    store = _wh._load_rejections_store()
-    items_raw = store.get("items")
-    items = items_raw if isinstance(items_raw, list) else []
-    row: Optional[dict[str, Any]] = None
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("id") or "").strip() == rid:
-            row = dict(item)
-            break
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
     if not row:
         raise HTTPException(status_code=404, detail=f"Rejected webhook not found: {rid}")
 

@@ -27,6 +27,7 @@ _CALL_ENDED_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
 _WEBHOOK_INBOX_DIR = _WEBHOOK_DIR / "inbox"
 _LIVE_QUEUE_FILE = _WEBHOOK_DIR / "live_queue.json"
 _REJECTED_WEBHOOKS_FILE = _WEBHOOK_DIR / "rejections.json"
+_REJECTED_WEBHOOKS_ARCHIVE_FILE = _WEBHOOK_DIR / "rejections_archive.json"
 _REJECTED_WEBHOOKS_CORRUPT_PREFIX = "rejections.corrupt."
 _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
 _WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
@@ -268,6 +269,13 @@ def _default_rejections_store() -> dict[str, Any]:
     }
 
 
+def _default_rejections_archive_store() -> dict[str, Any]:
+    return {
+        "updated_at": _utc_now_iso(),
+        "items": [],
+    }
+
+
 def _write_json_atomic(path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
@@ -277,6 +285,21 @@ def _write_json_atomic(path, data: Any) -> None:
 
 def _normalize_rejections_store(raw: Any) -> dict[str, Any]:
     base = _default_rejections_store()
+    if not isinstance(raw, dict):
+        return base
+    items_raw = raw.get("items")
+    items: list[dict[str, Any]] = []
+    if isinstance(items_raw, list):
+        for row in items_raw:
+            if isinstance(row, dict):
+                items.append(dict(row))
+    base["updated_at"] = str(raw.get("updated_at") or _utc_now_iso())
+    base["items"] = items
+    return base
+
+
+def _normalize_rejections_archive_store(raw: Any) -> dict[str, Any]:
+    base = _default_rejections_archive_store()
     if not isinstance(raw, dict):
         return base
     items_raw = raw.get("items")
@@ -313,11 +336,34 @@ def _load_rejections_store() -> dict[str, Any]:
     return data
 
 
+def _load_rejections_archive_store() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _REJECTED_WEBHOOKS_ARCHIVE_FILE.exists():
+        data = _default_rejections_archive_store()
+        _write_json_atomic(_REJECTED_WEBHOOKS_ARCHIVE_FILE, data)
+        return data
+    try:
+        raw = json.loads(_REJECTED_WEBHOOKS_ARCHIVE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    data = _normalize_rejections_archive_store(raw)
+    _write_json_atomic(_REJECTED_WEBHOOKS_ARCHIVE_FILE, data)
+    return data
+
+
 def _save_rejections_store(data: dict[str, Any]) -> dict[str, Any]:
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     norm = _normalize_rejections_store(data)
     norm["updated_at"] = _utc_now_iso()
     _write_json_atomic(_REJECTED_WEBHOOKS_FILE, norm)
+    return norm
+
+
+def _save_rejections_archive_store(data: dict[str, Any]) -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    norm = _normalize_rejections_archive_store(data)
+    norm["updated_at"] = _utc_now_iso()
+    _write_json_atomic(_REJECTED_WEBHOOKS_ARCHIVE_FILE, norm)
     return norm
 
 
@@ -339,6 +385,17 @@ def _append_rejected_webhook(item: dict[str, Any]) -> dict[str, Any]:
     store["items"] = items
     _save_rejections_store(store)
     return row
+
+
+def _rejection_sort_key(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(
+        row.get("created_at")
+        or row.get("updated_at")
+        or row.get("stashed_at")
+        or "",
+    )
 
 
 def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipeline_ids: list[str]) -> Optional[dict[str, Any]]:
@@ -363,24 +420,87 @@ def _mark_rejection_queued_manual(rejection_id: str, run_ids: list[str], pipelin
         store["items"] = items
         _save_rejections_store(store)
         return updated
+    archive = _load_rejections_archive_store()
+    arch_items = archive.get("items")
+    if not isinstance(arch_items, list):
+        return None
+    for idx, row in enumerate(arch_items):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() != rid:
+            continue
+        updated = dict(row)
+        updated["status"] = "queued_manual"
+        updated["updated_at"] = _utc_now_iso()
+        updated["moved_run_ids"] = [str(x) for x in (run_ids or []) if str(x)]
+        updated["moved_pipeline_ids"] = [str(x) for x in (pipeline_ids or []) if str(x)]
+        arch_items[idx] = updated
+        archive["items"] = arch_items
+        _save_rejections_archive_store(archive)
+        return updated
     return None
 
 
-def _list_rejected_webhooks(limit: int = 200, include_non_rejected: bool = True) -> list[dict[str, Any]]:
+def _list_rejected_webhooks(
+    limit: int = 200,
+    include_non_rejected: bool = True,
+    include_archive: bool = True,
+) -> list[dict[str, Any]]:
     lim = max(1, min(int(limit or 200), 20000))
-    store = _load_rejections_store()
-    items_raw = store.get("items")
     items: list[dict[str, Any]] = []
-    if isinstance(items_raw, list):
-        for row in items_raw:
+
+    def _collect(rows: Any, source: str) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
             if not isinstance(row, dict):
                 continue
             status = str(row.get("status") or "rejected").strip().lower()
             if not include_non_rejected and status != "rejected":
                 continue
-            items.append(dict(row))
-    items.sort(key=lambda r: str(r.get("created_at") or r.get("updated_at") or ""), reverse=True)
+            out = dict(row)
+            out["source"] = str(out.get("source") or source)
+            items.append(out)
+
+    store = _load_rejections_store()
+    _collect(store.get("items"), "active")
+    if include_archive:
+        archive = _load_rejections_archive_store()
+        _collect(archive.get("items"), "archive")
+
+    items.sort(key=_rejection_sort_key, reverse=True)
     return items[:lim]
+
+
+def _find_rejected_webhook(rejection_id: str, include_archive: bool = True) -> tuple[Optional[dict[str, Any]], str]:
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        return None, ""
+
+    store = _load_rejections_store()
+    rows = store.get("items") if isinstance(store.get("items"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() != rid:
+            continue
+        out = dict(row)
+        out["source"] = str(out.get("source") or "active")
+        return out, "active"
+
+    if include_archive:
+        archive = _load_rejections_archive_store()
+        rows = archive.get("items") if isinstance(archive.get("items"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("id") or "").strip() != rid:
+                continue
+            out = dict(row)
+            out["source"] = str(out.get("source") or "archive")
+            return out, "archive"
+
+    return None, ""
 
 
 async def _touch_live_queue_item(
