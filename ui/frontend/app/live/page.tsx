@@ -376,7 +376,6 @@ export default function LivePage() {
   const [liveSaving, setLiveSaving] = useState(false);
   const [liveMessage, setLiveMessage] = useState("");
   const [liveMessageError, setLiveMessageError] = useState(false);
-  const [collapsedCompletedDayIds, setCollapsedCompletedDayIds] = useState<Record<string, boolean>>({});
   const [collapsedCompletedFailedDayIds, setCollapsedCompletedFailedDayIds] = useState<Record<string, boolean>>({});
   const [collapsedCompletedRetryDayIds, setCollapsedCompletedRetryDayIds] = useState<Record<string, boolean>>({});
   const [collapsedCompletedSuccessDayIds, setCollapsedCompletedSuccessDayIds] = useState<Record<string, boolean>>({});
@@ -393,6 +392,9 @@ export default function LivePage() {
   const [requeueingRejectedId, setRequeueingRejectedId] = useState("");
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
+  const [requeueingFailedRunId, setRequeueingFailedRunId] = useState("");
+  const [failedRunActionMsg, setFailedRunActionMsg] = useState("");
+  const [failedRunActionErr, setFailedRunActionErr] = useState(false);
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
   const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
 
@@ -797,6 +799,54 @@ export default function LivePage() {
     }
   };
 
+  const moveFailedRunToRun = async (run: PipelineRunRecord) => {
+    const sourceRunId = String(run?.id || "").trim();
+    if (!sourceRunId) return;
+    if (liveReadOnly) {
+      setFailedRunActionErr(true);
+      setFailedRunActionMsg("Read-only mirror mode: cannot enqueue failed run from this environment.");
+      return;
+    }
+    if (normalizeRunOrigin(run.run_origin) !== "webhook") {
+      setFailedRunActionErr(true);
+      setFailedRunActionMsg("Only production/webhook failed runs can be moved back to queue.");
+      return;
+    }
+    const ok = window.confirm(
+      `Move failed run ${sourceRunId.slice(0, 8)} back to queue for pipeline "${run.pipeline_name}"?`,
+    );
+    if (!ok) return;
+
+    setRequeueingFailedRunId(sourceRunId);
+    setFailedRunActionMsg("");
+    try {
+      const res = await fetch(`/api/pipelines/live-webhook/runs/${encodeURIComponent(sourceRunId)}/enqueue`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pipeline_id: String(run.pipeline_id || "").trim(),
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+      }
+      const newRunId = String(body?.run_id || "").trim();
+      setFailedRunActionErr(false);
+      setFailedRunActionMsg(
+        newRunId
+          ? `Moved to queue as run ${newRunId.slice(0, 8)}.`
+          : "Moved failed run back to queue.",
+      );
+      await mutateRuns();
+    } catch (e: any) {
+      setFailedRunActionErr(true);
+      setFailedRunActionMsg(String(e?.message || "Failed moving run back to queue."));
+    } finally {
+      setRequeueingFailedRunId("");
+    }
+  };
+
   const filteredRuns = useMemo(() => {
     const fromTs = filterDateFrom ? new Date(`${filterDateFrom}T00:00:00`).getTime() : null;
     const toTs = filterDateTo ? new Date(`${filterDateTo}T23:59:59`).getTime() : null;
@@ -877,19 +927,52 @@ export default function LivePage() {
     return groups;
   }, [completedRuns]);
 
-  useEffect(() => {
-    setCollapsedCompletedDayIds((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const group of completedRunsByDay) {
-        if (next[group.dayId] == null) {
-          next[group.dayId] = true;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [completedRunsByDay]);
+  const completedFailedByDay = useMemo(
+    () =>
+      completedRunsByDay
+        .map((group) => ({
+          dayId: group.dayId,
+          label: group.label,
+          runs: group.failedRuns,
+        }))
+        .filter((group) => group.runs.length > 0),
+    [completedRunsByDay],
+  );
+  const completedRetryByDay = useMemo(
+    () =>
+      completedRunsByDay
+        .map((group) => ({
+          dayId: group.dayId,
+          label: group.label,
+          runs: group.retryRuns,
+        }))
+        .filter((group) => group.runs.length > 0),
+    [completedRunsByDay],
+  );
+  const completedSuccessByDay = useMemo(
+    () =>
+      completedRunsByDay
+        .map((group) => ({
+          dayId: group.dayId,
+          label: group.label,
+          runs: group.successRuns,
+        }))
+        .filter((group) => group.runs.length > 0),
+    [completedRunsByDay],
+  );
+  const completedFailedCount = useMemo(
+    () => completedFailedByDay.reduce((n, group) => n + group.runs.length, 0),
+    [completedFailedByDay],
+  );
+  const completedRetryCount = useMemo(
+    () => completedRetryByDay.reduce((n, group) => n + group.runs.length, 0),
+    [completedRetryByDay],
+  );
+  const completedSuccessCount = useMemo(
+    () => completedSuccessByDay.reduce((n, group) => n + group.runs.length, 0),
+    [completedSuccessByDay],
+  );
+  const hideRetryColumn = completedRetryCount === 0;
 
   useEffect(() => {
     setCollapsedCompletedFailedDayIds((prev) => {
@@ -1159,7 +1242,14 @@ export default function LivePage() {
             Loading live runs…
           </div>
         ) : (
-          <div className="h-full grid grid-cols-1 2xl:grid-cols-[300px_340px_1fr_1fr_1fr] gap-0">
+          <div
+            className={cn(
+              "h-full grid grid-cols-1 gap-0",
+              hideRetryColumn
+                ? "2xl:grid-cols-[300px_340px_1fr_1fr_1fr_1fr]"
+                : "2xl:grid-cols-[300px_340px_1fr_1fr_1fr_1fr_1fr]",
+            )}
+          >
             <section className="min-h-0 border-r border-gray-800 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <Workflow className="w-4 h-4 text-emerald-400" />
@@ -1391,122 +1481,153 @@ export default function LivePage() {
               </div>
             </section>
 
+            <section className="min-h-0 border-r border-gray-800 flex flex-col">
+              <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
+                <XCircle className="w-4 h-4 text-red-400" />
+                <p className="text-sm font-semibold text-gray-100">Failed</p>
+                <span className="text-xs text-gray-500">{completedFailedCount}</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                {failedRunActionMsg ? (
+                  <p className={cn("text-[11px]", failedRunActionErr ? "text-red-300" : "text-emerald-300")}>
+                    {failedRunActionMsg}
+                  </p>
+                ) : null}
+                {completedFailedCount === 0 ? (
+                  <p className="text-xs text-gray-600 italic">No failed runs.</p>
+                ) : (
+                  completedFailedByDay.map((group) => {
+                    const collapsed = !!collapsedCompletedFailedDayIds[group.dayId];
+                    return (
+                      <div key={`failed-${group.dayId}`} className="space-y-1.5">
+                        <button
+                          onClick={() =>
+                            setCollapsedCompletedFailedDayIds((prev) => ({
+                              ...prev,
+                              [group.dayId]: !prev[group.dayId],
+                            }))}
+                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-red-800/50 bg-red-950/20 hover:bg-red-900/20 text-left"
+                          title={collapsed ? "Expand date folder" : "Collapse date folder"}
+                        >
+                          <ChevronRight
+                            className={cn("w-3.5 h-3.5 text-red-300 transition-transform", !collapsed && "rotate-90")}
+                          />
+                          <span className="text-[11px] text-red-200 font-semibold">{group.label}</span>
+                          <span className="ml-auto text-[10px] text-red-300">{group.runs.length}</span>
+                        </button>
+                        {!collapsed && (
+                          <div className="space-y-2 pl-2">
+                            {group.runs.map((run) => {
+                              const runKey = String(run.id || "").trim() || `${group.dayId}-${run.pipeline_id}-${run.call_id}-${run.started_at || ""}`;
+                              const canMove = normalizeRunOrigin(run.run_origin) === "webhook";
+                              const busy = requeueingFailedRunId === run.id;
+                              return (
+                                <div key={`failed-run-${runKey}`} className="space-y-1">
+                                  {renderRunCard(run)}
+                                  <div className="flex justify-end">
+                                    <button
+                                      type="button"
+                                      disabled={!canMove || busy || liveReadOnly}
+                                      onClick={() => { void moveFailedRunToRun(run); }}
+                                      className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
+                                      title={
+                                        !canMove
+                                          ? "Only production/webhook runs can be moved back to queue"
+                                          : "Move failed run back to queue"
+                                      }
+                                    >
+                                      {busy ? "Moving..." : "Move To Run"}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+
+            {!hideRetryColumn && (
+              <section className="min-h-0 border-r border-gray-800 flex flex-col">
+                <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
+                  <Loader2 className="w-4 h-4 text-fuchsia-400" />
+                  <p className="text-sm font-semibold text-gray-100">Retry</p>
+                  <span className="text-xs text-gray-500">{completedRetryCount}</span>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                  {completedRetryByDay.map((group) => {
+                    const collapsed = !!collapsedCompletedRetryDayIds[group.dayId];
+                    return (
+                      <div key={`retry-${group.dayId}`} className="space-y-1.5">
+                        <button
+                          onClick={() =>
+                            setCollapsedCompletedRetryDayIds((prev) => ({
+                              ...prev,
+                              [group.dayId]: !prev[group.dayId],
+                            }))}
+                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-fuchsia-800/50 bg-fuchsia-950/20 hover:bg-fuchsia-900/20 text-left"
+                          title={collapsed ? "Expand date folder" : "Collapse date folder"}
+                        >
+                          <ChevronRight
+                            className={cn("w-3.5 h-3.5 text-fuchsia-300 transition-transform", !collapsed && "rotate-90")}
+                          />
+                          <span className="text-[11px] text-fuchsia-200 font-semibold">{group.label}</span>
+                          <span className="ml-auto text-[10px] text-fuchsia-300">{group.runs.length}</span>
+                        </button>
+                        {!collapsed && (
+                          <div className="space-y-2 pl-2">
+                            {group.runs.map(renderRunCard)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
             <section className="min-h-0 flex flex-col">
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <p className="text-sm font-semibold text-gray-100">Completed</p>
-                <span className="text-xs text-gray-500">{completedRuns.length}</span>
+                <p className="text-sm font-semibold text-gray-100">Successful</p>
+                <span className="text-xs text-gray-500">{completedSuccessCount}</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                {completedRuns.length === 0 && (
-                  <p className="text-xs text-gray-600 italic">No completed runs.</p>
+                {completedSuccessCount === 0 ? (
+                  <p className="text-xs text-gray-600 italic">No successful runs.</p>
+                ) : (
+                  completedSuccessByDay.map((group) => {
+                    const collapsed = !!collapsedCompletedSuccessDayIds[group.dayId];
+                    return (
+                      <div key={`success-${group.dayId}`} className="space-y-1.5">
+                        <button
+                          onClick={() =>
+                            setCollapsedCompletedSuccessDayIds((prev) => ({
+                              ...prev,
+                              [group.dayId]: !prev[group.dayId],
+                            }))}
+                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-emerald-800/50 bg-emerald-950/20 hover:bg-emerald-900/20 text-left"
+                          title={collapsed ? "Expand date folder" : "Collapse date folder"}
+                        >
+                          <ChevronRight
+                            className={cn("w-3.5 h-3.5 text-emerald-300 transition-transform", !collapsed && "rotate-90")}
+                          />
+                          <span className="text-[11px] text-emerald-200 font-semibold">{group.label}</span>
+                          <span className="ml-auto text-[10px] text-emerald-300">{group.runs.length}</span>
+                        </button>
+                        {!collapsed && (
+                          <div className="space-y-2 pl-2">
+                            {group.runs.map(renderRunCard)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
-                {completedRunsByDay.map((group) => {
-                  const collapsed = !!collapsedCompletedDayIds[group.dayId];
-                  const failedCollapsed = !!collapsedCompletedFailedDayIds[group.dayId];
-                  const retryCollapsed = !!collapsedCompletedRetryDayIds[group.dayId];
-                  const successCollapsed = !!collapsedCompletedSuccessDayIds[group.dayId];
-                  return (
-                    <div key={group.dayId} className="space-y-1.5">
-                      <button
-                        onClick={() => setCollapsedCompletedDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
-                        className="w-full flex items-center gap-2 px-2 py-1 rounded border border-gray-800 bg-gray-900/70 hover:bg-gray-800 text-left"
-                        title={collapsed ? "Expand date folder" : "Collapse date folder"}
-                      >
-                        <ChevronRight className={cn("w-3.5 h-3.5 text-gray-500 transition-transform", !collapsed && "rotate-90")} />
-                        <span className="text-[11px] text-gray-300 font-semibold">{group.label}</span>
-                        <span className="ml-auto text-[10px] text-gray-500">{group.runs.length}</span>
-                      </button>
-                      {!collapsed && (
-                        <div className="space-y-2 pl-2">
-                          <button
-                            onClick={() =>
-                              setCollapsedCompletedFailedDayIds((prev) => ({
-                                ...prev,
-                                [group.dayId]: !prev[group.dayId],
-                              }))}
-                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-red-800/50 bg-red-950/30 hover:bg-red-900/30 text-left"
-                            title={failedCollapsed ? "Expand failed runs" : "Collapse failed runs"}
-                          >
-                            <ChevronRight
-                              className={cn(
-                                "w-3.5 h-3.5 text-red-300 transition-transform",
-                                !failedCollapsed && "rotate-90",
-                              )}
-                            />
-                            <span className="text-[10px] font-semibold text-red-200">FAILED</span>
-                            <span className="ml-auto text-[10px] text-red-300">{group.failedRuns.length}</span>
-                          </button>
-                          {!failedCollapsed && (
-                            <>
-                              {group.failedRuns.length === 0 ? (
-                                <p className="text-[11px] text-gray-500 italic px-1">No failed runs on this day.</p>
-                              ) : (
-                                group.failedRuns.map(renderRunCard)
-                              )}
-                            </>
-                          )}
-
-                          <button
-                            onClick={() =>
-                              setCollapsedCompletedRetryDayIds((prev) => ({
-                                ...prev,
-                                [group.dayId]: !prev[group.dayId],
-                              }))}
-                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-fuchsia-800/50 bg-fuchsia-950/20 hover:bg-fuchsia-900/20 text-left"
-                            title={retryCollapsed ? "Expand retry runs" : "Collapse retry runs"}
-                          >
-                            <ChevronRight
-                              className={cn(
-                                "w-3.5 h-3.5 text-fuchsia-300 transition-transform",
-                                !retryCollapsed && "rotate-90",
-                              )}
-                            />
-                            <span className="text-[10px] font-semibold text-fuchsia-200">RETRY</span>
-                            <span className="ml-auto text-[10px] text-fuchsia-300">{group.retryRuns.length}</span>
-                          </button>
-                          {!retryCollapsed && (
-                            <>
-                              {group.retryRuns.length === 0 ? (
-                                <p className="text-[11px] text-gray-500 italic px-1">No retry runs on this day.</p>
-                              ) : (
-                                group.retryRuns.map(renderRunCard)
-                              )}
-                            </>
-                          )}
-
-                          <button
-                            onClick={() =>
-                              setCollapsedCompletedSuccessDayIds((prev) => ({
-                                ...prev,
-                                [group.dayId]: !prev[group.dayId],
-                              }))}
-                            className="w-full flex items-center gap-2 px-2 py-1 rounded border border-emerald-800/50 bg-emerald-950/20 hover:bg-emerald-900/20 text-left"
-                            title={successCollapsed ? "Expand successful runs" : "Collapse successful runs"}
-                          >
-                            <ChevronRight
-                              className={cn(
-                                "w-3.5 h-3.5 text-emerald-300 transition-transform",
-                                !successCollapsed && "rotate-90",
-                              )}
-                            />
-                            <span className="text-[10px] font-semibold text-emerald-200">SUCCESSFUL</span>
-                            <span className="ml-auto text-[10px] text-emerald-300">{group.successRuns.length}</span>
-                          </button>
-                          {!successCollapsed && (
-                            <>
-                              {group.successRuns.length === 0 ? (
-                                <p className="text-[11px] text-gray-500 italic px-1">No successful runs on this day.</p>
-                              ) : (
-                                group.successRuns.map(renderRunCard)
-                              )}
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
               </div>
             </section>
           </div>
