@@ -276,7 +276,7 @@ export function TranscriptViewer({
 
   if (turns.length === 0) {
     return (
-      <pre className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto ${className}`}>
+      <pre className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain h-full min-h-0 ${className}`}>
         {content}
       </pre>
     );
@@ -285,14 +285,14 @@ export function TranscriptViewer({
   // If no speaker info at all, render as raw pre
   if (!turns.some(t => t.speaker)) {
     return (
-      <pre className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto ${className}`}>
+      <pre className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain h-full min-h-0 ${className}`}>
         {content}
       </pre>
     );
   }
 
   return (
-    <div className={`overflow-y-auto pr-1 ${className}`}>
+    <div className={`overflow-y-auto overscroll-contain h-full min-h-0 pr-1 ${className}`}>
       <TurnBubbleList turns={turns} />
     </div>
   );

@@ -5254,7 +5254,7 @@ function PipelineCanvas() {
       return (
         <pre className={cn(
           "w-full overflow-auto bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
-          expand ? "h-full min-h-[300px]" : "max-h-80",
+          expand ? "flex-1 min-h-0" : "max-h-80",
         )}>
           {text}
         </pre>
@@ -5264,9 +5264,9 @@ function PipelineCanvas() {
       return (
         <div className={cn(
           "border border-gray-700 rounded-lg overflow-hidden bg-gray-900",
-          expand ? "h-full min-h-[300px]" : "h-80",
+          expand ? "flex-1 min-h-0 flex flex-col" : "h-80",
         )}>
-          <TranscriptViewer content={text} format="txt" className="h-full" />
+          <TranscriptViewer content={text} format="txt" className={expand ? "flex-1 min-h-0" : "h-full"} />
         </div>
       );
     }
@@ -5293,7 +5293,7 @@ function PipelineCanvas() {
         )}
         <div className={cn(
           "overflow-auto rounded-lg border border-gray-700 bg-gray-900/50 px-2 py-1.5",
-          expand ? "flex-1 min-h-[300px]" : "max-h-80",
+          expand ? "flex-1 min-h-0" : "max-h-80",
         )}>
           <SectionContent content={renderedMarkdown} format="markdown" />
         </div>
@@ -5359,7 +5359,7 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div className={cn(expand && "flex-1 min-h-0 overflow-y-auto")}>
+        <div className={cn(expand && "flex-1 min-h-0 overflow-hidden")}>
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>
@@ -5551,10 +5551,14 @@ function PipelineCanvas() {
             </div>
 
             <div className="lg:col-span-7 min-h-0 overflow-y-auto space-y-2.5">
-              <PropertiesSection title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}>
-                <div className="space-y-2">
+              <PropertiesSection
+                title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
+                className={selKind === "input" ? "h-full flex flex-col" : undefined}
+                bodyClassName={selKind === "input" ? "h-full min-h-0 flex flex-col" : undefined}
+              >
+                <div className={cn("space-y-2", selKind === "input" && "h-full min-h-0 flex flex-col")}>
                   {selKind !== "input" ? renderCacheRunSelector() : null}
-                  <div className="flex items-center justify-between gap-2">
+                  <div className={cn("flex items-center justify-between gap-2", selKind === "input" && "shrink-0")}>
                     <p className="text-[10px] text-gray-500">
                       {selKind === "processing"
                         ? (processingStepIndex >= 0 ? `Step ${processingStepIndex + 1}` : "Not in execution path")
@@ -5565,10 +5569,14 @@ function PipelineCanvas() {
                     {renderResultViewToggle()}
                   </div>
 
-                  {selKind === "input" ? (() => {
-                    const src = String(selData.inputSource || "").trim();
-                    return renderInputPreview(src, true);
-                  })() : null}
+                  {selKind === "input" ? (
+                    <div className="flex-1 min-h-0 overflow-hidden">
+                      {(() => {
+                        const src = String(selData.inputSource || "").trim();
+                        return renderInputPreview(src, true);
+                      })()}
+                    </div>
+                  ) : null}
 
                   {selKind === "processing" ? (
                     processingCache ? (
@@ -6195,7 +6203,7 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  <div className="flex-1 min-h-0">
+                  <div className="flex-1 min-h-0 overflow-hidden">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
                     return renderInputPreview(src, true);
@@ -6219,7 +6227,7 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  <div className="flex-1 min-h-0 overflow-y-auto">
+                  <div className="flex-1 min-h-0 overflow-hidden">
                     {!ioCacheTarget ? (
                       <p className="text-[11px] text-gray-500">
                         Connect this artifact to a processing node to resolve its result.
@@ -7373,7 +7381,7 @@ function PipelineCanvas() {
                       )}
                     </div>
                   </div>
-                  <div className={cn("flex-1", selKind === "processing" ? "overflow-hidden" : "overflow-y-auto")}>
+                  <div className="flex-1 min-h-0 overflow-hidden">
                     {renderPanel()}
                   </div>
                 </div>
