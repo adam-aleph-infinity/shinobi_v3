@@ -5402,7 +5402,7 @@ function PipelineCanvas() {
             )}
           </div>
         )}
-        <div className={cn(expand && "flex-1 min-h-0")}>
+        <div className={cn(expand && "flex-1 min-h-0 overflow-hidden")}>
           <RenderResultContent content={preview?.content || ""} sourceHint={src} expand={expand} />
         </div>
       </div>
@@ -5565,7 +5565,7 @@ function PipelineCanvas() {
 
       return (
         <div className="h-full min-h-0 p-3">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0 overflow-hidden lg:[grid-template-rows:minmax(0,1fr)]">
             <div className="lg:col-span-5 min-h-0 overflow-y-auto pr-1 space-y-3">
               <div className={`flex items-center gap-3 px-3.5 py-3 rounded-xl ${selMeta.color}`}>
                 <span className="text-white text-lg shrink-0">{selMeta.icon}</span>
@@ -5595,12 +5595,12 @@ function PipelineCanvas() {
 
             <div className={cn(
               "lg:col-span-7 min-h-0 space-y-2.5",
-              selKind === "input" ? "h-full flex flex-col" : "overflow-y-auto",
+              selKind === "input" ? "min-h-0 flex flex-col overflow-hidden" : "overflow-y-auto",
             )}>
               <PropertiesSection
                 title={selKind === "input" ? "Input Data" : selKind === "output" ? "Artifact Result" : "Agent Response"}
-                className={selKind === "input" ? "h-full flex flex-col" : undefined}
-                bodyClassName={selKind === "input" ? "flex-1 min-h-0 flex flex-col" : undefined}
+                className={selKind === "input" ? "min-h-0 flex-1 flex flex-col" : undefined}
+                bodyClassName={selKind === "input" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : undefined}
               >
                 <div className={cn("space-y-2", selKind === "input" && "h-full min-h-0 flex flex-col")}>
                   {selKind !== "input" ? renderCacheRunSelector() : null}
@@ -5616,7 +5616,7 @@ function PipelineCanvas() {
                   </div>
 
                   {selKind === "input" ? (
-                    <div className="flex-1 min-h-0 flex flex-col">
+                    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                       {(() => {
                         const src = String(selData.inputSource || "").trim();
                         return renderInputPreview(src, true);
@@ -6040,7 +6040,7 @@ function PipelineCanvas() {
 
     return (
       <div className="h-full min-h-0 p-3">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0 overflow-hidden lg:[grid-template-rows:minmax(0,1fr)]">
           <div className={cn(
             "min-h-0 overflow-y-auto pr-1 space-y-4",
             selKind === "input"
@@ -6231,16 +6231,16 @@ function PipelineCanvas() {
           <div className={cn(
             "min-h-0 space-y-2.5",
             selKind === "input"
-              ? "lg:col-span-9 h-full flex flex-col overflow-hidden"
+              ? "lg:col-span-9 min-h-0 flex flex-col overflow-hidden"
               : selKind === "output"
-                ? "lg:col-span-5 h-full flex flex-col overflow-hidden"
+                ? "lg:col-span-5 min-h-0 flex flex-col overflow-hidden"
                 : "lg:col-span-4 overflow-y-auto",
           )}>
             {selKind === "input" && (
               <PropertiesSection
                 title="Input Data"
-                className="h-full flex flex-col"
-                bodyClassName="flex-1 min-h-0 flex flex-col"
+                className="min-h-0 flex-1 flex flex-col"
+                bodyClassName="flex-1 min-h-0 flex flex-col overflow-hidden"
               >
                 <div className="space-y-2 h-full min-h-0 flex flex-col">
                   <div className="flex items-center justify-between gap-2 shrink-0">
@@ -6249,7 +6249,7 @@ function PipelineCanvas() {
                     </p>
                     {renderResultViewToggle()}
                   </div>
-                  <div className="flex-1 min-h-0 flex flex-col">
+                  <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                   {(() => {
                     const src = String(selData.inputSource || "").trim();
                     return renderInputPreview(src, true);

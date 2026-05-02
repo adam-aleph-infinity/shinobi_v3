@@ -382,10 +382,12 @@ export function ContextBar() {
 
   useEffect(() => {
     const handler = (ev: MessageEvent) => {
+      if (typeof window !== "undefined" && ev.origin !== window.location.origin) return;
       const payload = ev?.data;
       if (!payload || typeof payload !== "object") return;
       const type = String((payload as any).type || "");
-      if (type === "crm:pair-selected") {
+
+      if (type === "crm:pair-selected" || type === "shinobi:select-pair") {
         const nextAgent = String((payload as any).agent || "").trim();
         const nextCustomer = String((payload as any).customer || "").trim();
         if (!nextAgent || !nextCustomer) return;
@@ -394,7 +396,28 @@ export function ContextBar() {
         setShowCallsPanel(false);
         return;
       }
-      if (type === "crm:call-selected") {
+
+      if (type === "crm:agent-selected" || type === "shinobi:select-agent") {
+        const nextAgent = String((payload as any).agent || "").trim();
+        if (!nextAgent) return;
+        setCustomer("", nextAgent);
+        setShowCrmPanel(false);
+        setShowCallsPanel(false);
+        return;
+      }
+
+      if (type === "crm:customer-selected" || type === "shinobi:select-customer") {
+        const nextAgent = String((payload as any).agent || "").trim();
+        const nextCustomer = String((payload as any).customer || "").trim();
+        if (!nextCustomer) return;
+        if (nextAgent) setCustomer(nextCustomer, nextAgent);
+        else setCustomer(nextCustomer);
+        setShowCrmPanel(false);
+        setShowCallsPanel(false);
+        return;
+      }
+
+      if (type === "crm:call-selected" || type === "shinobi:calls-context") {
         const nextAgent = String((payload as any).agent || "").trim();
         const nextCustomer = String((payload as any).customer || "").trim();
         const nextCallId = String((payload as any).call_id || "").trim();
