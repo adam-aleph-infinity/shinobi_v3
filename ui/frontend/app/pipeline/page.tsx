@@ -367,6 +367,13 @@ interface RenderedLlmCacheEntry {
   error: string;
 }
 
+interface CanvasDetailViewerState {
+  title: string;
+  subtitle?: string;
+  content: string;
+  sourceHint?: string;
+}
+
 interface PipelineBundle {
   bundle_version: number;
   bundle_id: string;
@@ -1860,6 +1867,7 @@ function PipelineCanvas() {
   const [callTranscriptError, setCallTranscriptError] = useState("");
   const [pendingOpenRunPayload, setPendingOpenRunPayload] = useState<PipelineOpenRunPayload | null>(null);
   const [pendingRunCallId, setPendingRunCallId] = useState("");
+  const [detailViewer, setDetailViewer] = useState<CanvasDetailViewerState | null>(null);
   const pipelinesPanelResizeRef = useRef<{
     active: boolean;
     startX: number;
@@ -1878,6 +1886,10 @@ function PipelineCanvas() {
     setLogsExpanded(true);
     setLogsCollapsed(false);
   }, [running]);
+
+  useEffect(() => {
+    if (!selectedNodeId) setDetailViewer(null);
+  }, [selectedNodeId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -5411,6 +5423,97 @@ function PipelineCanvas() {
     );
   }
 
+  function openDetailViewer(payload: CanvasDetailViewerState) {
+    setDetailViewer({
+      title: String(payload.title || "Viewer"),
+      subtitle: String(payload.subtitle || ""),
+      content: String(payload.content || ""),
+      sourceHint: String(payload.sourceHint || ""),
+    });
+  }
+
+  function renderPopoutButton(payload: CanvasDetailViewerState | null) {
+    const disabled = !payload || !String(payload.content || "").trim();
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          if (!payload) return;
+          openDetailViewer(payload);
+        }}
+        disabled={disabled}
+        className={cn(
+          "px-2 py-0.5 rounded border text-[10px] transition-colors",
+          disabled
+            ? "border-gray-800 text-gray-600 cursor-not-allowed"
+            : "border-indigo-700/60 text-indigo-300 bg-indigo-950/30 hover:bg-indigo-950/60",
+        )}
+        title={disabled ? "No content yet" : "Open in separate scrollable window"}
+      >
+        Open Viewer
+      </button>
+    );
+  }
+
+  function renderDetailViewerModal() {
+    if (!detailViewer) return null;
+    const text = String(detailViewer.content || "");
+    const hint = String(detailViewer.sourceHint || "").toLowerCase();
+    const forceRaw = hint.includes("transcript");
+    const showRaw = forceRaw || resultViewMode === "raw";
+
+    return (
+      <div className="absolute inset-3 z-50 bg-black/70 backdrop-blur-[1px] rounded-xl flex items-center justify-center">
+        <div className="relative w-[min(92vw,1240px)] h-[min(84vh,860px)] rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_24px_70px_rgba(0,0,0,0.65)] flex flex-col overflow-hidden">
+          <div className="shrink-0 px-3 py-2 border-b border-gray-800 flex items-center gap-2">
+            <p className="text-sm font-semibold text-white truncate">{detailViewer.title}</p>
+            {detailViewer.subtitle ? (
+              <p className="text-[10px] text-gray-500 truncate">· {detailViewer.subtitle}</p>
+            ) : null}
+            <div className="ml-auto flex items-center gap-1.5">
+              {forceRaw ? (
+                <span className="text-[10px] px-2 py-0.5 rounded border border-gray-700 text-gray-300 bg-gray-900">
+                  Raw
+                </span>
+              ) : (
+                renderResultViewToggle()
+              )}
+              <button
+                type="button"
+                onClick={() => setDetailViewer(null)}
+                className="h-6 w-6 rounded-md border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors flex items-center justify-center"
+                title="Close viewer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden p-3">
+            {!text.trim() ? (
+              <p className="text-[11px] text-gray-500">No content.</p>
+            ) : showRaw ? (
+              <pre
+                className="h-full min-h-0 overflow-y-auto overscroll-contain nowheel rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words"
+                onWheelCapture={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                {text}
+              </pre>
+            ) : (
+              <div
+                className="h-full min-h-0 overflow-y-auto overscroll-contain nowheel rounded-lg border border-gray-700 bg-gray-900/60 px-2 py-1.5"
+                onWheelCapture={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                <SectionContent content={text} format="markdown" />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderCacheRunSelector() {
     if (runContextMode !== "historical") {
       const rid = String(currentRunId || "").trim();
@@ -5564,6 +5667,31 @@ function PipelineCanvas() {
         ? runtimeGraph.stepToProcNodeIds.indexOf(outputProducerNode.id)
         : -1;
       const outputCache = outputStepIndex >= 0 ? getStepCacheDisplay(outputStepIndex) : null;
+      const lockedInputSource = selKind === "input" ? String(selData.inputSource || "").trim() : "";
+      const lockedInputPreview = lockedInputSource ? inputPreviewBySource[lockedInputSource] : null;
+      const lockedViewerPayload: CanvasDetailViewerState | null =
+        selKind === "input"
+          ? {
+              title: "Input Data",
+              subtitle: lockedInputSource || "input",
+              content: String(lockedInputPreview?.content || ""),
+              sourceHint: lockedInputSource || "input",
+            }
+          : selKind === "processing"
+            ? {
+                title: "Agent Response",
+                subtitle: processingStepIndex >= 0 ? `Step ${processingStepIndex + 1}` : "",
+                content: String(processingCache?.content || ""),
+                sourceHint: "agent_response",
+              }
+            : selKind === "output"
+              ? {
+                  title: "Artifact Result",
+                  subtitle: outputStepIndex >= 0 ? `Step ${outputStepIndex + 1}` : "",
+                  content: String(outputCache?.content || ""),
+                  sourceHint: String(selData.subType || "output"),
+                }
+              : null;
 
       return (
         <div className="h-full min-h-0 p-3">
@@ -5614,7 +5742,10 @@ function PipelineCanvas() {
                           ? (outputStepIndex >= 0 ? `Step ${outputStepIndex + 1}` : "No producer connected")
                           : `Context: ${salesAgent || "agent"} · ${customer || "customer"} · ${previewCallId || "no call"}`}
                     </p>
-                    {renderResultViewToggle()}
+                    <div className="flex items-center gap-1.5">
+                      {renderResultViewToggle()}
+                      {renderPopoutButton(lockedViewerPayload)}
+                    </div>
                   </div>
 
                   {selKind === "input" ? (
@@ -5684,6 +5815,12 @@ function PipelineCanvas() {
       const usage = agId ? (agentUsageByPipeline[agId] ?? { total: 0, other: 0 }) : { total: 0, other: 0 };
       const stepIndex = runtimeGraph.stepToProcNodeIds.indexOf(selectedNode.id);
       const stepCache = getStepCacheDisplay(stepIndex);
+      const processingViewerPayload: CanvasDetailViewerState | null = {
+        title: "Agent Response",
+        subtitle: stepIndex >= 0 ? `Step ${stepIndex + 1}` : "",
+        content: String(stepCache?.content || ""),
+        sourceHint: "agent_response",
+      };
 
       type CS = { nodeId: string; typeLabel: string; nodeLabel: string; icon: React.ReactNode; badge: string };
       const incomingSources = edges
@@ -5995,7 +6132,10 @@ function PipelineCanvas() {
                       <p className="text-[10px] text-gray-500">
                         {stepIndex >= 0 ? `Step ${stepIndex + 1}` : "Not in execution path"}
                       </p>
-                      {renderResultViewToggle()}
+                      <div className="flex items-center gap-1.5">
+                        {renderResultViewToggle()}
+                        {renderPopoutButton(processingViewerPayload)}
+                      </div>
                     </div>
                     {stepCache ? (
                       <>
@@ -6039,6 +6179,16 @@ function PipelineCanvas() {
         stepIndex: outputStepIndex,
       };
     })();
+    const inputSource = selKind === "input" ? String(selData.inputSource || "").trim() : "";
+    const inputPreview = inputSource ? inputPreviewBySource[inputSource] : null;
+    const inputViewerPayload: CanvasDetailViewerState | null = selKind === "input"
+      ? {
+          title: "Input Data",
+          subtitle: inputSource || "input",
+          content: String(inputPreview?.content || ""),
+          sourceHint: inputSource || "input",
+        }
+      : null;
 
     return (
       <div className="h-full min-h-0 p-3">
@@ -6249,7 +6399,10 @@ function PipelineCanvas() {
                     <p className="text-[10px] text-gray-500">
                       Context: {salesAgent || "agent"} · {customer || "customer"} · {previewCallId || "no call"}
                     </p>
-                    {renderResultViewToggle()}
+                    <div className="flex items-center gap-1.5">
+                      {renderResultViewToggle()}
+                      {renderPopoutButton(inputViewerPayload)}
+                    </div>
                   </div>
                   <div className="h-full flex-1 min-h-0 flex flex-col overflow-hidden">
                   {(() => {
@@ -6273,7 +6426,15 @@ function PipelineCanvas() {
                     <p className="text-[10px] text-gray-500">
                       {ioCacheTarget ? `${ioCacheTarget.title} · ${ioCacheTarget.subtitle}` : "No producer connected"}
                     </p>
-                    {renderResultViewToggle()}
+                    <div className="flex items-center gap-1.5">
+                      {renderResultViewToggle()}
+                      {renderPopoutButton(ioCacheTarget ? {
+                        title: "Artifact Result",
+                        subtitle: ioCacheTarget.subtitle,
+                        content: String(getStepCacheDisplay(ioCacheTarget.stepIndex)?.content || ""),
+                        sourceHint: String(selData.subType || "output"),
+                      } : null)}
+                    </div>
                   </div>
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {!ioCacheTarget ? (
@@ -7425,6 +7586,7 @@ function PipelineCanvas() {
                     {renderPanel()}
                   </div>
                 </div>
+                {renderDetailViewerModal()}
               </div>
             </div>
           )}
