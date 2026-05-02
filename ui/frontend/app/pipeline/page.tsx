@@ -5214,19 +5214,32 @@ function PipelineCanvas() {
       return <p className="text-[10px] text-gray-500">No content.</p>;
     }
 
-    const expandedViewportClass = "flex-1 min-h-0 max-h-full overflow-y-auto overscroll-contain nowheel";
+    const expandedViewportClass = "flex-1 min-h-0 overflow-y-auto overscroll-contain nowheel";
+    const compactViewportClass = "max-h-80 overflow-y-auto overscroll-contain nowheel";
     const viewportClass = cn(
       "rounded-lg border border-gray-700 bg-gray-900/60",
-      expand
-        ? expandedViewportClass
-        : "max-h-80 overflow-y-auto overscroll-contain nowheel",
+      expand ? expandedViewportClass : compactViewportClass,
     );
 
     const renderRawText = (rawText: string) => (
       <div
-        className={viewportClass}
+        className={cn(
+          "rounded-lg border border-gray-700 bg-gray-900/60",
+          expand ? "flex-1 min-h-0 overflow-hidden" : "",
+        )}
+        onWheelCapture={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
       >
-        <pre className="w-full px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words">
+        <pre
+          className={cn(
+            "w-full px-2 py-1.5 text-[11px] text-gray-300 font-mono whitespace-pre-wrap break-words",
+            expand
+              ? "h-full min-h-0 overflow-y-auto overscroll-contain nowheel"
+              : compactViewportClass,
+          )}
+          onWheelCapture={(e) => e.stopPropagation()}
+          onWheel={(e) => e.stopPropagation()}
+        >
           {rawText}
         </pre>
       </div>
@@ -5281,6 +5294,8 @@ function PipelineCanvas() {
         )}
         <div
           className={viewportClass}
+          onWheelCapture={(e) => e.stopPropagation()}
+          onWheel={(e) => e.stopPropagation()}
         >
           <div className="px-2 py-1.5">
             <SectionContent content={renderedMarkdown} format="markdown" />
@@ -7321,7 +7336,7 @@ function PipelineCanvas() {
           {selectedNodeId && (
             <div className="absolute inset-0 z-30 bg-black p-3 flex items-center justify-center">
               <div
-                className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
+                className="relative nowheel w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-700 bg-gray-900 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible flex flex-col"
                 style={{ animation: "canvasPopupIn 180ms ease-out" }}
               >
                 <button
