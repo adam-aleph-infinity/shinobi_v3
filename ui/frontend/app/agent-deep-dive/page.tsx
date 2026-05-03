@@ -6,8 +6,9 @@ export default function AgentDeepDivePage() {
   return (
     <CRMBrowserPage
       artifactMode={true}
+      deepDiveMode={true}
       title="Agent Deep Dive"
-      subtitle="Advanced pair analytics with artifact-based filters and sorting"
+      subtitle="Cross-tab artifacts by agent/customer/pipeline scopes"
     />
   );
 }

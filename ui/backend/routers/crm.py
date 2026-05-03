@@ -2,6 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from typing import Optional
+import re
 
 from ui.backend.database import get_session
 from ui.backend.models.crm import CRMPair
@@ -14,6 +15,63 @@ class AuthRequest(BaseModel):
     crm_url: str
     email: str
     password: str
+
+
+def _norm_agent_name(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _build_account_agent_uniqueness_index(db: Session) -> dict[str, dict[str, object]]:
+    """
+    Returns:
+      {
+        "<account_id>": {
+          "is_unique": bool,
+          "agent_count": int,
+          "agents_canonical": list[str],
+        }
+      }
+    """
+    rows = db.exec(select(CRMPair)).all()
+    if not rows:
+        return {}
+
+    raw_names = sorted(
+        {
+            str(getattr(r, "agent", "") or "").strip()
+            for r in rows
+            if str(getattr(r, "agent", "") or "").strip()
+        }
+    )
+    alias_map: dict[str, str] = {}
+    try:
+        from ui.backend.services.crm_service import _auto_detect_re_aliases, _load_aliases
+
+        alias_map = {**_auto_detect_re_aliases(raw_names), **_load_aliases()}
+    except Exception:
+        alias_map = {}
+
+    account_agents: dict[str, set[str]] = {}
+    for row in rows:
+        account_id = str(getattr(row, "account_id", "") or "").strip()
+        if not account_id:
+            continue
+        raw_agent = str(getattr(row, "agent", "") or "").strip()
+        canonical = str(alias_map.get(raw_agent) or raw_agent).strip()
+        canonical_norm = _norm_agent_name(canonical)
+        if not canonical_norm:
+            continue
+        account_agents.setdefault(account_id, set()).add(canonical_norm)
+
+    out: dict[str, dict[str, object]] = {}
+    for account_id, agents in account_agents.items():
+        agents_sorted = sorted(agents)
+        out[account_id] = {
+            "is_unique": len(agents_sorted) <= 1,
+            "agent_count": len(agents_sorted),
+            "agents_canonical": agents_sorted,
+        }
+    return out
 
 
 
@@ -37,6 +95,7 @@ def get_pairs(
 ):
     from sqlalchemy import func as sa_func, select as sa_select
     try:
+        uniqueness_index = _build_account_agent_uniqueness_index(db)
         stmt = select(CRMPair)
         if crm:
             stmt = stmt.where(CRMPair.crm_url.ilike(f"%{crm}%"))
@@ -98,9 +157,41 @@ def get_pairs(
                 "total_duration": p.total_duration_s,
                 "net_deposits": p.net_deposits,
                 "ftd_at": p.ftd_at,
+                "pair_is_unique": bool(
+                    (uniqueness_index.get(str(p.account_id or "").strip()) or {}).get("is_unique", True)
+                ),
+                "pair_agent_count": int(
+                    (uniqueness_index.get(str(p.account_id or "").strip()) or {}).get("agent_count", 1) or 1
+                ),
             }
             for p in pairs
         ]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/crm-urls")
+def get_crm_urls(db: Session = Depends(get_session)):
+    """Returns distinct CRM base URLs for the CRM filter dropdown."""
+    try:
+        rows = db.exec(
+            select(CRMPair.crm_url).distinct().order_by(CRMPair.crm_url)
+        ).all()
+        return [str(url).strip() for url in rows if str(url or "").strip()]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/pairs-count")
+def get_pairs_count(db: Session = Depends(get_session)):
+    """Returns total CRM pair count without loading rows."""
+    from sqlalchemy import func as sa_func
+
+    try:
+        total = db.exec(select(sa_func.count()).select_from(CRMPair)).one()
+        if isinstance(total, (tuple, list)):
+            total = total[0] if total else 0
+        return {"count": int(total or 0)}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -199,11 +290,12 @@ def get_customers(crm: str = Query(""), agent: str = Query("")):
 def calls_by_pair(
     agent: str = Query(...),
     customer: str = Query(""),
+    auto_sync: bool = Query(True, description="Auto-refresh missing calls for this pair before returning"),
+    max_refresh_pairs: int = Query(4, ge=1, le=20),
     db: Session = Depends(get_session),
 ):
-    """Return calls from local DB for an agent/customer pair — no live CRM fetch.
-    Resolves agent aliases so calls stored under any alias name are included.
-    Returns the same shape as /calls/{account_id} for drop-in compatibility."""
+    """Return calls for an agent/customer pair (alias-aware).
+    Prefers local files/DB; auto-syncs missing call sets from CRM when needed."""
     from sqlalchemy import or_
     from ui.backend.models.crm import CRMCall
     from ui.backend.services.crm_service import _load_aliases, _auto_detect_re_aliases
@@ -219,22 +311,111 @@ def calls_by_pair(
     else:
         cond = or_(*[CRMCall.agent == n for n in all_names])
 
-    stmt = select(CRMCall).where(cond)
+    # Determine relevant CRM account targets from crm_pair first.
+    pair_stmt = select(CRMPair)
+    if len(all_names) == 1:
+        pair_stmt = pair_stmt.where(CRMPair.agent == agent)
+    else:
+        pair_stmt = pair_stmt.where(or_(*[CRMPair.agent == n for n in all_names]))
     if customer:
-        stmt = stmt.where(CRMCall.customer == customer)
+        pair_stmt = pair_stmt.where(CRMPair.customer == customer)
+    pair_rows = db.exec(pair_stmt).all()
 
-    rows = db.exec(stmt.order_by(CRMCall.started_at)).all()
-    return [
-        {
-            "call_id":      r.call_id,
-            "date":         r.started_at or "",
-            "duration":     int(r.audio_duration_s if r.audio_duration_s is not None else (r.duration_s or 0)),
-            "record_path":  r.record_path or "",
-            "crm_url":      r.crm_url,
-            "account_id":   r.account_id,
-        }
-        for r in rows
-    ]
+    # Fall back to legacy crm_call rows if no pair rows are found.
+    if not pair_rows:
+        stmt = select(CRMCall).where(cond)
+        if customer:
+            stmt = stmt.where(CRMCall.customer == customer)
+        rows = db.exec(stmt.order_by(CRMCall.started_at)).all()
+        return [
+            {
+                "call_id":      r.call_id,
+                "date":         r.started_at or "",
+                "duration":     int(r.audio_duration_s if r.audio_duration_s is not None else (r.duration_s or 0)),
+                "record_path":  r.record_path or "",
+                "crm_url":      r.crm_url,
+                "account_id":   r.account_id,
+            }
+            for r in rows
+        ]
+
+    targets: list[tuple[str, str, str, int]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for p in pair_rows:
+        crm_url = str(p.crm_url or "").strip()
+        account_id = str(p.account_id or "").strip()
+        cust = str(p.customer or customer or "").strip()
+        if not crm_url or not account_id:
+            continue
+        key = (crm_url, account_id)
+        if key in seen_targets:
+            continue
+        seen_targets.add(key)
+        targets.append((crm_url, account_id, cust, int(p.call_count or 0)))
+
+    # Auto-heal: refresh only targets that are clearly missing local calls.
+    if auto_sync:
+        refreshed = 0
+        for crm_url, account_id, cust, expected_count in targets:
+            if refreshed >= int(max_refresh_pairs):
+                break
+            local_calls = crm_service.get_calls_local(crm_url=crm_url, agent=agent, customer=cust)
+            local_count = len(local_calls or [])
+            needs_refresh = False
+            if expected_count > 0:
+                # tolerate a tiny drift (1 call) to avoid unnecessary frequent refresh.
+                needs_refresh = (local_count + 1) < expected_count
+            elif local_count == 0:
+                needs_refresh = True
+            if not needs_refresh:
+                continue
+            try:
+                crm_service.refresh_calls(
+                    account_id=account_id,
+                    crm_url=crm_url,
+                    agent=agent,
+                    customer=cust,
+                )
+                refreshed += 1
+            except Exception:
+                # best-effort; we'll still return whatever is available
+                pass
+
+    # Merge calls from all discovered account targets.
+    merged: dict[tuple[str, str], dict] = {}
+    for crm_url, account_id, cust, _expected_count in targets:
+        # Prefer calls.json (freshly refreshed) over legacy crm_call rows.
+        calls = crm_service.get_calls_local(crm_url=crm_url, agent=agent, customer=cust)
+        if not calls:
+            calls = crm_service.get_calls(
+                account_id=account_id,
+                crm_url=crm_url,
+                agent=agent,
+                customer=cust,
+            )
+        for c in calls or []:
+            cid = str(c.get("call_id", c.get("id", ""))).strip()
+            if not cid:
+                continue
+            key = (crm_url, cid)
+            started_at = str(c.get("started_at", c.get("date", "")) or "").strip()
+            duration_val = c.get("audio_duration_s", c.get("duration_s", c.get("duration", 0)))
+            try:
+                duration = int(float(duration_val or 0))
+            except Exception:
+                duration = 0
+            merged[key] = {
+                "call_id": cid,
+                "date": started_at,
+                "duration": duration,
+                "record_path": str(c.get("record_path", "")),
+                "crm_url": crm_url,
+                "account_id": account_id,
+            }
+
+    out = list(merged.values())
+    out.sort(key=lambda row: str(row.get("date") or ""))
+    return out
 
 
 @router.get("/calls/{account_id}")

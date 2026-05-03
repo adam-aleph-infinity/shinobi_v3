@@ -8,6 +8,8 @@ export interface AgentCustomerPair {
   total_duration: number;
   net_deposits?: number | null;
   ftd_at?: string | null;
+  pair_is_unique?: boolean;
+  pair_agent_count?: number;
 }
 
 export interface TxStats {

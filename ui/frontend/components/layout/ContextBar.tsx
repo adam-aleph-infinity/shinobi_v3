@@ -1,9 +1,11 @@
 "use client";
 import { useAppCtx } from "@/lib/app-context";
 import useSWR from "swr";
-import { User, ChevronRight, X, ChevronDown, Bot, Workflow } from "lucide-react";
+import { X, ChevronDown, Bot, Workflow, Loader2, PhoneCall, FileText } from "lucide-react";
 import { useRef, useState, useEffect, useMemo } from "react";
 import { cn } from "@/lib/utils";
+import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
+import ContextTopBar from "@/components/shared/ContextTopBar";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -21,17 +23,32 @@ interface Pipeline {
   steps: { agent_id: string }[];
 }
 
-interface NavAgentOption {
-  agent: string;
-  count: number;
-}
-
 interface NavCustomerOption {
   customer: string;
   call_count: number;
 }
 
 type CallDatesMap = Record<string, { date: string; has_audio: boolean }>;
+interface CRMCallLite {
+  call_id: string;
+  date?: string;
+  duration?: number;
+}
+interface FinalTranscriptCall {
+  call_id: string;
+  has_llm_voted?: boolean;
+  has_llm_smoothed?: boolean;
+  has_pipeline_final?: boolean;
+  pipeline_final_files?: Array<{ path?: string }>;
+  voted_path?: string | null;
+  smoothed_path?: string | null;
+  final_path?: string | null;
+  started_at?: string | null;
+}
+
+function normalizeCallId(raw: string | null | undefined): string {
+  return String(raw || "").trim().toLowerCase();
+}
 
 // ── Universal Agent Picker ─────────────────────────────────────────────────────
 function AgentPicker({
@@ -248,13 +265,17 @@ export function ContextBar() {
     salesAgent, customer, callId,
     activeAgentId, activeAgentName,
     activePipelineId, activePipelineName,
-    setSalesAgent, setCustomer, setCallId,
+    setCustomer, setCallId,
     setActiveAgent, setActivePipeline,
   } = useAppCtx();
+  const [showCrmPanel, setShowCrmPanel] = useState(false);
+  const [showCallsPanel, setShowCallsPanel] = useState(false);
+  const [callTranscriptText, setCallTranscriptText] = useState("");
+  const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
+  const [callTranscriptError, setCallTranscriptError] = useState("");
 
   const { data: agents }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelines } = useSWR<Pipeline[]>("/api/pipelines", fetcher);
-  const { data: navAgents } = useSWR<NavAgentOption[]>("/api/crm/nav/agents", fetcher);
   const { data: navCustomers } = useSWR<NavCustomerOption[]>(
     salesAgent ? `/api/crm/nav/customers?agent=${encodeURIComponent(salesAgent)}` : null,
     fetcher,
@@ -265,8 +286,83 @@ export function ContextBar() {
       : null,
     fetcher,
   );
+  const { data: crmCalls } = useSWR<CRMCallLite[]>(
+    salesAgent && customer
+      ? `/api/crm/calls-by-pair?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
+  const { data: transcriptCalls } = useSWR<FinalTranscriptCall[]>(
+    salesAgent && customer
+      ? `/api/final-transcript/calls?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      : null,
+    fetcher,
+  );
 
-  // Auto-clear stale IDs once lists have loaded and the stored ID is missing
+  const crmPanelUrl = useMemo(() => {
+    const qp = new URLSearchParams({ embedded: "1", mode: "pick_pair" });
+    if (salesAgent) qp.set("agent", salesAgent);
+    if (customer) qp.set("customer", customer);
+    return `/crm?${qp.toString()}`;
+  }, [salesAgent, customer]);
+
+  const crmCallsSafe: CRMCallLite[] = Array.isArray(crmCalls) ? crmCalls : [];
+  const transcriptCallsSafe: FinalTranscriptCall[] = Array.isArray(transcriptCalls) ? transcriptCalls : [];
+
+  const callsMerged = useMemo(() => {
+    const byNorm = new Map<string, { call_id: string; date: string; duration_s: number }>();
+    crmCallsSafe.forEach((c) => {
+      const raw = String(c.call_id || "").trim();
+      const norm = normalizeCallId(raw);
+      if (!norm) return;
+      byNorm.set(norm, {
+        call_id: raw,
+        date: String(c.date || ""),
+        duration_s: Number(c.duration || 0),
+      });
+    });
+    transcriptCallsSafe.forEach((t) => {
+      const raw = String(t.call_id || "").trim();
+      const norm = normalizeCallId(raw);
+      if (!norm || byNorm.has(norm)) return;
+      byNorm.set(norm, {
+        call_id: raw,
+        date: String(t.started_at || ""),
+        duration_s: 0,
+      });
+    });
+    const list = Array.from(byNorm.values()).map((row) => {
+      const fromDates = callDates?.[row.call_id];
+      return {
+        ...row,
+        date: String(fromDates?.date || row.date || ""),
+      };
+    });
+    list.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    return list;
+  }, [crmCallsSafe, transcriptCallsSafe, callDates]);
+
+  const transcriptCallMapByNorm = useMemo(() => {
+    const out = new Map<string, FinalTranscriptCall>();
+    for (const c of transcriptCallsSafe) {
+      const key = normalizeCallId(c.call_id);
+      if (!key || out.has(key)) continue;
+      out.set(key, c);
+    }
+    return out;
+  }, [transcriptCallsSafe]);
+
+  const openCrmOverlay = () => {
+    setShowCrmPanel(true);
+    setShowCallsPanel(false);
+  };
+
+  const openCallsOverlay = () => {
+    if (!salesAgent || !customer) return;
+    setShowCallsPanel(true);
+    setShowCrmPanel(false);
+  };
+
   useEffect(() => {
     if (agents && activeAgentId && !agents.find(a => a.id === activeAgentId)) {
       setActiveAgent("", "", "");
@@ -284,117 +380,112 @@ export function ContextBar() {
     if (!navCustomers.some(c => c.customer === customer)) setCustomer("");
   }, [salesAgent, customer, navCustomers, setCustomer]);
 
-  const selectedAgentKnown = !salesAgent || !!(navAgents ?? []).find(a => a.agent === salesAgent);
-  const selectedCustomerKnown = !customer || !!(navCustomers ?? []).find(c => c.customer === customer);
-  const callOptions = useMemo(() => {
-    const entries = Object.entries(callDates ?? {});
-    entries.sort((a, b) => String(b[1]?.date || "").localeCompare(String(a[1]?.date || "")));
-    return entries;
-  }, [callDates]);
-  const selectedCallKnown = !callId || callOptions.some(([cid]) => cid === callId);
+  useEffect(() => {
+    const handler = (ev: MessageEvent) => {
+      if (typeof window !== "undefined" && ev.origin !== window.location.origin) return;
+      const payload = ev?.data;
+      if (!payload || typeof payload !== "object") return;
+      const type = String((payload as any).type || "");
+
+      if (type === "crm:pair-selected" || type === "shinobi:select-pair") {
+        const nextAgent = String((payload as any).agent || "").trim();
+        const nextCustomer = String((payload as any).customer || "").trim();
+        if (!nextAgent || !nextCustomer) return;
+        setCustomer(nextCustomer, nextAgent);
+        setShowCrmPanel(false);
+        setShowCallsPanel(false);
+        return;
+      }
+
+      if (type === "crm:agent-selected" || type === "shinobi:select-agent") {
+        const nextAgent = String((payload as any).agent || "").trim();
+        if (!nextAgent) return;
+        setCustomer("", nextAgent);
+        setShowCrmPanel(false);
+        setShowCallsPanel(false);
+        return;
+      }
+
+      if (type === "crm:customer-selected" || type === "shinobi:select-customer") {
+        const nextAgent = String((payload as any).agent || "").trim();
+        const nextCustomer = String((payload as any).customer || "").trim();
+        if (!nextCustomer) return;
+        if (nextAgent) setCustomer(nextCustomer, nextAgent);
+        else setCustomer(nextCustomer);
+        setShowCrmPanel(false);
+        setShowCallsPanel(false);
+        return;
+      }
+
+      if (type === "crm:call-selected" || type === "shinobi:calls-context") {
+        const nextAgent = String((payload as any).agent || "").trim();
+        const nextCustomer = String((payload as any).customer || "").trim();
+        const nextCallId = String((payload as any).call_id || "").trim();
+        if (nextAgent && nextCustomer && (nextAgent !== salesAgent || nextCustomer !== customer)) {
+          setCustomer(nextCustomer, nextAgent);
+        }
+        setCallId(nextCallId);
+        if (nextCallId) setShowCallsPanel(false);
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, [customer, salesAgent, setCallId, setCustomer]);
+
+  useEffect(() => {
+    if (!showCallsPanel) return;
+    if (!salesAgent || !customer || !callId) {
+      setCallTranscriptText("");
+      setCallTranscriptError("");
+      setCallTranscriptLoading(false);
+      return;
+    }
+    const txCall = transcriptCallMapByNorm.get(normalizeCallId(callId));
+    const txPath =
+      txCall?.final_path
+      || txCall?.smoothed_path
+      || txCall?.voted_path
+      || txCall?.pipeline_final_files?.[0]?.path
+      || "";
+    if (!txPath) {
+      setCallTranscriptText("");
+      setCallTranscriptError("No transcript found for this call.");
+      setCallTranscriptLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setCallTranscriptLoading(true);
+    setCallTranscriptError("");
+    fetch(`/api/final-transcript/by-path?path=${encodeURIComponent(txPath)}`)
+      .then((r) => r.text())
+      .then((txt) => {
+        if (cancelled) return;
+        setCallTranscriptText(String(txt || ""));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCallTranscriptText("");
+        setCallTranscriptError("Error loading transcript.");
+      })
+      .finally(() => {
+        if (!cancelled) setCallTranscriptLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showCallsPanel, salesAgent, customer, callId, transcriptCallMapByNorm]);
 
   return (
-    <div className="border-b border-gray-800 bg-gray-900/90 px-4 flex items-center gap-2 text-xs shrink-0 h-9">
-
-      {/* ── Context selectors: sales agent → customer → call ── */}
-      <span className="flex items-center gap-1.5 min-w-0">
-        <User className="w-3 h-3 text-indigo-400 shrink-0" />
-        <select
-          value={salesAgent}
-          onChange={e => setSalesAgent(e.target.value)}
-          className={cn(
-            "h-6 rounded border px-2 text-[11px] outline-none bg-gray-800/70 min-w-[160px] max-w-[220px] truncate",
-            selectedAgentKnown
-              ? "text-gray-200 border-gray-700/70 focus:border-indigo-500"
-              : "text-red-300 border-red-800/70 focus:border-red-500",
-          )}
-        >
-          <option value="">{navAgents === undefined ? "Sales agent (loading…)" : "Sales agent…"}</option>
-          {!selectedAgentKnown && salesAgent && (
-            <option value={salesAgent}>{salesAgent} (not found)</option>
-          )}
-          {(navAgents ?? []).map(a => (
-            <option key={a.agent} value={a.agent}>
-              {a.agent} ({a.count})
-            </option>
-          ))}
-        </select>
-        {salesAgent && (
-          <button onClick={() => setSalesAgent("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
-            <X className="w-3 h-3" />
-          </button>
-        )}
-      </span>
-
-      <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />
-
-      <span className="flex items-center gap-1.5 min-w-0">
-        <select
-          value={customer}
-          onChange={e => setCustomer(e.target.value)}
-          disabled={!salesAgent}
-          className={cn(
-            "h-6 rounded border px-2 text-[11px] outline-none bg-gray-800/70 min-w-[160px] max-w-[220px] truncate disabled:opacity-50 disabled:cursor-not-allowed",
-            selectedCustomerKnown
-              ? "text-gray-300 border-gray-700/70 focus:border-indigo-500"
-              : "text-red-300 border-red-800/70 focus:border-red-500",
-          )}
-        >
-          <option value="">
-            {!salesAgent ? "Customer…" : navCustomers === undefined ? "Customer (loading…)" : "Customer…"}
-          </option>
-          {!selectedCustomerKnown && customer && (
-            <option value={customer}>{customer} (not found)</option>
-          )}
-          {(navCustomers ?? []).map(c => (
-            <option key={c.customer} value={c.customer}>
-              {c.customer}
-            </option>
-          ))}
-        </select>
-        {customer && (
-          <button onClick={() => setCustomer("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
-            <X className="w-3 h-3" />
-          </button>
-        )}
-      </span>
-
-      {customer && <ChevronRight className="w-3 h-3 text-gray-700 shrink-0" />}
-      {customer && (
-        <span className="flex items-center gap-1.5 min-w-0">
-          <select
-            value={callId}
-            onChange={e => setCallId(e.target.value)}
-            className={cn(
-              "h-6 rounded border px-2 text-[11px] outline-none bg-gray-800/70 min-w-[160px] max-w-[210px] truncate",
-              selectedCallKnown
-                ? "text-gray-300 border-gray-700/70 focus:border-indigo-500"
-                : "text-red-300 border-red-800/70 focus:border-red-500",
-            )}
-          >
-            <option value="">
-              {callDates === undefined ? "Call (loading…)" : "Call…"}
-            </option>
-            {!selectedCallKnown && callId && (
-              <option value={callId}>{callId} (not found)</option>
-            )}
-            {callOptions.map(([cid, meta]) => (
-              <option key={cid} value={cid}>
-                {(meta?.date ? String(meta.date).slice(0, 10) : "unknown")} · {cid}
-              </option>
-            ))}
-          </select>
-          {callId && (
-            <button onClick={() => setCallId("")} className="text-gray-600 hover:text-gray-400 shrink-0 transition-colors">
-              <X className="w-3 h-3" />
-            </button>
-          )}
-        </span>
-      )}
-
-      {/* ── Agent + Pipeline pickers — right-aligned ── */}
-      <div className="ml-auto flex items-center gap-3">
-        {/* Hide agent picker when a pipeline is active — pipeline owns execution */}
+    <div className="border-b border-gray-800 bg-gray-900/90 shrink-0">
+      <ContextTopBar
+        salesAgent={salesAgent}
+        customer={customer}
+        callId={callId}
+        onOpenCrm={openCrmOverlay}
+        onOpenCalls={openCallsOverlay}
+      />
+      <div className="px-4 py-1.5 flex items-center gap-3 text-xs border-t border-gray-800/60">
+        <span className="text-[10px] text-gray-500 uppercase tracking-wide shrink-0">Execution</span>
         {!activePipelineId && (
           <AgentPicker
             activeId={activeAgentId}
@@ -412,6 +503,133 @@ export function ContextBar() {
           onClear={() => setActivePipeline("", "")}
         />
       </div>
+
+      {showCallsPanel && (
+        <div className="fixed inset-0 z-[80] bg-black p-3 flex items-center justify-center">
+          <div className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-indigo-800 bg-gray-950 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible">
+            <button
+              onClick={() => setShowCallsPanel(false)}
+              className="absolute -top-6 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+              title="Close Calls panel"
+            >
+              <X className="w-6 h-6" />
+            </button>
+            <div className="h-full w-full rounded-[inherit] overflow-hidden">
+              <div className="h-12 px-3 border-b border-gray-800 flex items-center gap-2 shrink-0">
+                <PhoneCall className="w-4 h-4 text-amber-400 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-white font-semibold truncate">Calls</p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {salesAgent || "Agent"} · {customer || "Customer"} · {callId ? `Call ${callId}` : "No call selected"}
+                  </p>
+                </div>
+              </div>
+              <div className="h-[calc(100%-3rem)] min-h-0 grid grid-cols-1 lg:grid-cols-12">
+                <section className="lg:col-span-4 border-r border-gray-800 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Call IDs</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                    {callsMerged.length === 0 && (
+                      <p className="text-xs text-gray-500 italic px-1 py-2">
+                        Select sales agent + customer to load calls.
+                      </p>
+                    )}
+                    {callsMerged.map((row) => {
+                      const cid = row.call_id;
+                      const selected = normalizeCallId(cid) === normalizeCallId(callId);
+                      const txCall = transcriptCallMapByNorm.get(normalizeCallId(cid));
+                      const hasTranscript = !!(
+                        txCall?.final_path
+                        || txCall?.smoothed_path
+                        || txCall?.voted_path
+                        || txCall?.pipeline_final_files?.[0]?.path
+                      );
+                      return (
+                        <button
+                          key={cid}
+                          onClick={() => setCallId(cid)}
+                          className={cn(
+                            "w-full text-left px-2.5 py-2 rounded-lg border transition-colors",
+                            selected
+                              ? "border-amber-600/70 bg-amber-900/30"
+                              : "border-gray-800 bg-gray-900 hover:bg-gray-800",
+                          )}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs font-mono text-gray-100 truncate flex-1">{cid}</p>
+                            {hasTranscript && (
+                              <span
+                                title="Transcript available"
+                                className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
+                              >
+                                <FileText className="h-3 w-3" />
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-gray-500 truncate">
+                            {row.date ? String(row.date).slice(0, 10) : "Unknown date"}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+                <section className="lg:col-span-8 min-h-0 flex flex-col">
+                  <div className="h-10 px-3 border-b border-gray-800 flex items-center">
+                    <p className="text-[11px] font-semibold text-gray-200">Transcript</p>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    {!callId ? (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        Select a Call ID to preview transcript.
+                      </div>
+                    ) : callTranscriptLoading ? (
+                      <div className="h-full flex items-center justify-center gap-2 text-gray-400 text-sm">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Loading transcript…
+                      </div>
+                    ) : callTranscriptError ? (
+                      <div className="h-full flex items-center justify-center text-red-300 text-sm px-4 text-center">
+                        {callTranscriptError}
+                      </div>
+                    ) : callTranscriptText ? (
+                      <div className="h-full p-2">
+                        <TranscriptViewer content={callTranscriptText} format="txt" className="h-full" />
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                        No transcript content.
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCrmPanel && (
+        <div className="fixed inset-0 z-[80] bg-black p-3 flex items-center justify-center">
+          <div className="relative w-[min(95vw,1500px)] h-[min(90vh,920px)] rounded-xl border border-cyan-800 bg-gray-950 shadow-[0_32px_90px_rgba(0,0,0,0.68)] overflow-visible">
+            <button
+              onClick={() => setShowCrmPanel(false)}
+              className="absolute -top-6 left-1/2 -translate-x-1/2 z-40 h-12 w-12 rounded-full border-2 border-red-300/80 bg-red-600 text-white hover:bg-red-500 transition-colors flex items-center justify-center shadow-2xl"
+              title="Close CRM panel"
+            >
+              <X className="w-6 h-6" />
+            </button>
+            <div className="h-full w-full rounded-[inherit] overflow-hidden">
+              <iframe
+                title="CRM Browser"
+                src={crmPanelUrl}
+                className="w-full h-full border-0 bg-gray-900"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

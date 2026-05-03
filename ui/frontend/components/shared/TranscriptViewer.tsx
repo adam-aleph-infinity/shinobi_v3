@@ -232,7 +232,7 @@ function TurnBubbleList({ turns }: { turns: Turn[] }) {
               )}
               <span className="text-[9px] font-mono text-gray-600">{timeLabel}</span>
             </div>
-            <p className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">{t.text}</p>
+            <p className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap break-words">{t.text}</p>
           </div>
         );
       })}
@@ -246,10 +246,12 @@ function TurnBubbleList({ turns }: { turns: Turn[] }) {
 export function TranscriptViewer({
   content,
   format,
+  externalScroll = false,
   className = "max-h-96",
 }: {
   content: string;
   format?: string;
+  externalScroll?: boolean;
   className?: string;
 }) {
   if (!content.trim()) return <p className="text-xs text-gray-600 italic">Empty</p>;
@@ -275,8 +277,15 @@ export function TranscriptViewer({
   }
 
   if (turns.length === 0) {
+    const rawClass = externalScroll
+      ? `w-full min-h-full text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
+      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 max-h-full ${className}`;
     return (
-      <pre className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto ${className}`}>
+      <pre
+        className={rawClass}
+        onWheelCapture={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+      >
         {content}
       </pre>
     );
@@ -284,15 +293,30 @@ export function TranscriptViewer({
 
   // If no speaker info at all, render as raw pre
   if (!turns.some(t => t.speaker)) {
+    const rawClass = externalScroll
+      ? `w-full min-h-full text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
+      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 max-h-full ${className}`;
     return (
-      <pre className={`text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto ${className}`}>
+      <pre
+        className={rawClass}
+        onWheelCapture={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+      >
         {content}
       </pre>
     );
   }
 
+  const viewportClass = externalScroll
+    ? `w-full min-h-full pr-1 ${className}`
+    : `overflow-y-auto overscroll-contain nowheel h-full min-h-0 max-h-full pr-1 ${className}`;
+
   return (
-    <div className={`overflow-y-auto pr-1 ${className}`}>
+    <div
+      className={viewportClass}
+      onWheelCapture={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
+    >
       <TurnBubbleList turns={turns} />
     </div>
   );

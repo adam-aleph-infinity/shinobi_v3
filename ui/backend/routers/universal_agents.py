@@ -442,10 +442,13 @@ def get_raw_input(
     call_id: str = Query(""),
     merged_scope: str = Query("auto"),
     merged_until_call_id: str = Query(""),
+    model: str = Query(""),
+    include_file_refs: bool = Query(False),
     db: Session = Depends(get_session),
 ):
     """Resolve and return the raw text for a single input source."""
     try:
+        meta: dict[str, Any] = {}
         content = _resolve_input(
             source,
             agent_id,
@@ -456,8 +459,35 @@ def get_raw_input(
             db,
             merged_scope=merged_scope,
             merged_until_call_id=merged_until_call_id,
+            meta=meta,
         )
-        return {"content": content, "chars": len(content)}
+        payload: dict[str, Any] = {
+            "content": content,
+            "chars": len(content),
+            "meta": meta,
+        }
+        src = _normalize_input_source(source)
+        if include_file_refs and src in _FILE_SOURCES and content:
+            provider_model = str(model or "gpt-5.4").strip() or "gpt-5.4"
+            input_key = src
+            db._agent_run_ctx = {
+                "sales_agent": sales_agent,
+                "customer": customer,
+                "call_id": str(meta.get("resolved_call_id") or call_id or "").strip(),
+                "source_for_key": {input_key: src},
+            }
+            try:
+                payload["file_refs"] = _resolve_provider_file_refs(
+                    provider_model,
+                    {input_key: content},
+                    db,
+                )
+            except Exception as refs_exc:
+                payload["file_refs"] = {}
+                payload["file_refs_error"] = str(refs_exc)
+        else:
+            payload["file_refs"] = {}
+        return payload
     except RuntimeError as e:
         raise HTTPException(404, str(e))
 
@@ -766,6 +796,8 @@ def import_presets():
 # Input sources that represent large text files — never pasted inline into the prompt.
 # These are uploaded as native file objects to the LLM provider.
 _FILE_SOURCES = {"transcript", "merged_transcript", "notes", "merged_notes", "artifact_output"}
+_UPLOAD_MEMORY_LOCK = threading.Lock()
+_UPLOAD_MEMORY_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
 def _normalize_input_source(source: str) -> str:
@@ -792,6 +824,92 @@ def _clean_result(text: str) -> str:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+
+
+def _memory_cache_get(provider: str, purpose: str, chash: str) -> Optional[str]:
+    key = (provider, purpose, chash)
+    with _UPLOAD_MEMORY_LOCK:
+        entry = _UPLOAD_MEMORY_CACHE.get(key)
+        if not entry:
+            return None
+        expires_ts = entry.get("expires_ts")
+        if isinstance(expires_ts, (int, float)) and expires_ts <= time.time():
+            _UPLOAD_MEMORY_CACHE.pop(key, None)
+            return None
+        file_id = str(entry.get("file_id") or "").strip()
+        return file_id or None
+
+
+def _memory_cache_set(
+    provider: str,
+    purpose: str,
+    chash: str,
+    file_id: str,
+    expires_at: Optional[datetime] = None,
+) -> None:
+    key = (provider, purpose, chash)
+    expires_ts: Optional[float] = None
+    if expires_at is not None:
+        try:
+            expires_ts = expires_at.timestamp()
+        except Exception:
+            expires_ts = None
+    with _UPLOAD_MEMORY_LOCK:
+        _UPLOAD_MEMORY_CACHE[key] = {
+            "file_id": str(file_id or "").strip(),
+            "expires_ts": expires_ts,
+        }
+
+
+def _file_source_summary(source: str, key: str) -> str:
+    src = _normalize_input_source(source)
+    labels = {
+        "transcript": "Single-call transcript context",
+        "merged_transcript": "Merged transcript context",
+        "notes": "Single-call notes context",
+        "merged_notes": "Merged notes context",
+        "artifact_output": "Upstream pipeline artifact output",
+        "artifact_persona": "Persona artifact output",
+        "artifact_persona_score": "Persona score artifact output",
+        "artifact_notes": "Notes artifact output",
+        "artifact_notes_compliance": "Notes compliance artifact output",
+        "agent_output": "Upstream agent output",
+        "manual": "Manually supplied runtime context",
+    }
+    return labels.get(src, f"Attached runtime context from source '{src}' for key '{key}'")
+
+
+def _inject_file_reference_block(
+    user_template: str,
+    file_refs: dict[str, str],
+    source_for_key: dict[str, str],
+) -> str:
+    text = str(user_template or "")
+    for key in file_refs:
+        text = text.replace(f"{{{key}}}", "")
+    text = text.strip()
+    if not file_refs:
+        return text
+    lines = ["FILE REFERENCES (ATTACHED FILES):"]
+    for key, file_id in file_refs.items():
+        src = source_for_key.get(key, "")
+        summary = _file_source_summary(src, key)
+        lines.append(f"- key={key} | file_id={file_id} | summary={summary}")
+    block = "\n".join(lines).strip()
+    if text:
+        return f"{text}\n\n{block}"
+    return block
+
+
+def _format_file_refs_for_log(file_refs: dict[str, str], limit: int = 8) -> str:
+    items = list((file_refs or {}).items())
+    if not items:
+        return "none"
+    head = items[: max(1, limit)]
+    text = ", ".join(f"{k}={v}" for k, v in head)
+    if len(items) > limit:
+        text += f", …(+{len(items) - limit} more)"
+    return text
 
 
 def _append_once(base: str, block: str) -> str:
@@ -1446,7 +1564,19 @@ def _get_or_upload_gemini(
     chash     = _content_hash(content)
     now       = datetime.utcnow()
     cid_short = f"…{call_id[-8:]}" if call_id else "pair"
-    header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
+    # Keep uploaded file bytes identical to source content (no runtime prefix/header injection).
+    purpose = "user_data"
+
+    mem_file_id = _memory_cache_get("gemini", purpose, chash)
+    if mem_file_id:
+        try:
+            f = genai.get_file(mem_file_id)
+            log_buffer.emit(
+                f"[FILE] ✓ gemini:{mem_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [memory]"
+            )
+            return f
+        except Exception:
+            pass
 
     # Try existing record first
     existing = db.exec(
@@ -1457,18 +1587,23 @@ def _get_or_upload_gemini(
     if existing and (existing.expires_at is None or existing.expires_at > now):
         try:
             f = genai.get_file(existing.provider_file_id)
-            log_buffer.emit(f"[FILE] ✓ gemini:{existing.provider_file_id} ({source} · {cid_short})")
+            log_buffer.emit(
+                f"[FILE] ✓ gemini:{existing.provider_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [db]"
+            )
+            _memory_cache_set("gemini", purpose, chash, existing.provider_file_id, existing.expires_at)
             return f  # ✓ reused cached file
         except Exception:
             pass  # file gone on Google's side; fall through
 
-    # Upload fresh (header + content so the model sees the context)
+    # Upload fresh as-is (no runtime prefix/header injection)
     f = genai.upload_file(
-        io.BytesIO((header + content).encode("utf-8")),
+        io.BytesIO(content.encode("utf-8")),
         mime_type="text/plain",
         display_name=f"{source}_{customer}_{call_id or 'pair'}.txt",
     )
-    log_buffer.emit(f"[FILE] ↑ gemini:{f.name} ({source} · {cid_short})")
+    log_buffer.emit(
+        f"[FILE] ↑ gemini:{f.name} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short})"
+    )
 
     record = UF(
         id=str(uuid.uuid4()),
@@ -1487,6 +1622,7 @@ def _get_or_upload_gemini(
     )
     db.add(record)
     db.commit()
+    _memory_cache_set("gemini", purpose, chash, f.name, record.expires_at)
     return f
 
 
@@ -1507,7 +1643,19 @@ def _get_or_upload_anthropic(
     chash     = _content_hash(content)
     now       = datetime.utcnow()
     cid_short = f"…{call_id[-8:]}" if call_id else "pair"
-    header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
+    # Keep uploaded file bytes identical to source content (no runtime prefix/header injection).
+    purpose = "files-api-2025-04-14"
+
+    mem_file_id = _memory_cache_get("anthropic", purpose, chash)
+    if mem_file_id:
+        try:
+            client.beta.files.retrieve(mem_file_id, betas=["files-api-2025-04-14"])
+            log_buffer.emit(
+                f"[FILE] ✓ anthropic:{mem_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [memory]"
+            )
+            return mem_file_id
+        except Exception:
+            pass
 
     # Try existing record
     existing = db.exec(
@@ -1519,18 +1667,23 @@ def _get_or_upload_anthropic(
         try:
             client.beta.files.retrieve(existing.provider_file_id,
                                         betas=["files-api-2025-04-14"])
-            log_buffer.emit(f"[FILE] ✓ anthropic:{existing.provider_file_id} ({source} · {cid_short})")
+            log_buffer.emit(
+                f"[FILE] ✓ anthropic:{existing.provider_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [db]"
+            )
+            _memory_cache_set("anthropic", purpose, chash, existing.provider_file_id)
             return existing.provider_file_id  # ✓ reused
         except Exception:
             pass  # file deleted on Anthropic's side; fall through
 
-    # Upload fresh (header + content so the model sees the context)
+    # Upload fresh as-is (no runtime prefix/header injection)
     resp = client.beta.files.upload(
-        file=(f"{source}_{customer}_{call_id or 'pair'}.txt", (header + content).encode("utf-8"), "text/plain"),
+        file=(f"{source}_{customer}_{call_id or 'pair'}.txt", content.encode("utf-8"), "text/plain"),
         betas=["files-api-2025-04-14"],
     )
     file_id = resp.id
-    log_buffer.emit(f"[FILE] ↑ anthropic:{file_id} ({source} · {cid_short})")
+    log_buffer.emit(
+        f"[FILE] ↑ anthropic:{file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short})"
+    )
 
     record = UF(
         id=str(uuid.uuid4()),
@@ -1549,6 +1702,7 @@ def _get_or_upload_anthropic(
     )
     db.add(record)
     db.commit()
+    _memory_cache_set("anthropic", purpose, chash, file_id)
     return file_id
 
 
@@ -1566,12 +1720,25 @@ def _get_or_upload_openai(
     chash     = _content_hash(content)
     now       = datetime.utcnow()
     cid_short = f"…{call_id[-8:]}" if call_id else "pair"
-    header    = _make_file_header(source, sales_agent, customer, call_id, len(content))
-    upload_content = header + content
+    # Keep uploaded file bytes identical to source content (no runtime prefix/header injection).
+    upload_content = content
 
     # OpenAI Responses API requires purpose="user_data"; old records used purpose="assistants"
     # and cannot be reused. Distinguish them via provider_file_uri ("user_data" vs "").
     purpose = "user_data" if provider == "openai" else "assistants"
+
+    mem_file_id = _memory_cache_get(provider, purpose, chash)
+    if mem_file_id:
+        try:
+            base_url = "https://api.x.ai/v1" if provider == "grok" else None
+            verify_timeout_s = float(os.environ.get("OPENAI_UPLOAD_TIMEOUT_S", os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "30")))
+            OpenAI(api_key=api_key, base_url=base_url, timeout=verify_timeout_s).files.retrieve(mem_file_id)
+            log_buffer.emit(
+                f"[FILE] ✓ {provider}:{mem_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [memory]"
+            )
+            return mem_file_id, upload_content
+        except Exception:
+            pass
 
     # Try existing record — for user_data purpose, only match records that were also
     # uploaded with user_data (provider_file_uri == "user_data"); ignore old assistants files.
@@ -1581,7 +1748,10 @@ def _get_or_upload_openai(
     existing = db.exec(existing_stmt.order_by(UF.created_at.desc())).first()
 
     if existing:
-        log_buffer.emit(f"[FILE] ✓ {provider}:{existing.provider_file_id} ({source} · {cid_short})")
+        log_buffer.emit(
+            f"[FILE] ✓ {provider}:{existing.provider_file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}) [db]"
+        )
+        _memory_cache_set(provider, purpose, chash, existing.provider_file_id)
         return existing.provider_file_id, upload_content
 
     # Upload fresh
@@ -1596,9 +1766,13 @@ def _get_or_upload_openai(
             purpose=purpose,
         )
         file_id = resp.id
-        log_buffer.emit(f"[FILE] ↑ {provider}:{file_id} ({source} · {cid_short})")
+        log_buffer.emit(
+            f"[FILE] ↑ {provider}:{file_id} key={key} src={source} chars={len(content):,} hash={chash} ({cid_short})"
+        )
     except Exception as exc:
-        log_buffer.emit(f"[FILE] ⚠ {provider} upload failed ({source} · {cid_short}): {exc} — tracking locally as {file_id}")
+        log_buffer.emit(
+            f"[FILE] ⚠ {provider} upload failed key={key} src={source} chars={len(content):,} hash={chash} ({cid_short}): {exc} — tracking locally as {file_id}"
+        )
 
     # If uploading a user_data file, delete any stale assistants-purpose records for
     # the same content so they don't appear as duplicates in the Provider Files view.
@@ -1633,6 +1807,7 @@ def _get_or_upload_openai(
     )
     db.add(record)
     db.commit()
+    _memory_cache_set(provider, purpose, chash, file_id)
     return file_id, upload_content
 
 
@@ -1654,20 +1829,26 @@ def _llm_call_gemini_files(
     # Get or upload each file input (context passed for record-keeping)
     ctx = getattr(db, "_agent_run_ctx", {})
     file_objs = {}
+    file_ref_ids: dict[str, str] = {}
     for key, content in file_inputs.items():
-        file_objs[key] = _get_or_upload_gemini(
+        file_obj = _get_or_upload_gemini(
             content, key,
             ctx.get("source_for_key", {}).get(key, ""),
             ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
             db,
         )
+        file_objs[key] = file_obj
+        file_ref_ids[key] = str(getattr(file_obj, "name", "") or "unknown")
 
-    # Build user message — strip {key} placeholders for file inputs
-    user_text = user_template
-    for key in file_objs:
-        user_text = user_text.replace(f"{{{key}}}", "")
-    for key, val in inline_inputs.items():
-        user_text = user_text.replace(f"{{{key}}}", val)
+    if inline_inputs:
+        log_buffer.emit(
+            f"[LLM] {model} — dropped {len(inline_inputs)} inline input(s); strict file-only mode"
+        )
+    user_text = _inject_file_reference_block(
+        user_template=user_template,
+        file_refs=file_ref_ids,
+        source_for_key=ctx.get("source_for_key", {}),
+    )
 
     parts = list(file_objs.values()) + [user_text.strip()]
 
@@ -1708,25 +1889,32 @@ def _llm_call_anthropic_files(
     client = anthropic.Anthropic(api_key=api_key)
 
     content_blocks: list = []
-    user_text = user_template
+    file_ref_ids: dict[str, str] = {}
 
     ctx = getattr(db, "_agent_run_ctx", {})
     for key, content in file_inputs.items():
-        user_text = user_text.replace(f"{{{key}}}", "")
         file_id = _get_or_upload_anthropic(
             content, key,
             ctx.get("source_for_key", {}).get(key, ""),
             ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
             db,
         )
+        file_ref_ids[key] = file_id
         content_blocks.append({
             "type": "document",
             "source": {"type": "file", "file_id": file_id},
             "title": key,
         })
 
-    for key, val in inline_inputs.items():
-        user_text = user_text.replace(f"{{{key}}}", val)
+    if inline_inputs:
+        log_buffer.emit(
+            f"[LLM] {model} — dropped {len(inline_inputs)} inline input(s); strict file-only mode"
+        )
+    user_text = _inject_file_reference_block(
+        user_template=user_template,
+        file_refs=file_ref_ids,
+        source_for_key=ctx.get("source_for_key", {}),
+    )
 
     content_blocks.append({"type": "text", "text": user_text.strip()})
 
@@ -1741,6 +1929,9 @@ def _llm_call_anthropic_files(
     }
 
     response = client.beta.messages.create(**kwargs)
+    resp_id = str(getattr(response, "id", "") or "").strip()
+    if resp_id:
+        log_buffer.emit(f"[LLM] {model} — Anthropic message_id={resp_id}")
     text = "\n\n".join(
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
@@ -1767,25 +1958,32 @@ def _llm_call_anthropic_files_streaming(
     client = anthropic.Anthropic(api_key=api_key)
 
     content_blocks: list = []
-    user_text = user_template
+    file_ref_ids: dict[str, str] = {}
 
     ctx = getattr(db, "_agent_run_ctx", {})
     for key, content in file_inputs.items():
-        user_text = user_text.replace(f"{{{key}}}", "")
         file_id = _get_or_upload_anthropic(
             content, key,
             ctx.get("source_for_key", {}).get(key, ""),
             ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
             db,
         )
+        file_ref_ids[key] = file_id
         content_blocks.append({
             "type": "document",
             "source": {"type": "file", "file_id": file_id},
             "title": key,
         })
 
-    for key, val in inline_inputs.items():
-        user_text = user_text.replace(f"{{{key}}}", val)
+    if inline_inputs:
+        log_buffer.emit(
+            f"[LLM] {model} — dropped {len(inline_inputs)} inline input(s); strict file-only mode"
+        )
+    user_text = _inject_file_reference_block(
+        user_template=user_template,
+        file_refs=file_ref_ids,
+        source_for_key=ctx.get("source_for_key", {}),
+    )
 
     content_blocks.append({"type": "text", "text": user_text.strip()})
 
@@ -1842,14 +2040,18 @@ def _llm_call_openai_responses_files(
             "openai", api_key, db,
         )
         file_ids[k] = fid
+    if file_ids:
+        log_buffer.emit(f"[LLM] {model} — file refs resolved: {_format_file_refs_for_log(file_ids)}")
 
-    # Strip file placeholders; substitute inline inputs
-    user_text = user_template
-    for k in file_ids:
-        user_text = user_text.replace(f"{{{k}}}", "")
-    for k, v in inline_inputs.items():
-        user_text = user_text.replace(f"{{{k}}}", v)
-    user_text = user_text.strip()
+    if inline_inputs:
+        log_buffer.emit(
+            f"[LLM] {model} — dropped {len(inline_inputs)} inline input(s); strict file-only mode"
+        )
+    user_text = _inject_file_reference_block(
+        user_template=user_template,
+        file_refs=file_ids,
+        source_for_key=ctx.get("source_for_key", {}),
+    ).strip()
 
     # Build Responses API input: file blocks + text wrapped in a user message.
     # Important: dedupe repeated file_ids. A pipeline step may map multiple keys
@@ -1868,6 +2070,8 @@ def _llm_call_openai_responses_files(
         log_buffer.emit(
             f"[LLM] {model} — deduped {duplicate_count} duplicate file reference(s)"
         )
+    if unique_file_ids:
+        log_buffer.emit(f"[LLM] {model} — file_ids attached: {', '.join(unique_file_ids)}")
 
     content: list = []
     for fid in unique_file_ids:
@@ -2033,6 +2237,10 @@ def _llm_call_openai_responses_files(
             time.sleep(sleep_s)
             continue
 
+        resp_id = str(data.get("id") or "").strip()
+        if resp_id:
+            log_buffer.emit(f"[LLM] {model} — OpenAI response_id={resp_id}")
+
         text, thinking = _extract_text_and_thinking(data)
         if not text:
             last_err = RuntimeError("OpenAI Responses API returned empty output")
@@ -2053,6 +2261,245 @@ def _llm_call_openai_responses_files(
     raise RuntimeError(str(last_err or "OpenAI Responses API failed after retries"))
 
 
+def _llm_call_grok_responses_files(
+    system: str, user_template: str,
+    file_inputs: dict, inline_inputs: dict,
+    model: str, temperature: float,
+    db: Session,
+) -> tuple[str, str]:
+    """Call xAI Responses API with file references only (strict file-id runtime policy)."""
+    import sys
+    sys.path.insert(0, str(settings.project_root))
+    from shared.llm_client import resolve_grok_key
+
+    api_key = resolve_grok_key() or ""
+    if not api_key:
+        raise RuntimeError("GROK_API_KEY/XAI_API_KEY not set")
+    base_url = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+    connect_timeout_s = float(os.environ.get("XAI_CONNECT_TIMEOUT_S", os.environ.get("OPENAI_CONNECT_TIMEOUT_S", "20")))
+    read_timeout_s = float(os.environ.get("XAI_RESPONSES_TIMEOUT_S", os.environ.get("OPENAI_RESPONSES_TIMEOUT_S", "600")))
+    max_retries = max(0, int(os.environ.get("XAI_RESPONSES_MAX_RETRIES", os.environ.get("OPENAI_RESPONSES_MAX_RETRIES", "4"))))
+    retry_base_s = max(0.1, float(os.environ.get("XAI_RESPONSES_RETRY_BASE_S", os.environ.get("OPENAI_RESPONSES_RETRY_BASE_S", "1.2"))))
+    retry_max_s = max(0.5, float(os.environ.get("XAI_RESPONSES_RETRY_MAX_S", os.environ.get("OPENAI_RESPONSES_RETRY_MAX_S", "20"))))
+    retry_jitter_s = max(0.0, float(os.environ.get("XAI_RESPONSES_RETRY_JITTER_S", os.environ.get("OPENAI_RESPONSES_RETRY_JITTER_S", "0.4"))))
+    ctx = getattr(db, "_agent_run_ctx", {})
+
+    file_ids: dict[str, str] = {}
+    for k, v in file_inputs.items():
+        fid, _ = _get_or_upload_openai(
+            v, k,
+            ctx.get("source_for_key", {}).get(k, ""),
+            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
+            "grok", api_key, db,
+        )
+        file_ids[k] = fid
+    if file_ids:
+        log_buffer.emit(f"[LLM] {model} — file refs resolved: {_format_file_refs_for_log(file_ids)}")
+
+    if inline_inputs:
+        log_buffer.emit(
+            f"[LLM] {model} — dropped {len(inline_inputs)} inline input(s); strict file-only mode"
+        )
+    user_text = _inject_file_reference_block(
+        user_template=user_template,
+        file_refs=file_ids,
+        source_for_key=ctx.get("source_for_key", {}),
+    ).strip()
+
+    unique_file_ids: list[str] = []
+    seen_file_ids: set[str] = set()
+    duplicate_count = 0
+    for fid in file_ids.values():
+        if fid in seen_file_ids:
+            duplicate_count += 1
+            continue
+        seen_file_ids.add(fid)
+        unique_file_ids.append(fid)
+    if duplicate_count:
+        log_buffer.emit(
+            f"[LLM] {model} — deduped {duplicate_count} duplicate file reference(s)"
+        )
+    if unique_file_ids:
+        log_buffer.emit(f"[LLM] {model} — file_ids attached: {', '.join(unique_file_ids)}")
+
+    content: list[dict[str, Any]] = []
+    for fid in unique_file_ids:
+        content.append({"type": "input_file", "file_id": fid})
+    if user_text:
+        content.append({"type": "input_text", "text": user_text})
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": [{"role": "user", "content": content}],
+    }
+    if system:
+        payload["instructions"] = system
+    if temperature > 0:
+        payload["temperature"] = temperature
+
+    def _extract_text_and_thinking(data: dict) -> tuple[str, str]:
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+
+        top_text = data.get("output_text")
+        if isinstance(top_text, str) and top_text.strip():
+            text_parts.append(top_text)
+
+        for item in data.get("output", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "reasoning":
+                for summary in item.get("summary", []) or []:
+                    if isinstance(summary, dict):
+                        t = summary.get("text")
+                        if isinstance(t, str) and t.strip():
+                            thinking_parts.append(t.strip())
+
+            for block in item.get("content", []) or []:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype in ("output_text", "text"):
+                    t = block.get("text", "")
+                    if isinstance(t, str) and t.strip():
+                        text_parts.append(t)
+                elif btype == "reasoning":
+                    t = block.get("text", "")
+                    if isinstance(t, str) and t.strip():
+                        thinking_parts.append(t)
+
+        text = _clean_result("\n\n".join(x.strip() for x in text_parts if x and x.strip()))
+        thinking = "\n\n".join(x.strip() for x in thinking_parts if x and x.strip())
+        return text, thinking
+
+    retriable_statuses = {408, 409, 429, 500, 502, 503, 504}
+    retriable_codes = {
+        "server_error",
+        "rate_limit_exceeded",
+        "temporarily_unavailable",
+        "overloaded_error",
+    }
+    total_attempts = max_retries + 1
+    last_err: Optional[Exception] = None
+
+    for attempt in range(1, total_attempts + 1):
+        if attempt == 1:
+            log_buffer.emit(f"[LLM] {model} — xAI responses request started")
+        else:
+            log_buffer.emit(
+                f"[LLM] {model} — xAI responses retry attempt {attempt}/{total_attempts}"
+            )
+
+        try:
+            resp = requests.post(
+                f"{base_url}/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=(connect_timeout_s, read_timeout_s),
+            )
+        except requests.Timeout as exc:
+            last_err = RuntimeError(
+                f"xAI Responses API timed out after {int(read_timeout_s)}s (model: {model})"
+            )
+            if attempt >= total_attempts:
+                raise last_err from exc
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — timeout on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+        except requests.RequestException as exc:
+            last_err = RuntimeError(f"xAI Responses API request failed: {exc}")
+            if attempt >= total_attempts:
+                raise last_err from exc
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — transport error on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+
+        if not resp.ok:
+            raw_body = (resp.text or "").strip()
+            body = raw_body if len(raw_body) <= 800 else (raw_body[:800] + "…")
+            request_id = (resp.headers.get("x-request-id") or "").strip()
+            error_code = ""
+            retry_after_s = 0.0
+            try:
+                body_json = resp.json() if raw_body else {}
+                if isinstance(body_json, dict):
+                    err_obj = body_json.get("error") if isinstance(body_json.get("error"), dict) else {}
+                    error_code = str(err_obj.get("code") or "")
+                    if not request_id:
+                        request_id = str(err_obj.get("request_id") or "")
+            except Exception:
+                body_json = {}
+
+            retry_after_hdr = (resp.headers.get("retry-after") or "").strip()
+            if retry_after_hdr:
+                try:
+                    retry_after_s = max(0.0, float(retry_after_hdr))
+                except Exception:
+                    retry_after_s = 0.0
+
+            is_retriable = (resp.status_code in retriable_statuses) or (error_code in retriable_codes)
+            err_msg = f"xAI Responses API HTTP {resp.status_code}: {body or 'empty response'}"
+            if request_id:
+                err_msg += f" (request_id={request_id})"
+
+            if is_retriable and attempt < total_attempts:
+                exp_backoff_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+                sleep_s = max(exp_backoff_s, retry_after_s)
+                log_buffer.emit(
+                    f"[LLM] {model} — transient HTTP {resp.status_code} on attempt {attempt}/{total_attempts}; "
+                    f"retrying in {sleep_s:.1f}s"
+                )
+                time.sleep(sleep_s)
+                continue
+
+            raise RuntimeError(err_msg)
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            last_err = RuntimeError("xAI Responses API returned invalid JSON")
+            if attempt >= total_attempts:
+                raise last_err from exc
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — invalid JSON on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+
+        resp_id = str(data.get("id") or "").strip()
+        if resp_id:
+            log_buffer.emit(f"[LLM] {model} — xAI response_id={resp_id}")
+
+        text, thinking = _extract_text_and_thinking(data)
+        if not text:
+            last_err = RuntimeError("xAI Responses API returned empty output")
+            if attempt >= total_attempts:
+                raise last_err
+            sleep_s = min(retry_max_s, retry_base_s * (2 ** (attempt - 1))) + (random.random() * retry_jitter_s)
+            log_buffer.emit(
+                f"[LLM] {model} — empty output on attempt {attempt}/{total_attempts}; retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+            continue
+
+        log_buffer.emit(
+            f"[LLM] {model} — xAI responses complete ({len(text):,} chars, attempt {attempt}/{total_attempts})"
+        )
+        return text, thinking
+
+    raise RuntimeError(str(last_err or "xAI Responses API failed after retries"))
+
+
 def _llm_call_with_files(
     system: str, user_template: str,
     file_inputs: dict, inline_inputs: dict,
@@ -2068,57 +2515,94 @@ def _llm_call_with_files(
         return _llm_call_anthropic_files(
             system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
-    # OpenAI — Responses API with file references (no inline content pasting)
-    if not model.startswith("grok"):
-        return _llm_call_openai_responses_files(
+    if model.startswith("grok"):
+        return _llm_call_grok_responses_files(
             system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
-    # Grok — Chat Completions with inline content (xAI doesn't support file references)
-    import sys
-    sys.path.insert(0, str(settings.project_root))
-    from shared.llm_client import LLMClient, resolve_grok_key
+    # OpenAI — Responses API with file references (no inline content pasting)
+    return _llm_call_openai_responses_files(
+        system, user_template, file_inputs, inline_inputs, model, temperature, db)
 
-    provider = "grok"
-    api_key = resolve_grok_key() or ""
-    if not api_key:
-        raise RuntimeError("API key not set for provider 'grok'")
+
+def _resolve_provider_file_refs(
+    model: str,
+    file_inputs: dict[str, str],
+    db: Session,
+) -> dict[str, str]:
+    """Resolve provider file IDs for logging/preview without running the model call."""
+    refs: dict[str, str] = {}
+    if not file_inputs:
+        return refs
 
     ctx = getattr(db, "_agent_run_ctx", {})
+    if model.startswith("gemini"):
+        for key, content in file_inputs.items():
+            f = _get_or_upload_gemini(
+                content,
+                key,
+                ctx.get("source_for_key", {}).get(key, ""),
+                ctx.get("sales_agent", ""),
+                ctx.get("customer", ""),
+                ctx.get("call_id", ""),
+                db,
+            )
+            refs[key] = str(getattr(f, "name", "") or "unknown")
+        return refs
 
-    # Upload each file input and get (file_id, content_with_header)
-    file_resolved: dict[str, tuple[str, str]] = {}
-    for k, v in file_inputs.items():
-        fid, content_with_header = _get_or_upload_openai(
-            v, k,
-            ctx.get("source_for_key", {}).get(k, ""),
-            ctx.get("sales_agent", ""), ctx.get("customer", ""), ctx.get("call_id", ""),
-            provider, api_key, db,
+    if model.startswith("claude-"):
+        for key, content in file_inputs.items():
+            file_id = _get_or_upload_anthropic(
+                content,
+                key,
+                ctx.get("source_for_key", {}).get(key, ""),
+                ctx.get("sales_agent", ""),
+                ctx.get("customer", ""),
+                ctx.get("call_id", ""),
+                db,
+            )
+            refs[key] = file_id
+        return refs
+
+    if model.startswith("grok"):
+        import sys
+        sys.path.insert(0, str(settings.project_root))
+        from shared.llm_client import resolve_grok_key
+
+        api_key = resolve_grok_key() or ""
+        if not api_key:
+            raise RuntimeError("GROK_API_KEY/XAI_API_KEY not set")
+        for key, content in file_inputs.items():
+            file_id, _ = _get_or_upload_openai(
+                content,
+                key,
+                ctx.get("source_for_key", {}).get(key, ""),
+                ctx.get("sales_agent", ""),
+                ctx.get("customer", ""),
+                ctx.get("call_id", ""),
+                "grok",
+                api_key,
+                db,
+            )
+            refs[key] = file_id
+        return refs
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    for key, content in file_inputs.items():
+        file_id, _ = _get_or_upload_openai(
+            content,
+            key,
+            ctx.get("source_for_key", {}).get(key, ""),
+            ctx.get("sales_agent", ""),
+            ctx.get("customer", ""),
+            ctx.get("call_id", ""),
+            "openai",
+            api_key,
+            db,
         )
-        file_resolved[k] = (fid, content_with_header)
-
-    user = user_template
-    orphaned: list[str] = []
-    for k, v in inline_inputs.items():
-        placeholder = f"{{{k}}}"
-        if placeholder in user:
-            user = user.replace(placeholder, v)
-    for k, (fid, content_with_header) in file_resolved.items():
-        placeholder = f"{{{k}}}"
-        if placeholder in user:
-            user = user.replace(placeholder, content_with_header)
-        elif content_with_header.strip():
-            # No placeholder — append so the model always receives the content
-            orphaned.append(f"--- {k} [file_id={fid}] ---\n{content_with_header}")
-    if orphaned:
-        user = user.strip() + "\n\n" + "\n\n".join(orphaned)
-
-    client = LLMClient(provider=provider, api_key=api_key)
-    resp = client.chat_completion(
-        model=model,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=temperature,
-    )
-    return _clean_result(resp.choices[0].message.content or ""), ""
+        refs[key] = file_id
+    return refs
 
 
 def _resolve_input(source: str, agent_id: Optional[str],
@@ -2126,7 +2610,8 @@ def _resolve_input(source: str, agent_id: Optional[str],
                    manual_inputs: dict, db: Session,
                    input_key: str = "",
                    merged_scope: str = "auto",
-                   merged_until_call_id: str = "") -> str:
+                   merged_until_call_id: str = "",
+                   meta: Optional[dict[str, Any]] = None) -> str:
     """Resolve one declared input to its text content."""
     from ui.backend.models.note import Note
     from ui.backend.models.persona import Persona
@@ -2135,11 +2620,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
     source = _normalize_input_source(source)
     merged_scope_norm = _normalize_merged_scope(merged_scope)
     fixed_merged_call_id = _norm_call_id(merged_until_call_id)
+    if meta is not None:
+        meta.clear()
+        meta["source"] = source
 
     if source == "transcript":
         if not call_id:
             # Per-pair context: fall back to merged transcript
             source = "merged_transcript"
+            if meta is not None:
+                meta["source"] = source
         else:
             llm_dir = ui_data / "agents" / sales_agent / customer / call_id / "transcribed" / "llm_final"
             path = llm_dir / "smoothed.txt"
@@ -2150,6 +2640,13 @@ def _resolve_input(source: str, agent_id: Optional[str],
             if not path.exists():
                 raise RuntimeError(f"Transcript not found for call {call_id}")
             content = path.read_text(encoding="utf-8").strip()
+            if meta is not None:
+                meta["origin"] = "cache"
+                try:
+                    meta["cache_file"] = str(path.relative_to(ui_data))
+                except Exception:
+                    meta["cache_file"] = str(path)
+                meta["resolved_call_id"] = call_id
             if not content:
                 return content
             try:
@@ -2168,6 +2665,8 @@ def _resolve_input(source: str, agent_id: Optional[str],
             cutoff_call_id = ""
         elif merged_scope_norm == "upto_call" and fixed_merged_call_id:
             cutoff_call_id = fixed_merged_call_id
+        if meta is not None:
+            meta["resolved_call_id"] = cutoff_call_id
 
         if not cutoff_call_id:
             merged = pair_dir / "merged_transcript.txt"
@@ -2176,6 +2675,12 @@ def _resolve_input(source: str, agent_id: Optional[str],
                     cached = merged.read_text(encoding="utf-8").strip()
                     # Rich merged transcript cache marker
                     if "CALL STATUS INDEX" in cached[:2000]:
+                        if meta is not None:
+                            meta["origin"] = "cache"
+                            try:
+                                meta["cache_file"] = str(merged.relative_to(ui_data))
+                            except Exception:
+                                meta["cache_file"] = str(merged)
                         return cached
                 except Exception:
                     pass
@@ -2199,8 +2704,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
             else:
                 out_path = pair_dir / "merged_transcript.txt"
             out_path.write_text(content, encoding="utf-8")
+            if meta is not None:
+                meta["origin"] = "computed"
+                try:
+                    meta["cache_file"] = str(out_path.relative_to(ui_data))
+                except Exception:
+                    meta["cache_file"] = str(out_path)
         except Exception:
             pass
+        if meta is not None and "origin" not in meta:
+            meta["origin"] = "computed"
         return content
 
     if source == "notes":
@@ -2239,8 +2752,16 @@ def _resolve_input(source: str, agent_id: Optional[str],
             else:
                 out_path = pair_dir / "merged_notes.txt"
             out_path.write_text(content, encoding="utf-8")
+            if meta is not None:
+                meta["origin"] = "computed"
+                try:
+                    meta["cache_file"] = str(out_path.relative_to(ui_data))
+                except Exception:
+                    meta["cache_file"] = str(out_path)
         except Exception:
             pass
+        if meta is not None and "origin" not in meta:
+            meta["origin"] = "computed"
         return content
 
     if source == "agent_output":
@@ -2406,28 +2927,14 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
             user_template    = agent_def.get("user_prompt", "")
             model            = agent_def.get("model", "gpt-5.4")
             temperature      = float(agent_def.get("temperature", 0.0))
-            output_contract_mode = _normalize_output_contract_mode(agent_def.get("output_contract_mode"))
-            output_contract_block = _build_output_contract_block(agent_def)
-            if output_contract_mode != "off" and output_contract_block:
-                system_prompt = _append_once(system_prompt, output_contract_block)
-                if output_contract_mode == "strict":
-                    user_template = _append_once(
-                        user_template,
-                        "STRICT OUTPUT REQUIREMENT:\n- Follow the OUTPUT CONTRACT exactly.\n- Return only the final formatted output.",
-                    )
+            # Intentionally do not mutate prompts at runtime.
+            # Agent execution must use exactly the stored system/user prompts.
 
-            # Split resolved inputs into file-type (uploaded) vs inline (substituted)
-            file_keys: set[str] = set()
-            for inp in agent_def.get("inputs", []):
-                k = inp.get("key", "")
-                effective_src = effective_source_for_key.get(
-                    k, _normalize_input_source(inp.get("source", "manual"))
-                )
-                if _is_file_source(effective_src):
-                    file_keys.add(k)
-
-            file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
-            inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
+            # Strict runtime policy:
+            # all resolved agent inputs are handled as provider files.
+            # No raw resolved content is substituted into prompts.
+            file_inputs = dict(resolved)
+            inline_inputs: dict[str, str] = {}
 
             # Attach run context to db session so upload helpers can record it
             db._agent_run_ctx = {
@@ -2443,10 +2950,8 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
                 },
             }
 
-            # Grok pastes files inline; all other providers use file references
-            total_chars = sum(len(v) for v in inline_inputs.values())
-            if model.startswith("grok"):
-                total_chars += sum(len(v) for v in file_inputs.values())
+            # Runtime context is file-only; do not include resolved content inline.
+            total_chars = 0
             log_buffer.emit(f"[AGENT] ▶ {agent_def.get('name', agent_id)} · {model}")
             log_buffer.emit(f"[LLM] {model} — {total_chars:,} chars input")
             yield _sse("progress", {

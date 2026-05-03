@@ -1,28 +1,32 @@
 "use client";
-import { useState, useEffect } from "react";
+
+import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
+import { Bot, Home } from "lucide-react";
+import { cn } from "@/lib/utils";
 import AppSidebar from "./AppSidebar";
 import CopilotDock from "./CopilotDock";
 import { ContextBar } from "./ContextBar";
-import { PanelLeftOpen } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { usePathname } from "next/navigation";
 
 const SIDEBAR_WIDTH = 224;
+const RAIL_WIDTH = 32;
 const COPILOT_DEFAULT_WIDTH = 304;
-const COPILOT_MIN_WIDTH = 280;
-const COPILOT_MAX_WIDTH = 520;
+const COPILOT_MIN_WIDTH = 260;
+const COPILOT_MAX_WIDTH = 560;
 const MIN_CONTENT_WIDTH = 560;
 
 function clampCopilotWidth(raw: number, sidebarCollapsed: boolean): number {
   const hardClamped = Math.min(COPILOT_MAX_WIDTH, Math.max(COPILOT_MIN_WIDTH, raw));
   if (typeof window === "undefined") return hardClamped;
   const sidebarSpace = sidebarCollapsed ? 0 : SIDEBAR_WIDTH;
-  const viewportMax = Math.max(COPILOT_MIN_WIDTH, window.innerWidth - sidebarSpace - MIN_CONTENT_WIDTH);
+  const chromeSpace = sidebarSpace + RAIL_WIDTH + RAIL_WIDTH;
+  const viewportMax = Math.max(220, window.innerWidth - chromeSpace - MIN_CONTENT_WIDTH);
   return Math.min(hardClamped, viewportMax);
 }
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [embeddedMode, setEmbeddedMode] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [copilotCollapsed, setCopilotCollapsed] = useState(false);
   const [copilotWidth, setCopilotWidth] = useState(COPILOT_DEFAULT_WIDTH);
@@ -44,22 +48,26 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const embedded = new URLSearchParams(window.location.search).get("embedded") === "1";
+    setEmbeddedMode(embedded);
+  }, [pathname]);
+
+  useEffect(() => {
     if (!mounted) return;
     localStorage.setItem("copilot-width", String(copilotWidth));
   }, [copilotWidth, mounted]);
 
   useEffect(() => {
     if (!mounted) return;
-    const onResize = () => {
-      setCopilotWidth((current) => clampCopilotWidth(current, collapsed));
-    };
+    const onResize = () => setCopilotWidth((current) => clampCopilotWidth(current, collapsed));
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [collapsed, mounted]);
 
   const toggleSidebar = () => {
-    setCollapsed(c => {
-      const next = !c;
+    setCollapsed((curr) => {
+      const next = !curr;
       localStorage.setItem("sidebar-collapsed", String(next));
       setCopilotWidth((current) => clampCopilotWidth(current, next));
       return next;
@@ -67,8 +75,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   };
 
   const toggleCopilot = () => {
-    setCopilotCollapsed(c => {
-      const next = !c;
+    setCopilotCollapsed((curr) => {
+      const next = !curr;
       localStorage.setItem("copilot-collapsed", String(next));
       return next;
     });
@@ -78,13 +86,16 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     if (e.button !== 0) return;
     e.preventDefault();
 
-    const panelLeft = collapsed ? 0 : SIDEBAR_WIDTH;
+    const startX = e.clientX;
+    const startWidth = copilotWidth;
+
     setResizingCopilot(true);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
 
     const onMove = (ev: MouseEvent) => {
-      const next = clampCopilotWidth(ev.clientX - panelLeft, collapsed);
+      const delta = ev.clientX - startX;
+      const next = clampCopilotWidth(startWidth + delta, collapsed);
       setCopilotWidth(next);
     };
     const onUp = () => {
@@ -99,73 +110,116 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     window.addEventListener("mouseup", onUp);
   };
 
-  const sidebarOffset = mounted ? (collapsed ? 0 : SIDEBAR_WIDTH) : SIDEBAR_WIDTH;
-  const copilotOffset = mounted ? (copilotCollapsed ? 0 : copilotWidth) : COPILOT_DEFAULT_WIDTH;
-  const contentOffset = sidebarOffset + copilotOffset;
-  const isLivePage = pathname === "/live";
-  const showContextBar = !isLivePage;
+  const path = String(pathname || "");
+  const isPipelinePage =
+    path === "/pipeline" || path.startsWith("/pipeline/");
+  const isJobsPage =
+    path === "/jobs" ||
+    path.startsWith("/jobs/") ||
+    path === "/live" ||
+    path.startsWith("/live/");
+  const isAgentDeepDivePage =
+    path === "/agent-deep-dive" ||
+    path.startsWith("/agent-deep-dive/") ||
+    path.includes("agent-deep-dive");
+  const showContextBar = !(isPipelinePage || isJobsPage || isAgentDeepDivePage);
+  const sidebarPanelWidth = mounted && collapsed ? 0 : SIDEBAR_WIDTH;
+  const copilotPanelWidth = mounted && copilotCollapsed ? 0 : copilotWidth;
+
+  if (embeddedMode) {
+    return (
+      <main className="h-screen w-screen overflow-hidden bg-gray-950">
+        {children}
+      </main>
+    );
+  }
 
   return (
-    <>
-      {/* Sidebar — hidden until mounted to avoid hydration mismatch */}
-      {!mounted && <div className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 z-40" />}
-      {!mounted && (
-        <div
-          className="fixed top-0 h-screen bg-gray-900 border-r border-gray-800 z-30"
-          style={{ left: SIDEBAR_WIDTH, width: COPILOT_DEFAULT_WIDTH }}
-        />
-      )}
-      {mounted && collapsed && (
-        <button
-          onClick={toggleSidebar}
-          className="fixed top-4 left-4 z-50 p-1.5 rounded-md bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
-          title="Show sidebar"
-        >
-          <PanelLeftOpen className="w-4 h-4" />
-        </button>
-      )}
-      {mounted && !collapsed && <AppSidebar onToggle={toggleSidebar} />}
+    <main className="fixed inset-0 flex overflow-hidden bg-gray-950">
+      <div
+        className={cn(
+          "h-full shrink-0 overflow-hidden bg-gray-900 transition-[width] duration-200",
+          sidebarPanelWidth > 0 && "border-r border-gray-800",
+          resizingCopilot && "transition-none",
+        )}
+        style={{ width: sidebarPanelWidth }}
+      >
+        {sidebarPanelWidth > 0 && <AppSidebar />}
+      </div>
 
-      {mounted && copilotCollapsed && (
-        <button
-          onClick={toggleCopilot}
-          className="fixed top-4 z-50 p-1.5 rounded-md bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
-          style={{ left: collapsed ? 56 : SIDEBAR_WIDTH + 8 }}
-          title="Show copilot panel"
-        >
-          <PanelLeftOpen className="w-4 h-4" />
-        </button>
-      )}
-      {mounted && !copilotCollapsed && (
-        <div className="fixed top-0 h-screen z-30" style={{ left: collapsed ? 0 : SIDEBAR_WIDTH, width: copilotWidth }}>
-          <CopilotDock onToggle={toggleCopilot} />
-          <div className="absolute top-0 -right-1 h-full w-3 z-40">
-            <button
-              type="button"
-              aria-label="Resize copilot panel"
-              onMouseDown={startCopilotResize}
-              className="group h-full w-full cursor-col-resize flex items-center justify-center"
-            >
-              <span
-                className={cn(
-                  "h-20 w-[2px] rounded bg-gray-700/70 group-hover:bg-indigo-400 transition-colors",
-                  resizingCopilot && "h-full bg-indigo-400"
-                )}
-              />
-            </button>
+      <button
+        type="button"
+        onClick={toggleSidebar}
+        title={collapsed ? "Show toolbar" : "Hide toolbar"}
+        aria-label={collapsed ? "Show toolbar" : "Hide toolbar"}
+        className={cn(
+          "h-full shrink-0 border-r border-gray-800 bg-gray-900/95 w-8",
+          "flex items-center justify-center text-gray-500 hover:text-white transition-colors",
+          !collapsed && "text-indigo-300",
+        )}
+      >
+        <Home className="h-4 w-4" />
+      </button>
+
+      <div
+        className={cn(
+          "h-full shrink-0 overflow-hidden bg-gray-900 transition-[width] duration-200 relative",
+          copilotPanelWidth > 0 && "border-r border-gray-800",
+          resizingCopilot && "transition-none",
+        )}
+        style={{ width: copilotPanelWidth }}
+      >
+        {copilotPanelWidth > 0 && (
+          <>
+            <CopilotDock />
+            <div className="absolute top-0 -right-1 h-full w-3 z-30">
+              <button
+                type="button"
+                aria-label="Resize copilot panel"
+                onMouseDown={startCopilotResize}
+                className="group h-full w-full cursor-col-resize flex items-center justify-center"
+              >
+                <span
+                  className={cn(
+                    "h-24 w-[2px] rounded bg-gray-700/70 group-hover:bg-indigo-400 transition-colors",
+                    resizingCopilot && "h-full bg-indigo-400"
+                  )}
+                />
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={toggleCopilot}
+        title={copilotCollapsed ? "Show copilot" : "Hide copilot"}
+        aria-label={copilotCollapsed ? "Show copilot" : "Hide copilot"}
+        className={cn(
+          "h-full shrink-0 border-r border-gray-800 bg-gray-900/95 w-8",
+          "flex items-center justify-center text-gray-500 hover:text-white transition-colors",
+          !copilotCollapsed && "text-indigo-300",
+        )}
+      >
+        <Bot className="h-4 w-4" />
+      </button>
+
+      <section className="min-w-0 flex-1 h-full flex flex-col">
+        {mounted && showContextBar && (
+          <div className="shrink-0 z-20">
+            <ContextBar />
           </div>
-        </div>
-      )}
-
-      {/* Main content — always same structure so React doesn't remount children */}
-      <div className={cn("transition-[margin] duration-200", resizingCopilot && "transition-none")} style={{ marginLeft: contentOffset }}>
-        <div className="sticky top-0 z-30">
-          {mounted && showContextBar && <ContextBar />}
-        </div>
-        <main className="min-h-screen p-6">
+        )}
+        <main
+          className={cn(
+            "flex-1 min-h-0",
+            isPipelinePage ? "p-0 overflow-hidden" : "p-6 overflow-y-auto",
+          )}
+        >
           {children}
         </main>
-      </div>
-    </>
+      </section>
+    </main>
   );
 }

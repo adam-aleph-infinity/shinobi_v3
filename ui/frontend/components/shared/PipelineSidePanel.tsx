@@ -1035,6 +1035,7 @@ export function PipelineSidePanel({
           sales_agent: salesAgent,
           customer,
           call_id: "",
+          context_call_id: callId || "",
           force,
           force_step_indices: forceStepIndices,
           resume_partial: resumePartial,

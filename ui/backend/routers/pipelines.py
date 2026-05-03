@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ from sqlmodel import Session, select
 from ui.backend.config import settings
 from ui.backend.database import get_session, engine as _db_engine
 from ui.backend.services import log_buffer, execution_logs
+from ui.backend.services import user_profiles
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
@@ -37,10 +39,239 @@ _AI_PIPELINES_FILE = _AI_REGISTRY_DIR / "pipelines_snapshot.json"
 _AI_INTERNAL_PROMPTS_FILE = _AI_REGISTRY_DIR / "internal_prompt_templates.json"
 _AI_README_FILE = _AI_REGISTRY_DIR / "README.md"
 _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
+_WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
+_WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
+_WEBHOOK_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
+_WEBHOOK_STATS_FILE = _WEBHOOK_DIR / "stats.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
 _STOP_REQUESTED: dict[str, threading.Event] = {}
 _RUN_SUBSCRIBERS: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+_CALL_ARTIFACTS_CACHE_LOCK = threading.Lock()
+_CALL_ARTIFACTS_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict[str, Any]]] = {}
+_CALL_ARTIFACTS_CACHE_TTL_S = 75.0
+_CALL_ARTIFACTS_CACHE_MAX = 600
+_MERGED_CALL_INDEX_CACHE_LOCK = threading.Lock()
+_MERGED_CALL_INDEX_CACHE: dict[str, tuple[int, list[tuple[str, str]], dict[str, list[str]], dict[str, float]]] = {}
+
+
+def _user_profile(request: Request) -> dict[str, Any]:
+    return user_profiles.get_current_user_profile(request)
+
+
+def _require_can_view(request: Request) -> dict[str, Any]:
+    profile = _user_profile(request)
+    if not bool((profile.get("permissions") or {}).get("can_view")):
+        raise HTTPException(status_code=403, detail="User is not allowed to access this environment.")
+    return profile
+
+
+def _require_can_create_pipeline(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_create_pipelines")
+
+
+def _require_can_edit_pipeline(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_edit_pipelines")
+
+
+def _require_can_run_pipeline(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_run_pipelines")
+
+
+def _require_can_manage_jobs(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_manage_jobs")
+
+
+def _require_can_manage_live(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_manage_live_jobs")
+
+
+def _workspace_owner_for_new_pipeline(request: Request, profile: dict[str, Any]) -> str:
+    env = str((profile or {}).get("environment") or "").strip().lower()
+    if env != "dev":
+        return ""
+    return str((profile or {}).get("email") or "").strip().lower()
+
+
+def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    perms = profile.get("permissions") if isinstance(profile.get("permissions"), dict) else {}
+    if not bool(perms.get("can_view")):
+        return False
+    if bool(profile.get("is_admin")):
+        return True
+    env = str(profile.get("environment") or "").strip().lower()
+    if env != "dev":
+        return True
+    owner = str(data.get("workspace_user_email") or "").strip().lower()
+    if not owner:
+        # Legacy/shared pipelines remain visible.
+        return True
+    return owner == str(profile.get("email") or "").strip().lower()
+
+
+def _assert_can_modify_pipeline_record(request: Request, profile: dict[str, Any], data: dict[str, Any]) -> None:
+    _require_can_edit_pipeline(request)
+    if bool(profile.get("is_admin")):
+        return
+    env = str(profile.get("environment") or "").strip().lower()
+    if env != "dev":
+        return
+    owner = str(data.get("workspace_user_email") or "").strip().lower()
+    if owner and owner != str(profile.get("email") or "").strip().lower():
+        raise HTTPException(status_code=403, detail="This pipeline belongs to another user workspace.")
+
+
+def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
+    if not bool(settings.live_mirror_enabled):
+        return False
+    if not str(settings.live_mirror_base_url or "").strip():
+        return False
+    if request is not None and str(request.headers.get("x-shinobi-live-mirror-hop") or "").strip() == "1":
+        return False
+    return True
+
+
+def _is_live_state_read_only(request: Optional[Request] = None) -> bool:
+    # Explicit config switch takes precedence (useful when dev shares prod DB).
+    if bool(getattr(settings, "live_state_read_only", False)):
+        return True
+    # Mirror mode is always read-only.
+    return _is_live_mirror_mode(request)
+
+
+def _live_mirror_headers() -> dict[str, str]:
+    headers: dict[str, str] = {"x-shinobi-live-mirror-hop": "1"}
+    token = str(settings.live_mirror_auth_token or "").strip()
+    if token:
+        hdr = str(settings.live_mirror_auth_header or "x-api-token").strip() or "x-api-token"
+        headers[hdr] = token
+    return headers
+
+
+def _live_mirror_url(path: str) -> str:
+    base = str(settings.live_mirror_base_url or "").strip().rstrip("/")
+    p = str(path or "").strip()
+    if not p.startswith("/"):
+        p = f"/{p}"
+    return f"{base}{p}"
+
+
+def _live_mirror_request_json(
+    method: str,
+    path: str,
+    *,
+    request: Optional[Request] = None,
+    payload: Optional[dict[str, Any]] = None,
+) -> Any:
+    if not _is_live_mirror_mode(request):
+        raise HTTPException(status_code=500, detail="Live mirror mode is not configured.")
+    url = _live_mirror_url(path)
+    timeout_s = max(3, min(int(settings.live_mirror_timeout_s or 20), 120))
+    try:
+        with httpx.Client(timeout=timeout_s, headers=_live_mirror_headers()) as client:
+            if str(method or "GET").upper() == "GET":
+                resp = client.get(url)
+            else:
+                resp = client.request(str(method).upper(), url, json=(payload or {}))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Live mirror request failed: {e}") from e
+    if resp.status_code >= 400:
+        detail = resp.text
+        try:
+            parsed = resp.json()
+            if isinstance(parsed, dict):
+                detail = str(parsed.get("detail") or parsed.get("error") or detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=resp.status_code, detail=f"Live mirror error: {detail}")
+    try:
+        return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Live mirror returned invalid JSON: {e}") from e
+
+
+def _norm_ci(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _parse_iso_to_ms(value: Any) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return 0
+    try:
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def _find_latest_matching_webhook_event(
+    *,
+    after_ms: int,
+    sales_agent: str,
+    customer: str,
+    call_id: str,
+    limit_files: int = 300,
+) -> Optional[dict[str, Any]]:
+    try:
+        if not _WEBHOOK_INBOX_DIR.exists():
+            return None
+        files = sorted(
+            _WEBHOOK_INBOX_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[: max(10, min(int(limit_files or 300), 2000))]
+    except Exception:
+        return None
+
+    wanted_agent = _norm_ci(sales_agent)
+    wanted_customer = _norm_ci(customer)
+    wanted_call_id = _norm_ci(call_id)
+
+    for fp in files:
+        try:
+            st = fp.stat()
+            mtime_ms = int(float(st.st_mtime) * 1000.0)
+            if after_ms > 0 and mtime_ms <= after_ms:
+                # Files are newest-first; once below cursor, older files won't match either.
+                break
+            raw = json.loads(fp.read_text(encoding="utf-8", errors="replace"))
+            payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        except Exception:
+            continue
+
+        payload_agent = _norm_ci(payload.get("agent"))
+        payload_customer = _norm_ci(payload.get("customer"))
+        payload_call_id = _norm_ci(payload.get("call_id"))
+
+        if wanted_agent and payload_agent and payload_agent != wanted_agent:
+            continue
+        if wanted_call_id and payload_call_id and payload_call_id != wanted_call_id:
+            continue
+        # Customer is optional in webhook payload; if present it must match.
+        if wanted_customer and payload_customer and payload_customer != wanted_customer:
+            continue
+
+        received_at = str(raw.get("received_at") or "")
+        received_ms = _parse_iso_to_ms(received_at) or mtime_ms
+        if after_ms > 0 and received_ms <= after_ms:
+            continue
+
+        return {
+            "event_id": str(raw.get("event_id") or ""),
+            "webhook_type": str(raw.get("webhook_type") or ""),
+            "compat_mode": str(raw.get("compat_mode") or ""),
+            "received_at": received_at,
+            "received_ms": received_ms,
+            "file": str(fp),
+            "payload": payload,
+        }
+    return None
 
 
 def _safe_template_format(template: str, values: dict[str, Any]) -> str:
@@ -51,6 +282,192 @@ def _safe_template_format(template: str, values: dict[str, Any]) -> str:
         return str(template or "").format_map(_SafeDict(values))
     except Exception:
         return str(template or "")
+
+
+def _default_live_webhook_config() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "ingest_only": True,
+        "trigger_pipeline": True,
+        "agent_continuity_filter_enabled": True,
+        "agent_continuity_pair_tag_fallback_enabled": True,
+        "agent_continuity_reject_multi_agent_pair_tags": True,
+        "live_pipeline_ids": [],
+        "default_pipeline_id": "",
+        "pipeline_by_agent": {},
+        "transcription_model": "gpt-5.4",
+        "transcription_timeout_s": int(settings.crm_webhook_transcription_timeout_s or 900),
+        "transcription_poll_interval_s": float(settings.crm_webhook_transcription_poll_interval_s or 2.0),
+        "backfill_historical_transcripts": True,
+        "backfill_timeout_s": 5400,
+        "max_live_running": 5,
+        "agent_continuity_filter_enabled": True,
+        "auto_retry_enabled": True,
+        "retry_max_attempts": 2,
+        "retry_delay_s": 45,
+        "retry_on_server_error": True,
+        "retry_on_rate_limit": True,
+        "retry_on_timeout": True,
+        "send_note_pipeline_ids": [],
+        "run_payload": {
+            "resume_partial": True,
+        },
+    }
+
+
+def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
+    base = _default_live_webhook_config()
+    if isinstance(raw, dict):
+        base.update(raw)
+
+    base["enabled"] = bool(base.get("enabled", True))
+    base["ingest_only"] = bool(base.get("ingest_only", True))
+    base["trigger_pipeline"] = bool(base.get("trigger_pipeline", True))
+    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
+    base["agent_continuity_pair_tag_fallback_enabled"] = bool(
+        base.get("agent_continuity_pair_tag_fallback_enabled", True)
+    )
+    base["agent_continuity_reject_multi_agent_pair_tags"] = bool(
+        base.get("agent_continuity_reject_multi_agent_pair_tags", True)
+    )
+    live_ids = base.get("live_pipeline_ids")
+    if isinstance(live_ids, list):
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for v in live_ids:
+            pid = str(v or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            dedup.append(pid)
+        base["live_pipeline_ids"] = dedup
+    else:
+        base["live_pipeline_ids"] = []
+    send_note_ids = base.get("send_note_pipeline_ids")
+    if isinstance(send_note_ids, list):
+        dedup_send: list[str] = []
+        seen_send: set[str] = set()
+        for v in send_note_ids:
+            pid = str(v or "").strip()
+            if not pid or pid in seen_send:
+                continue
+            seen_send.add(pid)
+            dedup_send.append(pid)
+        base["send_note_pipeline_ids"] = dedup_send
+    else:
+        base["send_note_pipeline_ids"] = []
+    base["default_pipeline_id"] = str(base.get("default_pipeline_id") or "").strip()
+    base["transcription_model"] = str(base.get("transcription_model") or "gpt-5.4").strip() or "gpt-5.4"
+    try:
+        base["transcription_timeout_s"] = max(30, min(int(base.get("transcription_timeout_s") or 900), 3600))
+    except Exception:
+        base["transcription_timeout_s"] = 900
+    try:
+        base["transcription_poll_interval_s"] = max(
+            0.2,
+            min(float(base.get("transcription_poll_interval_s") or 2.0), 30.0),
+        )
+    except Exception:
+        base["transcription_poll_interval_s"] = 2.0
+    base["backfill_historical_transcripts"] = bool(base.get("backfill_historical_transcripts", True))
+    try:
+        base["backfill_timeout_s"] = max(120, min(int(base.get("backfill_timeout_s") or 5400), 21600))
+    except Exception:
+        base["backfill_timeout_s"] = 5400
+    try:
+        base["max_live_running"] = max(1, min(int(base.get("max_live_running") or 5), 64))
+    except Exception:
+        base["max_live_running"] = 5
+    base["agent_continuity_filter_enabled"] = bool(base.get("agent_continuity_filter_enabled", True))
+    base["auto_retry_enabled"] = bool(base.get("auto_retry_enabled", True))
+    try:
+        base["retry_max_attempts"] = max(0, min(int(base.get("retry_max_attempts") or 2), 10))
+    except Exception:
+        base["retry_max_attempts"] = 2
+    try:
+        base["retry_delay_s"] = max(5, min(int(base.get("retry_delay_s") or 45), 3600))
+    except Exception:
+        base["retry_delay_s"] = 45
+    base["retry_on_server_error"] = bool(base.get("retry_on_server_error", True))
+    base["retry_on_rate_limit"] = bool(base.get("retry_on_rate_limit", True))
+    base["retry_on_timeout"] = bool(base.get("retry_on_timeout", True))
+
+    mapping = base.get("pipeline_by_agent")
+    if isinstance(mapping, dict):
+        norm_map: dict[str, str] = {}
+        for k, v in mapping.items():
+            kk = str(k or "").strip()
+            vv = str(v or "").strip()
+            if kk and vv:
+                norm_map[kk] = vv
+        base["pipeline_by_agent"] = norm_map
+    else:
+        base["pipeline_by_agent"] = {}
+
+    run_payload = base.get("run_payload")
+    base["run_payload"] = run_payload if isinstance(run_payload, dict) else {}
+    return base
+
+
+def _load_live_webhook_config() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _WEBHOOK_CONFIG_FILE.exists():
+        cfg = _default_live_webhook_config()
+        _WEBHOOK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        return cfg
+    try:
+        raw = json.loads(_WEBHOOK_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    cfg = _normalize_live_webhook_config(raw)
+    _WEBHOOK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    return cfg
+
+
+def _save_live_webhook_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    norm = _normalize_live_webhook_config(cfg)
+    _WEBHOOK_CONFIG_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
+    return norm
+
+
+def _default_live_webhook_stats() -> dict[str, Any]:
+    return {
+        "rejected_webhooks_total": 0,
+        "rejected_by_reason": {},
+        "updated_at": "",
+    }
+
+
+def _load_live_webhook_stats() -> dict[str, Any]:
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    if not _WEBHOOK_STATS_FILE.exists():
+        return _default_live_webhook_stats()
+    try:
+        raw = json.loads(_WEBHOOK_STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return _default_live_webhook_stats()
+    if not isinstance(raw, dict):
+        return _default_live_webhook_stats()
+    out = _default_live_webhook_stats()
+    try:
+        out["rejected_webhooks_total"] = max(0, int(raw.get("rejected_webhooks_total") or 0))
+    except Exception:
+        out["rejected_webhooks_total"] = 0
+    by_reason = raw.get("rejected_by_reason")
+    if isinstance(by_reason, dict):
+        norm_reason: dict[str, int] = {}
+        for k, v in by_reason.items():
+            kk = str(k or "").strip()
+            if not kk:
+                continue
+            try:
+                norm_reason[kk] = max(0, int(v or 0))
+            except Exception:
+                norm_reason[kk] = 0
+        out["rejected_by_reason"] = norm_reason
+    out["updated_at"] = str(raw.get("updated_at") or "").strip()
+    return out
 
 
 _CALL_ID_PRESERVATION_PERSONA = """
@@ -528,6 +945,10 @@ class FolderIn(BaseModel):
     name: str
 
 
+class FolderDeleteIn(BaseModel):
+    name: str
+
+
 class FolderMoveIn(BaseModel):
     folder: str = ""
 
@@ -541,6 +962,21 @@ class PipelineBundleImportIn(BaseModel):
 
 def _hash_text(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
+def _model_provider_name(model: str) -> str:
+    m = str(model or "").strip().lower()
+    if not m:
+        return "unknown"
+    if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
+        return "openai"
+    if m.startswith("claude-"):
+        return "anthropic"
+    if m.startswith("gemini"):
+        return "google"
+    if m.startswith("grok"):
+        return "xai"
+    return "unknown"
 
 
 def _build_input_fingerprint(
@@ -1809,19 +2245,26 @@ def _ensure_folder_exists(folder: str) -> None:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
-def list_pipelines():
+def list_pipelines(request: Request):
+    profile = _require_can_view(request)
     _load_internal_prompt_templates()
     _sync_ai_registry_pipelines()
-    return _load_all()
+    rows = _load_all()
+    return [r for r in rows if _can_access_pipeline_record(profile, r)]
 
 
 @router.get("/folders")
-def list_pipeline_folders():
+def list_pipeline_folders(request: Request):
+    profile = _require_can_view(request)
+    visible = [p for p in _load_all() if _can_access_pipeline_record(profile, p)]
     from_pipelines = [
         _normalise_folder(str(p.get("folder", "") or ""))
-        for p in _load_all()
+        for p in visible
     ]
-    merged = [*from_pipelines, *_load_folders()]
+    global_folders = _load_folders()
+    if str(profile.get("environment") or "").strip().lower() == "dev" and not bool(profile.get("is_admin")):
+        global_folders = []
+    merged = [*from_pipelines, *global_folders]
     deduped = []
     seen = set()
     for folder in merged:
@@ -1837,7 +2280,8 @@ def list_pipeline_folders():
 
 
 @router.post("/folders")
-def create_pipeline_folder(req: FolderIn):
+def create_pipeline_folder(req: FolderIn, request: Request):
+    _require_can_create_pipeline(request)
     name = _normalise_folder(req.name)
     if not name:
         raise HTTPException(400, "Folder name is required")
@@ -1845,12 +2289,49 @@ def create_pipeline_folder(req: FolderIn):
     return {"ok": True, "folder": name}
 
 
+@router.delete("/folders")
+def delete_pipeline_folder(req: FolderDeleteIn, request: Request):
+    profile = _require_can_edit_pipeline(request)
+    target = _normalise_folder(req.name)
+    if not target:
+        raise HTTPException(400, "Folder name is required")
+
+    # Default/Unfiled is represented as empty folder and cannot be deleted.
+    if target.lower() in {"unfiled", "default"}:
+        raise HTTPException(400, "Default folder cannot be deleted")
+
+    moved = 0
+    for file in _DIR.glob("*.json"):
+        data = json.loads(file.read_text(encoding="utf-8"))
+        if not _can_access_pipeline_record(profile, data):
+            continue
+        _assert_can_modify_pipeline_record(request, profile, data)
+        cur = _normalise_folder(str(data.get("folder", "") or ""))
+        if cur.lower() != target.lower():
+            continue
+        data["folder"] = ""
+        data["updated_at"] = datetime.utcnow().isoformat()
+        file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        moved += 1
+
+    folders = _load_folders()
+    folders = [f for f in folders if _normalise_folder(f).lower() != target.lower()]
+    _save_folders(folders)
+    _sync_ai_registry_pipelines()
+    return {"ok": True, "deleted_folder": target, "moved_to_default": moved}
+
+
 @router.post("")
-def create_pipeline(req: PipelineIn):
+def create_pipeline(req: PipelineIn, request: Request):
+    profile = _require_can_create_pipeline(request)
     _validate_pipeline_payload(req)
     _DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.utcnow().isoformat()
     record = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()}
+    owner_email = _workspace_owner_for_new_pipeline(request, profile)
+    if owner_email:
+        record["workspace_user_email"] = owner_email
+        record["workspace_user_name"] = str(profile.get("name") or "").strip()
     record["folder"] = _normalise_folder(record.get("folder", ""))
     if record["folder"]:
         _ensure_folder_exists(record["folder"])
@@ -1987,8 +2468,11 @@ def get_artifact_template(
 
 
 @router.get("/{pipeline_id}/bundle")
-def export_pipeline_bundle(pipeline_id: str):
+def export_pipeline_bundle(pipeline_id: str, request: Request):
+    profile = _require_can_view(request)
     _, pipeline_def = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pipeline_def):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     step_agent_ids = [
         str((s or {}).get("agent_id") or "").strip()
         for s in (pipeline_def.get("steps") or [])
@@ -2022,7 +2506,8 @@ def export_pipeline_bundle(pipeline_id: str):
 
 
 @router.post("/bundles/import")
-def import_pipeline_bundle(req: PipelineBundleImportIn):
+def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
+    profile = _require_can_create_pipeline(request)
     payload = req.bundle if isinstance(req.bundle, dict) else {}
     pipeline_raw = payload.get("pipeline")
     agents_raw = payload.get("agents")
@@ -2118,6 +2603,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn):
     pipeline_out["updated_at"] = now
     pipeline_out["name"] = unique_pipeline_name
     pipeline_out["folder"] = folder_name
+    owner_email = _workspace_owner_for_new_pipeline(request, profile)
+    if owner_email:
+        pipeline_out["workspace_user_email"] = owner_email
+        pipeline_out["workspace_user_name"] = str(profile.get("name") or "").strip()
 
     # Remap pipeline step agent ids.
     remapped_steps: list[dict[str, Any]] = []
@@ -2195,15 +2684,22 @@ def import_pipeline_bundle(req: PipelineBundleImportIn):
 
 
 @router.get("/{pipeline_id}")
-def get_pipeline(pipeline_id: str):
+def get_pipeline(pipeline_id: str, request: Request):
+    profile = _require_can_view(request)
     _, data = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     return data
 
 
 @router.put("/{pipeline_id}")
-def update_pipeline(pipeline_id: str, req: PipelineIn):
+def update_pipeline(pipeline_id: str, req: PipelineIn, request: Request):
+    profile = _require_can_edit_pipeline(request)
     _validate_pipeline_payload(req)
     f, data = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_modify_pipeline_record(request, profile, data)
     data.update({**req.model_dump(), "updated_at": datetime.utcnow().isoformat()})
     data["folder"] = _normalise_folder(data.get("folder", ""))
     if data["folder"]:
@@ -2214,8 +2710,12 @@ def update_pipeline(pipeline_id: str, req: PipelineIn):
 
 
 @router.patch("/{pipeline_id}/folder")
-def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
+def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn, request: Request):
+    profile = _require_can_edit_pipeline(request)
     f, data = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_modify_pipeline_record(request, profile, data)
     folder = _normalise_folder(req.folder)
     data["folder"] = folder
     data["updated_at"] = datetime.utcnow().isoformat()
@@ -2227,8 +2727,16 @@ def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
 
 
 @router.delete("/{pipeline_id}")
-def delete_pipeline(pipeline_id: str):
+def delete_pipeline(pipeline_id: str, request: Request):
+    profile = _require_can_edit_pipeline(request)
     f, _ = _find_file(pipeline_id)
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_modify_pipeline_record(request, profile, data)
     f.unlink()
     _sync_ai_registry_pipelines()
     return {"ok": True}
@@ -2238,15 +2746,68 @@ class PipelineRunRequest(BaseModel):
     sales_agent: str = ""
     customer: str = ""
     call_id: str = ""
+    context_call_id: str = ""  # optional input-resolution scope call id
+    run_id: str = ""  # continue/append within an existing run id when provided
     force: bool = False
     force_step_indices: list[int] = []  # bypass cache for specific steps even when force=False
     resume_partial: bool = False  # allow per-step cache fallback when exact fingerprint miss
+    execute_step_indices: list[int] = []  # run only these step indices (0-based); empty = run all
+    prepare_input_only: bool = False  # resolve selected step inputs only; do not execute model
+    run_origin: str = ""  # local | webhook (used for UI source separation)
 
 
 class PipelineStopRequest(BaseModel):
     sales_agent: str = ""
     customer: str = ""
     call_id: str = ""
+
+
+class LiveWebhookConfigIn(BaseModel):
+    enabled: bool = True
+    ingest_only: bool = True
+    trigger_pipeline: bool = True
+    agent_continuity_filter_enabled: bool = True
+    agent_continuity_pair_tag_fallback_enabled: bool = True
+    agent_continuity_reject_multi_agent_pair_tags: bool = True
+    live_pipeline_ids: list[str] = []
+    default_pipeline_id: str = ""
+    pipeline_by_agent: dict[str, str] = {}
+    backfill_historical_transcripts: bool = True
+    backfill_timeout_s: int = 5400
+    max_live_running: int = 5
+    agent_continuity_filter_enabled: bool = True
+    auto_retry_enabled: bool = True
+    retry_max_attempts: int = 2
+    retry_delay_s: int = 45
+    retry_on_server_error: bool = True
+    retry_on_rate_limit: bool = True
+    retry_on_timeout: bool = True
+    send_note_pipeline_ids: list[str] = []
+    run_payload: dict[str, Any] = {}
+
+
+class LiveWebhookQuickSetIn(BaseModel):
+    pipeline_id: str = ""
+    enabled: bool = True
+    listen_all_webhooks: bool = True
+    clear_agent_mappings: bool = True
+
+
+class LiveWebhookRejectionEnqueueIn(BaseModel):
+    pipeline_id: str = ""
+    run_all: bool = False
+
+
+class LiveWebhookRunEnqueueIn(BaseModel):
+    pipeline_id: str = ""
+
+
+class LiveWebhookRunCancelIn(BaseModel):
+    reason: str = "Cancelled by user."
+
+
+class LiveWebhookRunRetryIn(BaseModel):
+    pipeline_id: str = ""
 
 
 @router.get("/{pipeline_id}/results")
@@ -2584,6 +3145,83 @@ def _is_global_section_title(title: str) -> bool:
     )
 
 
+def _get_cached_call_artifacts(
+    key: tuple[str, str, str, str, int],
+) -> Optional[dict[str, Any]]:
+    now = time.time()
+    with _CALL_ARTIFACTS_CACHE_LOCK:
+        hit = _CALL_ARTIFACTS_CACHE.get(key)
+        if not hit:
+            return None
+        expires_at, payload = hit
+        if expires_at <= now:
+            _CALL_ARTIFACTS_CACHE.pop(key, None)
+            return None
+        return payload
+
+
+def _set_cached_call_artifacts(
+    key: tuple[str, str, str, str, int],
+    payload: dict[str, Any],
+) -> None:
+    now = time.time()
+    with _CALL_ARTIFACTS_CACHE_LOCK:
+        _CALL_ARTIFACTS_CACHE[key] = (now + _CALL_ARTIFACTS_CACHE_TTL_S, payload)
+        if len(_CALL_ARTIFACTS_CACHE) > _CALL_ARTIFACTS_CACHE_MAX:
+            oldest = sorted(
+                _CALL_ARTIFACTS_CACHE.items(),
+                key=lambda item: float(item[1][0]),
+            )[: max(1, len(_CALL_ARTIFACTS_CACHE) - _CALL_ARTIFACTS_CACHE_MAX)]
+            for old_key, _ in oldest:
+                _CALL_ARTIFACTS_CACHE.pop(old_key, None)
+
+
+def _get_merged_call_index(
+    merged_path: os.PathLike[str] | str,
+) -> tuple[list[tuple[str, str]], dict[str, list[str]], dict[str, float]]:
+    path_str = str(merged_path)
+    try:
+        st = os.stat(path_str)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+    except Exception:
+        return [], {}, {}
+
+    with _MERGED_CALL_INDEX_CACHE_LOCK:
+        cached = _MERGED_CALL_INDEX_CACHE.get(path_str)
+        if cached and int(cached[0]) == mtime_ns:
+            return cached[1], cached[2], cached[3]
+
+    try:
+        with open(path_str, "r", encoding="utf-8", errors="replace") as fh:
+            merged_text = fh.read()
+    except Exception:
+        return [], {}, {}
+
+    merged_calls = _split_merged_calls(merged_text)
+    merged_call_tokens = {
+        str(cid).strip().lower(): _tokenize_match_text(txt)
+        for cid, txt in merged_calls
+        if str(cid).strip()
+    }
+    idf: dict[str, float] = {}
+    if merged_call_tokens:
+        df: dict[str, int] = {}
+        n_docs = len(merged_call_tokens)
+        for toks in merged_call_tokens.values():
+            for t in set(toks):
+                df[t] = df.get(t, 0) + 1
+        idf = {t: math.log((n_docs + 1) / (v + 1)) + 1.0 for t, v in df.items()}
+
+    with _MERGED_CALL_INDEX_CACHE_LOCK:
+        _MERGED_CALL_INDEX_CACHE[path_str] = (mtime_ns, merged_calls, merged_call_tokens, idf)
+        if len(_MERGED_CALL_INDEX_CACHE) > 120:
+            oldest_paths = list(_MERGED_CALL_INDEX_CACHE.keys())[:30]
+            for p in oldest_paths:
+                _MERGED_CALL_INDEX_CACHE.pop(p, None)
+
+    return merged_calls, merged_call_tokens, idf
+
+
 @router.get("/{pipeline_id}/call-artifacts")
 def get_pipeline_call_artifacts(
     pipeline_id: str,
@@ -2602,6 +3240,16 @@ def get_pipeline_call_artifacts(
     call_id_norm = call_id_raw.lower()
     if not call_id_norm:
         raise HTTPException(400, "call_id is required")
+    cache_key = (
+        str(pipeline_id or "").strip(),
+        str(sales_agent or "").strip().lower(),
+        str(customer or "").strip().lower(),
+        call_id_norm,
+        int(round(float(min_confidence) * 1000.0)),
+    )
+    cached_payload = _get_cached_call_artifacts(cache_key)
+    if cached_payload is not None:
+        return cached_payload
 
     _, pipeline_def = _find_file(pipeline_id)
     pipeline_scope = str(pipeline_def.get("scope") or "per_pair")
@@ -2726,28 +3374,8 @@ def get_pipeline_call_artifacts(
                 _build_and_save_merged_transcript(sales_agent, customer, force=True)
             except Exception:
                 pass
-        merged_text = ""
         if merged_path.exists():
-            try:
-                merged_text = merged_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                merged_text = ""
-        merged_calls = _split_merged_calls(merged_text)
-        merged_call_tokens = {
-            str(cid).strip().lower(): _tokenize_match_text(txt)
-            for cid, txt in merged_calls
-            if str(cid).strip()
-        }
-        if merged_call_tokens:
-            df: dict[str, int] = {}
-            n_docs = len(merged_call_tokens)
-            for toks in merged_call_tokens.values():
-                for t in set(toks):
-                    df[t] = df.get(t, 0) + 1
-            idf = {
-                t: math.log((n_docs + 1) / (v + 1)) + 1.0
-                for t, v in df.items()
-            }
+            merged_calls, merged_call_tokens, idf = _get_merged_call_index(merged_path)
 
     artifacts_out: list[dict[str, Any]] = []
     unassigned_out: list[dict[str, Any]] = []
@@ -2990,7 +3618,7 @@ def get_pipeline_call_artifacts(
 
     artifacts_out.sort(key=lambda x: int(x.get("step_index", 0)))
     unassigned_out.sort(key=lambda x: int(x.get("step_index", 0)))
-    return {
+    payload = {
         "pipeline_id": pipeline_id,
         "sales_agent": sales_agent,
         "customer": customer,
@@ -3001,6 +3629,8 @@ def get_pipeline_call_artifacts(
         "unassigned": unassigned_out,
         "generated_at": datetime.utcnow().isoformat(),
     }
+    _set_cached_call_artifacts(cache_key, payload)
+    return payload
 
 
 @router.get("/{pipeline_id}/artifact-status")
@@ -3097,7 +3727,12 @@ def get_pipeline_artifact_status(
     artifact_step_ids = set(artifact_types_by_step.keys())
     artifact_total = len(artifact_step_ids)
 
-    def _state(step_ids: set[int], last_at: Optional[str]) -> dict[str, Any]:
+    def _state(
+        step_ids: set[int],
+        last_at: Optional[str],
+        note_sent: bool = False,
+        note_sent_at: Optional[str] = None,
+    ) -> dict[str, Any]:
         valid_step_ids = {s for s in step_ids if 0 <= s < total_steps}
         step_count = len(valid_step_ids)
         agent_step_count = step_count
@@ -3121,11 +3756,19 @@ def get_pipeline_artifact_status(
             "artifact_complete": artifact_complete,
             "artifact_types": artifact_types,
             "last_at": last_at,
+            "note_sent": bool(note_sent),
+            "note_sent_at": note_sent_at,
         }
 
     grouped_step_ids: dict[str, set[int]] = {}
     grouped_last_at: dict[str, Optional[str]] = {}
     grouped_raw_call_id: dict[str, str] = {}
+    grouped_note_sent: dict[str, bool] = {}
+    grouped_note_sent_at: dict[str, Optional[str]] = {}
+
+    def _mark_note_sent(norm_call_id: str, ts: Optional[str]) -> None:
+        grouped_note_sent[norm_call_id] = True
+        grouped_note_sent_at[norm_call_id] = _max_iso(grouped_note_sent_at.get(norm_call_id), ts)
 
     def _merge_grouped_rows(rows: list[Any], call_key: str, step_key: str, last_key: str) -> None:
         for r in rows:
@@ -3232,11 +3875,110 @@ def get_pipeline_artifact_status(
             except Exception:
                 pass
 
+    # Optional note-push status by call, inferred from successful CRM push entries
+    # in pipeline_run.log_json. Keep this best-effort and fully backward compatible.
+    has_pipeline_run_cols = {
+        "id",
+        "pipeline_id",
+        "sales_agent",
+        "customer",
+        "call_id",
+        "status",
+        "started_at",
+        "finished_at",
+        "log_json",
+    }.issubset(_get_table_columns(db, "pipeline_run"))
+    if has_pipeline_run_cols:
+        try:
+            rows = db.execute(
+                _sql_text(
+                    "SELECT call_id, COALESCE(finished_at, started_at) AS last_at, log_json "
+                    "FROM pipeline_run "
+                    "WHERE pipeline_id = :pipeline_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND status = 'done' "
+                    "ORDER BY COALESCE(finished_at, started_at) DESC "
+                    "LIMIT 1000"
+                ),
+                {
+                    "pipeline_id": pipeline_id,
+                    "sales_agent": sales_agent,
+                    "customer": customer,
+                },
+            ).all()
+            for r in rows:
+                m = getattr(r, "_mapping", r)
+                cid_raw = str(m.get("call_id", "") if hasattr(m, "get") else (r[0] if len(r) > 0 else ""))
+                cid = _norm_call_id(cid_raw)
+                if requested_set and cid and cid not in requested_set:
+                    continue
+                last_at = _to_iso(m.get("last_at") if hasattr(m, "get") else (r[1] if len(r) > 1 else None))
+                log_blob = str(m.get("log_json", "") if hasattr(m, "get") else (r[2] if len(r) > 2 else ""))
+                if "[CRM-PUSH] ✓ Sent note " not in log_blob:
+                    continue
+                _mark_note_sent(cid, last_at)
+        except Exception:
+            pass
+
+    # Fallback (file-backed execution logs), for deployments where pipeline_run table
+    # does not exist or is not populated. Reads recent pipeline_run sessions and checks
+    # report.log_lines_tail for CRM push success markers.
+    if not grouped_note_sent:
+        try:
+            recent_sessions = execution_logs.list_recent(limit=2500, action="pipeline_run")
+            for row in recent_sessions:
+                ctx = row.get("context") if isinstance(row.get("context"), dict) else {}
+                if str(ctx.get("pipeline_id") or "").strip() != pipeline_id:
+                    continue
+                if str(ctx.get("sales_agent") or "").strip().lower() != str(sales_agent or "").strip().lower():
+                    continue
+                if str(ctx.get("customer") or "").strip().lower() != str(customer or "").strip().lower():
+                    continue
+                sid = str(row.get("session_id") or "").strip()
+                if not sid:
+                    continue
+
+                full = execution_logs.get_session(sid)
+                if not isinstance(full, dict):
+                    continue
+                report = full.get("report") if isinstance(full.get("report"), dict) else {}
+                tail = report.get("log_lines_tail") if isinstance(report, dict) else []
+                if not isinstance(tail, list):
+                    continue
+                sent_ok = False
+                for item in tail:
+                    if not isinstance(item, dict):
+                        continue
+                    txt = str(item.get("text") or item.get("message") or "")
+                    if "[CRM-PUSH] ✓ Sent note " in txt:
+                        sent_ok = True
+                        break
+                if not sent_ok:
+                    continue
+
+                cid = _norm_call_id(ctx.get("call_id"))
+                if requested_set and cid and cid not in requested_set:
+                    continue
+                ts = (
+                    _to_iso(full.get("finished_at_utc"))
+                    or _to_iso(full.get("updated_at_utc"))
+                    or _to_iso(row.get("updated_at_utc"))
+                )
+                _mark_note_sent(cid, ts)
+        except Exception:
+            pass
+
     calls_out: dict[str, dict[str, Any]] = {}
     source_call_ids = sorted(list(requested_set)) if requested_set else sorted([cid for cid in grouped_step_ids.keys() if cid])
     for norm_cid in source_call_ids:
         out_key = requested_norm_to_raw.get(norm_cid) or grouped_raw_call_id.get(norm_cid) or norm_cid
-        calls_out[out_key] = _state(grouped_step_ids.get(norm_cid, set()), grouped_last_at.get(norm_cid))
+        calls_out[out_key] = _state(
+            grouped_step_ids.get(norm_cid, set()),
+            grouped_last_at.get(norm_cid),
+            grouped_note_sent.get(norm_cid, False),
+            grouped_note_sent_at.get(norm_cid),
+        )
 
     # Include discovered calls too when caller did not pass explicit call_ids.
     if not requested_set:
@@ -3246,13 +3988,23 @@ def get_pipeline_artifact_status(
             out_key = grouped_raw_call_id.get(norm_cid) or norm_cid
             if out_key in calls_out:
                 continue
-            calls_out[out_key] = _state(grouped_step_ids.get(norm_cid, set()), grouped_last_at.get(norm_cid))
+            calls_out[out_key] = _state(
+                grouped_step_ids.get(norm_cid, set()),
+                grouped_last_at.get(norm_cid),
+                grouped_note_sent.get(norm_cid, False),
+                grouped_note_sent_at.get(norm_cid),
+            )
 
     return {
         "pipeline_id": pipeline_id,
         "sales_agent": sales_agent,
         "customer": customer,
-        "pair": _state(grouped_step_ids.get("", set()), grouped_last_at.get("")),
+        "pair": _state(
+            grouped_step_ids.get("", set()),
+            grouped_last_at.get(""),
+            grouped_note_sent.get("", False),
+            grouped_note_sent_at.get(""),
+        ),
         "calls": calls_out,
         "generated_at": datetime.utcnow().isoformat(),
     }
@@ -3265,6 +4017,8 @@ async def stop_pipeline(
     request: Request,
 ):
     """Request cancellation of an active pipeline run for this context."""
+    _require_can_run_pipeline(request)
+    _find_file(pipeline_id)
     client_local_time = request.headers.get("x-client-local-time", "")
     client_timezone = request.headers.get("x-client-timezone", "")
     execution_session_id = execution_logs.start_session(
@@ -3293,7 +4047,7 @@ async def stop_pipeline(
         task.cancel()
         cancelled = True
 
-    # Proactively mark state file as failed for per-pair UI so canvas unblocks quickly.
+    # Proactively mark state file as cancelled for per-pair UI so canvas unblocks quickly.
     # If the run coroutine is still alive, it will keep the same run_id and reconcile.
     try:
         path = _STATE_DIR / f"{_pair_key(pipeline_id, req.sales_agent, req.customer)}.json"
@@ -3302,9 +4056,10 @@ async def stop_pipeline(
             if data.get("status") == "running":
                 now_iso = datetime.utcnow().isoformat()
                 for s in data.get("steps", []):
-                    if s.get("state") == "running" or s.get("status") == "loading":
-                        s["state"] = "failed"
-                        s["status"] = "error"  # legacy compatibility
+                    st = str(s.get("state") or s.get("status") or "").strip().lower()
+                    if st in ("running", "loading", "started"):
+                        s["state"] = "cancelled"
+                        s["status"] = "cancelled"  # explicit status for UI mapping
                         s["end_time"] = now_iso
                         s["error_msg"] = "stopped by user"
                 node_states = data.get("node_states")
@@ -3315,9 +4070,9 @@ async def stop_pipeline(
                             continue
                         for node_id, raw_st in list(b.items()):
                             st = str(raw_st or "").lower()
-                            if st in ("running", "loading"):
-                                b[node_id] = "error"
-                data["status"] = "failed"
+                            if st in ("running", "loading", "started"):
+                                b[node_id] = "cancelled"
+                data["status"] = "cancelled"
                 data["updated_at"] = now_iso
                 path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -3342,6 +4097,7 @@ async def stop_pipeline(
 @router.get("/{pipeline_id}/runs")
 def list_pipeline_runs(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: Optional[str] = Query(None),
@@ -3349,6 +4105,10 @@ def list_pipeline_runs(
     db: Session = Depends(get_session),
 ):
     """Return recent runs for a specific pipeline."""
+    profile = _require_can_view(request)
+    _, pdef = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pdef):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     from ui.backend.models.pipeline_run import PipelineRun as PR
 
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
@@ -3379,6 +4139,7 @@ def list_pipeline_runs(
 @router.get("/{pipeline_id}/analytics")
 def get_pipeline_analytics(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: Optional[str] = Query(None),
@@ -3387,6 +4148,15 @@ def get_pipeline_analytics(
     db: Session = Depends(get_session),
 ):
     """Return parsed score + violation metrics from pipeline run outputs."""
+    profile = _require_can_view(request)
+    try:
+        _, pdef_access = _find_file(pipeline_id)
+        if not _can_access_pipeline_record(profile, pdef_access):
+            raise HTTPException(status_code=404, detail="Pipeline not found.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     from ui.backend.models.pipeline_run import PipelineRun as PR
     try:
         from ui.backend.routers.universal_agents import _load_all as _load_agents
@@ -3958,6 +4728,1037 @@ def get_pipeline_state(
         return None
 
 
+@router.get("/live-webhook/config")
+def get_live_webhook_config(request: Request):
+    profile = _require_can_view(request)
+    can_manage_live = bool((profile.get("permissions") or {}).get("can_manage_live_jobs"))
+    if _is_live_mirror_mode(request):
+        mirrored = _live_mirror_request_json("GET", "/api/pipelines/live-webhook/config", request=request)
+        if isinstance(mirrored, dict):
+            mirrored["read_only"] = True
+            mirrored["mirror_source"] = str(settings.live_mirror_base_url or "").strip()
+            mirrored["effective_read_only"] = True
+            mirrored["state_source"] = "live-mirror-api"
+            mirrored["user_permissions"] = profile.get("permissions") or {}
+        return mirrored
+    cfg = _load_live_webhook_config()
+    try:
+        from ui.backend.routers import webhooks as _wh
+
+        stats = _wh._get_rejected_webhook_stats()
+    except Exception:
+        stats = _load_live_webhook_stats()
+    return {
+        "enabled": bool(cfg.get("enabled", True)),
+        "ingest_only": bool(cfg.get("ingest_only", True)),
+        "trigger_pipeline": bool(cfg.get("trigger_pipeline", True)),
+        "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
+        "agent_continuity_pair_tag_fallback_enabled": bool(
+            cfg.get("agent_continuity_pair_tag_fallback_enabled", True)
+        ),
+        "agent_continuity_reject_multi_agent_pair_tags": bool(
+            cfg.get("agent_continuity_reject_multi_agent_pair_tags", True)
+        ),
+        "live_pipeline_ids": cfg.get("live_pipeline_ids") if isinstance(cfg.get("live_pipeline_ids"), list) else [],
+        "send_note_pipeline_ids": (
+            cfg.get("send_note_pipeline_ids") if isinstance(cfg.get("send_note_pipeline_ids"), list) else []
+        ),
+        "default_pipeline_id": str(cfg.get("default_pipeline_id") or "").strip(),
+        "pipeline_by_agent": cfg.get("pipeline_by_agent") if isinstance(cfg.get("pipeline_by_agent"), dict) else {},
+        "run_payload": cfg.get("run_payload") if isinstance(cfg.get("run_payload"), dict) else {},
+        "transcription_model": str(cfg.get("transcription_model") or "gpt-5.4"),
+        "transcription_timeout_s": int(cfg.get("transcription_timeout_s") or 900),
+        "transcription_poll_interval_s": float(cfg.get("transcription_poll_interval_s") or 2.0),
+        "backfill_historical_transcripts": bool(cfg.get("backfill_historical_transcripts", True)),
+        "backfill_timeout_s": int(cfg.get("backfill_timeout_s") or 5400),
+        "max_live_running": int(cfg.get("max_live_running") or 5),
+        "agent_continuity_filter_enabled": bool(cfg.get("agent_continuity_filter_enabled", True)),
+        "auto_retry_enabled": bool(cfg.get("auto_retry_enabled", True)),
+        "retry_max_attempts": int(cfg.get("retry_max_attempts") or 2),
+        "retry_delay_s": int(cfg.get("retry_delay_s") or 45),
+        "retry_on_server_error": bool(cfg.get("retry_on_server_error", True)),
+        "retry_on_rate_limit": bool(cfg.get("retry_on_rate_limit", True)),
+        "retry_on_timeout": bool(cfg.get("retry_on_timeout", True)),
+        "rejected_webhooks_total": int(stats.get("rejected_webhooks_total") or 0),
+        "rejected_by_reason": (
+            stats.get("rejected_by_reason") if isinstance(stats.get("rejected_by_reason"), dict) else {}
+        ),
+        "rejected_updated_at": str(stats.get("updated_at") or ""),
+        "read_only": bool((not can_manage_live) or _is_live_state_read_only(request)),
+        "effective_read_only": bool((not can_manage_live) or _is_live_state_read_only(request)),
+        "state_source": "shared-db" if bool(getattr(settings, "live_state_use_db", True)) else "local-file",
+        "user_permissions": profile.get("permissions") or {},
+    }
+
+
+@router.get("/live-webhook/rejections")
+def get_live_webhook_rejections(
+    request: Request,
+    limit: int = Query(20000, ge=1, le=20000),
+    status: str = Query("all"),
+    include_payload: int = Query(0),
+):
+    _require_can_view(request)
+    status_norm = str(status or "all").strip().lower() or "all"
+    include_payload_flag = bool(include_payload)
+    if _is_live_mirror_mode(request):
+        path = (
+            f"/api/pipelines/live-webhook/rejections"
+            f"?limit={int(limit)}&status={status_norm}&include_payload={1 if include_payload_flag else 0}"
+        )
+        return _live_mirror_request_json("GET", path, request=request)
+    from ui.backend.routers import webhooks as _wh
+
+    include_non_rejected = status_norm == "all"
+    all_items = _wh._list_rejected_webhooks(
+        limit=20000,
+        include_non_rejected=include_non_rejected,
+        include_archive=True,
+    )
+    if status_norm != "all":
+        all_items = [
+            it for it in all_items
+            if str((it or {}).get("status") or "").strip().lower() == status_norm
+        ]
+    if not include_payload_flag:
+        compact_items: list[dict[str, Any]] = []
+        for row in all_items:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            payload = out.get("payload")
+            out["payload_present"] = isinstance(payload, dict)
+            out.pop("payload", None)
+            compact_items.append(out)
+        all_items = compact_items
+    total_count = len(all_items)
+    items = all_items[: int(limit)]
+    return {
+        "ok": True,
+        "count": total_count,
+        "returned_count": len(items),
+        "total_count": total_count,
+        "items": items,
+    }
+
+
+@router.get("/live-webhook/rejections/{rejection_id}")
+def get_live_webhook_rejection(
+    rejection_id: str,
+    request: Request,
+    include_payload: int = Query(1),
+):
+    _require_can_view(request)
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection id.")
+    include_payload_flag = bool(include_payload)
+    if _is_live_mirror_mode(request):
+        path = (
+            f"/api/pipelines/live-webhook/rejections/{rid}"
+            f"?include_payload={1 if include_payload_flag else 0}"
+        )
+        return _live_mirror_request_json("GET", path, request=request)
+
+    from ui.backend.routers import webhooks as _wh
+
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Rejected webhook not found: {rid}")
+    out = dict(row)
+    payload = out.get("payload")
+    out["payload_present"] = isinstance(payload, dict)
+    if not include_payload_flag:
+        out.pop("payload", None)
+    return {"ok": True, "item": out}
+
+
+@router.post("/live-webhook/rejections/{rejection_id}/enqueue")
+async def enqueue_live_webhook_rejection(
+    rejection_id: str,
+    req: LiveWebhookRejectionEnqueueIn,
+    request: Request,
+):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook rejections are read-only in this environment.")
+
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection id.")
+
+    from ui.backend.routers import webhooks as _wh
+
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Rejected webhook record not found.")
+
+    cfg = _wh._load_call_ended_config()
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    sales_agent = str(row.get("sales_agent") or payload.get("agent") or payload.get("sales_agent") or "").strip()
+    customer = str(row.get("customer") or payload.get("customer") or "").strip()
+    call_id = str(row.get("call_id") or payload.get("call_id") or "").strip()
+    account_id = str(row.get("account_id") or payload.get("account_id") or "").strip()
+    crm_url = str(row.get("crm_url") or payload.get("crm_url") or "").strip()
+    if not (sales_agent and customer and call_id):
+        raise HTTPException(status_code=400, detail="Rejected record is missing agent/customer/call context.")
+
+    requested_pipeline_id = str(req.pipeline_id or "").strip()
+    pipeline_ids: list[str] = []
+    if requested_pipeline_id:
+        pipeline_ids = [requested_pipeline_id]
+    else:
+        stored_pipeline_ids = row.get("pipeline_ids") if isinstance(row.get("pipeline_ids"), list) else []
+        clean_stored = [str(x or "").strip() for x in stored_pipeline_ids if str(x or "").strip()]
+        if clean_stored:
+            pipeline_ids = clean_stored if bool(req.run_all) else [clean_stored[0]]
+        else:
+            live_ids = _resolve_live_pipeline_ids(cfg)
+            if live_ids:
+                pipeline_ids = live_ids if bool(req.run_all) else [live_ids[0]]
+            else:
+                mapped = _wh._resolve_pipeline_id(cfg, sales_agent, sales_agent)
+                if mapped:
+                    pipeline_ids = [mapped]
+    if not pipeline_ids:
+        raise HTTPException(status_code=400, detail="No pipeline resolved for rejected webhook replay.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cfg_run_payload = cfg.get("run_payload") if isinstance(cfg.get("run_payload"), dict) else {}
+    run_ids: list[str] = []
+    results: list[dict[str, Any]] = []
+    for pipeline_id in pipeline_ids:
+        _wh._assert_pipeline_exists(pipeline_id)
+        _, pdef = _find_file(pipeline_id)
+        pipeline_name = str(pdef.get("name") or pipeline_id)
+        run_id = str(uuid.uuid4())
+        run_payload: dict[str, Any] = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "resume_partial": True,
+            "run_origin": "webhook",
+            "run_id": run_id,
+        }
+        for k, v in cfg_run_payload.items():
+            run_payload[str(k)] = v
+        queue_item = {
+            "id": str(uuid.uuid4()),
+            "event_id": str(row.get("event_id") or ""),
+            "event_file": str(row.get("event_file") or ""),
+            "webhook_type": "rejected-replay",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "state": "queued",
+            "attempts": 0,
+            "max_attempts": int(cfg.get("retry_max_attempts") or 2),
+            "next_attempt_at": now_iso,
+            "last_error": "",
+            "request_base_url": str(request.base_url or ""),
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "run_id": run_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "pair": {
+                "crm_url": crm_url,
+                "account_id": account_id,
+                "agent": sales_agent,
+                "customer": customer,
+            },
+            "payload": run_payload,
+            "record_path": str(payload.get("record_path") or ""),
+            "manual_replay": True,
+            "rejection_id": rid,
+        }
+        created, meta = await _wh._enqueue_live_item(queue_item)
+        if created:
+            _wh._upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=pipeline_name,
+                sales_agent=sales_agent,
+                customer=customer,
+                call_id=call_id,
+                status="queued",
+                log_line=f"Queued manually from rejected webhook ({rid[:8]})",
+            )
+            run_ids.append(run_id)
+        meta_run_id = str(meta.get("run_id") or run_id)
+        if meta_run_id and meta_run_id not in run_ids:
+            run_ids.append(meta_run_id)
+        results.append(
+            {
+                "pipeline_id": pipeline_id,
+                "pipeline_name": pipeline_name,
+                "run_id": meta_run_id,
+                "state": str(meta.get("state") or ("queued" if created else "queued")),
+                "message": str(meta.get("message") or ""),
+                "created": bool(created),
+            }
+        )
+
+    _wh._mark_rejection_queued_manual(rid, run_ids, pipeline_ids)
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "rejection_id": rid,
+        "run_ids": run_ids,
+        "pipelines": results,
+    }
+
+
+@router.post("/live-webhook/runs/{run_id}/enqueue")
+async def enqueue_live_webhook_run(
+    run_id: str,
+    req: LiveWebhookRunEnqueueIn,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
+
+    source_run_id = str(run_id or "").strip()
+    if not source_run_id:
+        raise HTTPException(status_code=400, detail="Missing run id.")
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.routers import webhooks as _wh
+
+    src = db.get(PR, source_run_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    pipeline_id = str(req.pipeline_id or src.pipeline_id or "").strip()
+    if not pipeline_id:
+        raise HTTPException(status_code=400, detail="No pipeline id resolved from source run.")
+    _, pdef = _find_file(pipeline_id)
+    pipeline_name = str(pdef.get("name") or src.pipeline_name or pipeline_id)
+
+    sales_agent = str(src.sales_agent or "").strip()
+    customer = str(src.customer or "").strip()
+    call_id = str(src.call_id or "").strip()
+    if not (sales_agent and customer):
+        raise HTTPException(status_code=400, detail="Source run missing agent/customer context.")
+
+    cfg = _load_live_webhook_config()
+    queued_at = datetime.now(timezone.utc).isoformat()
+    new_run_id = str(uuid.uuid4())
+    run_payload: dict[str, Any] = {
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "call_id": call_id,
+        "resume_partial": True,
+        "run_origin": "webhook",
+        "run_id": new_run_id,
+        "manual_replay": True,
+        "source_run_id": source_run_id,
+    }
+    cfg_run_payload = cfg.get("run_payload")
+    if isinstance(cfg_run_payload, dict):
+        for k, v in cfg_run_payload.items():
+            run_payload[str(k)] = v
+
+    queue_item = {
+        "id": str(uuid.uuid4()),
+        "event_id": "",
+        "event_file": "",
+        "webhook_type": "failed-replay",
+        "created_at": queued_at,
+        "updated_at": queued_at,
+        "state": "queued",
+        "attempts": 0,
+        "max_attempts": int(cfg.get("retry_max_attempts") or 2),
+        "next_attempt_at": queued_at,
+        "last_error": "",
+        "request_base_url": str(request.base_url or ""),
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "run_id": new_run_id,
+        "sales_agent": sales_agent,
+        "customer": customer,
+        "call_id": call_id,
+        "pair": _wh._pair_from_names(sales_agent, customer),
+        "payload": run_payload,
+        "manual_replay": True,
+        "source_run_id": source_run_id,
+    }
+
+    created, meta = await _wh._enqueue_live_item(queue_item)
+    effective_run_id = str(meta.get("run_id") or new_run_id)
+    if created:
+        _wh._upsert_pipeline_run_stub(
+            run_id=effective_run_id,
+            pipeline_id=pipeline_id,
+            pipeline_name=pipeline_name,
+            sales_agent=sales_agent,
+            customer=customer,
+            call_id=call_id,
+            status="queued",
+            log_line=f"Queued manually from failed run replay ({source_run_id[:8]})",
+        )
+
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "source_run_id": source_run_id,
+        "run_id": effective_run_id,
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "state": str(meta.get("state") or ("queued" if created else "")),
+        "deduplicated": (not created),
+        "message": str(meta.get("message") or ""),
+    }
+
+
+@router.post("/live-webhook/runs/{run_id}/cancel")
+async def cancel_live_webhook_run(
+    run_id: str,
+    req: LiveWebhookRunCancelIn,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
+
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing run id.")
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.routers import webhooks as _wh
+
+    reason = str(req.reason or "Cancelled by user.").strip() or "Cancelled by user."
+    row = db.get(PR, rid)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    queue_found = False
+    queue_prev_state = ""
+    queue_changed = False
+    async with _wh._LIVE_QUEUE_LOCK:
+        queue = _wh._load_live_queue()
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("run_id") or "").strip() != rid:
+                continue
+            queue_found = True
+            queue_prev_state = str(item.get("state") or "").strip().lower()
+            if queue_prev_state != "cancelled":
+                item["state"] = "cancelled"
+                item["updated_at"] = now_iso
+                item["next_attempt_at"] = now_iso
+                item["last_error"] = reason
+                queue_changed = True
+            break
+        if queue_changed:
+            _wh._save_live_queue(queue)
+
+    cancelled_task = False
+    slot = ""
+    if row is not None:
+        slot = _run_slot_key(
+            str(row.pipeline_id or ""),
+            str(row.sales_agent or ""),
+            str(row.customer or ""),
+            str(row.call_id or ""),
+        )
+        with _ACTIVE_RUN_LOCK:
+            ev = _STOP_REQUESTED.get(slot)
+            if ev:
+                ev.set()
+            task = _ACTIVE_RUN_TASKS.get(slot)
+        if task and not task.done():
+            task.cancel()
+            cancelled_task = True
+
+        _wh._upsert_pipeline_run_stub(
+            run_id=rid,
+            pipeline_id=str(row.pipeline_id or ""),
+            pipeline_name=str(row.pipeline_name or row.pipeline_id or ""),
+            sales_agent=str(row.sales_agent or ""),
+            customer=str(row.customer or ""),
+            call_id=str(row.call_id or ""),
+            status="cancelled",
+            log_line=f"Cancelled by user: {reason[:300]}",
+        )
+    elif queue_found:
+        # Keep a visible history row even when DB row was not created yet.
+        _wh._upsert_pipeline_run_stub(
+            run_id=rid,
+            pipeline_id="",
+            pipeline_name="",
+            sales_agent="",
+            customer="",
+            call_id="",
+            status="cancelled",
+            log_line=f"Cancelled from queue by user: {reason[:300]}",
+        )
+
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "run_id": rid,
+        "queue_found": queue_found,
+        "queue_prev_state": queue_prev_state,
+        "queue_updated": queue_changed,
+        "cancelled_task": cancelled_task,
+        "slot": slot,
+        "reason": reason,
+    }
+
+
+@router.post("/live-webhook/runs/{run_id}/retry")
+async def retry_live_webhook_run(
+    run_id: str,
+    req: LiveWebhookRunRetryIn,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
+
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing run id.")
+
+    from ui.backend.models.pipeline_run import PipelineRun as PR
+    from ui.backend.routers import webhooks as _wh
+
+    row = db.get(PR, rid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    queue_found = False
+    queue_changed = False
+    queue_prev_state = ""
+    async with _wh._LIVE_QUEUE_LOCK:
+        queue = _wh._load_live_queue()
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("run_id") or "").strip() != rid:
+                continue
+            queue_found = True
+            queue_prev_state = str(item.get("state") or "").strip().lower()
+            if queue_prev_state in {"running", "preparing"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Run is currently {queue_prev_state}; cancel it first before retrying.",
+                )
+            if queue_prev_state != "retrying":
+                item["state"] = "retrying"
+                item["updated_at"] = now_iso
+                item["next_attempt_at"] = now_iso
+                if not str(item.get("last_error") or "").strip():
+                    item["last_error"] = "Manual retry requested."
+                queue_changed = True
+            break
+        if queue_changed:
+            _wh._save_live_queue(queue)
+
+    pipeline_id = str(req.pipeline_id or row.pipeline_id or "").strip()
+    if not pipeline_id:
+        raise HTTPException(status_code=400, detail="No pipeline id resolved for retry.")
+    _, pdef = _find_file(pipeline_id)
+    pipeline_name = str(pdef.get("name") or row.pipeline_name or pipeline_id)
+    sales_agent = str(row.sales_agent or "").strip()
+    customer = str(row.customer or "").strip()
+    call_id = str(row.call_id or "").strip()
+
+    cfg = _load_live_webhook_config()
+    created = False
+    meta: dict[str, Any] = {}
+    if not queue_found:
+        run_payload: dict[str, Any] = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "resume_partial": True,
+            "run_origin": "webhook",
+            "run_id": rid,
+            "manual_replay": True,
+            "source_run_id": rid,
+        }
+        cfg_run_payload = cfg.get("run_payload")
+        if isinstance(cfg_run_payload, dict):
+            for k, v in cfg_run_payload.items():
+                run_payload[str(k)] = v
+
+        queue_item = {
+            "id": str(uuid.uuid4()),
+            "event_id": "",
+            "event_file": "",
+            "webhook_type": "failed-retry",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "state": "retrying",
+            "attempts": 0,
+            "max_attempts": int(cfg.get("retry_max_attempts") or 2),
+            "next_attempt_at": now_iso,
+            "last_error": "Manual retry requested.",
+            "request_base_url": str(request.base_url or ""),
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "run_id": rid,
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "pair": _wh._pair_from_names(sales_agent, customer),
+            "payload": run_payload,
+            "manual_replay": True,
+            "source_run_id": rid,
+        }
+        created, meta = await _wh._enqueue_live_item(queue_item)
+    else:
+        meta = {
+            "run_id": rid,
+            "state": "retrying",
+            "message": "Moved to retry queue.",
+        }
+
+    _wh._upsert_pipeline_run_stub(
+        run_id=rid,
+        pipeline_id=pipeline_id,
+        pipeline_name=pipeline_name,
+        sales_agent=sales_agent,
+        customer=customer,
+        call_id=call_id,
+        status="retrying",
+        log_line=(
+            "Manual retry requested; moved to retry queue."
+            if queue_found
+            else "Manual retry requested; queued for retry dispatch."
+        ),
+    )
+
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "run_id": str(meta.get("run_id") or rid),
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "queue_found": queue_found,
+        "queue_prev_state": queue_prev_state,
+        "queue_updated": queue_changed,
+        "created_queue_item": bool(created),
+        "state": str(meta.get("state") or ("retrying" if (queue_found or created) else "")),
+        "deduplicated": (not created and not queue_found),
+        "message": str(meta.get("message") or ""),
+    }
+
+
+@router.put("/live-webhook/config")
+def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook config is read-only in this environment.")
+    incoming = req.model_dump()
+    incoming["default_pipeline_id"] = str(incoming.get("default_pipeline_id") or "").strip()
+    raw_live_ids = incoming.get("live_pipeline_ids")
+    live_ids = [str(v or "").strip() for v in raw_live_ids] if isinstance(raw_live_ids, list) else []
+    incoming["live_pipeline_ids"] = [pid for pid in live_ids if pid]
+    raw_send_note_ids = incoming.get("send_note_pipeline_ids")
+    send_note_ids = [str(v or "").strip() for v in raw_send_note_ids] if isinstance(raw_send_note_ids, list) else []
+    incoming["send_note_pipeline_ids"] = [pid for pid in send_note_ids if pid]
+
+    default_pid = str(incoming.get("default_pipeline_id") or "").strip()
+    if default_pid:
+        _find_file(default_pid)
+    for pid in incoming.get("live_pipeline_ids", []):
+        _find_file(pid)
+    for pid in incoming.get("send_note_pipeline_ids", []):
+        _find_file(pid)
+
+    mapping = incoming.get("pipeline_by_agent")
+    if isinstance(mapping, dict):
+        for _agent, pid in list(mapping.items()):
+            pid_s = str(pid or "").strip()
+            if not pid_s:
+                continue
+            _find_file(pid_s)
+
+    cfg = _load_live_webhook_config()
+    cfg.update(incoming)
+    saved = _save_live_webhook_config(cfg)
+    return {
+        "ok": True,
+        "config": {
+            "enabled": bool(saved.get("enabled", True)),
+            "ingest_only": bool(saved.get("ingest_only", True)),
+            "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
+            "agent_continuity_pair_tag_fallback_enabled": bool(
+                saved.get("agent_continuity_pair_tag_fallback_enabled", True)
+            ),
+            "agent_continuity_reject_multi_agent_pair_tags": bool(
+                saved.get("agent_continuity_reject_multi_agent_pair_tags", True)
+            ),
+            "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
+            "send_note_pipeline_ids": (
+                saved.get("send_note_pipeline_ids") if isinstance(saved.get("send_note_pipeline_ids"), list) else []
+            ),
+            "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
+            "pipeline_by_agent": (
+                saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
+            ),
+            "run_payload": saved.get("run_payload") if isinstance(saved.get("run_payload"), dict) else {},
+            "transcription_model": str(saved.get("transcription_model") or "gpt-5.4"),
+            "transcription_timeout_s": int(saved.get("transcription_timeout_s") or 900),
+            "transcription_poll_interval_s": float(saved.get("transcription_poll_interval_s") or 2.0),
+            "backfill_historical_transcripts": bool(saved.get("backfill_historical_transcripts", True)),
+            "backfill_timeout_s": int(saved.get("backfill_timeout_s") or 5400),
+            "max_live_running": int(saved.get("max_live_running") or 5),
+            "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
+            "auto_retry_enabled": bool(saved.get("auto_retry_enabled", True)),
+            "retry_max_attempts": int(saved.get("retry_max_attempts") or 2),
+            "retry_delay_s": int(saved.get("retry_delay_s") or 45),
+            "retry_on_server_error": bool(saved.get("retry_on_server_error", True)),
+            "retry_on_rate_limit": bool(saved.get("retry_on_rate_limit", True)),
+            "retry_on_timeout": bool(saved.get("retry_on_timeout", True)),
+        },
+    }
+
+
+@router.put("/live-webhook/quick-set")
+def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook config is read-only in this environment.")
+    pipeline_id = str(req.pipeline_id or "").strip()
+    if req.enabled and not pipeline_id:
+        raise HTTPException(status_code=400, detail="pipeline_id is required when enabling live webhook execution.")
+    if pipeline_id:
+        _find_file(pipeline_id)
+
+    cfg = _load_live_webhook_config()
+    cfg["enabled"] = bool(req.enabled)
+    cfg["trigger_pipeline"] = True
+    cfg["ingest_only"] = not bool(req.enabled)
+    cfg["default_pipeline_id"] = pipeline_id if req.enabled else ""
+    cfg["live_pipeline_ids"] = [pipeline_id] if (req.enabled and pipeline_id) else []
+
+    if bool(req.listen_all_webhooks) and bool(req.clear_agent_mappings):
+        cfg["pipeline_by_agent"] = {}
+
+    run_payload = cfg.get("run_payload")
+    if not isinstance(run_payload, dict):
+        run_payload = {}
+    run_payload.setdefault("resume_partial", True)
+    cfg["run_payload"] = run_payload
+
+    saved = _save_live_webhook_config(cfg)
+    return {
+        "ok": True,
+        "message": (
+            f"Live webhook enabled for all calls using pipeline {pipeline_id}"
+            if req.enabled
+            else "Live webhook disabled (ingest-only mode)."
+        ),
+        "config": {
+            "enabled": bool(saved.get("enabled", True)),
+            "ingest_only": bool(saved.get("ingest_only", True)),
+            "trigger_pipeline": bool(saved.get("trigger_pipeline", True)),
+            "agent_continuity_filter_enabled": bool(saved.get("agent_continuity_filter_enabled", True)),
+            "agent_continuity_pair_tag_fallback_enabled": bool(
+                saved.get("agent_continuity_pair_tag_fallback_enabled", True)
+            ),
+            "agent_continuity_reject_multi_agent_pair_tags": bool(
+                saved.get("agent_continuity_reject_multi_agent_pair_tags", True)
+            ),
+            "live_pipeline_ids": saved.get("live_pipeline_ids") if isinstance(saved.get("live_pipeline_ids"), list) else [],
+            "send_note_pipeline_ids": (
+                saved.get("send_note_pipeline_ids") if isinstance(saved.get("send_note_pipeline_ids"), list) else []
+            ),
+            "default_pipeline_id": str(saved.get("default_pipeline_id") or "").strip(),
+            "pipeline_by_agent": (
+                saved.get("pipeline_by_agent") if isinstance(saved.get("pipeline_by_agent"), dict) else {}
+            ),
+            "run_payload": saved.get("run_payload") if isinstance(saved.get("run_payload"), dict) else {},
+            "transcription_model": str(saved.get("transcription_model") or "gpt-5.4"),
+            "transcription_timeout_s": int(saved.get("transcription_timeout_s") or 900),
+            "transcription_poll_interval_s": float(saved.get("transcription_poll_interval_s") or 2.0),
+            "backfill_historical_transcripts": bool(saved.get("backfill_historical_transcripts", True)),
+            "backfill_timeout_s": int(saved.get("backfill_timeout_s") or 5400),
+            "max_live_running": int(saved.get("max_live_running") or 5),
+            "auto_retry_enabled": bool(saved.get("auto_retry_enabled", True)),
+            "retry_max_attempts": int(saved.get("retry_max_attempts") or 2),
+            "retry_delay_s": int(saved.get("retry_delay_s") or 45),
+            "retry_on_server_error": bool(saved.get("retry_on_server_error", True)),
+            "retry_on_rate_limit": bool(saved.get("retry_on_rate_limit", True)),
+            "retry_on_timeout": bool(saved.get("retry_on_timeout", True)),
+        },
+    }
+
+
+@router.get("/live-webhook/rejections")
+def list_live_webhook_rejections(
+    request: Request,
+    limit: int = Query(20000, ge=1, le=20000),
+    status: str = Query("all"),
+    include_payload: int = Query(0),
+):
+    _require_can_view(request)
+    status_norm = str(status or "all").strip().lower() or "all"
+    include_payload_flag = bool(include_payload)
+    if _is_live_mirror_mode(request):
+        path = (
+            f"/api/pipelines/live-webhook/rejections"
+            f"?limit={int(limit)}&status={status_norm}&include_payload={1 if include_payload_flag else 0}"
+        )
+        return _live_mirror_request_json("GET", path, request=request)
+
+    from ui.backend.routers import webhooks as _wh
+
+    wanted_status = status_norm
+    include_non_rejected = wanted_status == "all"
+    all_items = _wh._list_rejected_webhooks(
+        limit=20000,
+        include_non_rejected=include_non_rejected,
+        include_archive=True,
+    )
+    if not include_non_rejected:
+        all_items = [
+            row for row in all_items
+            if str((row or {}).get("status") or "rejected").strip().lower() == wanted_status
+        ]
+    if not include_payload_flag:
+        compact_items: list[dict[str, Any]] = []
+        for row in all_items:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            payload = out.get("payload")
+            out["payload_present"] = isinstance(payload, dict)
+            out.pop("payload", None)
+            compact_items.append(out)
+        all_items = compact_items
+    total_count = len(all_items)
+    items = all_items[: int(limit)]
+    return {
+        "ok": True,
+        "count": total_count,
+        "returned_count": len(items),
+        "total_count": total_count,
+        "items": items,
+    }
+
+
+@router.post("/live-webhook/rejections/{rejection_id}/enqueue")
+async def enqueue_live_webhook_rejection(
+    rejection_id: str,
+    req: LiveWebhookRejectionEnqueueIn,
+    request: Request,
+):
+    _require_can_manage_live(request)
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook requeue is read-only in this environment.")
+
+    from ui.backend.routers import webhooks as _wh
+
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection_id.")
+
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Rejected webhook not found: {rid}")
+
+    target_pipeline_ids: list[str] = []
+    if bool(req.run_all):
+        raw = row.get("pipeline_ids")
+        if isinstance(raw, list):
+            target_pipeline_ids.extend([str(x or "").strip() for x in raw if str(x or "").strip()])
+    requested_pipeline_id = str(req.pipeline_id or "").strip()
+    if requested_pipeline_id:
+        target_pipeline_ids.append(requested_pipeline_id)
+    if not target_pipeline_ids:
+        raw = row.get("pipeline_ids")
+        if isinstance(raw, list):
+            target_pipeline_ids.extend([str(x or "").strip() for x in raw if str(x or "").strip()])
+    if not target_pipeline_ids:
+        cfg = _load_live_webhook_config()
+        live_ids = cfg.get("live_pipeline_ids")
+        if isinstance(live_ids, list):
+            target_pipeline_ids.extend([str(x or "").strip() for x in live_ids if str(x or "").strip()])
+        default_pid = str(cfg.get("default_pipeline_id") or "").strip()
+        if default_pid:
+            target_pipeline_ids.append(default_pid)
+
+    dedup_ids: list[str] = []
+    seen: set[str] = set()
+    for pid in target_pipeline_ids:
+        p = str(pid or "").strip()
+        if not p or p in seen:
+            continue
+        _find_file(p)
+        seen.add(p)
+        dedup_ids.append(p)
+    target_pipeline_ids = dedup_ids
+    if not target_pipeline_ids:
+        raise HTTPException(status_code=400, detail="No target pipeline id was resolved for this rejection.")
+
+    pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+    raw_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    sales_agent = str(row.get("sales_agent") or pair.get("agent") or raw_payload.get("agent") or "").strip()
+    customer = str(row.get("customer") or pair.get("customer") or raw_payload.get("customer") or "").strip()
+    call_id = str(row.get("call_id") or raw_payload.get("call_id") or "").strip()
+    pair_data = {
+        "crm_url": str(pair.get("crm_url") or raw_payload.get("crm_url") or ""),
+        "account_id": str(pair.get("account_id") or raw_payload.get("account_id") or ""),
+        "agent": sales_agent,
+        "customer": customer,
+    }
+
+    cfg = _load_live_webhook_config()
+    max_attempts = int(cfg.get("retry_max_attempts") or 2)
+    queued_at = datetime.now(timezone.utc).isoformat()
+    pipelines_out: list[dict[str, Any]] = []
+    run_ids: list[str] = []
+    request_base_url = str(request.base_url or "")
+
+    for pipeline_id in target_pipeline_ids:
+        _, pdef = _find_file(pipeline_id)
+        pipeline_name = str(pdef.get("name") or pipeline_id)
+        run_id = str(uuid.uuid4())
+        run_payload = {
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "resume_partial": True,
+            "run_origin": "webhook",
+            "run_id": run_id,
+            "manual_replay": True,
+            "rejection_id": rid,
+        }
+        queue_item = {
+            "id": str(uuid.uuid4()),
+            "webhook_type": "rejected-replay",
+            "created_at": queued_at,
+            "updated_at": queued_at,
+            "state": "queued",
+            "attempts": 0,
+            "max_attempts": max_attempts,
+            "next_attempt_at": queued_at,
+            "last_error": "",
+            "request_base_url": request_base_url,
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "run_id": run_id,
+            "sales_agent": sales_agent,
+            "customer": customer,
+            "call_id": call_id,
+            "pair": pair_data,
+            "payload": run_payload,
+            "event_id": str(row.get("event_id") or ""),
+            "event_file": str(row.get("event_file") or ""),
+            "manual_replay": True,
+            "rejection_id": rid,
+        }
+        created, meta = await _wh._enqueue_live_item(queue_item)
+        effective_run_id = str(meta.get("run_id") or run_id)
+        if created:
+            _wh._upsert_pipeline_run_stub(
+                run_id=effective_run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=pipeline_name,
+                sales_agent=sales_agent,
+                customer=customer,
+                call_id=call_id,
+                status="queued",
+                log_line="Queued from rejected webhook replay.",
+            )
+        pipelines_out.append(
+            {
+                "pipeline_id": pipeline_id,
+                "pipeline_name": pipeline_name,
+                "run_id": effective_run_id,
+                "state": str(meta.get("state") or ("queued" if created else "")),
+                "message": str(meta.get("message") or ""),
+                "deduplicated": (not created),
+            }
+        )
+        if effective_run_id:
+            run_ids.append(effective_run_id)
+
+    _wh._mark_rejection_queued_manual(rid, run_ids, target_pipeline_ids)
+    _wh.ensure_live_dispatcher_started()
+    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
+
+    return {
+        "ok": True,
+        "rejection_id": rid,
+        "pipeline_count": len(pipelines_out),
+        "run_ids": run_ids,
+        "pipelines": pipelines_out,
+    }
+
+
+@router.get("/{pipeline_id}/live-webhook/wait")
+async def wait_for_live_webhook(
+    pipeline_id: str,
+    request: Request,
+    sales_agent: str = Query(""),
+    customer: str = Query(""),
+    call_id: str = Query(""),
+    after_ms: int = Query(0, ge=0),
+    timeout_s: float = Query(45.0, ge=1.0, le=90.0),
+):
+    """Long-poll for next webhook payload matching the current pipeline context."""
+    profile = _require_can_view(request)
+    _, pdef = _find_file(pipeline_id)  # validate pipeline exists
+    if not _can_access_pipeline_record(profile, pdef):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+
+    wanted_agent = str(sales_agent or "").strip()
+    wanted_customer = str(customer or "").strip()
+    wanted_call_id = str(call_id or "").strip()
+
+    cursor_ms = int(after_ms or 0)
+    deadline = time.time() + float(timeout_s)
+    poll_interval_s = 0.75
+
+    while True:
+        evt = _find_latest_matching_webhook_event(
+            after_ms=cursor_ms,
+            sales_agent=wanted_agent,
+            customer=wanted_customer,
+            call_id=wanted_call_id,
+        )
+        if evt:
+            evt_ms = int(evt.get("received_ms") or 0)
+            return {
+                "ok": True,
+                "triggered": True,
+                "pipeline_id": pipeline_id,
+                "cursor_ms": evt_ms or cursor_ms,
+                "event": evt,
+            }
+
+        if time.time() >= deadline:
+            return {
+                "ok": True,
+                "triggered": False,
+                "pipeline_id": pipeline_id,
+                "cursor_ms": cursor_ms,
+                "timeout": True,
+            }
+        await asyncio.sleep(poll_interval_s)
+
+
 @router.post("/{pipeline_id}/run")
 async def run_pipeline(
     pipeline_id: str,
@@ -3966,6 +5767,10 @@ async def run_pipeline(
     db: Session = Depends(get_session),
 ):
     """Execute a pipeline step-by-step, streaming SSE events."""
+    profile = _require_can_run_pipeline(request)
+    _, pdef = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pdef):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     from ui.backend.models.agent_result import AgentResult as AR
     from ui.backend.models.note import Note
     from ui.backend.models.pipeline_artifact import PipelineArtifact as PA
@@ -3974,6 +5779,7 @@ async def run_pipeline(
     from ui.backend.routers.universal_agents import (
         _sse, _is_file_source, _resolve_input,
         _llm_call_with_files, _llm_call_anthropic_files_streaming,
+        _resolve_provider_file_refs,
         _load_all as _load_agents,
     )
 
@@ -3981,7 +5787,9 @@ async def run_pipeline(
     steps = pipeline_def.get("steps", [])
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
 
-    run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, req.call_id)
+    requested_call_id = str(req.call_id or "").strip()
+    effective_call_id = str(req.context_call_id or "").strip() or requested_call_id
+    run_slot = _run_slot_key(pipeline_id, req.sales_agent, req.customer, effective_call_id)
     client_local_time = request.headers.get("x-client-local-time", "")
     client_timezone = request.headers.get("x-client-timezone", "")
 
@@ -4064,14 +5872,30 @@ async def run_pipeline(
 
     async def stream():
         pipeline_name = pipeline_def.get("name", "pipeline")
-        cid_short = f"…{req.call_id[-8:]}" if req.call_id else "pair"
+        input_scope_call_id = effective_call_id
+        cid_short = f"…{input_scope_call_id[-8:]}" if input_scope_call_id else "pair"
+        _requested_origin = str(req.run_origin or "").strip().lower()
+        if _requested_origin in {"webhook", "production"}:
+            run_origin = "webhook"
+        elif _requested_origin in {"local", "test"}:
+            run_origin = "local"
+        else:
+            run_origin = "local"
 
         # ── Create history run record ────────────────────────────────────────
         recent = log_buffer.get_recent(1)
         start_seq = recent[-1].seq if recent else 0
 
-        run_id = str(uuid.uuid4())
+        requested_run_id = str(req.run_id or "").strip()
+        run_id = requested_run_id or str(uuid.uuid4())
         run_start_dt = datetime.utcnow().isoformat()
+        existing_run_row = None
+        if requested_run_id:
+            try:
+                with Session(_db_engine) as _s:
+                    existing_run_row = _s.get(PR, requested_run_id)
+            except Exception:
+                existing_run_row = None
         execution_session_id = execution_logs.start_session(
             action="pipeline_run",
             source="backend",
@@ -4081,10 +5905,13 @@ async def run_pipeline(
                 "run_slot": run_slot,
                 "sales_agent": req.sales_agent,
                 "customer": req.customer,
-                "call_id": req.call_id,
+                "call_id": input_scope_call_id,
+                "requested_run_id": requested_run_id,
                 "force": bool(req.force),
                 "force_step_indices": [int(i) for i in (req.force_step_indices or [])],
                 "resume_partial": bool(req.resume_partial),
+                "execute_step_indices": [int(i) for i in (req.execute_step_indices or [])],
+                "prepare_input_only": bool(req.prepare_input_only),
             },
             client_local_time=client_local_time,
             client_timezone=client_timezone,
@@ -4095,10 +5922,24 @@ async def run_pipeline(
             f"Pipeline run started: {pipeline_name}",
             level="stage",
             status="running",
-            data={"run_id": run_id, "steps_total": len(steps)},
+            data={
+                "run_id": run_id,
+                "steps_total": len(steps),
+                "input_scope_call_id": input_scope_call_id,
+            },
             client_local_time=client_local_time,
         )
-        run_steps = [
+        execution_logs.append_event(
+            execution_session_id,
+            f"Run origin: {run_origin}",
+            level="info",
+            status="running",
+            data={"run_origin": run_origin},
+            client_local_time=client_local_time,
+        )
+        if input_scope_call_id and input_scope_call_id != requested_call_id:
+            log_buffer.emit(f"[PIPELINE] ℹ Input scope call context: {input_scope_call_id} · {cid_short}")
+        _default_run_steps = [
             {
                 "agent_id":         s.get("agent_id", ""),
                 "agent_name":       "",
@@ -4113,27 +5954,66 @@ async def run_pipeline(
                 "input_token_est":  0,
                 "output_token_est": 0,
                 "thinking":         "",
+                "model_info":       {},
+                "request_raw":      {},
+                "response_raw":     "",
                 "input_sources":    [],
                 "input_fingerprint": "",
                 "input_ready":      False,
                 "cache_mode":       "",
                 "note_id":          "",
                 "note_call_id":     "",
+                "run_origin":       run_origin,
             }
             for s in steps
         ]
-        run_record = PR(
-            id=run_id,
-            pipeline_id=pipeline_id,
-            pipeline_name=pipeline_name,
-            sales_agent=req.sales_agent,
-            customer=req.customer,
-            call_id=req.call_id,
-            status="running",
-            canvas_json=json.dumps(pipeline_def.get("canvas", {})),
-        )
+        run_steps = _default_run_steps
+        if existing_run_row and (existing_run_row.steps_json or "").strip():
+            try:
+                _parsed = json.loads(existing_run_row.steps_json or "[]")
+                if isinstance(_parsed, list) and len(_parsed) == len(_default_run_steps):
+                    run_steps = []
+                    for _idx, _base in enumerate(_default_run_steps):
+                        _row = _parsed[_idx] if _idx < len(_parsed) and isinstance(_parsed[_idx], dict) else {}
+                        _merged = dict(_base)
+                        _merged.update(_row or {})
+                        # Keep agent_id aligned to current pipeline step definition.
+                        _merged["agent_id"] = _base.get("agent_id", "")
+                        _merged["run_origin"] = _base.get("run_origin", run_origin)
+                        run_steps.append(_merged)
+            except Exception:
+                run_steps = _default_run_steps
+
         with Session(_db_engine) as _s:
-            _s.add(run_record)
+            if existing_run_row:
+                _row = _s.get(PR, run_id)
+                if _row is None:
+                    existing_run_row = None
+                else:
+                    _row.pipeline_id = pipeline_id
+                    _row.pipeline_name = pipeline_name
+                    _row.sales_agent = req.sales_agent
+                    _row.customer = req.customer
+                    _row.call_id = input_scope_call_id
+                    _row.status = "running"
+                    _row.canvas_json = json.dumps(pipeline_def.get("canvas", {}))
+                    _row.steps_json = json.dumps(run_steps)
+                    _row.log_json = ""
+                    _row.finished_at = None
+                    _s.add(_row)
+            if not existing_run_row:
+                run_record = PR(
+                    id=run_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=pipeline_name,
+                    sales_agent=req.sales_agent,
+                    customer=req.customer,
+                    call_id=input_scope_call_id,
+                    status="running",
+                    canvas_json=json.dumps(pipeline_def.get("canvas", {})),
+                    steps_json=json.dumps(run_steps),
+                )
+                _s.add(run_record)
             _s.commit()
 
         yield _sse(
@@ -4182,7 +6062,11 @@ async def run_pipeline(
         _artifact_ctx: dict[str, Optional[str]] = {"latest_persona_id": None}
 
         def _step_status_to_ui(_s: dict) -> str:
-            raw = (_s.get("state") or _s.get("status") or "waiting")
+            raw = str(_s.get("state") or _s.get("status") or "waiting").strip().lower()
+            if raw in ("input_prepared", "prepared"):
+                return "pending"
+            if raw in ("cancelled", "canceled", "aborted", "stopped"):
+                return "cancelled"
             if raw in ("failed", "error"):
                 return "error"
             if raw in ("running", "loading"):
@@ -4192,7 +6076,11 @@ async def run_pipeline(
             return "pending"
 
         def _step_input_status(_s: dict) -> str:
-            raw = (_s.get("state") or _s.get("status") or "waiting")
+            raw = str(_s.get("state") or _s.get("status") or "waiting").strip().lower()
+            if raw in ("input_prepared", "prepared"):
+                return "done" if _s.get("input_ready") else "pending"
+            if raw in ("cancelled", "canceled", "aborted", "stopped"):
+                return "cancelled"
             if raw in ("failed", "error"):
                 return "error"
             if raw in ("running", "loading"):
@@ -4231,6 +6119,8 @@ async def run_pipeline(
                 ]
                 if any(_s == "error" for _s in _statuses):
                     input_nodes[_node_id] = "error"
+                elif any(_s == "cancelled" for _s in _statuses):
+                    input_nodes[_node_id] = "cancelled"
                 elif any(_s == "done" for _s in _statuses):
                     input_nodes[_node_id] = "done"
                 elif any(_s == "cached" for _s in _statuses):
@@ -4246,6 +6136,29 @@ async def run_pipeline(
                 "output": output,
             }
 
+        _last_log_snapshot_ts = 0.0
+
+        def _persist_run_log_snapshot(force: bool = False) -> None:
+            """Persist in-flight pipeline logs so UI keeps live context across refresh/navigation."""
+            nonlocal _last_log_snapshot_ts
+            try:
+                now_m = time.monotonic()
+                if (not force) and (now_m - _last_log_snapshot_ts < 1.5):
+                    return
+                _last_log_snapshot_ts = now_m
+                _lines = [
+                    {"ts": l.ts, "text": l.text, "level": l.level}
+                    for l in log_buffer.get_after(start_seq)
+                ]
+                with Session(_db_engine) as _s:
+                    _s.execute(
+                        _sql_text("UPDATE pipeline_run SET log_json = :log_json WHERE id = :id"),
+                        {"log_json": json.dumps(_lines[-400:]), "id": run_id},
+                    )
+                    _s.commit()
+            except Exception:
+                pass
+
         def save_steps():
             """Persist current step states — writes both the DB and the live state file.
             Always written with status='running'; the state file is only promoted to
@@ -4260,6 +6173,7 @@ async def run_pipeline(
                     _s.commit()
             except Exception:
                     pass
+            _persist_run_log_snapshot()
             _save_state(
                 pipeline_id, run_id, req.sales_agent, req.customer, "running", run_steps,
                 start_datetime=run_start_dt, node_states=_build_node_states(),
@@ -4304,9 +6218,9 @@ async def run_pipeline(
                     "sales_agent": req.sales_agent or "",
                     "customer": req.customer or "",
                 }
-                if req.call_id:
+                if input_scope_call_id:
                     _sql += "AND call_id = :call_id "
-                    _params["call_id"] = req.call_id
+                    _params["call_id"] = input_scope_call_id
                 else:
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
@@ -4338,8 +6252,8 @@ async def run_pipeline(
                     AR.pipeline_id == pipeline_id,
                     AR.pipeline_step_index == _step_idx,
                 )
-            if req.call_id:
-                _base = _base.where(AR.call_id == req.call_id)
+            if input_scope_call_id:
+                _base = _base.where(AR.call_id == input_scope_call_id)
             else:
                 _base = _base.where(AR.call_id == "")
 
@@ -4378,9 +6292,9 @@ async def run_pipeline(
                     "sales_agent": req.sales_agent or "",
                     "customer": req.customer or "",
                 }
-                if req.call_id:
+                if input_scope_call_id:
                     _sql += "AND call_id = :call_id "
-                    _params["call_id"] = req.call_id
+                    _params["call_id"] = input_scope_call_id
                 else:
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
@@ -4406,8 +6320,8 @@ async def run_pipeline(
                     AR.pipeline_id == pipeline_id,
                     AR.pipeline_step_index == _step_idx,
                 )
-            if req.call_id:
-                _base = _base.where(AR.call_id == req.call_id)
+            if input_scope_call_id:
+                _base = _base.where(AR.call_id == input_scope_call_id)
             else:
                 _base = _base.where(AR.call_id == "")
             return _sess.exec(_base.order_by(AR.created_at.desc())).first()
@@ -4450,9 +6364,9 @@ async def run_pipeline(
                         _ov.get(_k, _inp.get("source", "manual"))
                     )
                     if _src == "transcript":
-                        if req.call_id:
-                            if not _has_call_transcript(req.call_id):
-                                _missing_call_ids.add(req.call_id)
+                        if input_scope_call_id:
+                            if not _has_call_transcript(input_scope_call_id):
+                                _missing_call_ids.add(input_scope_call_id)
                         elif not _pair_has_any_transcript():
                             _needs_merged = True
                     elif _src == "merged_transcript":
@@ -4466,6 +6380,10 @@ async def run_pipeline(
         ) -> tuple[bool, int]:
             from ui.backend.models.job import Job, JobStatus
 
+            def _job_status_text(_value: Any) -> str:
+                _raw = getattr(_value, "value", _value)
+                return str(_raw or "").strip().lower()
+
             _ids = list(dict.fromkeys([str(_j) for _j in _job_ids if str(_j)]))
             if not _ids:
                 return True, 0
@@ -4478,7 +6396,7 @@ async def run_pipeline(
                     _rows = _s.exec(
                         select(Job).where(Job.id.in_(_ids))
                     ).all()
-                _status_by_id = {str(_r.id): str(_r.status) for _r in _rows}
+                _status_by_id = {str(_r.id): _job_status_text(_r.status) for _r in _rows}
                 _done = sum(
                     1 for _i in _ids
                     if _status_by_id.get(_i) in ("complete", "failed")
@@ -4494,6 +6412,7 @@ async def run_pipeline(
                     log_buffer.emit(
                         f"[PIPELINE] … auto-transcription running ({_done}/{len(_ids)} complete) · {cid_short}"
                     )
+                    _persist_run_log_snapshot(force=True)
                 if time.monotonic() >= _deadline:
                     return False, _failed
                 await asyncio.sleep(2.0)
@@ -4533,6 +6452,7 @@ async def run_pipeline(
                     "needs_merged_transcript": bool(_needs_merged),
                 },
             )
+            _persist_run_log_snapshot(force=True)
             yield _sse("progress", {"msg": yield_msg})
 
             _file_aliases = _crm_load_aliases()
@@ -4610,6 +6530,7 @@ async def run_pipeline(
                     "job_count": len(_job_ids),
                 },
             )
+            _persist_run_log_snapshot(force=True)
             yield _sse("progress", {
                 "msg": f"Auto-transcription ready (submitted {_submitted}, skipped {_skipped})",
             })
@@ -4634,7 +6555,7 @@ async def run_pipeline(
                             agent_name=_agent_name,
                             sales_agent=req.sales_agent,
                             customer=req.customer,
-                            call_id=req.call_id,
+                            call_id=input_scope_call_id,
                             pipeline_id=pipeline_id,
                             pipeline_step_index=_pipeline_step_index,
                             input_fingerprint=_input_fingerprint,
@@ -4656,7 +6577,7 @@ async def run_pipeline(
                                 "agent_name": _agent_name,
                                 "sales_agent": req.sales_agent,
                                 "customer": req.customer,
-                                "call_id": req.call_id,
+                                "call_id": input_scope_call_id,
                                 "content": _content,
                                 "model": _model,
                                 "created_at": _created_at,
@@ -4682,7 +6603,7 @@ async def run_pipeline(
             """Upsert stable pipeline artifact metadata for per-call/per-pair cache visibility."""
             _raw = (
                 f"{pipeline_id}::{(req.sales_agent or '').strip().lower()}::"
-                f"{(req.customer or '').strip().lower()}::{req.call_id or ''}::{_step_idx}"
+                f"{(req.customer or '').strip().lower()}::{input_scope_call_id or ''}::{_step_idx}"
             )
             _id = hashlib.sha1(_raw.encode("utf-8")).hexdigest()
             _now = datetime.utcnow()
@@ -4704,7 +6625,7 @@ async def run_pipeline(
                             pipeline_id=pipeline_id,
                             sales_agent=req.sales_agent,
                             customer=req.customer,
-                            call_id=req.call_id or "",
+                            call_id=input_scope_call_id or "",
                             pipeline_step_index=_step_idx,
                             agent_id=_agent_id,
                             agent_name=_agent_name,
@@ -4792,6 +6713,24 @@ async def run_pipeline(
                 _seen_stages.append(_cs)
             _grp[_cs].append(_si)
         _ordered_stages = [(_cs, _grp[_cs]) for _cs in _seen_stages]
+
+        _execute_step_indices: list[int] = []
+        _seen_exec: set[int] = set()
+        for _raw_idx in (req.execute_step_indices or []):
+            try:
+                _idx = int(_raw_idx)
+            except Exception:
+                continue
+            if _idx < 0 or _idx >= len(steps) or _idx in _seen_exec:
+                continue
+            _seen_exec.add(_idx)
+            _execute_step_indices.append(_idx)
+        _execute_step_set: Optional[set[int]] = set(_execute_step_indices) if _execute_step_indices else None
+        if _execute_step_set:
+            _mode_suffix = " (inputs only)" if req.prepare_input_only else ""
+            log_buffer.emit(
+                f"[PIPELINE] ▶ Targeted execution: {len(_execute_step_indices)} step(s) selected{_mode_suffix} · {cid_short}"
+            )
         # Rewrite once after canvas maps are available so JSON includes node_states.
         save_steps()
 
@@ -4858,7 +6797,7 @@ async def run_pipeline(
             _fp = _input_fingerprint or _hash_text(_content)[:24]
             _marker = f"pipeline:{pipeline_id}:{_step_idx}:{_fp}"
             _label = (_meta.get("label") or "").strip() or f"{pipeline_name} · {_agent_name}"
-            _call_id = req.call_id or f"pipeline:{run_id}:{_step_idx}"
+            _call_id = input_scope_call_id or f"pipeline:{run_id}:{_step_idx}"
 
             try:
                 if _sub_type == "persona":
@@ -5019,10 +6958,17 @@ async def run_pipeline(
 
             fatal_error = False
 
-            for _canvas_stage, step_indices in _ordered_stages:
+            for _canvas_stage, _stage_step_indices in _ordered_stages:
                 _raise_if_stop_requested()
                 if fatal_error:
                     break
+                step_indices = (
+                    [i for i in _stage_step_indices if i in _execute_step_set]
+                    if _execute_step_set is not None
+                    else _stage_step_indices
+                )
+                if not step_indices:
+                    continue
 
                 # ── Single-step stage (streaming ok) ─────────────────────────
                 if len(step_indices) == 1:
@@ -5074,7 +7020,7 @@ async def run_pipeline(
 
                     # Resume-partial fast path: reuse latest step cache immediately,
                     # before potentially expensive input resolution/fingerprint work.
-                    if req.resume_partial and (not req.force) and step_idx not in req.force_step_indices:
+                    if (not req.prepare_input_only) and req.resume_partial and (not req.force) and step_idx not in req.force_step_indices:
                         _resume_cached = None
                         try:
                             with Session(_db_engine) as _s:
@@ -5130,20 +7076,8 @@ async def run_pipeline(
                     temperature   = float(runtime_agent_def.get("temperature", 0.0))
                     system_prompt = runtime_agent_def.get("system_prompt", "")
                     user_template = runtime_agent_def.get("user_prompt", "")
-                    _step_sub_type = str(
-                        ((_step_output_meta.get(step_idx) or {}).get("sub_type") or "")
-                    ).strip().lower()
-                    system_prompt, user_template = _apply_call_id_contract(
-                        system_prompt=system_prompt,
-                        user_template=user_template,
-                        agent_def=runtime_agent_def,
-                        artifact_sub_type=_step_sub_type,
-                    )
-                    system_prompt, user_template = _apply_output_contract_to_prompts(
-                        system_prompt=system_prompt,
-                        user_template=user_template,
-                        agent_def=runtime_agent_def,
-                    )
+                    # Intentionally do not mutate prompts at runtime.
+                    # Execution must use exactly the stored system/user prompts.
                     manual_inputs = {"_chain_previous": prev_content}
                     source_for_key = {
                         inp.get("key", ""): _public_input_source(
@@ -5159,11 +7093,15 @@ async def run_pipeline(
                         _ref_id: Optional[str],
                         _manual_inputs: dict[str, str],
                         _input_key: str,
+                        _merged_scope: str,
+                        _merged_until_call_id: str,
                     ) -> str:
                         with Session(_db_engine) as _ldb:
                             return _resolve_input(
-                                _source, _ref_id, req.sales_agent, req.customer, req.call_id,
+                                _source, _ref_id, req.sales_agent, req.customer, input_scope_call_id,
                                 _manual_inputs, _ldb, input_key=_input_key,
+                                merged_scope=_merged_scope,
+                                merged_until_call_id=_merged_until_call_id,
                             )
                     for inp in runtime_agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
@@ -5171,10 +7109,12 @@ async def run_pipeline(
                             overrides.get(key, inp.get("source", "manual"))
                         )
                         ref_id = inp.get("agent_id")
+                        merged_scope = str(inp.get("merged_scope") or "auto")
+                        merged_until_call_id = str(inp.get("merged_until_call_id") or "")
                         try:
                             text = await loop.run_in_executor(
                                 None,
-                                lambda s=source, a=ref_id, m=manual_inputs, k=key: _resolve_input_worker(s, a, m, k),
+                                lambda s=source, a=ref_id, m=manual_inputs, k=key, ms=merged_scope, mc=merged_until_call_id: _resolve_input_worker(s, a, m, k, ms, mc),
                             )
                             resolved[key] = text
                         except Exception as exc:
@@ -5188,19 +7128,31 @@ async def run_pipeline(
                     if resolve_err:
                         break
                     run_steps[step_idx]["input_ready"] = True
+                    run_steps[step_idx]["model_info"] = {
+                        "provider": _model_provider_name(model),
+                        "model": model,
+                        "temperature": temperature,
+                        "agent_class": str(runtime_agent_def.get("agent_class") or ""),
+                        "output_format": str(runtime_agent_def.get("output_format") or ""),
+                    }
                     save_steps()  # input files/text resolved — persist input-node readiness
 
-                    file_keys = {
-                        inp.get("key", "")
-                        for inp in runtime_agent_def.get("inputs", [])
-                        if _is_file_source(
-                            _public_input_source(
-                                overrides.get(inp.get("key", ""), inp.get("source", "manual"))
-                            )
-                        )
+                    # Strict runtime policy:
+                    # always pass resolved inputs as provider files only.
+                    file_inputs = dict(resolved)
+                    inline_inputs: dict[str, str] = {}
+                    run_steps[step_idx]["request_raw"] = {
+                        "system_prompt": system_prompt,
+                        "user_prompt_template": user_template,
+                        "inline_inputs": dict(inline_inputs),
+                        "resolved_input_meta": {
+                            str(k): {
+                                "chars": len(str(v or "")),
+                                "source": str(source_for_key.get(k) or ""),
+                            }
+                            for k, v in resolved.items()
+                        },
                     }
-                    file_inputs   = {k: v for k, v in resolved.items() if k in file_keys}
-                    inline_inputs = {k: v for k, v in resolved.items() if k not in file_keys}
 
                     input_fingerprint = _build_input_fingerprint(
                         pipeline_id=pipeline_id,
@@ -5215,6 +7167,27 @@ async def run_pipeline(
                         output_profile=runtime_agent_def,
                     )
                     run_steps[step_idx]["input_fingerprint"] = input_fingerprint
+
+                    if req.prepare_input_only:
+                        _prepared_at = datetime.utcnow().isoformat()
+                        run_steps[step_idx].update({
+                            "state": "input_prepared",
+                            "end_time": _prepared_at,
+                            "input_ready": True,
+                            "cache_mode": "input_prepared",
+                            "error_msg": "",
+                        })
+                        save_steps()
+                        log_buffer.emit(
+                            f"[PIPELINE] ↺ Step {step_idx + 1}/{len(steps)}: {agent_name} → input prepared · {cid_short}"
+                        )
+                        yield _sse("input_ready", {"step": step_idx})
+                        yield _sse("input_prepared", {
+                            "step": step_idx,
+                            "agent_name": agent_name,
+                            "input_fingerprint": input_fingerprint,
+                        })
+                        continue
 
                     # ── Check cache (pipeline+step+input fingerprint) ────────
                     if not req.force and step_idx not in req.force_step_indices:
@@ -5291,6 +7264,37 @@ async def run_pipeline(
                     else:
                         _log_display = f"{len(file_inputs)} file(s)"
                     log_buffer.emit(f"[LLM] {model} — {_log_display} input · {cid_short}")
+                    try:
+                        def _resolve_refs_only() -> dict[str, str]:
+                            with Session(_db_engine) as _ldb:
+                                _ldb._agent_run_ctx = {
+                                    "sales_agent": req.sales_agent,
+                                    "customer": req.customer,
+                                    "call_id": input_scope_call_id,
+                                    "source_for_key": source_for_key,
+                                }
+                                return _resolve_provider_file_refs(model, file_inputs, _ldb)
+
+                        file_ref_map = await loop.run_in_executor(None, _resolve_refs_only)
+                        run_steps[step_idx]["request_raw"] = {
+                            **(run_steps[step_idx].get("request_raw") or {}),
+                            "provider_file_refs": dict(file_ref_map or {}),
+                        }
+                        if file_ref_map:
+                            _ref_preview = ", ".join(f"{k}={v}" for k, v in list(file_ref_map.items())[:6])
+                            if len(file_ref_map) > 6:
+                                _ref_preview += f", …(+{len(file_ref_map)-6} more)"
+                            log_buffer.emit(
+                                f"[PIPELINE] Step {step_idx + 1} file refs: {_ref_preview} · {cid_short}"
+                            )
+                            yield _sse("progress", {
+                                "step": step_idx,
+                                "msg": f"File refs: {_ref_preview}",
+                            })
+                    except Exception as _ref_exc:
+                        log_buffer.emit(
+                            f"[PIPELINE] ⚠ Step {step_idx + 1} file ref resolution failed: {_ref_exc} · {cid_short}"
+                        )
 
                     step_start_t = time.time()
                     llm_err = False
@@ -5306,7 +7310,7 @@ async def run_pipeline(
                                     _ldb._agent_run_ctx = {
                                         "sales_agent": req.sales_agent,
                                         "customer": req.customer,
-                                        "call_id": req.call_id,
+                                        "call_id": input_scope_call_id,
                                         "source_for_key": source_for_key,
                                     }
                                     c, t = _llm_call_anthropic_files_streaming(
@@ -5345,7 +7349,7 @@ async def run_pipeline(
                                     _ldb._agent_run_ctx = {
                                         "sales_agent": req.sales_agent,
                                         "customer": req.customer,
-                                        "call_id": req.call_id,
+                                        "call_id": input_scope_call_id,
                                         "source_for_key": source_for_key,
                                     }
                                     return _llm_call_with_files(
@@ -5396,6 +7400,7 @@ async def run_pipeline(
                     if llm_err:
                         break
 
+                    raw_content = content
                     content = _apply_output_postprocess(
                         raw_output=content,
                         agent_def=runtime_agent_def,
@@ -5441,6 +7446,7 @@ async def run_pipeline(
                         "input_token_est":  input_tok_est,
                         "output_token_est": output_tok_est,
                         "thinking":         (thinking or "")[:8000],
+                        "response_raw":     raw_content,
                     })
                     save_steps()  # write state BEFORE yields so file is correct if client disconnects
 
@@ -5528,20 +7534,8 @@ async def run_pipeline(
                         _par_temp   = float(_par_rdef.get("temperature", 0.0))
                         _par_sysp   = _par_rdef.get("system_prompt", "")
                         _par_ut     = _par_rdef.get("user_prompt", "")
-                        _par_sub_type = str(
-                            ((_step_output_meta.get(par_idx) or {}).get("sub_type") or "")
-                        ).strip().lower()
-                        _par_sysp, _par_ut = _apply_call_id_contract(
-                            system_prompt=_par_sysp,
-                            user_template=_par_ut,
-                            agent_def=_par_rdef,
-                            artifact_sub_type=_par_sub_type,
-                        )
-                        _par_sysp, _par_ut = _apply_output_contract_to_prompts(
-                            system_prompt=_par_sysp,
-                            user_template=_par_ut,
-                            agent_def=_par_rdef,
-                        )
+                        # Intentionally do not mutate prompts at runtime.
+                        # Execution must use exactly the stored system/user prompts.
                         _par_mi     = {"_chain_previous": _sp}
                         _par_fp     = ""
                         _par_input_ready = False
@@ -5556,12 +7550,12 @@ async def run_pipeline(
                                 _par_db._agent_run_ctx = {
                                     "sales_agent": req.sales_agent,
                                     "customer": req.customer,
-                                    "call_id": req.call_id,
+                                    "call_id": input_scope_call_id,
                                     "source_for_key": _source_for_key,
                                 }
 
                                 # Resume-partial fast path for parallel stages too.
-                                if req.resume_partial and (not req.force) and par_idx not in req.force_step_indices:
+                                if (not req.prepare_input_only) and req.resume_partial and (not req.force) and par_idx not in req.force_step_indices:
                                     _resume_cached = None
                                     try:
                                         _resume_cached = _lookup_step_cache_resume_only(_par_db, _par_aid, par_idx)
@@ -5590,23 +7584,32 @@ async def run_pipeline(
                                         _par_ov.get(_k, _inp.get("source", "manual"))
                                     )
                                     _rid = _inp.get("agent_id")
+                                    _ms  = str(_inp.get("merged_scope") or "auto")
+                                    _mc  = str(_inp.get("merged_until_call_id") or "")
                                     _par_resolved[_k] = _resolve_input(
-                                        _src, _rid, req.sales_agent, req.customer, req.call_id, _par_mi, _par_db,
+                                        _src, _rid, req.sales_agent, req.customer, input_scope_call_id, _par_mi, _par_db,
                                         input_key=_k,
+                                        merged_scope=_ms,
+                                        merged_until_call_id=_mc,
                                     )
                                 _par_input_ready = True
-
-                                _par_fkeys = {
-                                    _inp.get("key", "")
-                                    for _inp in _par_rdef.get("inputs", [])
-                                    if _is_file_source(
-                                        _public_input_source(
-                                            _par_ov.get(_inp.get("key", ""), _inp.get("source", "manual"))
-                                        )
-                                    )
+                                _par_request_raw = {
+                                    "system_prompt": _par_sysp,
+                                    "user_prompt_template": _par_ut,
+                                    "inline_inputs": {},
+                                    "resolved_input_meta": {
+                                        str(k): {
+                                            "chars": len(str(v or "")),
+                                            "source": str(_source_for_key.get(k) or ""),
+                                        }
+                                        for k, v in _par_resolved.items()
+                                    },
                                 }
-                                _par_fi = {k: v for k, v in _par_resolved.items() if k in _par_fkeys}
-                                _par_ii = {k: v for k, v in _par_resolved.items() if k not in _par_fkeys}
+
+                                # Strict runtime policy:
+                                # always pass resolved inputs as provider files only.
+                                _par_fi = dict(_par_resolved)
+                                _par_ii: dict[str, str] = {}
                                 _par_fp = _build_input_fingerprint(
                                     pipeline_id=pipeline_id,
                                     step_idx=par_idx,
@@ -5619,6 +7622,16 @@ async def run_pipeline(
                                     resolved_inputs=_par_resolved,
                                     output_profile=_par_rdef,
                                 )
+
+                                if req.prepare_input_only:
+                                    return {
+                                        "step_idx": par_idx,
+                                        "status": "input_prepared",
+                                        "agent_name": _par_aname,
+                                        "model": _par_model,
+                                        "input_fingerprint": _par_fp,
+                                        "input_ready": _par_input_ready,
+                                    }
 
                                 if not req.force and par_idx not in req.force_step_indices:
                                     _cached = None
@@ -5658,10 +7671,29 @@ async def run_pipeline(
                                     _par_log = f"{len(_par_fi)} file(s)"
                                 log_buffer.emit(f"[LLM] {_par_model} — {_par_log} input · {cid_short}")
 
+                                _par_ref_preview = ""
+                                try:
+                                    _par_ref_map = _resolve_provider_file_refs(_par_model, _par_fi, _par_db)
+                                    if _par_ref_map:
+                                        _par_request_raw["provider_file_refs"] = dict(_par_ref_map or {})
+                                        _par_ref_preview = ", ".join(
+                                            f"{k}={v}" for k, v in list(_par_ref_map.items())[:6]
+                                        )
+                                        if len(_par_ref_map) > 6:
+                                            _par_ref_preview += f", …(+{len(_par_ref_map)-6} more)"
+                                        log_buffer.emit(
+                                            f"[PIPELINE] Step {par_idx + 1} file refs: {_par_ref_preview} · {cid_short}"
+                                        )
+                                except Exception as _par_ref_exc:
+                                    log_buffer.emit(
+                                        f"[PIPELINE] ⚠ Step {par_idx + 1} file ref resolution failed: {_par_ref_exc} · {cid_short}"
+                                    )
+
                                 _par_t0 = time.time()
                                 _par_content, _par_thinking = _llm_call_with_files(
                                     _par_sysp, _par_ut, _par_fi, _par_ii, _par_model, _par_temp, _par_db,
                                 )
+                                _par_response_raw = _par_content
                                 _par_content = _apply_output_postprocess(
                                     raw_output=_par_content,
                                     agent_def=_par_rdef,
@@ -5693,6 +7725,16 @@ async def run_pipeline(
                                     "agent_name": _par_aname,
                                     "input_fingerprint": _par_fp,
                                     "input_ready": _par_input_ready,
+                                    "file_refs_preview": _par_ref_preview,
+                                    "request_raw": _par_request_raw,
+                                    "response_raw": _par_response_raw,
+                                    "model_info": {
+                                        "provider": _model_provider_name(_par_model),
+                                        "model": _par_model,
+                                        "temperature": _par_temp,
+                                        "agent_class": str(_par_rdef.get("agent_class") or ""),
+                                        "output_format": str(_par_rdef.get("output_format") or ""),
+                                    },
                                 }
                         except Exception as exc:
                             return {
@@ -5744,7 +7786,26 @@ async def run_pipeline(
                         _rst  = _res["status"]
                         _rn   = _res.get("agent_name", "")
                         _rm   = _res.get("model", "")
-                        if _rst == "cached":
+                        if _rst == "input_prepared":
+                            run_steps[_ri].update({
+                                "state": "input_prepared",
+                                "end_time": datetime.utcnow().isoformat(),
+                                "input_ready": _res.get("input_ready", True),
+                                "cache_mode": "input_prepared",
+                                "error_msg": "",
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
+                            })
+                            save_steps()
+                            log_buffer.emit(
+                                f"[PIPELINE] ↺ Step {_ri + 1}/{len(steps)}: {_rn} → input prepared · {cid_short}"
+                            )
+                            yield _sse("input_ready", {"step": _ri})
+                            yield _sse("input_prepared", {
+                                "step": _ri,
+                                "agent_name": _rn,
+                                "input_fingerprint": _res.get("input_fingerprint", ""),
+                            })
+                        elif _rst == "cached":
                             _persist_structured_artifact(
                                 _step_idx=_ri,
                                 _content=_res["content"],
@@ -5789,6 +7850,12 @@ async def run_pipeline(
                         elif _rst == "done":
                             _rc  = _res["content"]
                             _ret = _res["exec_time_s"]
+                            _file_refs_preview = str(_res.get("file_refs_preview") or "").strip()
+                            if _file_refs_preview:
+                                yield _sse("progress", {
+                                    "step": _ri,
+                                    "msg": f"Step {_ri + 1} file refs: {_file_refs_preview}",
+                                })
                             _persist_structured_artifact(
                                 _step_idx=_ri,
                                 _content=_rc,
@@ -5805,6 +7872,9 @@ async def run_pipeline(
                                 "input_token_est":  _res["input_tok"],
                                 "output_token_est": _res["output_tok"],
                                 "thinking":         (_res.get("thinking") or "")[:8000],
+                                "model_info":       (_res.get("model_info") or {}),
+                                "request_raw":      (_res.get("request_raw") or {}),
+                                "response_raw":     (_res.get("response_raw") or ""),
                                 "input_fingerprint": _res.get("input_fingerprint", ""),
                             })
                             save_steps()  # write BEFORE yields so file is correct if client disconnects
@@ -5875,14 +7945,16 @@ async def run_pipeline(
             if cancel_msg == "run stopped by user":
                 now_iso = datetime.utcnow().isoformat()
                 for s in run_steps:
-                    if s.get("state") == "running":
-                        s["state"] = "failed"
+                    raw_st = str(s.get("state") or s.get("status") or "").strip().lower()
+                    if raw_st in ("running", "loading", "started"):
+                        s["state"] = "cancelled"
+                        s["status"] = "cancelled"
                         s["end_time"] = now_iso
                         s["error_msg"] = cancel_msg
-                run_final_status = "error"
-                log_buffer.emit(f"[PIPELINE] ✗ Aborted: {pipeline_name} · {cid_short}")
+                run_final_status = "cancelled"
+                log_buffer.emit(f"[PIPELINE] ◼ Cancelled: {pipeline_name} · {cid_short}")
                 _save_state(
-                    pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
+                    pipeline_id, run_id, req.sales_agent, req.customer, "cancelled", run_steps,
                     start_datetime=run_start_dt, node_states=_build_node_states(),
                 )
             else:
@@ -5935,8 +8007,8 @@ async def run_pipeline(
                                     AR.pipeline_id == pipeline_id,
                                     AR.pipeline_step_index == idx,
                                 )
-                                if req.call_id:
-                                    stale_stmt = stale_stmt.where(AR.call_id == req.call_id)
+                                if input_scope_call_id:
+                                    stale_stmt = stale_stmt.where(AR.call_id == input_scope_call_id)
                                 else:
                                     stale_stmt = stale_stmt.where(AR.call_id == "")
                                 fp = s.get("input_fingerprint", "")
@@ -5949,6 +8021,56 @@ async def run_pipeline(
                                     _s.commit()
                 except Exception:
                     pass
+            # For production runs triggered by webhook, optionally push notes back to CRM.
+            try:
+                if run_final_status == "done" and run_origin == "webhook":
+                    if bool(settings.live_mirror_enabled):
+                        log_buffer.emit("[CRM-PUSH] Skipped: disabled in development/mirror environment.")
+                    else:
+                        _cfg = _load_live_webhook_config()
+                        _send_ids = {
+                            str(v or "").strip()
+                            for v in (_cfg.get("send_note_pipeline_ids") or [])
+                            if str(v or "").strip()
+                        }
+                        if pipeline_id in _send_ids:
+                            _note_id = ""
+                            for _st in run_steps:
+                                _nid = str(_st.get("note_id") or "").strip()
+                                if _nid:
+                                    _note_id = _nid
+                            if _note_id:
+                                log_buffer.emit(f"[CRM-PUSH] Sending note {_note_id} to CRM…")
+                                try:
+                                    from ui.backend.routers.notes import send_note_to_crm_internal
+                                    with Session(_db_engine) as _note_s:
+                                        _push = send_note_to_crm_internal(
+                                            note_id=_note_id,
+                                            account_id="",
+                                            db=_note_s,
+                                        )
+                                    _crm_status = str(_push.get("crm_status") or "")
+                                    _endpoint = str(_push.get("endpoint") or "")
+                                    log_buffer.emit(
+                                        f"[CRM-PUSH] ✓ Sent note {_note_id} to CRM"
+                                        + (f" (status {_crm_status})" if _crm_status else "")
+                                    )
+                                    if _endpoint:
+                                        log_buffer.emit(f"[CRM-PUSH] endpoint: {_endpoint}")
+                                except HTTPException as _crm_http_err:
+                                    _detail = _crm_http_err.detail
+                                    if isinstance(_detail, (dict, list)):
+                                        _detail = json.dumps(_detail, ensure_ascii=False)
+                                    log_buffer.emit(
+                                        f"[CRM-PUSH] ✗ Failed for note {_note_id}: "
+                                        f"{_crm_http_err.status_code} {str(_detail or '').strip()}"
+                                    )
+                                except Exception as _crm_err:
+                                    log_buffer.emit(f"[CRM-PUSH] ✗ Failed for note {_note_id}: {_crm_err}")
+                            else:
+                                log_buffer.emit("[CRM-PUSH] Skipped: no note artifact produced by this run.")
+            except Exception as _crm_outer_err:
+                log_buffer.emit(f"[CRM-PUSH] ⚠ Post-run push check failed: {_crm_outer_err}")
             log_lines: list[dict[str, Any]] = []
             try:
                 log_lines = [
@@ -6019,7 +8141,7 @@ async def run_pipeline(
                         "run_slot": run_slot,
                         "sales_agent": req.sales_agent,
                         "customer": req.customer,
-                        "call_id": req.call_id,
+                        "call_id": input_scope_call_id,
                         "final_status": run_final_status,
                         "steps_total": len(run_steps),
                         "status_counts": _status_counts,

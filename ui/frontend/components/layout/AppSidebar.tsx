@@ -5,10 +5,11 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
+import { useUserProfile } from "@/lib/user-profile";
 import {
   Users, FileText, BarChart3, Terminal,
-  FolderOpen, Bot, PanelLeftClose, Settings, StickyNote, DatabaseZap, GitBranch, History, Archive,
-  User, ShieldCheck,
+  FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch,
+  User, ShieldCheck, Activity,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -20,15 +21,13 @@ const GROUPS = [
     items: [
       { href: "/crm",       icon: Users,    label: "CRM Browser" },
       { href: "/calls",     icon: FileText, label: "Calls" },
-      { href: "/artifacts", icon: Archive,  label: "Artifacts" },
     ],
   },
   {
     label: "Agents",
     items: [
-      { href: "/agents",   icon: Bot,       label: "Agents & Artifacts" },
       { href: "/pipeline", icon: GitBranch, label: "Pipeline Workflow" },
-      { href: "/history",  icon: History,   label: "Run History" },
+      { href: "/jobs",     icon: Activity,  label: "Jobs" },
     ],
   },
   {
@@ -36,15 +35,12 @@ const GROUPS = [
     items: [
       { href: "/agent-deep-dive",  icon: BarChart3,  label: "Agent Deep Dive" },
       { href: "/agent-dashboard",  icon: BarChart3,  label: "Agent Dashboard" },
-      { href: "/personas",         icon: FileText,   label: "Personas" },
-      { href: "/comparison",       icon: BarChart3,  label: "Compare Personas" },
-      { href: "/agent-comparison", icon: BarChart3,  label: "Compare Agents" },
     ],
   },
 ];
 
 const FOOTER_ITEMS = [
-  { href: "/populate",  icon: DatabaseZap, label: "Populate" },
+  { href: "/automations",  icon: DatabaseZap, label: "Automations" },
   { href: "/logs",      icon: Terminal,    label: "Logs" },
   { href: "/workspace", icon: FolderOpen,  label: "Workspace" },
   { href: "/settings",  icon: Settings,    label: "Settings" },
@@ -86,19 +82,22 @@ function BackendStatus() {
 }
 
 function SidebarClock() {
-  const [localNow, setLocalNow] = useState<Date>(new Date());
+  const [localNow, setLocalNow] = useState<Date | null>(null);
 
   useEffect(() => {
+    setLocalNow(new Date());
     const id = setInterval(() => setLocalNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  const localTime = localNow.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+  const localTime = localNow
+    ? localNow.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      })
+    : "--:--:--";
 
   return (
     <div className="text-[10px] font-mono text-gray-500 text-right leading-none">{localTime}</div>
@@ -107,10 +106,11 @@ function SidebarClock() {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
-export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
+export default function AppSidebar() {
   const pathname = usePathname();
   const isCallsPage = pathname === "/calls";
   const [isDevelopmentHost, setIsDevelopmentHost] = useState(false);
+  const { profile } = useUserProfile();
 
   useEffect(() => {
     const host = window.location.hostname.toLowerCase();
@@ -124,30 +124,56 @@ export default function AppSidebar({ onToggle }: { onToggle?: () => void }) {
 
   const isActive = (href: string) => {
     // Exact match for paths that share a prefix with others
-    if (href === "/personas" || href === "/calls" || href === "/agents") return pathname === href;
+    if (href === "/calls") return pathname === href;
     return pathname.startsWith(href);
   };
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-56 bg-gray-900 border-r border-gray-800 flex flex-col z-40">
+    <aside className="h-full w-full bg-gray-900 flex flex-col">
       {/* Logo */}
       <div className="p-4 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-2">
           <Image src="/shinobilookintothefuture.png" alt="Shinobi" width={120} height={32}
             className="object-contain" style={{ maxHeight: 32 }} />
-          {onToggle && (
-            <button onClick={onToggle}
-              className="ml-auto p-1 rounded text-gray-600 hover:text-gray-400 transition-colors"
-              title="Collapse sidebar">
-              <PanelLeftClose className="w-4 h-4" />
-            </button>
-          )}
         </div>
         {isDevelopmentHost && (
           <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">
             Development
           </p>
         )}
+        {profile && (
+          <div className="mt-2 rounded-lg border border-gray-800 bg-gray-950/70 px-2.5 py-2">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">User Workspace</p>
+            <p className="mt-1 text-xs font-medium text-gray-200 truncate">{profile.name || profile.email || "Unknown user"}</p>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <p className="text-[10px] text-gray-500 truncate">{profile.email || "No email"}</p>
+              <span
+                className={cn(
+                  "inline-flex rounded border px-1.5 py-0.5 text-[9px] uppercase tracking-wide",
+                  profile.role === "admin"
+                    ? "border-emerald-700/60 bg-emerald-950/40 text-emerald-300"
+                    : profile.role === "editor"
+                    ? "border-indigo-700/60 bg-indigo-950/40 text-indigo-300"
+                    : "border-gray-700/70 bg-gray-900/70 text-gray-300",
+                )}
+              >
+                {profile.role || "viewer"}
+              </span>
+            </div>
+          </div>
+        )}
+        <Link
+          href="/user"
+          className={cn(
+            "mt-2 flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors",
+            pathname === "/user"
+              ? "bg-indigo-600 text-white"
+              : "text-gray-400 hover:text-white hover:bg-gray-800",
+          )}
+        >
+          <User className="w-4 h-4 shrink-0" />
+          User
+        </Link>
       </div>
 
       {/* Nav groups */}

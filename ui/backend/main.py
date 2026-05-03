@@ -22,6 +22,7 @@ from ui.backend.models.agent_result import AgentResult      # noqa: F401 — reg
 from ui.backend.models.uploaded_file import UploadedFile    # noqa: F401 — registers table
 from ui.backend.models.pipeline_run import PipelineRun      # noqa: F401 — registers table
 from ui.backend.models.pipeline_artifact import PipelineArtifact  # noqa: F401 — registers table
+from ui.backend.models.app_state_kv import AppStateKV       # noqa: F401 — registers table
 from ui.backend.routers import crm, jobs, personas, logs, workspace, execution_logs
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
@@ -31,10 +32,16 @@ from ui.backend.routers.full_persona_agent import router as full_persona_agent_r
 from ui.backend.routers.persona_agents import router as persona_agents_router
 from ui.backend.routers.notes import router as notes_router
 from ui.backend.routers.populate import router as populate_router
+from ui.backend.routers.automations import router as automations_router
 from ui.backend.routers.universal_agents import router as universal_agents_router
 from ui.backend.routers.pipelines import router as pipelines_router
 from ui.backend.routers.history import router as history_router
 from ui.backend.routers.assistant import router as assistant_router
+from ui.backend.routers.users import router as users_router
+from ui.backend.routers.webhooks import (
+    router as webhooks_router,
+    ensure_live_dispatcher_started,
+)
 from ui.backend.services import log_buffer
 from ui.backend.version import APP_VERSION
 
@@ -65,10 +72,13 @@ app.include_router(full_persona_agent_router)
 app.include_router(persona_agents_router)
 app.include_router(notes_router)
 app.include_router(populate_router)
+app.include_router(automations_router)
 app.include_router(universal_agents_router)
 app.include_router(pipelines_router)
 app.include_router(history_router)
 app.include_router(assistant_router)
+app.include_router(users_router)
+app.include_router(webhooks_router)
 
 
 @app.on_event("startup")
@@ -426,6 +436,21 @@ async def on_startup():
 
     asyncio.create_task(_reconcile_crm_financials_bg())
 
+    # Start persistent live-webhook queue dispatcher (disabled in mirror mode).
+    if settings.live_mirror_enabled:
+        print("[startup] live webhook dispatcher disabled (LIVE_MIRROR_ENABLED=true)")
+    else:
+        try:
+            ensure_live_dispatcher_started()
+        except Exception as e:
+            print(f"[startup] live webhook dispatcher start failed: {e}")
+        try:
+            from ui.backend.services.automations import start_scheduler as _start_automation_scheduler
+
+            _start_automation_scheduler()
+        except Exception as e:
+            print(f"[startup] automation scheduler start failed: {e}")
+
     # Re-queue orphaned jobs from previous server runs
     loop = asyncio.get_running_loop()
     with Session(engine) as db:
@@ -447,9 +472,29 @@ async def on_startup():
             print(f"[startup] Re-queued pending job {job.id[:8]} ({job.call_id})")
 
 
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        from ui.backend.services.automations import stop_scheduler as _stop_automation_scheduler
+
+        _stop_automation_scheduler()
+    except Exception:
+        pass
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": APP_VERSION}
+    from ui.backend.database import _DATABASE_URL
+
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "database_backend": "postgres" if bool(_DATABASE_URL) else "sqlite",
+        "live_state_use_db": bool(getattr(settings, "live_state_use_db", True)),
+        "live_state_read_only": bool(getattr(settings, "live_state_read_only", False)),
+        "live_mirror_enabled": bool(getattr(settings, "live_mirror_enabled", False)),
+        "live_mirror_base_url_set": bool(str(getattr(settings, "live_mirror_base_url", "") or "").strip()),
+    }
 
 
 @app.get("/time")

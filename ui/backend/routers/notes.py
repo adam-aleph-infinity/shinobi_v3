@@ -1,6 +1,8 @@
 """Notes — per-call LLM analysis saved as notes against a specific transcript."""
 import asyncio
+import html
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -22,6 +24,7 @@ router = APIRouter(prefix="/notes", tags=["notes"])
 
 _CRM_LOG_TEXT_LIMIT = 1800
 _CRM_DATA_PREVIEW_LIMIT = 1200
+_CRM_RULE_LINE = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
 def _clip_text(value: str, limit: int = _CRM_LOG_TEXT_LIMIT) -> str:
@@ -108,6 +111,350 @@ def _build_response_log(resp_status: int, resp_headers: dict, resp_text: str) ->
         "body_preview": _clip_text(resp_text, _CRM_DATA_PREVIEW_LIMIT),
         "body_summary": _summarize_json_payload(resp_text),
     }
+
+
+def _crm_inline_format(text: str) -> str:
+    """Convert a single inline markdown fragment into CRM-safe inline HTML.
+
+    Allowed tags/styles are intentionally limited to what CRM HTMLPurifier keeps.
+    """
+    value = html.escape(str(text or ""), quote=False)
+    if not value:
+        return ""
+
+    # Inline code first
+    value = re.sub(
+        r"`([^`\n]+)`",
+        r'<u style="font-size:12px">\1</u>',
+        value,
+    )
+    # Bold + italic + underline
+    value = re.sub(
+        r"\*\*_([^_\n]+)_\*\*",
+        r"<strong><em><u>\1</u></em></strong>",
+        value,
+    )
+    value = re.sub(
+        r"__\*([^*\n]+)\*__",
+        r"<strong><em><u>\1</u></em></strong>",
+        value,
+    )
+    # Bold + italic
+    value = re.sub(
+        r"\*\*\*([^\*\n]+)\*\*\*",
+        r"<strong><em>\1</em></strong>",
+        value,
+    )
+    value = re.sub(
+        r"___([^_\n]+)___",
+        r"<strong><em>\1</em></strong>",
+        value,
+    )
+    # Strikethrough
+    value = re.sub(
+        r"~~([^~\n]+)~~",
+        r'<strong style="text-decoration:line-through">\1</strong>',
+        value,
+    )
+    # Bold / underline / italic
+    value = re.sub(r"\*\*([^\*\n]+)\*\*", r"<strong>\1</strong>", value)
+    value = re.sub(r"__([^_\n]+)__", r"<u>\1</u>", value)
+    value = re.sub(r"\*([^*\n]+)\*", r"<em>\1</em>", value)
+    value = re.sub(r"_([^_\n]+)_", r"<em>\1</em>", value)
+    return value
+
+
+def _crm_strip_code_fence(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s.startswith("```"):
+        return s
+    lines = s.split("\n")
+    if len(lines) < 3:
+        return s
+    if not lines[0].startswith("```"):
+        return s
+    if lines[-1].strip() != "```":
+        return s
+    return "\n".join(lines[1:-1]).strip()
+
+
+def _crm_extract_note_body(raw_text: str) -> str:
+    """Unwrap common JSON envelopes and return the true note markdown/body text."""
+    current = _crm_strip_code_fence(str(raw_text or ""))
+    if not current:
+        return ""
+
+    def _pick_payload(obj: dict) -> Optional[object]:
+        # Most-specific first.
+        for k in ("note", "content_md", "content", "response", "result", "output", "data", "text"):
+            if k in obj and obj.get(k) is not None:
+                return obj.get(k)
+        keys = list(obj.keys())
+        if len(keys) == 1:
+            return obj.get(keys[0])
+        return None
+
+    for _ in range(8):
+        txt = str(current or "").strip()
+        if not txt:
+            break
+
+        parsed: object
+        try:
+            parsed = json.loads(txt)
+        except Exception:
+            break
+
+        if isinstance(parsed, str):
+            current = _crm_strip_code_fence(parsed)
+            continue
+
+        if isinstance(parsed, dict):
+            payload = _pick_payload(parsed)
+            if payload is None:
+                break
+            if isinstance(payload, (dict, list)):
+                current = json.dumps(payload, ensure_ascii=False)
+            else:
+                current = str(payload)
+            current = _crm_strip_code_fence(current)
+            continue
+
+        if isinstance(parsed, list):
+            if len(parsed) == 1 and isinstance(parsed[0], str):
+                current = _crm_strip_code_fence(str(parsed[0]))
+                continue
+            break
+
+        break
+
+    return str(current or "").strip()
+
+
+def _crm_clean_note_text(markdown_text: str) -> str:
+    """Strip non-note scaffolding before CRM rendering."""
+    text = _crm_extract_note_body(str(markdown_text or ""))
+    if not text:
+        return ""
+
+    # Remove structured call anchors if present.
+    text = re.sub(
+        r"\[CALL_ANCHOR_START\][\s\S]*?\[CALL_ANCHOR_END\]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Also handle already-mutated/no-underscore anchor variants just in case.
+    text = re.sub(
+        r"\[CALLANCHORSTART\][\s\S]*?\[CALLANCHOREND\]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Handle looser/variant anchor patterns.
+    text = re.sub(
+        r"\[\s*CALL[_\s-]*ANCHOR[_\s-]*START\s*\][\s\S]*?\[\s*CALL[_\s-]*ANCHOR[_\s-]*END\s*\]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove generic title line like "System Note – Call 120634" or "System Note – Final Call".
+    text = re.sub(
+        r"^\s*System\s+Note\s*[–-]\s*[^\n]+\n+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    cleaned_lines: list[str] = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        s = line.strip()
+        # Remove optional top-level section numbering prefix only.
+        # e.g. "1. Company Procedures ..." -> "Company Procedures ..."
+        m = re.match(r"^([0-9]+)\.\s+(.*)$", s)
+        if m and m.group(1) in {"1", "2", "3"}:
+            line = re.sub(r"^\s*[0-9]+\.\s+", "", line, count=1)
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def _crm_render_section_heading(line_text: str) -> str:
+    """Render known non-markdown section lines as styled headings."""
+    s = str(line_text or "").strip()
+    if not s:
+        return ""
+
+    # Normalize simple markdown wrappers for matching, e.g. "**A) ...**"
+    plain = s
+    m_bold = re.match(r"^\*\*(.+)\*\*$", plain)
+    if m_bold:
+        plain = m_bold.group(1).strip()
+    m_italic = re.match(r"^\*(.+)\*$", plain)
+    if m_italic:
+        plain = m_italic.group(1).strip()
+
+    def _h(size_px: int, color: str, body: str) -> str:
+        return f'<strong style="font-size:{size_px}px;color:{color}">{_crm_inline_format(body)}</strong>'
+
+    # Main sections
+    if re.match(r"^(Company Procedures|Call Summary|Next Call Actions)\b", plain, flags=re.IGNORECASE):
+        return _h(18, "#1d4ed8", plain)
+    if re.match(r"^Total Violations\b", plain, flags=re.IGNORECASE):
+        return _h(18, "#7c3aed", plain)
+
+    # Secondary sections
+    if re.match(r"^(Procedure assessment|Procedure evaluation)\b", plain, flags=re.IGNORECASE):
+        return _h(15, "#0f766e", plain)
+    if re.match(r"^[A-C]\)\s+", plain):
+        return _h(15, "#334155", plain)
+
+    return ""
+
+
+def _crm_colorize_keywords(rendered_line: str) -> str:
+    """Apply CRM-safe color emphasis to key compliance tokens."""
+    out = str(rendered_line or "")
+    if not out:
+        return ""
+
+    # Bracketed tags first
+    out = re.sub(
+        r"(?i)\[COMPLIANT\]",
+        '<strong style="color:green">[COMPLIANT]</strong>',
+        out,
+    )
+    out = re.sub(
+        r"(?i)\[VIOLATION\]",
+        '<strong style="color:red">[VIOLATION]</strong>',
+        out,
+    )
+    # Frequent status phrases
+    out = re.sub(
+        r"(?i)\bnot performed\b",
+        '<strong style="color:red">not performed</strong>',
+        out,
+    )
+    out = re.sub(
+        r"(?i)\bmissing\b",
+        '<strong style="color:red">missing</strong>',
+        out,
+    )
+    out = re.sub(
+        r"(?i)\bviolation(s)?\b",
+        lambda m: f'<strong style="color:red">{m.group(0)}</strong>',
+        out,
+    )
+    out = re.sub(
+        r"(?i)\bcompliant\b",
+        '<strong style="color:green">compliant</strong>',
+        out,
+    )
+    return out
+
+
+def _markdown_to_crm_html(markdown_text: str) -> str:
+    """Convert markdown-like notes into CRM-safe HTML-ish text.
+
+    CRM strips most block tags and markdown syntax, so this intentionally maps
+    headings/lists/quotes/tables to inline-safe primitives and newline layout.
+    """
+    text = _crm_clean_note_text(markdown_text)
+    if not text:
+        return ""
+
+    out_lines: list[str] = []
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        if stripped == "":
+            out_lines.append("")
+            continue
+
+        # Horizontal rules
+        if re.fullmatch(r"[-_*]{3,}", stripped):
+            out_lines.append(_CRM_RULE_LINE)
+            continue
+
+        # Known non-markdown section headings
+        h = _crm_render_section_heading(stripped)
+        if h:
+            out_lines.append(h)
+            continue
+
+        # Headings
+        m = re.match(r"^(#{1,3})\s+(.*)$", stripped)
+        if m:
+            level = len(m.group(1))
+            body = _crm_inline_format(m.group(2).strip())
+            size = "22px" if level == 1 else "18px" if level == 2 else "15px"
+            out_lines.append(f'<strong style="font-size:{size};color:#1d4ed8">{body}</strong>')
+            continue
+
+        # Blockquote
+        m = re.match(r"^\s*>\s?(.*)$", line)
+        if m:
+            body = _crm_inline_format(m.group(1).strip())
+            out_lines.append(f'<em style="color:gray">&nbsp;&nbsp;❝ {body}</em>')
+            continue
+
+        # Markdown tables -> "Key: Value" rows
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if cells and all(re.fullmatch(r":?-{3,}:?", c or "") for c in cells):
+                # Markdown table separator row (|---|---|) -> drop.
+                continue
+            if cells:
+                key = _crm_inline_format(cells[0] if len(cells) > 0 else "")
+                val = _crm_inline_format(" | ".join(cells[1:]) if len(cells) > 1 else "")
+                if val:
+                    out_lines.append(_crm_colorize_keywords(f"<strong>{key}:</strong> {val}"))
+                else:
+                    out_lines.append(_crm_colorize_keywords(f"<strong>{key}</strong>"))
+                continue
+
+        # Checklist bullets
+        m = re.match(r"^(\s*)[-*+]\s+\[([ xX!])\]\s+(.*)$", line)
+        if m:
+            depth = max(0, len(m.group(1)) // 2)
+            prefix = "&nbsp;&nbsp;" * depth
+            chk = m.group(2)
+            symbol = "✓" if chk in ("x", "X") else "★" if chk == "!" else "◻"
+            out_lines.append(
+                _crm_colorize_keywords(f"{prefix}{symbol} {_crm_inline_format(m.group(3).strip())}")
+            )
+            continue
+
+        # Standard bullets
+        m = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
+        if m:
+            depth = max(0, len(m.group(1)) // 2)
+            if depth > 0:
+                out_lines.append(_crm_colorize_keywords(
+                    f"{'&nbsp;&nbsp;' * depth}◦ {_crm_inline_format(m.group(2).strip())}"
+                ))
+            else:
+                out_lines.append(_crm_colorize_keywords(f"● {_crm_inline_format(m.group(2).strip())}"))
+            continue
+
+        # Numbered items
+        m = re.match(r"^(\s*)(\d+)\.\s+(.*)$", line)
+        if m:
+            depth = max(0, len(m.group(1)) // 2)
+            prefix = "&nbsp;&nbsp;" * depth
+            out_lines.append(
+                _crm_colorize_keywords(f"{prefix}{m.group(2)}. {_crm_inline_format(m.group(3).strip())}")
+            )
+            continue
+
+        # Preserve left indentation with &nbsp;
+        lead_spaces = len(line) - len(line.lstrip(" "))
+        prefix = "&nbsp;" * lead_spaces
+        out_lines.append(_crm_colorize_keywords(f"{prefix}{_crm_inline_format(line.lstrip(' '))}"))
+
+    return "\n".join(out_lines)
 
 # ── Notes Agent preset storage ────────────────────────────────────────────────
 
@@ -553,13 +900,15 @@ class NoteSendToCRMRequest(BaseModel):
     account_id: str = ""
 
 
-@router.post("/{note_id}/send-to-crm")
-def send_note_to_crm(
+def send_note_to_crm_internal(
     note_id: str,
-    req: NoteSendToCRMRequest,
-    request: Request,
-    db: Session = Depends(get_session),
+    account_id: str,
+    db: Session,
 ):
+    # Safety guard: development mirror host must never push notes back to CRM.
+    if bool(settings.live_mirror_enabled):
+        raise HTTPException(403, "CRM push is disabled in development mirror mode.")
+
     if not settings.crm_push_enabled:
         raise HTTPException(403, "CRM push is disabled. Set CRM_PUSH_ENABLED=true.")
 
@@ -577,7 +926,7 @@ def send_note_to_crm(
     if missing:
         raise HTTPException(500, f"Missing CRM push credentials: {', '.join(missing)}")
 
-    account_id = str(req.account_id or "").strip()
+    account_id = str(account_id or "").strip()
     crm_url = ""
     if not account_id:
         account_id, crm_url = _resolve_account_for_note(note.agent, note.customer, db)
@@ -587,21 +936,14 @@ def send_note_to_crm(
             f"Could not resolve CRM account_id for {note.agent} / {note.customer}. Provide account_id explicitly.",
         )
 
-    data_field = str(settings.crm_push_data_field or "note").strip() or "note"
-    note_payload = {
-        data_field: str(note.content_md or ""),
-        "call_id": str(note.call_id or ""),
-        "agent": str(note.agent or ""),
-        "customer": str(note.customer or ""),
-        "model": str(note.model or ""),
-        "created_at": note.created_at.isoformat() if note.created_at else "",
-    }
+    crm_note_html = _markdown_to_crm_html(str(note.content_md or ""))
     body = {
         "api_username": settings.crm_push_api_username,
         "api_password": settings.crm_push_api_password,
         "api_key": settings.crm_push_api_key,
         "account_id": account_id,
-        "data": json.dumps(note_payload, ensure_ascii=False),
+        # CRM expects raw note body in `data`; do not wrap with metadata JSON.
+        "data": crm_note_html,
     }
     encoded_body = urlencode(body)
     endpoints = _candidate_crm_push_endpoints(
@@ -672,6 +1014,20 @@ def send_note_to_crm(
         "crm_url": crm_url,
         "note_id": note.id,
     }
+
+
+@router.post("/{note_id}/send-to-crm")
+def send_note_to_crm(
+    note_id: str,
+    req: NoteSendToCRMRequest,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    return send_note_to_crm_internal(
+        note_id=note_id,
+        account_id=str(req.account_id or "").strip(),
+        db=db,
+    )
 
 
 # ── Analyze a single call — SSE stream ───────────────────────────────────────

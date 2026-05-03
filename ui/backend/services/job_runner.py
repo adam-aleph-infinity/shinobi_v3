@@ -4,7 +4,9 @@ Streams stdout lines as SSE progress events via per-job asyncio queues.
 """
 import asyncio
 import json
+import random
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -143,43 +145,117 @@ def _s3_presigned_url(crm_url: str, record_path: str, expires: int = 3600) -> tu
 def _transcribe_via_elevenlabs(audio_url: Optional[str], audio_path: Optional[str]) -> dict:
     """Call ElevenLabs Scribe v2. Returns raw JSON dict with words + text."""
     import os
+    import requests
+    from ui.backend.config import settings
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY not set")
 
-    if audio_url:
-        import requests
-        resp = requests.post(
-            "https://api.elevenlabs.io/v1/speech-to-text",
-            data={
-                "source_url": audio_url,
-                "model_id": "scribe_v2",
-                "diarize": "true",
-                "tag_audio_events": "true",
-                "timestamps_granularity": "word",
-            },
-            headers={"xi-api-key": api_key},
-            timeout=300,
+    # Keep webhook/backfill responsive under provider network issues.
+    # Use short connect timeout and bounded read timeout instead of a single 300s block.
+    connect_timeout_s = max(5.0, float(getattr(settings, "elevenlabs_connect_timeout_s", 20.0) or 20.0))
+    read_timeout_s = max(20.0, float(getattr(settings, "elevenlabs_read_timeout_s", 180.0) or 180.0))
+    retry_attempts = max(1, int(getattr(settings, "elevenlabs_retry_attempts", 3) or 3))
+    retry_base_s = max(0.1, float(getattr(settings, "elevenlabs_retry_base_delay_s", 2.0) or 2.0))
+    retry_max_s = max(retry_base_s, float(getattr(settings, "elevenlabs_retry_max_delay_s", 30.0) or 30.0))
+    retry_jitter_s = max(0.0, float(getattr(settings, "elevenlabs_retry_jitter_s", 0.5) or 0.5))
+
+    def _delay_for_attempt(attempt: int) -> float:
+        delay = min(retry_max_s, retry_base_s * (2 ** max(0, attempt - 1)))
+        if retry_jitter_s > 0:
+            delay += random.uniform(0.0, retry_jitter_s)
+        return delay
+
+    def _status_retryable(status_code: int) -> bool:
+        return status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+
+    def _exception_retryable(exc: Exception) -> bool:
+        if isinstance(exc, (
+            requests.exceptions.ConnectTimeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        )):
+            return True
+        lo = str(exc).lower()
+        needles = (
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection aborted",
+            "temporarily unavailable",
+            "too many requests",
+            "rate limit",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
         )
-        if not resp.ok:
-            raise RuntimeError(f"ElevenLabs error {resp.status_code}: {resp.text[:300]}")
-        return resp.json()
+        return any(n in lo for n in needles)
+
+    if audio_url:
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                resp = requests.post(
+                    "https://api.elevenlabs.io/v1/speech-to-text",
+                    data={
+                        "source_url": audio_url,
+                        "model_id": "scribe_v2",
+                        "diarize": "true",
+                        "tag_audio_events": "true",
+                        "timestamps_granularity": "word",
+                    },
+                    headers={"xi-api-key": api_key},
+                    timeout=(connect_timeout_s, read_timeout_s),
+                )
+                if resp.ok:
+                    return resp.json()
+                err = RuntimeError(f"ElevenLabs error {resp.status_code}: {resp.text[:300]}")
+                if attempt >= retry_attempts or not _status_retryable(resp.status_code):
+                    raise err
+                delay_s = _delay_for_attempt(attempt)
+                print(f"[ElevenLabs] URL attempt {attempt}/{retry_attempts} failed ({resp.status_code}); retrying in {delay_s:.1f}s")
+                time.sleep(delay_s)
+            except Exception as e:
+                last_exc = e
+                if attempt >= retry_attempts or not _exception_retryable(e):
+                    raise
+                delay_s = _delay_for_attempt(attempt)
+                print(f"[ElevenLabs] URL attempt {attempt}/{retry_attempts} error: {e}; retrying in {delay_s:.1f}s")
+                time.sleep(delay_s)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("ElevenLabs URL transcription failed without a specific error")
     elif audio_path and Path(audio_path).exists():
         from elevenlabs import ElevenLabs
         client = ElevenLabs(api_key=api_key)
-        with open(audio_path, "rb") as f:
-            response = client.speech_to_text.convert(
-                file=f,
-                model_id="scribe_v2",
-                diarize=True,
-                tag_audio_events=True,
-                timestamps_granularity="word",
-            )
-        return {
-            "text": getattr(response, "text", ""),
-            "words": [w.__dict__ for w in getattr(response, "words", [])],
-            "segments": [s.__dict__ for s in getattr(response, "segments", [])],
-        }
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                with open(audio_path, "rb") as f:
+                    response = client.speech_to_text.convert(
+                        file=f,
+                        model_id="scribe_v2",
+                        diarize=True,
+                        tag_audio_events=True,
+                        timestamps_granularity="word",
+                    )
+                return {
+                    "text": getattr(response, "text", ""),
+                    "words": [w.__dict__ for w in getattr(response, "words", [])],
+                    "segments": [s.__dict__ for s in getattr(response, "segments", [])],
+                }
+            except Exception as e:
+                last_exc = e
+                if attempt >= retry_attempts or not _exception_retryable(e):
+                    raise
+                delay_s = _delay_for_attempt(attempt)
+                print(f"[ElevenLabs] file attempt {attempt}/{retry_attempts} error: {e}; retrying in {delay_s:.1f}s")
+                time.sleep(delay_s)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("ElevenLabs file transcription failed without a specific error")
     else:
         raise RuntimeError("No audio URL or valid local path provided")
 

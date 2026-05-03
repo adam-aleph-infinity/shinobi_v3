@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "ingest_only": true,
+  "trigger_pipeline": true,
+  "default_pipeline_id": "",
+  "pipeline_by_agent": {},
+  "transcription_model": "gpt-5.4",
+  "transcription_timeout_s": 900,
+  "transcription_poll_interval_s": 2.0,
+  "run_payload": {
+    "resume_partial": true
+  }
+}

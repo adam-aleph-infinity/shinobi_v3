@@ -4,7 +4,7 @@ import useSWR from "swr";
 import {
   Loader2, FileText,
   Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot, User, BarChart3, ShieldCheck,
-  EyeOff, Eye, X,
+  EyeOff, Eye, X, Send,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
@@ -223,6 +223,8 @@ interface PipelineArtifactState {
   artifact_complete?: boolean;
   artifact_types?: string[];
   last_at?: string | null;
+  note_sent?: boolean;
+  note_sent_at?: string | null;
 }
 interface PipelineArtifactStatus {
   pipeline_id: string;
@@ -295,6 +297,13 @@ export default function CallsPage() {
   const selectedCustomerName = ctx.customer;
   const selectedCallId = ctx.callId;
   const [checkedCallIds, setCheckedCallIds]       = useState<Set<string>>(new Set());
+  const [callsPickerMode, setCallsPickerMode] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams(window.location.search);
+    setCallsPickerMode(qs.get("embedded") === "1" && qs.get("mode") === "pick_calls");
+  }, []);
 
   // Auto-switch to pipeline tab when calls are first checked (if pipeline active)
   const prevCheckedSizeRef = useRef(0);
@@ -447,6 +456,25 @@ export default function CallsPage() {
     }
     return checkedCallIdsOrdered[0] ?? selectedCallId ?? "";
   }, [selectedCallId, checkedCallIdsOrdered]);
+
+  useEffect(() => {
+    if (!callsPickerMode) return;
+    if (typeof window === "undefined" || !window.parent || window.parent === window) return;
+    try {
+      window.parent.postMessage(
+        {
+          type: "shinobi:calls-context",
+          agent: selectedAgent || "",
+          customer: selectedCustomerName || "",
+          call_id: selectedCallId || "",
+          selected_call_ids: checkedCallIdsOrdered,
+        },
+        window.location.origin,
+      );
+    } catch {
+      // no-op
+    }
+  }, [callsPickerMode, selectedAgent, selectedCustomerName, selectedCallId, checkedCallIdsOrdered]);
 
   const selectedCallData = calls.find(c => normalizeCallId(c.call_id) === normalizeCallId(selectedCallId)) ?? null;
   const selectedTx = selectedCallData?.tx ?? null;
@@ -733,6 +761,7 @@ export default function CallsPage() {
             const artifactTypes = Array.from(
               new Set((effectiveArtifactState?.artifact_types ?? []).map(normalizeArtifactType).filter(Boolean)),
             );
+            const noteSent = !!effectiveArtifactState?.note_sent;
             const artifactBadgeTypes = artifactTypes.length > 0
               ? artifactTypes
               : ((effectiveArtifactState?.artifact_count ?? 0) > 0 ? ["unknown"] : []);
@@ -774,6 +803,14 @@ export default function CallsPage() {
                           className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
                         >
                           <FileText className="h-3 w-3" />
+                        </span>
+                      )}
+                      {noteSent && (
+                        <span
+                          title="Note sent to CRM"
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-sky-700/60 bg-sky-900/35 text-sky-300"
+                        >
+                          <Send className="h-3 w-3" />
                         </span>
                       )}
                       {ctx.activePipelineId && artifactBadgeTypes.map((type, idx) => {

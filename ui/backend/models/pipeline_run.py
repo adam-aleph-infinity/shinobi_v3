@@ -12,7 +12,7 @@ class PipelineRun(SQLModel, table=True):
     sales_agent: str = Field(default="", index=True)
     customer: str = Field(default="", index=True)
     call_id: str = Field(default="", index=True)
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     finished_at: Optional[datetime] = None
     status: str = "running"  # running | done | error
     canvas_json: str = ""    # JSON canvas snapshot {nodes, edges, stages}

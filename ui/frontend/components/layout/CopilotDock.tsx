@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Bot, Loader2, PanelLeftClose, Plus, Send, Trash2, User, Wrench } from "lucide-react";
+import { Bot, Loader2, Plus, Send, Trash2, User, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type SessionSummary = {
@@ -60,7 +60,7 @@ function fmtTime(iso: string): string {
   }
 }
 
-export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
+export default function CopilotDock() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -276,7 +276,7 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
   }
 
   return (
-    <aside className="h-screen bg-gray-900 border-r border-gray-800 flex flex-col">
+    <aside className="h-full w-full bg-gray-900 flex flex-col">
       <div className="px-3 py-2.5 border-b border-gray-800 flex items-start gap-2">
         <div className="min-w-0">
           <h1 className="text-sm font-semibold text-white leading-tight">AI Copilot</h1>
@@ -306,15 +306,6 @@ export default function CopilotDock({ onToggle }: { onToggle?: () => void }) {
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
-          {onToggle && (
-            <button
-              onClick={onToggle}
-              className="p-1.5 rounded-md bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
-              title="Hide copilot"
-            >
-              <PanelLeftClose className="w-3.5 h-3.5" />
-            </button>
-          )}
         </div>
       </div>
 
