@@ -22,6 +22,7 @@ from ui.backend.models.agent_result import AgentResult      # noqa: F401 — reg
 from ui.backend.models.uploaded_file import UploadedFile    # noqa: F401 — registers table
 from ui.backend.models.pipeline_run import PipelineRun      # noqa: F401 — registers table
 from ui.backend.models.pipeline_artifact import PipelineArtifact  # noqa: F401 — registers table
+from ui.backend.models.app_state_kv import AppStateKV       # noqa: F401 — registers table
 from ui.backend.routers import crm, jobs, personas, logs, workspace, execution_logs
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
@@ -483,7 +484,17 @@ async def on_shutdown():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": APP_VERSION}
+    from ui.backend.database import _DATABASE_URL
+
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "database_backend": "postgres" if bool(_DATABASE_URL) else "sqlite",
+        "live_state_use_db": bool(getattr(settings, "live_state_use_db", True)),
+        "live_state_read_only": bool(getattr(settings, "live_state_read_only", False)),
+        "live_mirror_enabled": bool(getattr(settings, "live_mirror_enabled", False)),
+        "live_mirror_base_url_set": bool(str(getattr(settings, "live_mirror_base_url", "") or "").strip()),
+    }
 
 
 @app.get("/time")
