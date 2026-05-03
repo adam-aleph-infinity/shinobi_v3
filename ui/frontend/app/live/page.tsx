@@ -482,7 +482,7 @@ export default function LivePage() {
     data: rejectedData,
     mutate: mutateRejected,
   } = useSWR<{ ok?: boolean; count?: number; total_count?: number; returned_count?: number; items?: RejectedWebhookItem[] }>(
-    "/api/pipelines/live-webhook/rejections?limit=20000&status=rejected&include_payload=0",
+    "/api/pipelines/live-webhook/rejections?limit=500&status=rejected&include_payload=0",
     fetcher,
     {
       refreshInterval: 10000,
@@ -500,7 +500,7 @@ export default function LivePage() {
   const [runsError, setRunsError] = useState<Error | null>(null);
 
   const { mutate: mutateRunsBase } = useSWR<PipelineRunRecord[]>(
-    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=1200&compact=1&mirror=1",
+    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=500&compact=1&mirror=1",
     fetcher,
     {
       refreshInterval: 30000,

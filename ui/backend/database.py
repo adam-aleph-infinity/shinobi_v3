@@ -15,19 +15,30 @@ else:
 
 
 def _migrate():
-    """Apply incremental schema migrations (idempotent). SQLite-only DDL hacks."""
-    if _DATABASE_URL:
-        return  # PostgreSQL — SQLModel.metadata.create_all handles everything
+    """Apply incremental schema migrations (idempotent)."""
     from sqlalchemy import text
     with engine.connect() as conn:
-        for ddl in [
-            "ALTER TABLE crm_pair ADD COLUMN ftd_at TEXT",
+        # SQLite-only column additions
+        if not _DATABASE_URL:
+            for ddl in [
+                "ALTER TABLE crm_pair ADD COLUMN ftd_at TEXT",
+            ]:
+                try:
+                    conn.execute(text(ddl))
+                    conn.commit()
+                except Exception:
+                    pass  # column already exists
+
+        # Indexes missing from SQLModel auto-create (safe to run on both Postgres + SQLite)
+        for idx_ddl in [
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_run_started_at ON pipeline_run (started_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_run_status ON pipeline_run (status)",
         ]:
             try:
-                conn.execute(text(ddl))
+                conn.execute(text(idx_ddl))
                 conn.commit()
             except Exception:
-                pass  # column already exists
+                pass  # already exists or unsupported
 
 
 def create_db():

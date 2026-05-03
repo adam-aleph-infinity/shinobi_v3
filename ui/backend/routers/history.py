@@ -89,7 +89,7 @@ def _extract_run_origin_from_steps_json(steps_json: Any) -> str:
 
 def _load_webhook_event_index(
     limit_files: int = 2000,
-    cache_ttl_s: int = 20,
+    cache_ttl_s: int = 120,
 ) -> tuple[dict[tuple[str, str, str], list[float]], dict[str, list[float]]]:
     by_key: dict[tuple[str, str, str], list[float]] = {}
     by_call: dict[str, list[float]] = {}
