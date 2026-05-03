@@ -6,7 +6,7 @@ import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { SectionContent } from "@/components/shared/SectionCards";
-import ContextTopBar from "@/components/shared/ContextTopBar";
+
 import {
   BarChart3,
   Bot,
@@ -893,27 +893,9 @@ export default function AgentDeepDiveView({
     setArtifactViewerMode("rendered");
   };
 
-  const openCrmOverlay = () => {
-    setShowCrmPanel(true);
-    setShowCallsPanel(false);
-  };
-
-  const openCallsOverlay = () => {
-    if (!salesAgent || !customer) return;
-    setShowCallsPanel(true);
-    setShowCrmPanel(false);
-  };
-
   return (
     <div className="relative h-full flex flex-col overflow-hidden bg-gray-950">
       <div className="shrink-0 border-b border-gray-800 bg-gray-900">
-        <ContextTopBar
-          salesAgent={salesAgent}
-          customer={customer}
-          callId={callId}
-          onOpenCrm={openCrmOverlay}
-          onOpenCalls={openCallsOverlay}
-        />
         <div className="flex flex-nowrap items-center gap-2 px-3 py-2 overflow-x-auto">
           <Workflow className="w-4 h-4 text-indigo-400 shrink-0" />
           <span className="text-sm font-bold text-white shrink-0">{title}</span>
