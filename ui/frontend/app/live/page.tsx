@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
 import { Activity, CheckCircle2, ChevronRight, Clock3, Loader2, Workflow, XCircle } from "lucide-react";
@@ -503,17 +503,77 @@ export default function LivePage() {
   );
   const liveReadOnly = hostReadOnly || !!liveCfg?.read_only || !permissions.can_manage_live_jobs;
 
-  // Balance speed and history depth in Jobs page.
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=1200&compact=1&mirror=1";
+  // Incremental load: full baseline every 30s, delta every 4s (only new/changed rows since last seen).
+  const [sinceTs, setSinceTs] = useState("");
+  const sinceTsRef = useRef("");
+  const [runsState, setRunsState] = useState<PipelineRunRecord[]>([]);
+  const [runsInitialLoading, setRunsInitialLoading] = useState(true);
+  const [runsError, setRunsError] = useState<Error | null>(null);
 
-  const { data: runsData, mutate: mutateRuns, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
+  const { mutate: mutateRunsBase } = useSWR<PipelineRunRecord[]>(
+    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=1200&compact=1&mirror=1",
+    fetcher,
+    {
+      refreshInterval: 30000,
+      keepPreviousData: true,
+      revalidateOnFocus: true,
+      onSuccess: (data) => {
+        setRunsInitialLoading(false);
+        setRunsError(null);
+        if (!Array.isArray(data)) return;
+        const max = data.reduce((m, r) => ((r.started_at || "") > m ? (r.started_at || "") : m), "");
+        if (max && max > sinceTsRef.current) {
+          sinceTsRef.current = max;
+          setSinceTs(max);
+        }
+        setRunsState(data);
+      },
+      onError: (err: Error) => {
+        setRunsInitialLoading(false);
+        setRunsError(err);
+      },
+    },
+  );
+
+  const deltaUrl = sinceTs
+    ? `/api/history/runs?sort_by=started_at&sort_dir=desc&limit=100&compact=1&mirror=1&date_from=${encodeURIComponent(sinceTs)}`
+    : null;
+  useSWR<PipelineRunRecord[]>(deltaUrl, fetcher, {
     refreshInterval: 4000,
-    keepPreviousData: true,
-    revalidateOnFocus: true,
+    onSuccess: (delta) => {
+      if (!Array.isArray(delta) || !delta.length) return;
+      const max = delta.reduce((m, r) => ((r.started_at || "") > m ? (r.started_at || "") : m), sinceTsRef.current);
+      if (max > sinceTsRef.current) {
+        sinceTsRef.current = max;
+        setSinceTs(max);
+      }
+      setRunsState((prev) => {
+        const byId = new Map(prev.map((r) => [r.id, r]));
+        for (const r of delta) byId.set(r.id, r);
+        return [...byId.values()].sort((a, b) =>
+          (b.started_at || "") > (a.started_at || "") ? 1 : -1,
+        );
+      });
+    },
   });
 
+  const isLoading = runsInitialLoading;
+  const mutateRuns = useCallback(
+    async (updater?: any, opts?: any) => {
+      if (typeof updater === "function") {
+        setRunsState(updater);
+        if (opts?.revalidate !== false) void mutateRunsBase();
+      } else if (Array.isArray(updater)) {
+        setRunsState(updater);
+      } else {
+        await mutateRunsBase();
+      }
+    },
+    [mutateRunsBase],
+  );
+
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
-  const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
+  const runs: PipelineRunRecord[] = runsState;
   const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData.items : [];
   const activeRejectedItems = useMemo(
     () =>
@@ -897,11 +957,14 @@ export default function LivePage() {
       setRejectionActionMsg("Read-only mirror mode: cannot enqueue rejected webhook from this environment.");
       return;
     }
-    const preferredPipelineId =
-      String(liveSelectedPipelineIds?.[0] || "").trim()
-      || String(item?.pipeline_ids?.[0] || "").trim();
+    const selectedIds = (liveSelectedPipelineIds || []).map((v) => String(v || "").trim()).filter(Boolean);
+    const runAll = selectedIds.length > 1;
+    const preferredPipelineId = selectedIds[0] || String(item?.pipeline_ids?.[0] || "").trim();
+    const pipelineLabel = runAll
+      ? selectedIds.map((id) => pipelineNameById[id] || id).join(", ")
+      : (pipelineNameById[preferredPipelineId] || preferredPipelineId || "(auto)");
     const ok = window.confirm(
-      `Move rejected webhook ${rejectionId.slice(0, 8)} to run queue${preferredPipelineId ? ` using pipeline ${preferredPipelineId}` : ""}?`,
+      `Move rejected webhook ${rejectionId.slice(0, 8)} to run queue using: ${pipelineLabel}?`,
     );
     if (!ok) return;
 
@@ -912,8 +975,8 @@ export default function LivePage() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          pipeline_id: preferredPipelineId || "",
-          run_all: false,
+          pipeline_id: runAll ? "" : (preferredPipelineId || ""),
+          run_all: runAll,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -938,7 +1001,7 @@ export default function LivePage() {
         } as any;
       }, { revalidate: false });
       setDismissedRejectedIds((prev) => ({ ...prev, [rid]: true }));
-      await mutateRuns((current) => {
+      await mutateRuns((current: PipelineRunRecord[]) => {
         const prevRows = Array.isArray(current) ? current : [];
         const existing = new Set(prevRows.map((r) => String(r.id || "")));
         const pipelineRows = Array.isArray(body?.pipelines) ? body.pipelines : [];

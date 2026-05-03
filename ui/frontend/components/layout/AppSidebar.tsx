@@ -21,7 +21,6 @@ const GROUPS = [
     items: [
       { href: "/crm",       icon: Users,    label: "CRM Browser" },
       { href: "/calls",     icon: FileText, label: "Calls" },
-      { href: "/user",      icon: User,     label: "User" },
     ],
   },
   {
@@ -163,6 +162,18 @@ export default function AppSidebar() {
             </div>
           </div>
         )}
+        <Link
+          href="/user"
+          className={cn(
+            "mt-2 flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors",
+            pathname === "/user"
+              ? "bg-indigo-600 text-white"
+              : "text-gray-400 hover:text-white hover:bg-gray-800",
+          )}
+        >
+          <User className="w-4 h-4 shrink-0" />
+          User
+        </Link>
       </div>
 
       {/* Nav groups */}

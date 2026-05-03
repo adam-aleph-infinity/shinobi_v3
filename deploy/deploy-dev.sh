@@ -35,7 +35,7 @@ gcloud compute ssh "$VM_NAME" \
 
     echo '▶ Pull latest code...'
     git fetch origin
-    git stash || true
+    git stash push --include-untracked -m \"pre-deploy \$(date +%Y-%m-%dT%H:%M:%S)\" || true
     git checkout \"\$BRANCH\"
     git pull origin \"\$BRANCH\"
 
@@ -76,8 +76,9 @@ gcloud compute ssh "$VM_NAME" \
     npm install --legacy-peer-deps -q
     rm -rf .next
     npm run build
-    cp -r .next/static .next/standalone/.next/static
-    cp -r public .next/standalone/public
+    mkdir -p .next/standalone/.next/static .next/standalone/public
+    rsync -a --delete .next/static/ .next/standalone/.next/static/
+    rsync -a --delete public/ .next/standalone/public/
     cd \"\$APP_DIR\"
 
     echo '▶ Update systemd units to point to shinobi_v3...'
@@ -93,7 +94,8 @@ User=\$USER
 WorkingDirectory=\$APP_DIR
 Environment=PATH=\$APP_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=\$APP_DIR/.env
-ExecStart=\$APP_DIR/.venv/bin/uvicorn ui.backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --timeout-keep-alive 75
+Environment=SHINOBI_BACKEND_WORKERS=2
+ExecStart=\$APP_DIR/.venv/bin/uvicorn ui.backend.main:app --host 127.0.0.1 --port 8000 --workers \\${SHINOBI_BACKEND_WORKERS} --timeout-keep-alive 75
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=300

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select, or_
@@ -12,6 +12,7 @@ from sqlmodel import Session, select, or_
 from ui.backend.database import get_session
 from ui.backend.models.job import Job, JobStatus
 from ui.backend.services import job_runner
+from ui.backend.services import user_profiles
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -48,7 +49,8 @@ class TranscribeRequest(BaseModel):
 
 
 @router.post("")
-async def create_job(req: TranscribeRequest, db: Session = Depends(get_session)):
+async def create_job(req: TranscribeRequest, request: Request, db: Session = Depends(get_session)):
+    user_profiles.require_permission(request, "can_manage_jobs")
     extra = {
         "stages": req.stages,
         "engines": req.engines,
@@ -108,7 +110,8 @@ def worker_stats():
 
 
 @router.delete("/history")
-def clear_history(db: Session = Depends(get_session)):
+def clear_history(request: Request, db: Session = Depends(get_session)):
+    user_profiles.require_permission(request, "can_manage_jobs")
     """Delete all completed and failed jobs."""
     to_delete = db.exec(
         select(Job).where(or_(Job.status == JobStatus.complete, Job.status == JobStatus.failed))
@@ -127,7 +130,8 @@ def get_config():
 
 
 @router.put("/config")
-def update_config(body: WorkerConfig):
+def update_config(body: WorkerConfig, request: Request):
+    user_profiles.require_permission(request, "can_manage_jobs")
     """Update the worker pool size."""
     job_runner.set_max_workers(body.max_workers)
     return {"max_workers": job_runner.get_max_workers()}
@@ -204,7 +208,8 @@ async def stream_job(job_id: str, db: Session = Depends(get_session)):
 
 
 @router.delete("/{job_id}")
-def cancel_job(job_id: str, db: Session = Depends(get_session)):
+def cancel_job(job_id: str, request: Request, db: Session = Depends(get_session)):
+    user_profiles.require_permission(request, "can_manage_jobs")
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(404, "Job not found")

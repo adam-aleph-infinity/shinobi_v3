@@ -4,7 +4,7 @@ import useSWR from "swr";
 import {
   Loader2, FileText,
   Circle, ChevronRight, Mic2, StickyNote, Trash2, Play, Bot, User, BarChart3, ShieldCheck,
-  EyeOff, Eye, X,
+  EyeOff, Eye, X, Send,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration, formatDate } from "@/lib/utils";
@@ -223,6 +223,8 @@ interface PipelineArtifactState {
   artifact_complete?: boolean;
   artifact_types?: string[];
   last_at?: string | null;
+  note_sent?: boolean;
+  note_sent_at?: string | null;
 }
 interface PipelineArtifactStatus {
   pipeline_id: string;
@@ -759,6 +761,7 @@ export default function CallsPage() {
             const artifactTypes = Array.from(
               new Set((effectiveArtifactState?.artifact_types ?? []).map(normalizeArtifactType).filter(Boolean)),
             );
+            const noteSent = !!effectiveArtifactState?.note_sent;
             const artifactBadgeTypes = artifactTypes.length > 0
               ? artifactTypes
               : ((effectiveArtifactState?.artifact_count ?? 0) > 0 ? ["unknown"] : []);
@@ -800,6 +803,14 @@ export default function CallsPage() {
                           className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-teal-700/60 bg-teal-900/35 text-teal-300"
                         >
                           <FileText className="h-3 w-3" />
+                        </span>
+                      )}
+                      {noteSent && (
+                        <span
+                          title="Note sent to CRM"
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-sky-700/60 bg-sky-900/35 text-sky-300"
+                        >
+                          <Send className="h-3 w-3" />
                         </span>
                       )}
                       {ctx.activePipelineId && artifactBadgeTypes.map((type, idx) => {

@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 from ui.backend.config import settings
 from ui.backend.database import get_session, engine as _db_engine
 from ui.backend.services import log_buffer, execution_logs
+from ui.backend.services import user_profiles
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
@@ -54,6 +55,74 @@ _MERGED_CALL_INDEX_CACHE_LOCK = threading.Lock()
 _MERGED_CALL_INDEX_CACHE: dict[str, tuple[int, list[tuple[str, str]], dict[str, list[str]], dict[str, float]]] = {}
 
 
+def _user_profile(request: Request) -> dict[str, Any]:
+    return user_profiles.get_current_user_profile(request)
+
+
+def _require_can_view(request: Request) -> dict[str, Any]:
+    profile = _user_profile(request)
+    if not bool((profile.get("permissions") or {}).get("can_view")):
+        raise HTTPException(status_code=403, detail="User is not allowed to access this environment.")
+    return profile
+
+
+def _require_can_create_pipeline(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_create_pipelines")
+
+
+def _require_can_edit_pipeline(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_edit_pipelines")
+
+
+def _require_can_run_pipeline(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_run_pipelines")
+
+
+def _require_can_manage_jobs(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_manage_jobs")
+
+
+def _require_can_manage_live(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_manage_live_jobs")
+
+
+def _workspace_owner_for_new_pipeline(request: Request, profile: dict[str, Any]) -> str:
+    env = str((profile or {}).get("environment") or "").strip().lower()
+    if env != "dev":
+        return ""
+    return str((profile or {}).get("email") or "").strip().lower()
+
+
+def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    perms = profile.get("permissions") if isinstance(profile.get("permissions"), dict) else {}
+    if not bool(perms.get("can_view")):
+        return False
+    if bool(profile.get("is_admin")):
+        return True
+    env = str(profile.get("environment") or "").strip().lower()
+    if env != "dev":
+        return True
+    owner = str(data.get("workspace_user_email") or "").strip().lower()
+    if not owner:
+        # Legacy/shared pipelines remain visible.
+        return True
+    return owner == str(profile.get("email") or "").strip().lower()
+
+
+def _assert_can_modify_pipeline_record(request: Request, profile: dict[str, Any], data: dict[str, Any]) -> None:
+    _require_can_edit_pipeline(request)
+    if bool(profile.get("is_admin")):
+        return
+    env = str(profile.get("environment") or "").strip().lower()
+    if env != "dev":
+        return
+    owner = str(data.get("workspace_user_email") or "").strip().lower()
+    if owner and owner != str(profile.get("email") or "").strip().lower():
+        raise HTTPException(status_code=403, detail="This pipeline belongs to another user workspace.")
+
+
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
     if not bool(settings.live_mirror_enabled):
         return False
@@ -65,8 +134,10 @@ def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
 
 
 def _is_live_state_read_only(request: Optional[Request] = None) -> bool:
+    # Explicit config switch takes precedence (useful when dev shares prod DB).
     if bool(getattr(settings, "live_state_read_only", False)):
         return True
+    # Mirror mode is always read-only.
     return _is_live_mirror_mode(request)
 
 
@@ -2174,19 +2245,26 @@ def _ensure_folder_exists(folder: str) -> None:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
-def list_pipelines():
+def list_pipelines(request: Request):
+    profile = _require_can_view(request)
     _load_internal_prompt_templates()
     _sync_ai_registry_pipelines()
-    return _load_all()
+    rows = _load_all()
+    return [r for r in rows if _can_access_pipeline_record(profile, r)]
 
 
 @router.get("/folders")
-def list_pipeline_folders():
+def list_pipeline_folders(request: Request):
+    profile = _require_can_view(request)
+    visible = [p for p in _load_all() if _can_access_pipeline_record(profile, p)]
     from_pipelines = [
         _normalise_folder(str(p.get("folder", "") or ""))
-        for p in _load_all()
+        for p in visible
     ]
-    merged = [*from_pipelines, *_load_folders()]
+    global_folders = _load_folders()
+    if str(profile.get("environment") or "").strip().lower() == "dev" and not bool(profile.get("is_admin")):
+        global_folders = []
+    merged = [*from_pipelines, *global_folders]
     deduped = []
     seen = set()
     for folder in merged:
@@ -2202,7 +2280,8 @@ def list_pipeline_folders():
 
 
 @router.post("/folders")
-def create_pipeline_folder(req: FolderIn):
+def create_pipeline_folder(req: FolderIn, request: Request):
+    _require_can_create_pipeline(request)
     name = _normalise_folder(req.name)
     if not name:
         raise HTTPException(400, "Folder name is required")
@@ -2211,7 +2290,8 @@ def create_pipeline_folder(req: FolderIn):
 
 
 @router.delete("/folders")
-def delete_pipeline_folder(req: FolderDeleteIn):
+def delete_pipeline_folder(req: FolderDeleteIn, request: Request):
+    profile = _require_can_edit_pipeline(request)
     target = _normalise_folder(req.name)
     if not target:
         raise HTTPException(400, "Folder name is required")
@@ -2223,6 +2303,9 @@ def delete_pipeline_folder(req: FolderDeleteIn):
     moved = 0
     for file in _DIR.glob("*.json"):
         data = json.loads(file.read_text(encoding="utf-8"))
+        if not _can_access_pipeline_record(profile, data):
+            continue
+        _assert_can_modify_pipeline_record(request, profile, data)
         cur = _normalise_folder(str(data.get("folder", "") or ""))
         if cur.lower() != target.lower():
             continue
@@ -2239,11 +2322,16 @@ def delete_pipeline_folder(req: FolderDeleteIn):
 
 
 @router.post("")
-def create_pipeline(req: PipelineIn):
+def create_pipeline(req: PipelineIn, request: Request):
+    profile = _require_can_create_pipeline(request)
     _validate_pipeline_payload(req)
     _DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.utcnow().isoformat()
     record = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()}
+    owner_email = _workspace_owner_for_new_pipeline(request, profile)
+    if owner_email:
+        record["workspace_user_email"] = owner_email
+        record["workspace_user_name"] = str(profile.get("name") or "").strip()
     record["folder"] = _normalise_folder(record.get("folder", ""))
     if record["folder"]:
         _ensure_folder_exists(record["folder"])
@@ -2380,8 +2468,11 @@ def get_artifact_template(
 
 
 @router.get("/{pipeline_id}/bundle")
-def export_pipeline_bundle(pipeline_id: str):
+def export_pipeline_bundle(pipeline_id: str, request: Request):
+    profile = _require_can_view(request)
     _, pipeline_def = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pipeline_def):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     step_agent_ids = [
         str((s or {}).get("agent_id") or "").strip()
         for s in (pipeline_def.get("steps") or [])
@@ -2415,7 +2506,8 @@ def export_pipeline_bundle(pipeline_id: str):
 
 
 @router.post("/bundles/import")
-def import_pipeline_bundle(req: PipelineBundleImportIn):
+def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
+    profile = _require_can_create_pipeline(request)
     payload = req.bundle if isinstance(req.bundle, dict) else {}
     pipeline_raw = payload.get("pipeline")
     agents_raw = payload.get("agents")
@@ -2511,6 +2603,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn):
     pipeline_out["updated_at"] = now
     pipeline_out["name"] = unique_pipeline_name
     pipeline_out["folder"] = folder_name
+    owner_email = _workspace_owner_for_new_pipeline(request, profile)
+    if owner_email:
+        pipeline_out["workspace_user_email"] = owner_email
+        pipeline_out["workspace_user_name"] = str(profile.get("name") or "").strip()
 
     # Remap pipeline step agent ids.
     remapped_steps: list[dict[str, Any]] = []
@@ -2588,15 +2684,22 @@ def import_pipeline_bundle(req: PipelineBundleImportIn):
 
 
 @router.get("/{pipeline_id}")
-def get_pipeline(pipeline_id: str):
+def get_pipeline(pipeline_id: str, request: Request):
+    profile = _require_can_view(request)
     _, data = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     return data
 
 
 @router.put("/{pipeline_id}")
-def update_pipeline(pipeline_id: str, req: PipelineIn):
+def update_pipeline(pipeline_id: str, req: PipelineIn, request: Request):
+    profile = _require_can_edit_pipeline(request)
     _validate_pipeline_payload(req)
     f, data = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_modify_pipeline_record(request, profile, data)
     data.update({**req.model_dump(), "updated_at": datetime.utcnow().isoformat()})
     data["folder"] = _normalise_folder(data.get("folder", ""))
     if data["folder"]:
@@ -2607,8 +2710,12 @@ def update_pipeline(pipeline_id: str, req: PipelineIn):
 
 
 @router.patch("/{pipeline_id}/folder")
-def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
+def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn, request: Request):
+    profile = _require_can_edit_pipeline(request)
     f, data = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_modify_pipeline_record(request, profile, data)
     folder = _normalise_folder(req.folder)
     data["folder"] = folder
     data["updated_at"] = datetime.utcnow().isoformat()
@@ -2620,8 +2727,16 @@ def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn):
 
 
 @router.delete("/{pipeline_id}")
-def delete_pipeline(pipeline_id: str):
+def delete_pipeline(pipeline_id: str, request: Request):
+    profile = _require_can_edit_pipeline(request)
     f, _ = _find_file(pipeline_id)
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not _can_access_pipeline_record(profile, data):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_modify_pipeline_record(request, profile, data)
     f.unlink()
     _sync_ai_registry_pipelines()
     return {"ok": True}
@@ -3902,6 +4017,8 @@ async def stop_pipeline(
     request: Request,
 ):
     """Request cancellation of an active pipeline run for this context."""
+    _require_can_run_pipeline(request)
+    _find_file(pipeline_id)
     client_local_time = request.headers.get("x-client-local-time", "")
     client_timezone = request.headers.get("x-client-timezone", "")
     execution_session_id = execution_logs.start_session(
@@ -3980,6 +4097,7 @@ async def stop_pipeline(
 @router.get("/{pipeline_id}/runs")
 def list_pipeline_runs(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: Optional[str] = Query(None),
@@ -3987,6 +4105,10 @@ def list_pipeline_runs(
     db: Session = Depends(get_session),
 ):
     """Return recent runs for a specific pipeline."""
+    profile = _require_can_view(request)
+    _, pdef = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pdef):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     from ui.backend.models.pipeline_run import PipelineRun as PR
 
     stmt = select(PR).where(PR.pipeline_id == pipeline_id)
@@ -4017,6 +4139,7 @@ def list_pipeline_runs(
 @router.get("/{pipeline_id}/analytics")
 def get_pipeline_analytics(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: Optional[str] = Query(None),
@@ -4025,6 +4148,15 @@ def get_pipeline_analytics(
     db: Session = Depends(get_session),
 ):
     """Return parsed score + violation metrics from pipeline run outputs."""
+    profile = _require_can_view(request)
+    try:
+        _, pdef_access = _find_file(pipeline_id)
+        if not _can_access_pipeline_record(profile, pdef_access):
+            raise HTTPException(status_code=404, detail="Pipeline not found.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     from ui.backend.models.pipeline_run import PipelineRun as PR
     try:
         from ui.backend.routers.universal_agents import _load_all as _load_agents
@@ -4598,12 +4730,16 @@ def get_pipeline_state(
 
 @router.get("/live-webhook/config")
 def get_live_webhook_config(request: Request):
+    profile = _require_can_view(request)
+    can_manage_live = bool((profile.get("permissions") or {}).get("can_manage_live_jobs"))
     if _is_live_mirror_mode(request):
         mirrored = _live_mirror_request_json("GET", "/api/pipelines/live-webhook/config", request=request)
         if isinstance(mirrored, dict):
             mirrored["read_only"] = True
             mirrored["mirror_source"] = str(settings.live_mirror_base_url or "").strip()
+            mirrored["effective_read_only"] = True
             mirrored["state_source"] = "live-mirror-api"
+            mirrored["user_permissions"] = profile.get("permissions") or {}
         return mirrored
     cfg = _load_live_webhook_config()
     try:
@@ -4648,8 +4784,10 @@ def get_live_webhook_config(request: Request):
             stats.get("rejected_by_reason") if isinstance(stats.get("rejected_by_reason"), dict) else {}
         ),
         "rejected_updated_at": str(stats.get("updated_at") or ""),
-        "read_only": _is_live_state_read_only(request),
+        "read_only": bool((not can_manage_live) or _is_live_state_read_only(request)),
+        "effective_read_only": bool((not can_manage_live) or _is_live_state_read_only(request)),
         "state_source": "shared-db" if bool(getattr(settings, "live_state_use_db", True)) else "local-file",
+        "user_permissions": profile.get("permissions") or {},
     }
 
 
@@ -4658,19 +4796,41 @@ def get_live_webhook_rejections(
     request: Request,
     limit: int = Query(20000, ge=1, le=20000),
     status: str = Query("all"),
+    include_payload: int = Query(0),
 ):
+    _require_can_view(request)
     status_norm = str(status or "all").strip().lower() or "all"
+    include_payload_flag = bool(include_payload)
     if _is_live_mirror_mode(request):
-        path = f"/api/pipelines/live-webhook/rejections?limit={int(limit)}&status={status_norm}"
+        path = (
+            f"/api/pipelines/live-webhook/rejections"
+            f"?limit={int(limit)}&status={status_norm}&include_payload={1 if include_payload_flag else 0}"
+        )
         return _live_mirror_request_json("GET", path, request=request)
     from ui.backend.routers import webhooks as _wh
 
-    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=True, include_archive=True)
+    include_non_rejected = status_norm == "all"
+    all_items = _wh._list_rejected_webhooks(
+        limit=20000,
+        include_non_rejected=include_non_rejected,
+        include_archive=True,
+    )
     if status_norm != "all":
         all_items = [
             it for it in all_items
             if str((it or {}).get("status") or "").strip().lower() == status_norm
         ]
+    if not include_payload_flag:
+        compact_items: list[dict[str, Any]] = []
+        for row in all_items:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            payload = out.get("payload")
+            out["payload_present"] = isinstance(payload, dict)
+            out.pop("payload", None)
+            compact_items.append(out)
+        all_items = compact_items
     total_count = len(all_items)
     items = all_items[: int(limit)]
     return {
@@ -4682,12 +4842,44 @@ def get_live_webhook_rejections(
     }
 
 
+@router.get("/live-webhook/rejections/{rejection_id}")
+def get_live_webhook_rejection(
+    rejection_id: str,
+    request: Request,
+    include_payload: int = Query(1),
+):
+    _require_can_view(request)
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection id.")
+    include_payload_flag = bool(include_payload)
+    if _is_live_mirror_mode(request):
+        path = (
+            f"/api/pipelines/live-webhook/rejections/{rid}"
+            f"?include_payload={1 if include_payload_flag else 0}"
+        )
+        return _live_mirror_request_json("GET", path, request=request)
+
+    from ui.backend.routers import webhooks as _wh
+
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Rejected webhook not found: {rid}")
+    out = dict(row)
+    payload = out.get("payload")
+    out["payload_present"] = isinstance(payload, dict)
+    if not include_payload_flag:
+        out.pop("payload", None)
+    return {"ok": True, "item": out}
+
+
 @router.post("/live-webhook/rejections/{rejection_id}/enqueue")
 async def enqueue_live_webhook_rejection(
     rejection_id: str,
     req: LiveWebhookRejectionEnqueueIn,
     request: Request,
 ):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook rejections are read-only in this environment.")
 
@@ -4826,6 +5018,7 @@ async def enqueue_live_webhook_run(
     request: Request,
     db: Session = Depends(get_session),
 ):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
 
@@ -4931,6 +5124,7 @@ async def cancel_live_webhook_run(
     request: Request,
     db: Session = Depends(get_session),
 ):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
 
@@ -5030,6 +5224,7 @@ async def retry_live_webhook_run(
     request: Request,
     db: Session = Depends(get_session),
 ):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
 
@@ -5168,6 +5363,7 @@ async def retry_live_webhook_run(
 
 @router.put("/live-webhook/config")
 def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook config is read-only in this environment.")
     incoming = req.model_dump()
@@ -5239,6 +5435,7 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
 
 @router.put("/live-webhook/quick-set")
 def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook config is read-only in this environment.")
     pipeline_id = str(req.pipeline_id or "").strip()
@@ -5312,14 +5509,21 @@ def list_live_webhook_rejections(
     request: Request,
     limit: int = Query(20000, ge=1, le=20000),
     status: str = Query("all"),
+    include_payload: int = Query(0),
 ):
+    _require_can_view(request)
+    status_norm = str(status or "all").strip().lower() or "all"
+    include_payload_flag = bool(include_payload)
     if _is_live_mirror_mode(request):
-        path = f"/api/pipelines/live-webhook/rejections?limit={int(limit)}&status={status}"
+        path = (
+            f"/api/pipelines/live-webhook/rejections"
+            f"?limit={int(limit)}&status={status_norm}&include_payload={1 if include_payload_flag else 0}"
+        )
         return _live_mirror_request_json("GET", path, request=request)
 
     from ui.backend.routers import webhooks as _wh
 
-    wanted_status = str(status or "all").strip().lower() or "all"
+    wanted_status = status_norm
     include_non_rejected = wanted_status == "all"
     all_items = _wh._list_rejected_webhooks(
         limit=20000,
@@ -5331,6 +5535,17 @@ def list_live_webhook_rejections(
             row for row in all_items
             if str((row or {}).get("status") or "rejected").strip().lower() == wanted_status
         ]
+    if not include_payload_flag:
+        compact_items: list[dict[str, Any]] = []
+        for row in all_items:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            payload = out.get("payload")
+            out["payload_present"] = isinstance(payload, dict)
+            out.pop("payload", None)
+            compact_items.append(out)
+        all_items = compact_items
     total_count = len(all_items)
     items = all_items[: int(limit)]
     return {
@@ -5348,6 +5563,7 @@ async def enqueue_live_webhook_rejection(
     req: LiveWebhookRejectionEnqueueIn,
     request: Request,
 ):
+    _require_can_manage_live(request)
     if _is_live_state_read_only(request):
         raise HTTPException(status_code=403, detail="Live webhook requeue is read-only in this environment.")
 
@@ -5494,6 +5710,7 @@ async def enqueue_live_webhook_rejection(
 @router.get("/{pipeline_id}/live-webhook/wait")
 async def wait_for_live_webhook(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: str = Query(""),
@@ -5501,7 +5718,10 @@ async def wait_for_live_webhook(
     timeout_s: float = Query(45.0, ge=1.0, le=90.0),
 ):
     """Long-poll for next webhook payload matching the current pipeline context."""
-    _find_file(pipeline_id)  # validate pipeline exists
+    profile = _require_can_view(request)
+    _, pdef = _find_file(pipeline_id)  # validate pipeline exists
+    if not _can_access_pipeline_record(profile, pdef):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
 
     wanted_agent = str(sales_agent or "").strip()
     wanted_customer = str(customer or "").strip()
@@ -5547,6 +5767,10 @@ async def run_pipeline(
     db: Session = Depends(get_session),
 ):
     """Execute a pipeline step-by-step, streaming SSE events."""
+    profile = _require_can_run_pipeline(request)
+    _, pdef = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pdef):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     from ui.backend.models.agent_result import AgentResult as AR
     from ui.backend.models.note import Note
     from ui.backend.models.pipeline_artifact import PipelineArtifact as PA

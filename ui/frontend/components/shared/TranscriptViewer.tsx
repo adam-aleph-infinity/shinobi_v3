@@ -232,7 +232,7 @@ function TurnBubbleList({ turns }: { turns: Turn[] }) {
               )}
               <span className="text-[9px] font-mono text-gray-600">{timeLabel}</span>
             </div>
-            <p className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">{t.text}</p>
+            <p className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap break-words">{t.text}</p>
           </div>
         );
       })}
@@ -278,12 +278,13 @@ export function TranscriptViewer({
 
   if (turns.length === 0) {
     const rawClass = externalScroll
-      ? `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
-      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 ${className}`;
+      ? `w-full min-h-full text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
+      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 max-h-full ${className}`;
     return (
       <pre
         className={rawClass}
         onWheelCapture={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
       >
         {content}
       </pre>
@@ -293,12 +294,13 @@ export function TranscriptViewer({
   // If no speaker info at all, render as raw pre
   if (!turns.some(t => t.speaker)) {
     const rawClass = externalScroll
-      ? `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
-      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 ${className}`;
+      ? `w-full min-h-full text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap break-words ${className}`
+      : `text-xs text-gray-300 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto overscroll-contain nowheel h-full min-h-0 max-h-full ${className}`;
     return (
       <pre
         className={rawClass}
         onWheelCapture={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
       >
         {content}
       </pre>
@@ -306,13 +308,14 @@ export function TranscriptViewer({
   }
 
   const viewportClass = externalScroll
-    ? `min-h-0 pr-1 ${className}`
-    : `overflow-y-auto overscroll-contain nowheel h-full min-h-0 pr-1 ${className}`;
+    ? `w-full min-h-full pr-1 ${className}`
+    : `overflow-y-auto overscroll-contain nowheel h-full min-h-0 max-h-full pr-1 ${className}`;
 
   return (
     <div
       className={viewportClass}
       onWheelCapture={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
     >
       <TurnBubbleList turns={turns} />
     </div>

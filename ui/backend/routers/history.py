@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import tuple_
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -319,6 +320,32 @@ def list_runs(
         crm_by_call_id.setdefault(c_call, c_url)
 
     crm_by_pair_cache: dict[tuple[str, str], str] = {}
+    # Prefetch pair->crm_url in one DB round-trip (avoid N+1 lookup per run row).
+    pair_candidates: set[tuple[str, str]] = {
+        (str(r.sales_agent or "").strip(), str(r.customer or "").strip())
+        for r in rows
+        if str(r.sales_agent or "").strip() and str(r.customer or "").strip()
+    }
+    if pair_candidates:
+        try:
+            # SQLite has a variable limit; chunk pair tuples defensively.
+            pair_list = list(pair_candidates)
+            chunk_size = 300
+            for i in range(0, len(pair_list), chunk_size):
+                chunk = pair_list[i : i + chunk_size]
+                pair_rows = db.exec(
+                    select(CRMPair).where(
+                        tuple_(CRMPair.agent, CRMPair.customer).in_(chunk)
+                    )
+                ).all()
+                for pair_row in pair_rows:
+                    k = (norm(pair_row.agent), norm(pair_row.customer))
+                    v = str(pair_row.crm_url or "").strip()
+                    if k[0] and k[1] and v:
+                        crm_by_pair_cache[k] = v
+        except Exception:
+            # Best effort only; fallback to per-row query path below.
+            pass
     webhook_idx_loaded = False
     webhook_by_key: dict[tuple[str, str, str], list[float]] = {}
     webhook_by_call: dict[str, list[float]] = {}
