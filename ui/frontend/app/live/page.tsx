@@ -95,6 +95,8 @@ interface RejectedWebhookItem {
   webhook_type?: string;
   event_id?: string;
   event_file?: string;
+  account_id?: string;
+  crm_url?: string;
   sales_agent?: string;
   customer?: string;
   call_id?: string;
@@ -112,6 +114,17 @@ function rejectedItemTs(item: RejectedWebhookItem): number {
   const secondary = parseServerDate(item.updated_at || item.created_at);
   if (secondary) return secondary.getTime();
   return 0;
+}
+
+function rejectedDayId(item: RejectedWebhookItem): string {
+  const d = parseServerDate(item.created_at || item.updated_at) || parseServerDate(item.updated_at || item.created_at);
+  if (!d) return "unknown";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function rejectedDayLabel(dayId: string): string {
+  if (dayId === "unknown") return "Unknown date";
+  return new Date(`${dayId}T00:00:00`).toLocaleDateString();
 }
 
 function statusTone(status: string): string {
@@ -439,6 +452,8 @@ export default function LivePage() {
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [hostReadOnly, setHostReadOnly] = useState(false);
   const [expandedRejectedId, setExpandedRejectedId] = useState("");
+  const [loadingRejectedDetailId, setLoadingRejectedDetailId] = useState("");
+  const [rejectedDetailsById, setRejectedDetailsById] = useState<Record<string, RejectedWebhookItem>>({});
   const [requeueingRejectedId, setRequeueingRejectedId] = useState("");
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
@@ -450,6 +465,7 @@ export default function LivePage() {
   const [runControlActionErr, setRunControlActionErr] = useState(false);
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
   const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
+  const [dismissedRejectedIds, setDismissedRejectedIds] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -477,7 +493,7 @@ export default function LivePage() {
     data: rejectedData,
     mutate: mutateRejected,
   } = useSWR<{ ok?: boolean; count?: number; total_count?: number; returned_count?: number; items?: RejectedWebhookItem[] }>(
-    "/api/pipelines/live-webhook/rejections?limit=2000&status=all",
+    "/api/pipelines/live-webhook/rejections?limit=20000&status=rejected&include_payload=0",
     fetcher,
     {
       refreshInterval: 10000,
@@ -499,17 +515,24 @@ export default function LivePage() {
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
   const runs: PipelineRunRecord[] = Array.isArray(runsData) ? runsData : [];
   const rejectedItems: RejectedWebhookItem[] = Array.isArray(rejectedData?.items) ? rejectedData.items : [];
+  const activeRejectedItems = useMemo(
+    () =>
+      rejectedItems
+        .filter((item) => !dismissedRejectedIds[String(item?.id || "").trim()])
+        .sort((a, b) => rejectedItemTs(b) - rejectedItemTs(a)),
+    [rejectedItems, dismissedRejectedIds],
+  );
   const rejectedTotalCount = Number(
-    rejectedData?.total_count ?? rejectedData?.count ?? rejectedItems.length ?? 0,
+    rejectedData?.total_count ?? rejectedData?.count ?? activeRejectedItems.length ?? 0,
   ) || 0;
   const rejectedStatsTotal = Number((liveCfg?.rejected_webhooks_total as number) || 0) || 0;
-  const rejectedDisplayCount = Math.max(rejectedTotalCount, rejectedStatsTotal);
+  const rejectedDisplayCount = activeRejectedItems.length;
   const rejectedByReason = (liveCfg?.rejected_by_reason && typeof liveCfg.rejected_by_reason === "object")
     ? liveCfg.rejected_by_reason
     : {};
   const continuityRejectedCount = useMemo(
     () =>
-      rejectedItems.filter((r) => {
+      activeRejectedItems.filter((r) => {
         const reason = String(r?.reason || "").toLowerCase();
         return (
           reason === "multi_agent_pair"
@@ -518,8 +541,39 @@ export default function LivePage() {
           || reason === "no_agent_history"
         );
       }).length,
-    [rejectedItems],
+    [activeRejectedItems],
   );
+  const rejectedByDay = useMemo(() => {
+    const byDay = new Map<string, RejectedWebhookItem[]>();
+    for (const item of activeRejectedItems) {
+      const dayId = rejectedDayId(item);
+      const arr = byDay.get(dayId) || [];
+      arr.push(item);
+      byDay.set(dayId, arr);
+    }
+    const groups = Array.from(byDay.entries()).map(([dayId, rows]) => ({
+      dayId,
+      label: rejectedDayLabel(dayId),
+      items: [...rows].sort((a, b) => rejectedItemTs(b) - rejectedItemTs(a)),
+    }));
+    groups.sort((a, b) => (a.dayId < b.dayId ? 1 : a.dayId > b.dayId ? -1 : 0));
+    return groups;
+  }, [activeRejectedItems]);
+
+  useEffect(() => {
+    setCollapsedRejectedDayIds((prev) => {
+      const next: Record<string, boolean> = { ...prev };
+      let changed = false;
+      const newestDayId = rejectedByDay[0]?.dayId || "";
+      for (const group of rejectedByDay) {
+        if (next[group.dayId] == null) {
+          next[group.dayId] = group.dayId !== newestDayId;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [rejectedByDay]);
 
   const pipelineNameById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -844,8 +898,8 @@ export default function LivePage() {
       return;
     }
     const preferredPipelineId =
-      String(item?.pipeline_ids?.[0] || "").trim()
-      || String(liveSelectedPipelineIds?.[0] || "").trim();
+      String(liveSelectedPipelineIds?.[0] || "").trim()
+      || String(item?.pipeline_ids?.[0] || "").trim();
     const ok = window.confirm(
       `Move rejected webhook ${rejectionId.slice(0, 8)} to run queue${preferredPipelineId ? ` using pipeline ${preferredPipelineId}` : ""}?`,
     );
@@ -867,14 +921,97 @@ export default function LivePage() {
         throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
       }
       const runCount = Array.isArray(body?.run_ids) ? body.run_ids.length : 0;
+      const nowIso = new Date().toISOString();
+      const rid = rejectionId;
+      await mutateRejected((current) => {
+        const obj = (current && typeof current === "object") ? current : {};
+        const prevItems = Array.isArray((obj as any).items) ? (obj as any).items as RejectedWebhookItem[] : [];
+        const nextItems = prevItems.filter((r) => String((r as any)?.id || "") !== rid);
+        const prevTotal = Number((obj as any).total_count ?? (obj as any).count ?? prevItems.length ?? 0) || 0;
+        const nextTotal = Math.max(0, prevTotal - (prevItems.length !== nextItems.length ? 1 : 0));
+        return {
+          ...(obj as any),
+          items: nextItems,
+          count: nextTotal,
+          total_count: nextTotal,
+          returned_count: nextItems.length,
+        } as any;
+      }, { revalidate: false });
+      setDismissedRejectedIds((prev) => ({ ...prev, [rid]: true }));
+      await mutateRuns((current) => {
+        const prevRows = Array.isArray(current) ? current : [];
+        const existing = new Set(prevRows.map((r) => String(r.id || "")));
+        const pipelineRows = Array.isArray(body?.pipelines) ? body.pipelines : [];
+        const out: PipelineRunRecord[] = [...prevRows];
+        for (const p of pipelineRows) {
+          const newRunId = String((p && p.run_id) || "").trim();
+          if (!newRunId || existing.has(newRunId)) continue;
+          existing.add(newRunId);
+          out.unshift({
+            id: newRunId,
+            pipeline_id: String((p && p.pipeline_id) || preferredPipelineId || ""),
+            pipeline_name: String((p && p.pipeline_name) || pipelineNameById[String((p && p.pipeline_id) || "")] || ""),
+            sales_agent: String(item.sales_agent || ""),
+            customer: String(item.customer || ""),
+            call_id: String(item.call_id || ""),
+            crm_url: String(item.crm_url || ""),
+            started_at: nowIso,
+            finished_at: null,
+            status: "queued",
+            canvas_json: "",
+            steps_json: "[]",
+            log_json: JSON.stringify(
+              [{ ts: nowIso, text: "Queued from rejected webhook replay.", level: "pipeline" }],
+            ),
+            run_origin: "webhook",
+          });
+        }
+        return out;
+      }, { revalidate: false });
+      setRejectedDetailsById((prev) => {
+        const next = { ...prev };
+        delete next[rid];
+        return next;
+      });
+      setExpandedRejectedId((prev) => (prev === rid ? "" : prev));
       setRejectionActionErr(false);
       setRejectionActionMsg(`Moved to run queue (${runCount} run${runCount === 1 ? "" : "s"}).`);
-      await Promise.allSettled([mutateRejected(), mutateRuns()]);
+      void Promise.allSettled([mutateRejected(), mutateRuns()]);
     } catch (e: any) {
       setRejectionActionErr(true);
       setRejectionActionMsg(String(e?.message || "Failed moving rejected webhook to run queue."));
     } finally {
       setRequeueingRejectedId("");
+    }
+  };
+
+  const toggleRejectedExpanded = async (item: RejectedWebhookItem) => {
+    const rid = String(item.id || "").trim();
+    if (!rid) return;
+    if (expandedRejectedId === rid) {
+      setExpandedRejectedId("");
+      return;
+    }
+    setExpandedRejectedId(rid);
+    if (rejectedDetailsById[rid]) return;
+    setLoadingRejectedDetailId(rid);
+    try {
+      const res = await fetch(`/api/pipelines/live-webhook/rejections/${encodeURIComponent(rid)}?include_payload=1`, {
+        cache: "no-store",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String((body as any)?.detail || (body as any)?.error || `HTTP ${res.status}`));
+      }
+      const full = ((body as any)?.item && typeof (body as any).item === "object")
+        ? ((body as any).item as RejectedWebhookItem)
+        : item;
+      setRejectedDetailsById((prev) => ({ ...prev, [rid]: full }));
+    } catch (e: any) {
+      setRejectionActionErr(true);
+      setRejectionActionMsg(String(e?.message || "Failed loading rejected webhook payload."));
+    } finally {
+      setLoadingRejectedDetailId((prev) => (prev === rid ? "" : prev));
     }
   };
 
@@ -1461,7 +1598,7 @@ export default function LivePage() {
                     {rejectionActionMsg}
                   </p>
                 ) : null}
-                {rejectedItems.length === 0 ? (
+                {activeRejectedItems.length === 0 ? (
                   <div className="space-y-1.5">
                     <p className="text-xs text-gray-600 italic">No active rejected webhooks.</p>
                     {rejectedStatsTotal > 0 && (
@@ -1485,60 +1622,88 @@ export default function LivePage() {
                     )}
                   </div>
                 ) : (
-                  rejectedItems.map((item) => {
-                    const rid = String(item.id || "");
-                    const expanded = expandedRejectedId === rid;
-                    const status = String(item.status || "rejected").toLowerCase();
-                    const source = String((item as { source?: string }).source || "active").toLowerCase();
-                    const statusCls = status === "queued_manual"
-                      ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
-                      : "text-red-300 border-red-700/60 bg-red-950/30";
-                    const sourceCls = source === "archive"
-                      ? "text-violet-300 border-violet-700/60 bg-violet-950/30"
-                      : "text-sky-300 border-sky-700/60 bg-sky-950/30";
+                  rejectedByDay.map((group) => {
+                    const collapsed = !!collapsedRejectedDayIds[group.dayId];
                     return (
-                      <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
-                        <div className="flex items-start gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
-                            className="mt-0.5 text-gray-500 hover:text-gray-300"
-                            title={expanded ? "Hide payload" : "View payload"}
-                          >
-                            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
-                          </button>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1 flex-wrap">
-                              <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
-                                {rid.slice(0, 8)}
-                              </span>
-                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
-                                {status}
-                              </span>
-                              <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", sourceCls)}>
-                                {source}
-                              </span>
-                              <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
-                            </div>
-                            <div className="text-[10px] text-gray-500 mt-1 truncate">
-                              {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
-                            </div>
+                      <div key={`rejected-day-${group.dayId}`} className="space-y-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setCollapsedRejectedDayIds((prev) => ({ ...prev, [group.dayId]: !prev[group.dayId] }))}
+                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-red-800/50 bg-red-950/20 hover:bg-red-900/20 text-left"
+                          title={collapsed ? "Expand date folder" : "Collapse date folder"}
+                        >
+                          <ChevronRight className={cn("w-3.5 h-3.5 text-red-300 transition-transform", !collapsed && "rotate-90")} />
+                          <span className="text-[11px] text-red-200 font-semibold">{group.label}</span>
+                          <span className="ml-auto text-[10px] text-red-300">{group.items.length}</span>
+                        </button>
+                        {!collapsed && (
+                          <div className="space-y-2 pl-2">
+                            {group.items.map((item) => {
+                              const rid = String(item.id || "");
+                              const expanded = expandedRejectedId === rid;
+                              const status = String(item.status || "rejected").toLowerCase();
+                              const source = String((item as { source?: string }).source || "active").toLowerCase();
+                              const statusCls = status === "queued_manual"
+                                ? "text-emerald-300 border-emerald-700/60 bg-emerald-950/30"
+                                : "text-red-300 border-red-700/60 bg-red-950/30";
+                              const sourceCls = source === "archive"
+                                ? "text-violet-300 border-violet-700/60 bg-violet-950/30"
+                                : "text-sky-300 border-sky-700/60 bg-sky-950/30";
+                              return (
+                                <div key={rid} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                                  <div className="flex items-start gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => { void toggleRejectedExpanded(item); }}
+                                      className="mt-0.5 text-gray-500 hover:text-gray-300"
+                                      title={expanded ? "Hide payload" : "View payload"}
+                                    >
+                                      <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+                                    </button>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-1 flex-wrap">
+                                        <span className="font-mono text-[10px] text-gray-300 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5">
+                                          {rid.slice(0, 8)}
+                                        </span>
+                                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusCls)}>
+                                          {status}
+                                        </span>
+                                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", sourceCls)}>
+                                          {source}
+                                        </span>
+                                        <span className="text-[10px] text-gray-500">{String(item.reason || "rejected")}</span>
+                                      </div>
+                                      <div className="text-[10px] text-gray-500 mt-1 truncate">
+                                        {String(item.sales_agent || "—")} · {String(item.customer || "—")} · call {String(item.call_id || "—")}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={requeueingRejectedId === rid}
+                                      onClick={() => { void moveRejectedToRun(item); }}
+                                      className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
+                                      title="Move this rejected webhook to run queue"
+                                    >
+                                      {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
+                                    </button>
+                                  </div>
+                                  {expanded ? (
+                                    loadingRejectedDetailId === rid ? (
+                                      <div className="mt-2 text-[11px] text-gray-400 flex items-center gap-1.5">
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                        Loading payload…
+                                      </div>
+                                    ) : (
+                                      <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
+{JSON.stringify(rejectedDetailsById[rid] || item, null, 2)}
+                                      </pre>
+                                    )
+                                  ) : null}
+                                </div>
+                              );
+                            })}
                           </div>
-                          <button
-                            type="button"
-                            disabled={requeueingRejectedId === rid}
-                            onClick={() => { void moveRejectedToRun(item); }}
-                            className="text-[10px] px-2 py-1 rounded border border-emerald-700/70 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-60"
-                            title="Move this rejected webhook to run queue"
-                          >
-                            {requeueingRejectedId === rid ? "Moving..." : "Move To Run"}
-                          </button>
-                        </div>
-                        {expanded ? (
-                          <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-{JSON.stringify(item, null, 2)}
-                          </pre>
-                        ) : null}
+                        )}
                       </div>
                     );
                   })
