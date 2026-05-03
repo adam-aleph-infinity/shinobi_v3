@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { VERSION } from "@/lib/version";
+import { useUserProfile } from "@/lib/user-profile";
 import {
   Users, FileText, BarChart3, Terminal,
   FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch,
@@ -20,6 +21,7 @@ const GROUPS = [
     items: [
       { href: "/crm",       icon: Users,    label: "CRM Browser" },
       { href: "/calls",     icon: FileText, label: "Calls" },
+      { href: "/user",      icon: User,     label: "User" },
     ],
   },
   {
@@ -109,6 +111,7 @@ export default function AppSidebar() {
   const pathname = usePathname();
   const isCallsPage = pathname === "/calls";
   const [isDevelopmentHost, setIsDevelopmentHost] = useState(false);
+  const { profile } = useUserProfile();
 
   useEffect(() => {
     const host = window.location.hostname.toLowerCase();
@@ -138,6 +141,27 @@ export default function AppSidebar() {
           <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">
             Development
           </p>
+        )}
+        {profile && (
+          <div className="mt-2 rounded-lg border border-gray-800 bg-gray-950/70 px-2.5 py-2">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">User Workspace</p>
+            <p className="mt-1 text-xs font-medium text-gray-200 truncate">{profile.name || profile.email || "Unknown user"}</p>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <p className="text-[10px] text-gray-500 truncate">{profile.email || "No email"}</p>
+              <span
+                className={cn(
+                  "inline-flex rounded border px-1.5 py-0.5 text-[9px] uppercase tracking-wide",
+                  profile.role === "admin"
+                    ? "border-emerald-700/60 bg-emerald-950/40 text-emerald-300"
+                    : profile.role === "editor"
+                    ? "border-indigo-700/60 bg-indigo-950/40 text-indigo-300"
+                    : "border-gray-700/70 bg-gray-900/70 text-gray-300",
+                )}
+              >
+                {profile.role || "viewer"}
+              </span>
+            </div>
+          </div>
         )}
       </div>
 

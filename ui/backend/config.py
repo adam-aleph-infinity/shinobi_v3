@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     crm_webhook_transcription_poll_interval_s: float = 2.0
     elevenlabs_connect_timeout_s: float = 20.0
     elevenlabs_read_timeout_s: float = 180.0
+    elevenlabs_retry_attempts: int = 3
+    elevenlabs_retry_base_delay_s: float = 2.0
+    elevenlabs_retry_max_delay_s: float = 30.0
+    elevenlabs_retry_jitter_s: float = 0.5
     crm_webhook_internal_base_url: str = "http://127.0.0.1:8000"
     # Development mirror mode: show production live/webhook state read-only.
     live_mirror_enabled: bool = False
@@ -32,6 +36,14 @@ class Settings(BaseSettings):
     live_mirror_timeout_s: int = 20
     live_mirror_auth_header: str = "x-api-token"
     live_mirror_auth_token: str = ""
+    user_admin_emails: str = "adam@shinobigrp.com"
+    user_seed_dev_viewer_emails: str = "eldad@shinobigrp.com"
+    user_default_email: str = ""
+    user_auto_provision_unknown: bool = True
+    dev_sync_base_url: str = "https://shinobi.aleph-infinity.com"
+    dev_sync_timeout_s: int = 25
+    dev_sync_auth_header: str = "x-api-token"
+    dev_sync_auth_token: str = ""
 
     model_config = {"env_file": str(Path(__file__).parent.parent.parent / ".env"), "extra": "ignore"}
 
