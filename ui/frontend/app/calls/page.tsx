@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import useSWR from "swr";
 import {
   Loader2, FileText,
@@ -11,8 +11,6 @@ import { cn, formatDuration, formatDate } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { CollapsiblePanel } from "@/components/shared/CollapsiblePanel";
 import { DragHandle } from "@/components/shared/DragHandle";
-import { AgentSidePanel } from "@/components/shared/AgentSidePanel";
-import { PipelineSidePanel } from "@/components/shared/PipelineSidePanel";
 import { SectionContent } from "@/components/shared/SectionCards";
 import { useResize } from "@/lib/useResize";
 import { CallCitationProvider } from "@/lib/call-citation-context";
@@ -273,22 +271,6 @@ function getArtifactIconMeta(type: string): {
 
 export default function CallsPage() {
   const ctx = useAppCtx();
-  const [sidePanel, setSidePanel] = useState<"agent" | "pipeline">("agent");
-
-  // On mount: default to pipeline tab if only a pipeline is active (no agent)
-  useEffect(() => {
-    if (ctx.activePipelineId && !ctx.activeAgentId) setSidePanel("pipeline");
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Auto-switch to pipeline tab when a pipeline becomes active
-  const prevPipelineId = useRef(ctx.activePipelineId);
-  useEffect(() => {
-    if (ctx.activePipelineId && ctx.activePipelineId !== prevPipelineId.current) {
-      setSidePanel("pipeline");
-    }
-    prevPipelineId.current = ctx.activePipelineId;
-  }, [ctx.activePipelineId]);
 
   const [callsW, callsDrag]       = useResize(280, 180, 440);
   const [callsCollapsed, setCallsCollapsed]       = useState(false);
@@ -305,15 +287,6 @@ export default function CallsPage() {
     setCallsPickerMode(qs.get("embedded") === "1" && qs.get("mode") === "pick_calls");
   }, []);
 
-  // Auto-switch to pipeline tab when calls are first checked (if pipeline active)
-  const prevCheckedSizeRef = useRef(0);
-  useEffect(() => {
-    if (checkedCallIds.size > 0 && prevCheckedSizeRef.current === 0 && ctx.activePipelineId) {
-      setSidePanel("pipeline");
-    }
-    prevCheckedSizeRef.current = checkedCallIds.size;
-  }, [checkedCallIds, ctx.activePipelineId]);
-
   const [batchTranscribing, setBatchTranscribing] = useState(false);
   const [batchError, setBatchError]               = useState("");
   const setSelectedCallId = (v: string) => ctx.setCallId(v);
@@ -322,7 +295,6 @@ export default function CallsPage() {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcribing, setTranscribing]         = useState(false);
   const [transcribeError, setTranscribeError]   = useState("");
-  const [notesW, notesDrag]                     = useResize(320, 200, 560, "left");
   const [showTranscript, setShowTranscript]     = useState(true);
 
   // Citation modal state
@@ -450,12 +422,6 @@ export default function CallsPage() {
     () => calls.filter(c => checkedCallIds.has(c.call_id)).map(c => c.call_id),
     [calls, checkedCallIds],
   );
-  const sidePanelFocusedCallId = useMemo(() => {
-    if (selectedCallId && (checkedCallIdsOrdered.length === 0 || checkedCallIdsOrdered.includes(selectedCallId))) {
-      return selectedCallId;
-    }
-    return checkedCallIdsOrdered[0] ?? selectedCallId ?? "";
-  }, [selectedCallId, checkedCallIdsOrdered]);
 
   useEffect(() => {
     if (!callsPickerMode) return;
@@ -919,61 +885,6 @@ export default function CallsPage() {
             )}
           </div>
 
-          {/* Agent / Pipeline side panel */}
-          <>
-            <DragHandle onMouseDown={notesDrag} />
-            <div className={cn(
-              "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col",
-              showTranscript ? "shrink-0" : "flex-1"
-            )} style={showTranscript ? { width: notesW } : {}}>
-              {/* Tab toggle — show when at least one option is active */}
-              {(ctx.activeAgentId || ctx.activePipelineId) && (
-                <div className="flex border-b border-gray-800 shrink-0">
-                  {ctx.activeAgentId && (
-                    <button
-                      key="agent"
-                      onClick={() => setSidePanel("agent")}
-                      className={cn(
-                        "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
-                        sidePanel === "agent"
-                          ? "bg-violet-900/30 text-violet-300 border-b-2 border-violet-500"
-                          : "text-gray-500 hover:text-white hover:bg-gray-800/60",
-                      )}
-                    >
-                      Agent
-                    </button>
-                  )}
-                  {ctx.activePipelineId && (
-                    <button
-                      key="pipeline"
-                      onClick={() => setSidePanel("pipeline")}
-                      className={cn(
-                        "flex-1 py-1.5 text-[10px] font-medium uppercase tracking-wide transition-colors",
-                        sidePanel === "pipeline"
-                          ? "bg-teal-900/30 text-teal-300 border-b-2 border-teal-500"
-                          : "text-gray-500 hover:text-white hover:bg-gray-800/60",
-                      )}
-                    >
-                      Pipeline
-                    </button>
-                  )}
-                </div>
-              )}
-              {/* Panel content — auto-fallback to pipeline if no agent set */}
-              {(ctx.activePipelineId && (sidePanel === "pipeline" || !ctx.activeAgentId))
-                ? <PipelineSidePanel
-                    showTranscript={showTranscript}
-                    onToggleTranscript={() => setShowTranscript(s => !s)}
-                    selectedCallIds={checkedCallIdsOrdered.length > 0 ? checkedCallIdsOrdered : undefined}
-                    focusedCallId={sidePanelFocusedCallId}
-                  />
-                : <AgentSidePanel
-                    selectedCallIds={checkedCallIdsOrdered.length > 0 ? checkedCallIdsOrdered : undefined}
-                    focusedCallId={sidePanelFocusedCallId}
-                    preferCallScope
-                  />}
-            </div>
-          </>
         </div>
       </CallCitationProvider>
 

@@ -120,9 +120,12 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     path.startsWith("/live/");
   const isAgentDeepDivePage =
     path === "/agent-deep-dive" ||
-    path.startsWith("/agent-deep-dive/") ||
-    path.includes("agent-deep-dive");
-  const showContextBar = !(isPipelinePage || isJobsPage || isAgentDeepDivePage);
+    path.startsWith("/agent-deep-dive/");
+  const isAgentDashboardPage =
+    path === "/agent-dashboard" ||
+    path.startsWith("/agent-dashboard/");
+  // ContextBar (pipeline selector + context) only on the two analyze screens.
+  const showContextBar = isAgentDashboardPage || isAgentDeepDivePage;
   const sidebarPanelWidth = mounted && collapsed ? 0 : SIDEBAR_WIDTH;
   const copilotPanelWidth = mounted && copilotCollapsed ? 0 : copilotWidth;
 

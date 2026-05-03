@@ -101,14 +101,9 @@ def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -
         return False
     if bool(profile.get("is_admin")):
         return True
-    env = str(profile.get("environment") or "").strip().lower()
-    if env != "dev":
-        return True
-    owner = str(data.get("workspace_user_email") or "").strip().lower()
-    if not owner:
-        # Legacy/shared pipelines remain visible.
-        return True
-    return owner == str(profile.get("email") or "").strip().lower()
+    # Visibility is environment-wide; ownership is enforced only for modifications.
+    # This lets dev users see all pipelines and live-enabled pipelines in selectors.
+    return True
 
 
 def _assert_can_modify_pipeline_record(request: Request, profile: dict[str, Any], data: dict[str, Any]) -> None:

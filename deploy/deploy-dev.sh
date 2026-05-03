@@ -1,5 +1,5 @@
 #!/bin/bash
-# Migrate/deploy Shinobi V3 to the development VM/domain.
+# Deploy latest code to the development VM/domain.
 # Dev target: shinobi-vm -> shinobi.aleph-infinity.com
 # Usage: bash deploy/deploy-dev.sh [branch]
 set -euo pipefail
@@ -8,9 +8,6 @@ PROJECT_ID="shinobi-v2-prod"
 VM_NAME="shinobi-vm"
 ZONE="us-central1-a"
 BRANCH="${1:-dev}"
-APP_DIR="~/shinobi_v3"
-LEGACY_DIR="~/shinobi_v2"
-REPO_URL="https://github.com/adam-aleph-infinity/shinobi_v3.git"
 
 echo "▶ Deploying Shinobi V3 to DEV VM $VM_NAME (branch: $BRANCH)..."
 
@@ -20,58 +17,69 @@ gcloud compute ssh "$VM_NAME" \
   --project="$PROJECT_ID" \
   --command="
     set -euo pipefail
+    cd ~/shinobi_v3
 
-    APP_DIR=$APP_DIR
-    LEGACY_DIR=$LEGACY_DIR
-    REPO_URL=$REPO_URL
-    BRANCH=$BRANCH
+    PRESERVE_ROOT=/tmp/shinobi_runtime_preserve_\$(date +%Y%m%d_%H%M%S)
+    PRESERVE_PATHS=(
+      ui/data/_pipelines
+      ui/data/_pipelines_folders.json
+      ui/data/_universal_agents
+      ui/data/_notes_agents
+      ui/data/_persona_agents
+      ui/data/_fpa_analyzer_presets
+      ui/data/_fpa_generator_presets
+      ui/data/_fpa_scorer_presets
+      ui/data/_comparison_presets
+      ui/data/_note_rollups
+      ui/data/execution_logs
+      ui/data/job_logs
+      ui/data/_pipeline_states
+      ui/data/_artifact_prompt_schemas
+      ui/data/_webhooks
+      ui/data/webhook_test
+      ui/data/all_crm_agents_customers.json
+    )
 
-    if [ ! -d \"\$APP_DIR/.git\" ]; then
-      echo '▶ First-time setup: cloning shinobi_v3...'
-      git clone --branch \"\$BRANCH\" \"\$REPO_URL\" \"\$APP_DIR\"
-    fi
+    echo '▶ Preserve runtime data...'
+    mkdir -p \"\$PRESERVE_ROOT\"
+    for p in \"\${PRESERVE_PATHS[@]}\"; do
+      if [ -d \"\$p\" ]; then
+        mkdir -p \"\$PRESERVE_ROOT/\$p\"
+        rsync -a \"\$p/\" \"\$PRESERVE_ROOT/\$p/\"
+      elif [ -f \"\$p\" ]; then
+        mkdir -p \"\$PRESERVE_ROOT/\$(dirname \"\$p\")\"
+        cp -f \"\$p\" \"\$PRESERVE_ROOT/\$p\"
+      fi
+    done
 
-    cd \"\$APP_DIR\"
+    echo '▶ Backup DB...'
+    cp ui/database/shinobi.db /tmp/shinobi_db_backup_\$(date +%Y%m%d_%H%M%S).db 2>/dev/null || true
 
-    echo '▶ Pull latest code...'
+    echo '▶ Pull latest...'
     git fetch origin
     git stash push --include-untracked -m \"pre-deploy \$(date +%Y-%m-%dT%H:%M:%S)\" || true
-    git checkout \"\$BRANCH\"
-    git pull origin \"\$BRANCH\"
+    git checkout $BRANCH
+    git pull origin $BRANCH
 
-    echo '▶ Ensure data directories...'
-    mkdir -p ui/data ui/database ui/data/agents
-
-    echo '▶ Migrate env files from legacy app (if present)...'
-    if [ -f \"\$LEGACY_DIR/.env\" ] && [ ! -f .env ]; then
-      cp \"\$LEGACY_DIR/.env\" .env
-      echo '  copied .env from legacy'
-    fi
-    if [ -f \"\$LEGACY_DIR/.env.crm\" ] && [ ! -f .env.crm ]; then
-      cp \"\$LEGACY_DIR/.env.crm\" .env.crm
-      echo '  copied .env.crm from legacy'
-    fi
-
-    echo '▶ One-time data bootstrap from legacy app (safe copy)...'
-    if [ ! -f .dev_migrated_from_v2 ]; then
-      if [ -d \"\$LEGACY_DIR/ui/data\" ]; then
-        rsync -a \"\$LEGACY_DIR/ui/data/\" ui/data/ || true
+    echo '▶ Restore runtime data...'
+    for p in \"\${PRESERVE_PATHS[@]}\"; do
+      if [ -d \"\$PRESERVE_ROOT/\$p\" ]; then
+        mkdir -p \"\$p\"
+        rsync -a \"\$PRESERVE_ROOT/\$p/\" \"\$p/\"
+      elif [ -f \"\$PRESERVE_ROOT/\$p\" ]; then
+        mkdir -p \"\$(dirname \"\$p\")\"
+        cp -f \"\$PRESERVE_ROOT/\$p\" \"\$p\"
       fi
-      if [ -f \"\$LEGACY_DIR/ui/database/shinobi.db\" ] && [ ! -f ui/database/shinobi.db ]; then
-        cp \"\$LEGACY_DIR/ui/database/shinobi.db\" ui/database/shinobi.db
-      fi
-      date -u +%Y-%m-%dT%H:%M:%SZ > .dev_migrated_from_v2
-    fi
+    done
 
-    echo '▶ Python dependencies...'
+    echo '▶ Install Python deps...'
     if [ ! -d .venv ]; then
       python3.11 -m venv .venv || python3 -m venv .venv
     fi
     source .venv/bin/activate
-    pip install --upgrade pip -q
     pip install -r requirements.txt -q
 
-    echo '▶ Frontend build...'
+    echo '▶ Build frontend...'
     cd ui/frontend
     npm install --legacy-peer-deps -q
     rm -rf .next
@@ -79,9 +87,9 @@ gcloud compute ssh "$VM_NAME" \
     mkdir -p .next/standalone/.next/static .next/standalone/public
     rsync -a --delete .next/static/ .next/standalone/.next/static/
     rsync -a --delete public/ .next/standalone/public/
-    cd \"\$APP_DIR\"
+    cd ~/shinobi_v3
 
-    echo '▶ Update systemd units to point to shinobi_v3...'
+    echo '▶ Update systemd units...'
     sudo tee /etc/systemd/system/shinobi-backend.service >/dev/null <<UNIT
 [Unit]
 Description=Shinobi DEV — FastAPI Backend (v3)
@@ -91,10 +99,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=\$USER
-WorkingDirectory=\$APP_DIR
-Environment=PATH=\$APP_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=\$APP_DIR/.env
-ExecStart=\$APP_DIR/.venv/bin/uvicorn ui.backend.main:app --host 127.0.0.1 --port 8000 --workers 2 --timeout-keep-alive 75
+WorkingDirectory=/home/\$USER/shinobi_v3
+Environment=PATH=/home/\$USER/shinobi_v3/.venv/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/\$USER/shinobi_v3/.env
+ExecStart=/home/\$USER/shinobi_v3/.venv/bin/uvicorn ui.backend.main:app --host 127.0.0.1 --port 8000 --workers 2 --timeout-keep-alive 75
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=300
@@ -117,7 +125,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=\$USER
-WorkingDirectory=\$APP_DIR/ui/frontend
+WorkingDirectory=/home/\$USER/shinobi_v3/ui/frontend
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=HOSTNAME=127.0.0.1
@@ -148,8 +156,7 @@ UNIT
       sleep 1
     done
 
-    echo '▶ Service summary:'
-    sudo systemctl --no-pager --full status shinobi-backend shinobi-frontend | sed -n '1,40p'
+    rm -rf \"\$PRESERVE_ROOT\" 2>/dev/null || true
 
     echo '✓ DEV deploy complete'
   "
