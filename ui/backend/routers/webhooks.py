@@ -687,11 +687,19 @@ def _list_rejected_webhooks(
             items.append(out)
 
     store = _load_rejections_store()
-    _collect(store.get("items"), "active")
+    store_rows = store.get("items")
+    store_has_data = isinstance(store_rows, list) and len(store_rows) > 0
+    _collect(store_rows, "active")
+    archive_has_data = False
     if include_archive:
         archive = _load_rejections_archive_store()
-        _collect(archive.get("items"), "archive")
-    if not items:
+        archive_rows = archive.get("items")
+        archive_has_data = isinstance(archive_rows, list) and len(archive_rows) > 0
+        _collect(archive_rows, "archive")
+    # Only fall back to queue-derived if the store is genuinely empty (no items at all).
+    # Do NOT fall back just because all existing items were filtered out (e.g. queued_manual),
+    # otherwise a queued_manual item would reappear as "rejected" from the queue snapshot.
+    if not store_has_data and not archive_has_data:
         _collect(_derive_rejected_from_live_queue(limit=20000), "live_queue_derived")
 
     items.sort(key=_rejection_sort_key, reverse=True)
