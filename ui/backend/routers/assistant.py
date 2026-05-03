@@ -630,6 +630,60 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_pipeline_folder",
+                "description": "Create a new pipeline folder in the pipeline workflow view.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Name of the folder to create"},
+                    },
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_crm_context",
+                "description": (
+                    "Search for agent and customer names in the CRM/pipeline run history. "
+                    "Use this to find the right agent or customer before calling set_context_bar."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Partial name to search for"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_context_bar",
+                "description": (
+                    "Set the agent, customer, and/or call context in the top context bar. "
+                    "Use search_crm_context first to find exact names. "
+                    "Provide at least one of agent, customer, or call_id."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {"type": "string", "description": "Agent name to select", "default": ""},
+                        "customer": {"type": "string", "description": "Customer name to select", "default": ""},
+                        "call_id": {"type": "string", "description": "Call ID to select", "default": ""},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
     ]
     if include_sub_agent:
         tools.append(
@@ -1544,6 +1598,53 @@ def _tool_run_shell_command(args: dict[str, Any]) -> dict[str, Any]:
         return {"command": cmd, "returncode": -1, "stdout": "", "stderr": f"Timed out after {timeout}s", "ok": False}
 
 
+def _tool_create_pipeline_folder(args: dict[str, Any]) -> dict[str, Any]:
+    name = str(args.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    normalised = pipelines_router._normalise_folder(name)
+    if not normalised:
+        raise HTTPException(400, "Invalid folder name")
+    pipelines_router._ensure_folder_exists(normalised)
+    return {"ok": True, "folder": normalised}
+
+
+def _tool_search_crm_context(args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "").strip()
+    limit = max(1, min(50, int(args.get("limit", 10) or 10)))
+    if not query:
+        raise HTTPException(400, "query is required")
+    q = f"%{query.lower()}%"
+    try:
+        with Session(engine) as db:
+            agents_sql = _sql_text(
+                "SELECT DISTINCT agent FROM pipeline_run WHERE LOWER(agent) LIKE :q ORDER BY agent LIMIT :lim"
+            )
+            customers_sql = _sql_text(
+                "SELECT DISTINCT customer FROM pipeline_run WHERE LOWER(customer) LIKE :q ORDER BY customer LIMIT :lim"
+            )
+            agents = [r[0] for r in db.execute(agents_sql, {"q": q, "lim": limit}).fetchall() if r[0]]
+            customers = [r[0] for r in db.execute(customers_sql, {"q": q, "lim": limit}).fetchall() if r[0]]
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "agents": [], "customers": []}
+    return {"ok": True, "query": query, "agents": agents, "customers": customers}
+
+
+def _tool_set_context_bar(args: dict[str, Any]) -> dict[str, Any]:
+    agent = str(args.get("agent") or "").strip()
+    customer = str(args.get("customer") or "").strip()
+    call_id = str(args.get("call_id") or "").strip()
+    if not agent and not customer and not call_id:
+        raise HTTPException(400, "At least one of agent, customer, or call_id is required")
+    return {
+        "ok": True,
+        "_action": "set_context",
+        "agent": agent,
+        "customer": customer,
+        "call_id": call_id,
+    }
+
+
 def _tool_get_app_map(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
     refresh = bool(args.get("refresh"))
     if refresh:
@@ -1788,6 +1889,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "read_source_file": _tool_read_source_file,
     "write_source_file": _tool_write_source_file,
     "run_shell_command": _tool_run_shell_command,
+    "create_pipeline_folder": _tool_create_pipeline_folder,
+    "search_crm_context": _tool_search_crm_context,
+    "set_context_bar": _tool_set_context_bar,
 }
 
 
@@ -2509,6 +2613,15 @@ async def chat_session(session_id: str, req: ChatRequest):
                             data={"tool": name, "ok": ok},
                             error="" if ok else str(tool_result.get("error") or ""),
                         )
+                        if ok and isinstance(tool_result, dict) and tool_result.get("_action") == "set_context":
+                            yield _sse(
+                                "set_context",
+                                {
+                                    "agent": str(tool_result.get("agent") or ""),
+                                    "customer": str(tool_result.get("customer") or ""),
+                                    "call_id": str(tool_result.get("call_id") or ""),
+                                },
+                            )
 
                     yield _sse("progress", {"msg": f"Continuing after tools (round {round_idx + 1})…"})
                     continue

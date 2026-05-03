@@ -260,6 +260,22 @@ export default function CopilotDock() {
             const content = String(payload?.content || "");
             setLiveAssistant((prev) => content || prev);
             setStatusLine("Done");
+          } else if (typ === "set_context") {
+            const agent = String(payload?.agent || "");
+            const customer = String(payload?.customer || "");
+            const callId = String(payload?.call_id || "");
+            if (agent || customer) {
+              window.postMessage(
+                { type: "shinobi:select-pair", agent, customer },
+                window.location.origin,
+              );
+            }
+            if (callId) {
+              window.postMessage(
+                { type: "shinobi:calls-context", call_id: callId },
+                window.location.origin,
+              );
+            }
           } else if (typ === "error") {
             throw new Error(String(payload?.msg || "Assistant error"));
           }
