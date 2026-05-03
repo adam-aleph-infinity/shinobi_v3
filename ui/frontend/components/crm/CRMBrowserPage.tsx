@@ -234,6 +234,7 @@ export default function CRMBrowserPage({
   // ── Sort / selection (persisted) — start from safe defaults; restored post-mount
   const [sortKey, _setSortKey] = useState<SortKey>("agent");
   const [sortDir, _setSortDir] = useState<SortDir>("asc");
+  const [filtersReady, setFiltersReady] = useState(false);
 
   // Restore all persisted filter + sort state after mount
   useEffect(() => {
@@ -282,6 +283,7 @@ export default function CRMBrowserPage({
         ...(prefillCustomerValue ? { customerFilter: prefillCustomerValue } : {}),
       });
     }
+    setFiltersReady(true);
   }, [prefillAgentValue, prefillCustomerValue]);
 
   function setSortKey(k: SortKey) { _setSortKey(k); ssSave({ sortKey: k }); }
@@ -297,9 +299,16 @@ export default function CRMBrowserPage({
   const [txPairResult, setTxPairResult]       = useState<Record<string, { submitted: number; skipped: number }>>({});
 
   // ── Data ───────────────────────────────────────────────────────────────────
-  const { data: allPairs } = useSWR<AgentCustomerPair[]>(`/crm/pairs?sort=agent&dir=asc`, fetcher);
-  const allPairsSafe: AgentCustomerPair[] = Array.isArray(allPairs) ? allPairs : [];
-  const crms = Array.from(new Set(allPairsSafe.map((p) => p.crm_url))).sort();
+  const { data: crmUrls } = useSWR<string[]>(
+    filtersReady ? `/crm/crm-urls` : null,
+    fetcher,
+  );
+  const crms: string[] = Array.isArray(crmUrls) ? crmUrls.filter(Boolean).sort() : [];
+  const { data: pairsCount } = useSWR<{ count: number }>(
+    filtersReady ? `/crm/pairs-count` : null,
+    fetcher,
+  );
+  const totalPairsCount = Number(pairsCount?.count ?? 0);
 
   // Client-side-only sort modes use a stable server base sort.
   const clientOnlySort = new Set<SortKey>([
@@ -323,11 +332,17 @@ export default function CRMBrowserPage({
   if (ftdBefore)      params.set("ftd_before",          ftdBefore);
 
   const { data: pairs, isLoading, error, mutate } = useSWR<AgentCustomerPair[]>(
-    `/crm/pairs?${params.toString()}`, fetcher, { refreshInterval: 0 }
+    filtersReady ? `/crm/pairs?${params.toString()}` : null,
+    fetcher,
+    { refreshInterval: 0, keepPreviousData: true },
   );
   const pairsSafe: AgentCustomerPair[] = Array.isArray(pairs) ? pairs : [];
 
-  const { data: txStats } = useSWR<TxStats>(`/final-transcript/tx-stats`, fetcher, { refreshInterval: 30000 });
+  const { data: txStats } = useSWR<TxStats>(
+    `/final-transcript/tx-stats`,
+    fetcher,
+    { refreshInterval: 30000, keepPreviousData: true },
+  );
 
   const artifactMetricsPath = useMemo(() => {
     if (!artifactsEnabled || !ctx.activePipelineId) return null;
@@ -340,7 +355,7 @@ export default function CRMBrowserPage({
   const { data: artifactIndex } = useSWR<ArtifactMetricsIndex>(
     artifactMetricsPath,
     fetcher,
-    { revalidateOnFocus: false },
+    { revalidateOnFocus: false, keepPreviousData: true },
   );
 
   const artifactPairMap = useMemo(() => {
@@ -1219,12 +1234,39 @@ export default function CRMBrowserPage({
                 </tr>
               </thead>
               <tbody>
-                {isLoading && (
-                  <tr><td colSpan={tableColSpan} className="text-center py-12 text-gray-500">
-                    <Loader2 className="w-4 h-4 animate-spin inline mr-2" />Loading…
-                  </td></tr>
+                {(!filtersReady || isLoading) && pairsSafe.length === 0 && (
+                  Array.from({ length: 8 }).map((_, i) => (
+                    <tr key={`skeleton-${i}`} className="border-b border-gray-800/50 animate-pulse">
+                      <td className="px-3 py-3"><div className="h-3 w-4 bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-28 bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-4 w-14 bg-gray-800 rounded-full" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-24 bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-20 bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-24 bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-10 ml-auto bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-10 ml-auto bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-16 ml-auto bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-16 ml-auto bg-gray-800 rounded" /></td>
+                      <td className="px-3 py-3"><div className="h-3 w-14 ml-auto bg-gray-800 rounded" /></td>
+                      {showArtifactColumns && (
+                        <>
+                          <td className="px-3 py-3"><div className="h-3 w-12 ml-auto bg-gray-800 rounded" /></td>
+                          <td className="px-3 py-3"><div className="h-3 w-12 ml-auto bg-gray-800 rounded" /></td>
+                          {showArtifactScoreColumns && scoreSections.map((sec) => (
+                            <td key={`skeleton-score-${i}-${sec}`} className="px-3 py-3"><div className="h-3 w-14 ml-auto bg-gray-800 rounded" /></td>
+                          ))}
+                          {showArtifactViolationColumns && violationTypes.map((v) => (
+                            <td key={`skeleton-viol-${i}-${v}`} className="px-3 py-3"><div className="h-3 w-14 ml-auto bg-gray-800 rounded" /></td>
+                          ))}
+                          <td className="px-3 py-3"><div className="h-3 w-12 ml-auto bg-gray-800 rounded" /></td>
+                          <td className="px-3 py-3"><div className="h-3 w-12 ml-auto bg-gray-800 rounded" /></td>
+                        </>
+                      )}
+                      <td className="px-2 py-3"><div className="h-3 w-3 ml-auto bg-gray-800 rounded" /></td>
+                    </tr>
+                  ))
                 )}
-                {error && (
+                {error && pairsSafe.length === 0 && (
                   <tr><td colSpan={tableColSpan} className="text-center py-12 text-red-400">Error: {error.message}</td></tr>
                 )}
                 {!isLoading && displayPairs.map((pair) => {
@@ -1400,11 +1442,11 @@ export default function CRMBrowserPage({
             </table>
           </div>
 
-          {/* Footer: count + transcribe button */}
+            {/* Footer: count + transcribe button */}
           <div className="px-4 py-2 border-t border-gray-800 flex items-center gap-3 shrink-0">
             <span className="text-xs text-gray-500 flex-1">
-              {pairsSafe.length > 0 || allPairsSafe.length > 0
-                ? `${displayPairs.length}${hasFilter ? ` of ${allPairsSafe.length}` : ""} pair${displayPairs.length !== 1 ? "s" : ""}`
+              {(pairsSafe.length > 0 || totalPairsCount > 0 || hasFilter)
+                ? `${displayPairs.length}${hasFilter && totalPairsCount > 0 ? ` of ${totalPairsCount}` : ""} pair${displayPairs.length !== 1 ? "s" : ""}`
                 : ""}
               {someSelected && ` · ${selectedIds.size} selected`}
             </span>
