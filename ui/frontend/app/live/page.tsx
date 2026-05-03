@@ -1106,7 +1106,15 @@ export default function LivePage() {
           ? `Moved to retry as run ${retryRunId.slice(0, 8)}.`
           : "Moved failed run to retry.",
       );
-      await mutateRuns();
+      // Optimistically move the card out of the failed section immediately.
+      mutateRuns((current: PipelineRunRecord[]) => {
+        if (!Array.isArray(current)) return current;
+        return current.map((r) =>
+          String(r.id || "") === sourceRunId
+            ? { ...r, status: "retrying", finished_at: undefined }
+            : r,
+        );
+      });
     } catch (e: any) {
       setFailedRunActionErr(true);
       setFailedRunActionMsg(String(e?.message || "Failed moving run to retry."));

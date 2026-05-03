@@ -907,6 +907,18 @@ def _upsert_pipeline_run_stub(
                                 if not str(step.get("error_msg") or "").strip():
                                     step["error_msg"] = "Run failed during preflight or dispatch."
                                 changed_steps = True
+                    elif _status == "retrying":
+                        # Reset failed/error step states so the canvas shows the run
+                        # as cleanly queued rather than carrying over old failure markers.
+                        for step in parsed_steps:
+                            if not isinstance(step, dict):
+                                continue
+                            prev = str(step.get("state") or step.get("status") or "").strip().lower()
+                            if prev in {"failed", "error"}:
+                                step["state"] = "waiting"
+                                step["status"] = "waiting"
+                                step["error_msg"] = ""
+                                changed_steps = True
                     if changed_steps:
                         row.steps_json = json.dumps(parsed_steps, ensure_ascii=False)
                 if log_line:
