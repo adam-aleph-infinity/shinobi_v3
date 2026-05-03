@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     live_mirror_timeout_s: int = 20
     live_mirror_auth_header: str = "x-api-token"
     live_mirror_auth_token: str = ""
+    # Persist live queue/rejection state in DB so prod/dev can share one source of truth.
+    live_state_use_db: bool = True
+    # Optional compatibility write-through to legacy files.
+    live_state_file_fallback: bool = False
+    # Hard safety switch for environments that should observe live state but not mutate it.
+    live_state_read_only: bool = False
     user_admin_emails: str = "adam@shinobigrp.com,adamleeperelman@gmail.com,adam.p@shinobigrp.com"
     user_seed_dev_viewer_emails: str = "eldad@shinobigrp.com"
     user_default_email: str = ""

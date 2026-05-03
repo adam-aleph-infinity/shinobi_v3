@@ -64,6 +64,12 @@ def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
     return True
 
 
+def _is_live_state_read_only(request: Optional[Request] = None) -> bool:
+    if bool(getattr(settings, "live_state_read_only", False)):
+        return True
+    return _is_live_mirror_mode(request)
+
+
 def _live_mirror_headers() -> dict[str, str]:
     headers: dict[str, str] = {"x-shinobi-live-mirror-hop": "1"}
     token = str(settings.live_mirror_auth_token or "").strip()
@@ -4597,9 +4603,15 @@ def get_live_webhook_config(request: Request):
         if isinstance(mirrored, dict):
             mirrored["read_only"] = True
             mirrored["mirror_source"] = str(settings.live_mirror_base_url or "").strip()
+            mirrored["state_source"] = "live-mirror-api"
         return mirrored
     cfg = _load_live_webhook_config()
-    stats = _load_live_webhook_stats()
+    try:
+        from ui.backend.routers import webhooks as _wh
+
+        stats = _wh._get_rejected_webhook_stats()
+    except Exception:
+        stats = _load_live_webhook_stats()
     return {
         "enabled": bool(cfg.get("enabled", True)),
         "ingest_only": bool(cfg.get("ingest_only", True)),
@@ -4636,7 +4648,8 @@ def get_live_webhook_config(request: Request):
             stats.get("rejected_by_reason") if isinstance(stats.get("rejected_by_reason"), dict) else {}
         ),
         "rejected_updated_at": str(stats.get("updated_at") or ""),
-        "read_only": False,
+        "read_only": _is_live_state_read_only(request),
+        "state_source": "shared-db" if bool(getattr(settings, "live_state_use_db", True)) else "local-file",
     }
 
 
@@ -4675,8 +4688,8 @@ async def enqueue_live_webhook_rejection(
     req: LiveWebhookRejectionEnqueueIn,
     request: Request,
 ):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook rejections are read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook rejections are read-only in this environment.")
 
     rid = str(rejection_id or "").strip()
     if not rid:
@@ -4813,8 +4826,8 @@ async def enqueue_live_webhook_run(
     request: Request,
     db: Session = Depends(get_session),
 ):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
 
     source_run_id = str(run_id or "").strip()
     if not source_run_id:
@@ -4918,8 +4931,8 @@ async def cancel_live_webhook_run(
     request: Request,
     db: Session = Depends(get_session),
 ):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
 
     rid = str(run_id or "").strip()
     if not rid:
@@ -5017,8 +5030,8 @@ async def retry_live_webhook_run(
     request: Request,
     db: Session = Depends(get_session),
 ):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook queue is read-only in this environment.")
 
     rid = str(run_id or "").strip()
     if not rid:
@@ -5155,8 +5168,8 @@ async def retry_live_webhook_run(
 
 @router.put("/live-webhook/config")
 def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook config is read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook config is read-only in this environment.")
     incoming = req.model_dump()
     incoming["default_pipeline_id"] = str(incoming.get("default_pipeline_id") or "").strip()
     raw_live_ids = incoming.get("live_pipeline_ids")
@@ -5226,8 +5239,8 @@ def set_live_webhook_config(req: LiveWebhookConfigIn, request: Request):
 
 @router.put("/live-webhook/quick-set")
 def quick_set_live_webhook(req: LiveWebhookQuickSetIn, request: Request):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook config is read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook config is read-only in this environment.")
     pipeline_id = str(req.pipeline_id or "").strip()
     if req.enabled and not pipeline_id:
         raise HTTPException(status_code=400, detail="pipeline_id is required when enabling live webhook execution.")
@@ -5335,8 +5348,8 @@ async def enqueue_live_webhook_rejection(
     req: LiveWebhookRejectionEnqueueIn,
     request: Request,
 ):
-    if _is_live_mirror_mode(request):
-        raise HTTPException(status_code=403, detail="Live webhook requeue is read-only in mirror mode.")
+    if _is_live_state_read_only(request):
+        raise HTTPException(status_code=403, detail="Live webhook requeue is read-only in this environment.")
 
     from ui.backend.routers import webhooks as _wh
 

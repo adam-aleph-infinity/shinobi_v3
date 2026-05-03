@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 
 from ui.backend.config import settings
 from ui.backend.database import engine as _db_engine, get_session
+from ui.backend.models.app_state_kv import AppStateKV
 from ui.backend.models.crm import CRMCall, CRMPair
 from ui.backend.models.job import Job
 from ui.backend.models.pipeline_run import PipelineRun
@@ -34,6 +35,9 @@ _WEBHOOK_TEST_DIR = settings.ui_data_dir / "webhook_test"
 _WEBHOOK_TEST_SESSION_FILE = _WEBHOOK_TEST_DIR / "_session.json"
 _LIVE_QUEUE_LOCK = asyncio.Lock()
 _LIVE_DISPATCHER_TASK: Optional[asyncio.Task] = None
+_STATE_KEY_LIVE_QUEUE = "webhooks.live_queue"
+_STATE_KEY_REJECTIONS = "webhooks.rejections"
+_STATE_KEY_REJECTIONS_ARCHIVE = "webhooks.rejections_archive"
 
 
 class CallEndedWebhookPayload(BaseModel):
@@ -237,7 +241,62 @@ def _parse_iso(raw: Any) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _live_state_use_db() -> bool:
+    return bool(getattr(settings, "live_state_use_db", True))
+
+
+def _live_state_file_fallback() -> bool:
+    return bool(getattr(settings, "live_state_file_fallback", False))
+
+
+def _load_state_blob_db(key: str) -> tuple[bool, Any]:
+    try:
+        with Session(_db_engine) as s:
+            row = s.get(AppStateKV, str(key))
+            if row is None:
+                return True, None
+            raw = str(getattr(row, "value_json", "") or "").strip()
+            if not raw:
+                return True, None
+            return True, json.loads(raw)
+    except Exception:
+        return False, None
+
+
+def _save_state_blob_db(key: str, value: Any) -> bool:
+    try:
+        payload = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return False
+    try:
+        with Session(_db_engine) as s:
+            row = s.get(AppStateKV, str(key))
+            if row is None:
+                row = AppStateKV(key=str(key))
+            row.value_json = payload
+            row.updated_at = datetime.utcnow()
+            s.add(row)
+            s.commit()
+        return True
+    except Exception:
+        return False
+
+
+def _normalize_dict_list(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
 def _load_live_queue() -> list[dict[str, Any]]:
+    if _live_state_use_db():
+        ok, raw = _load_state_blob_db(_STATE_KEY_LIVE_QUEUE)
+        if ok:
+            return _normalize_dict_list(raw)
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     if not _LIVE_QUEUE_FILE.exists():
         return []
@@ -245,20 +304,19 @@ def _load_live_queue() -> list[dict[str, Any]]:
         raw = json.loads(_LIVE_QUEUE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return []
-    if not isinstance(raw, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        out.append(item)
-    return out
+    return _normalize_dict_list(raw)
 
 
 def _save_live_queue(items: list[dict[str, Any]]) -> None:
+    normalized = _normalize_dict_list(items)
+    wrote_db = False
+    if _live_state_use_db():
+        wrote_db = _save_state_blob_db(_STATE_KEY_LIVE_QUEUE, normalized)
+    if wrote_db and not _live_state_file_fallback():
+        return
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     _LIVE_QUEUE_FILE.write_text(
-        json.dumps(items, indent=2, ensure_ascii=False),
+        json.dumps(normalized, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -315,6 +373,14 @@ def _normalize_rejections_archive_store(raw: Any) -> dict[str, Any]:
 
 
 def _load_rejections_store() -> dict[str, Any]:
+    if _live_state_use_db():
+        ok, raw = _load_state_blob_db(_STATE_KEY_REJECTIONS)
+        if ok:
+            if raw is None:
+                data = _default_rejections_store()
+                _save_rejections_store(data)
+                return data
+            return _normalize_rejections_store(raw)
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     if not _REJECTED_WEBHOOKS_FILE.exists():
         data = _default_rejections_store()
@@ -338,6 +404,14 @@ def _load_rejections_store() -> dict[str, Any]:
 
 
 def _load_rejections_archive_store() -> dict[str, Any]:
+    if _live_state_use_db():
+        ok, raw = _load_state_blob_db(_STATE_KEY_REJECTIONS_ARCHIVE)
+        if ok:
+            if raw is None:
+                data = _default_rejections_archive_store()
+                _save_rejections_archive_store(data)
+                return data
+            return _normalize_rejections_archive_store(raw)
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     if not _REJECTED_WEBHOOKS_ARCHIVE_FILE.exists():
         data = _default_rejections_archive_store()
@@ -353,18 +427,26 @@ def _load_rejections_archive_store() -> dict[str, Any]:
 
 
 def _save_rejections_store(data: dict[str, Any]) -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     norm = _normalize_rejections_store(data)
     norm["updated_at"] = _utc_now_iso()
-    _write_json_atomic(_REJECTED_WEBHOOKS_FILE, norm)
+    wrote_db = False
+    if _live_state_use_db():
+        wrote_db = _save_state_blob_db(_STATE_KEY_REJECTIONS, norm)
+    if (not wrote_db) or _live_state_file_fallback():
+        _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(_REJECTED_WEBHOOKS_FILE, norm)
     return norm
 
 
 def _save_rejections_archive_store(data: dict[str, Any]) -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     norm = _normalize_rejections_archive_store(data)
     norm["updated_at"] = _utc_now_iso()
-    _write_json_atomic(_REJECTED_WEBHOOKS_ARCHIVE_FILE, norm)
+    wrote_db = False
+    if _live_state_use_db():
+        wrote_db = _save_state_blob_db(_STATE_KEY_REJECTIONS_ARCHIVE, norm)
+    if (not wrote_db) or _live_state_file_fallback():
+        _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(_REJECTED_WEBHOOKS_ARCHIVE_FILE, norm)
     return norm
 
 
@@ -651,6 +733,32 @@ def _find_rejected_webhook(rejection_id: str, include_archive: bool = True) -> t
             return out, "live_queue_derived"
 
     return None, ""
+
+
+def _get_rejected_webhook_stats() -> dict[str, Any]:
+    active = _load_rejections_store()
+    archive = _load_rejections_archive_store()
+    rows: list[dict[str, Any]] = []
+    for src in (active.get("items"), archive.get("items")):
+        if not isinstance(src, list):
+            continue
+        for row in src:
+            if isinstance(row, dict):
+                rows.append(row)
+    by_reason: dict[str, int] = {}
+    for row in rows:
+        reason = str((row or {}).get("reason") or "unknown").strip() or "unknown"
+        by_reason[reason] = int(by_reason.get(reason, 0)) + 1
+    updated_candidates = [
+        str(active.get("updated_at") or "").strip(),
+        str(archive.get("updated_at") or "").strip(),
+    ]
+    updated_at = max(updated_candidates) if any(updated_candidates) else _utc_now_iso()
+    return {
+        "rejected_webhooks_total": len(rows),
+        "rejected_by_reason": by_reason,
+        "updated_at": updated_at,
+    }
 
 
 async def _touch_live_queue_item(
@@ -2577,6 +2685,8 @@ async def _handle_call_webhook(
     compat_mode: str = "",
 ) -> dict[str, Any]:
     _assert_webhook_auth(request, payload)
+    if bool(getattr(settings, "live_state_read_only", False)):
+        raise HTTPException(status_code=403, detail="Live webhook writes are disabled in read-only mode.")
     cfg = _load_call_ended_config()
     if not cfg.get("enabled", True):
         raise HTTPException(status_code=403, detail="Call-ended webhook flow is disabled in config.")
