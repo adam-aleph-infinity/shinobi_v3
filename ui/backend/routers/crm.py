@@ -170,6 +170,32 @@ def get_pairs(
         raise HTTPException(500, str(e))
 
 
+@router.get("/crm-urls")
+def get_crm_urls(db: Session = Depends(get_session)):
+    """Returns distinct CRM base URLs for the CRM filter dropdown."""
+    try:
+        rows = db.exec(
+            select(CRMPair.crm_url).distinct().order_by(CRMPair.crm_url)
+        ).all()
+        return [str(url).strip() for url in rows if str(url or "").strip()]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/pairs-count")
+def get_pairs_count(db: Session = Depends(get_session)):
+    """Returns total CRM pair count without loading rows."""
+    from sqlalchemy import func as sa_func
+
+    try:
+        total = db.exec(select(sa_func.count()).select_from(CRMPair)).one()
+        if isinstance(total, (tuple, list)):
+            total = total[0] if total else 0
+        return {"count": int(total or 0)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @router.get("/agents")
 def get_agents(crm: str = Query("")):
     try:

@@ -8,6 +8,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <AppContextProvider>
       <SWRConfig
         value={{
+          dedupingInterval: 10000,
+          revalidateOnMount: true,
+          focusThrottleInterval: 30000,
           onErrorRetry: (_err, _key, _cfg, revalidate, { retryCount }) => {
             if (retryCount >= 20) return;
             setTimeout(() => revalidate({ retryCount }), 3000);
