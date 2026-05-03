@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     live_state_file_fallback: bool = False
     # Hard safety switch for environments that should observe live state but not mutate it.
     live_state_read_only: bool = False
+    # Persist user-profile/permission state in DB so prod/dev stay in sync.
+    user_state_use_db: bool = True
+    # Optional compatibility write-through to legacy users.json file.
+    user_state_file_fallback: bool = False
     user_admin_emails: str = "adam@shinobigrp.com,adamleeperelman@gmail.com,adam.p@shinobigrp.com"
     user_seed_dev_viewer_emails: str = "eldad@shinobigrp.com"
     user_default_email: str = ""
