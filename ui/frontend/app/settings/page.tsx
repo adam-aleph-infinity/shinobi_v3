@@ -748,7 +748,7 @@ export default function SettingsPage() {
         </div>
       </Section>
 
-      {canManageUsers && currentUser?.environment === "prod" && (
+      {canManageUsers && (
         <Section title="User Profile Management">
           <div className="space-y-2">
             <div className="grid grid-cols-12 gap-2 px-2 text-[10px] uppercase tracking-widest text-gray-600">

@@ -450,7 +450,6 @@ export default function LivePage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [nowMs, setNowMs] = useState<number | null>(null);
-  const [hostReadOnly, setHostReadOnly] = useState(false);
   const [expandedRejectedId, setExpandedRejectedId] = useState("");
   const [loadingRejectedDetailId, setLoadingRejectedDetailId] = useState("");
   const [rejectedDetailsById, setRejectedDetailsById] = useState<Record<string, RejectedWebhookItem>>({});
@@ -473,16 +472,6 @@ export default function LivePage() {
     return () => window.clearInterval(ticker);
   }, []);
 
-  useEffect(() => {
-    try {
-      const host = String(window.location.hostname || "").toLowerCase();
-      // Dev mirror host should never allow changing live webhook execution config.
-      setHostReadOnly(host === "shinobi.aleph-infinity.com");
-    } catch {
-      setHostReadOnly(false);
-    }
-  }, []);
-
   const { data: pipelines } = useSWR<PipelineLite[]>("/api/pipelines", fetcher, { refreshInterval: 60000 });
   const { data: liveCfg, mutate: mutateLiveCfg } = useSWR<LiveWebhookConfig>(
     "/api/pipelines/live-webhook/config",
@@ -501,7 +490,7 @@ export default function LivePage() {
       revalidateOnFocus: true,
     },
   );
-  const liveReadOnly = hostReadOnly || !!liveCfg?.read_only || !permissions.can_manage_live_jobs;
+  const liveReadOnly = !!liveCfg?.read_only || !permissions.can_manage_live_jobs;
 
   // Incremental load: full baseline every 30s, delta every 4s (only new/changed rows since last seen).
   const [sinceTs, setSinceTs] = useState("");
