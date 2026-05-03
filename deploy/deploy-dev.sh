@@ -7,7 +7,7 @@ set -euo pipefail
 PROJECT_ID="shinobi-v2-prod"
 VM_NAME="shinobi-vm"
 ZONE="us-central1-a"
-BRANCH="${1:-main}"
+BRANCH="${1:-dev}"
 APP_DIR="~/shinobi_v3"
 LEGACY_DIR="~/shinobi_v2"
 REPO_URL="https://github.com/adam-aleph-infinity/shinobi_v3.git"
@@ -94,8 +94,7 @@ User=\$USER
 WorkingDirectory=\$APP_DIR
 Environment=PATH=\$APP_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=\$APP_DIR/.env
-Environment=SHINOBI_BACKEND_WORKERS=2
-ExecStart=\$APP_DIR/.venv/bin/uvicorn ui.backend.main:app --host 127.0.0.1 --port 8000 --workers \\${SHINOBI_BACKEND_WORKERS} --timeout-keep-alive 75
+ExecStart=\$APP_DIR/.venv/bin/uvicorn ui.backend.main:app --host 127.0.0.1 --port 8000 --workers 2 --timeout-keep-alive 75
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=300
