@@ -2029,6 +2029,29 @@ function PipelineCanvas() {
       };
     });
 
+    // Add any empty global folders (from pipelineFoldersData) that have no pipelines yet.
+    // They go into the __shared__ bucket so they're always visible regardless of owner.
+    const allKnownFolders = new Set<string>();
+    for (const owner of out) {
+      for (const f of owner.folders) {
+        if (f.key) allKnownFolders.add(f.key.toLowerCase());
+      }
+    }
+    const emptyGlobalFolders = (pipelineFoldersData ?? [])
+      .map(f => normalizeFolder(f))
+      .filter(f => f && !allKnownFolders.has(f.toLowerCase()));
+    if (emptyGlobalFolders.length > 0) {
+      let sharedGroup = out.find(o => o.ownerKey === "__shared__");
+      if (!sharedGroup) {
+        sharedGroup = { ownerKey: "__shared__", ownerEmail: "", ownerLabel: "Shared", total: 0, folders: [] };
+        out.push(sharedGroup);
+      }
+      for (const f of emptyGlobalFolders.sort((a, b) => a.localeCompare(b))) {
+        sharedGroup.folders.push({ key: f, label: f, pipelines: [] });
+      }
+      sharedGroup.folders.sort((a, b) => a.key.localeCompare(b.key));
+    }
+
     out.sort((a, b) => {
       const aRank = a.ownerKey === "__shared__" ? 2 : (a.ownerEmail && meEmail && a.ownerEmail === meEmail ? 0 : 1);
       const bRank = b.ownerKey === "__shared__" ? 2 : (b.ownerEmail && meEmail && b.ownerEmail === meEmail ? 0 : 1);
@@ -2036,7 +2059,7 @@ function PipelineCanvas() {
       return a.ownerLabel.localeCompare(b.ownerLabel);
     });
     return out;
-  }, [allPipelines, profile?.email]);
+  }, [allPipelines, pipelineFoldersData, profile?.email]);
 
   const normalizeCallId = (raw: string | null | undefined) => String(raw || "").trim().toLowerCase();
   const parseDurationSeconds = (raw: unknown): number | null => {
