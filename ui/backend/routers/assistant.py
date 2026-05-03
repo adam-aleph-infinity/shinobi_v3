@@ -129,32 +129,70 @@ def _migrate_legacy_sessions() -> None:
 _migrate_legacy_sessions()
 
 
-SYSTEM_PROMPT = (
+_BASE_SYSTEM_PROMPT = (
     "You are Shinobi Copilot, an expert workflow assistant inside the Shinobi app.\n"
-    "Your mission is to help users build pipelines, debug failed runs, and inspect app data.\n"
+    "Your mission is to help users build pipelines, debug failed runs, inspect app data, "
+    "and answer any question the user has.\n"
     "\n"
-    "Hard safety boundaries:\n"
+    "Core rules:\n"
     "- You MUST use tools for factual app state (agents, pipelines, runs, logs, workspace files).\n"
     "- You MAY create or update pipeline definitions via tools when the user asks.\n"
-    "- You MUST NOT attempt to modify application source code or deployment config.\n"
     "- Never claim an action was executed unless a tool result confirms it.\n"
-    "\n"
-    "Behavior:\n"
     "- Be concise and practical.\n"
     "- For debugging, identify root cause, evidence, and exact next fixes.\n"
     "- For pipeline design, propose concrete steps and assumptions.\n"
     "- For artifact cleanup requests, run cleanup_artifacts in dry-run first, then execute only after explicit user confirmation.\n"
+    "- You may answer general questions, explain concepts, help with code reviews, or assist with "
+    "anything the user needs — not just pipeline tasks.\n"
 )
+
+_ADMIN_EXTRA_PROMPT = (
+    "\nAdmin capabilities (this user has elevated access):\n"
+    "- You MAY read any source file in the project using read_source_file.\n"
+    "- You MAY write/modify source files using write_source_file — always show the user what you "
+    "will change and get confirmation before writing.\n"
+    "- When modifying source code: read the file first, explain the change, write only the minimal "
+    "necessary diff, and remind the user to restart services or redeploy after changes.\n"
+)
+
+_SUPER_ADMIN_EXTRA_PROMPT = (
+    "\nSuper-admin capabilities (unrestricted access):\n"
+    "- You MAY run shell commands using run_shell_command.\n"
+    "- Always show the exact command to the user before running it.\n"
+    "- Prefer non-destructive commands (read, status, build) over destructive ones (delete, reset).\n"
+    "- For deploys or restarts, confirm with the user first.\n"
+)
+
+
+def _build_system_prompt_base(user_role: str) -> str:
+    role = str(user_role or "").strip().lower()
+    prompt = _BASE_SYSTEM_PROMPT
+    if role in _ADMIN_ROLES:
+        prompt += _ADMIN_EXTRA_PROMPT
+    if role in _SUPER_ADMIN_ROLES:
+        prompt += _SUPER_ADMIN_EXTRA_PROMPT
+    return prompt
+
+
+# Keep SYSTEM_PROMPT as the default (no special role) for backward compat
+SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT
 
 
 class SessionCreateIn(BaseModel):
     title: str = ""
 
 
+_ADMIN_ROLES = {"admin", "super_admin"}
+_SUPER_ADMIN_ROLES = {"super_admin"}
+# Absolute root of the project (two levels up from ui/backend/routers/)
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=40000)
     model: str = ""
     max_tool_rounds: int = Field(default=8, ge=1, le=_MAX_TOOL_ROUNDS)
+    user_role: str = ""
 
 
 def _now_iso() -> str:
@@ -239,7 +277,7 @@ def _append_model_message(session: dict[str, Any], message: dict[str, Any]) -> N
     items.append(message)
 
 
-def _tool_specs(include_sub_agent: bool = True) -> list[dict[str, Any]]:
+def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = [
         {
             "type": "function",
@@ -616,6 +654,75 @@ def _tool_specs(include_sub_agent: bool = True) -> list[dict[str, Any]]:
                 },
             }
         )
+
+    role = str(user_role or "").strip().lower()
+    if role in _ADMIN_ROLES:
+        tools += [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_source_file",
+                    "description": (
+                        "Read any source file in the project (backend, frontend, config). "
+                        "Use relative path from project root, e.g. ui/backend/routers/assistant.py"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative path from project root"},
+                            "max_chars": {"type": "integer", "default": 20000, "minimum": 500, "maximum": 500000},
+                        },
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_source_file",
+                    "description": (
+                        "Write/overwrite a source file. Always read first, explain the change to "
+                        "the user, and confirm before writing. A .copilot_bak backup is created automatically."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative path from project root"},
+                            "content": {"type": "string", "description": "Full new content of the file"},
+                        },
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+
+    if role in _SUPER_ADMIN_ROLES:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_shell_command",
+                    "description": (
+                        "Run a shell command in the project directory. "
+                        "Always show the command to the user before running. "
+                        "Prefer read-only commands; confirm before destructive operations."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "cwd": {"type": "string", "default": "", "description": "Working dir relative to project root"},
+                            "timeout_seconds": {"type": "integer", "default": 30, "minimum": 5, "maximum": 120},
+                        },
+                        "required": ["command"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
+
     return tools
 
 
@@ -1357,6 +1464,86 @@ def _tool_preview_workspace_file(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_source_path(rel: str) -> Path:
+    """Resolve a relative path within the project root. Raises on traversal."""
+    candidate = (_PROJECT_ROOT / rel).resolve()
+    if not str(candidate).startswith(str(_PROJECT_ROOT)):
+        raise HTTPException(400, "Path outside project root is not allowed")
+    return candidate
+
+
+def _tool_read_source_file(args: dict[str, Any]) -> dict[str, Any]:
+    rel = str(args.get("path") or "").strip()
+    if not rel:
+        raise HTTPException(400, "path is required")
+    max_chars = max(500, min(500000, int(args.get("max_chars", 20000) or 20000)))
+    path = _safe_source_path(rel)
+    if not path.is_file():
+        raise HTTPException(404, f"File not found: {rel}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    truncated = len(text) > max_chars
+    return {
+        "path": rel,
+        "size": path.stat().st_size,
+        "lines": text.count("\n") + 1,
+        "chars": len(text),
+        "truncated": truncated,
+        "content": text[:max_chars] if truncated else text,
+    }
+
+
+def _tool_write_source_file(args: dict[str, Any]) -> dict[str, Any]:
+    rel = str(args.get("path") or "").strip()
+    content = str(args.get("content") or "")
+    if not rel:
+        raise HTTPException(400, "path is required")
+    path = _safe_source_path(rel)
+    # Backup original if it exists
+    backup_path = None
+    if path.is_file():
+        backup_path = path.with_suffix(path.suffix + ".copilot_bak")
+        backup_path.write_bytes(path.read_bytes())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {
+        "path": rel,
+        "bytes_written": len(content.encode("utf-8")),
+        "backup": str(backup_path.relative_to(_PROJECT_ROOT)) if backup_path else None,
+        "ok": True,
+    }
+
+
+def _tool_run_shell_command(args: dict[str, Any]) -> dict[str, Any]:
+    import subprocess
+    cmd = str(args.get("command") or "").strip()
+    cwd = str(args.get("cwd") or "").strip() or str(_PROJECT_ROOT)
+    timeout = max(5, min(120, int(args.get("timeout_seconds", 30) or 30)))
+    if not cmd:
+        raise HTTPException(400, "command is required")
+    # Resolve working directory safely
+    cwd_path = (_PROJECT_ROOT / cwd).resolve() if not Path(cwd).is_absolute() else Path(cwd).resolve()
+    if not str(cwd_path).startswith(str(_PROJECT_ROOT)):
+        raise HTTPException(400, "cwd outside project root is not allowed")
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(cwd_path),
+        )
+        return {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stdout": result.stdout[:20000],
+            "stderr": result.stderr[:5000],
+            "ok": result.returncode == 0,
+        }
+    except subprocess.TimeoutExpired:
+        return {"command": cmd, "returncode": -1, "stdout": "", "stderr": f"Timed out after {timeout}s", "ok": False}
+
+
 def _tool_get_app_map(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
     refresh = bool(args.get("refresh"))
     if refresh:
@@ -1598,6 +1785,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "get_execution_log": _tool_get_execution_log,
     "cleanup_artifacts": _tool_cleanup_artifacts,
     "preview_workspace_file": _tool_preview_workspace_file,
+    "read_source_file": _tool_read_source_file,
+    "write_source_file": _tool_write_source_file,
+    "run_shell_command": _tool_run_shell_command,
 }
 
 
@@ -1727,7 +1917,7 @@ def _compact_json(payload: Any, cap: int = 12000) -> str:
     return txt[:cap] + "\n... [truncated]"
 
 
-def _build_dynamic_system_prompt(user_message: str, tools: list[dict[str, Any]]) -> str:
+def _build_dynamic_system_prompt(user_message: str, tools: list[dict[str, Any]], user_role: str = "") -> str:
     assistant_knowledge.ensure_app_map(tools, force=False)
     pack = assistant_knowledge.context_pack(user_message, memory_limit=10, skills_limit=10)
     app_map = pack.get("app_map") if isinstance(pack.get("app_map"), dict) else {}
@@ -1740,8 +1930,9 @@ def _build_dynamic_system_prompt(user_message: str, tools: list[dict[str, Any]])
     skill_count = len(pack.get("skills") or [])
     memory_count = len(pack.get("memory") or [])
 
+    base = _build_system_prompt_base(user_role)
     return (
-        f"{SYSTEM_PROMPT}\n"
+        f"{base}\n"
         "\n"
         "Autogenerated operating context (live app + learned knowledge):\n"
         f"- app_map_generated_at: {str(app_map.get('generated_at') or '')}\n"
@@ -2095,14 +2286,16 @@ async def chat_session(session_id: str, req: ChatRequest):
         },
     )
 
+    user_role = str(req.user_role or "").strip().lower()
+
     async def stream():
-        tools = _tool_specs()
+        tools = _tool_specs(user_role=user_role)
 
         def _prepare_context() -> tuple[dict[str, Any], dict[str, Any], str]:
             familiarity = assistant_knowledge.familiarize_with_live_app(tool_specs=tools, force=False)
             distill = assistant_knowledge.distill_skills_from_successful_runs(limit=120, force=False)
             assistant_knowledge.ensure_app_map(tools, force=False)
-            dynamic_prompt = _build_dynamic_system_prompt(user_message, tools)
+            dynamic_prompt = _build_dynamic_system_prompt(user_message, tools, user_role=user_role)
             return familiarity, distill, dynamic_prompt
 
         familiarity_boot, distill_boot, dynamic_system_prompt = await asyncio.to_thread(_prepare_context)

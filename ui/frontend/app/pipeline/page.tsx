@@ -1730,6 +1730,23 @@ function PipelineCanvas() {
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
+
+  // Poll active runs to highlight pipelines that have live jobs
+  const { data: liveRunsData } = useSWR<{ id: string; pipeline_id: string; status: string }[]>(
+    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=100&compact=1",
+    fetcher,
+    { refreshInterval: 5000, keepPreviousData: true },
+  );
+  const pipelinesWithActiveRuns = useMemo(() => {
+    if (!Array.isArray(liveRunsData)) return new Set<string>();
+    const ACTIVE = new Set(["running", "queued", "preparing", "retrying", "loading", "started"]);
+    return new Set(
+      liveRunsData
+        .filter(r => ACTIVE.has(String(r.status || "").toLowerCase()))
+        .map(r => String(r.pipeline_id || ""))
+        .filter(Boolean),
+    );
+  }, [liveRunsData]);
   const {
     data: navCustomers,
     isValidating: navCustomersValidating,
@@ -6982,7 +6999,13 @@ function PipelineCanvas() {
                                         ? "bg-indigo-900/40 text-white"
                                         : "text-gray-400 hover:text-white hover:bg-gray-800"}`}
                                   >
-                                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700"}`} />
+                                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                      pipelinesWithActiveRuns.has(p.id)
+                                        ? "bg-amber-400 animate-pulse"
+                                        : p.id === activePipelineId
+                                        ? "bg-emerald-400"
+                                        : "bg-gray-700"
+                                    }`} title={pipelinesWithActiveRuns.has(p.id) ? "Has active runs" : p.id === activePipelineId ? "Active pipeline" : ""} />
                                     <span className="truncate flex-1">{p.name}</span>
                                   </button>
                                   <button

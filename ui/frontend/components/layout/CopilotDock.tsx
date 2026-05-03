@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, Send, Trash2, User, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useUserProfile } from "@/lib/user-profile";
 
 type SessionSummary = {
   id: string;
@@ -61,6 +62,7 @@ function fmtTime(iso: string): string {
 }
 
 export default function CopilotDock() {
+  const { profile } = useUserProfile();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -208,7 +210,7 @@ export default function CopilotDock() {
       const res = await fetch(`/api/assistant/sessions/${encodeURIComponent(sid)}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: prompt, model: selectedModel }),
+        body: JSON.stringify({ message: prompt, model: selectedModel, user_role: profile?.role ?? "" }),
       });
       if (!res.ok || !res.body) throw new Error((await res.text()) || `HTTP ${res.status}`);
 
