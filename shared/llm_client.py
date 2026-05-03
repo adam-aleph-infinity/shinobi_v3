@@ -173,9 +173,9 @@ class LLMClient:
                 kwargs["system"] = system_content
             if thinking:
                 # Extended thinking requires temperature=1 (Anthropic hard requirement)
-                budget = int(os.environ.get("ASSISTANT_ANTHROPIC_THINKING_BUDGET", "32000"))
-                budget = max(32000, budget)
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, min(32000, budget))}
+                budget = int(os.environ.get("ASSISTANT_ANTHROPIC_THINKING_BUDGET", "8000"))
+                budget = max(1024, min(32000, budget))
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
                 kwargs["temperature"] = 1
             elif temperature is not None:
                 kwargs["temperature"] = temperature
@@ -199,7 +199,10 @@ class LLMClient:
                         elif str(tool_choice.get("type") or "") in {"auto", "none", "tool"}:
                             kwargs["tool_choice"] = tool_choice
 
-            response = self.client.messages.create(**kwargs)
+            # Use streaming to collect the response — Anthropic SDK requires streaming
+            # for requests with extended thinking or large max_tokens (>10 min threshold).
+            with self.client.messages.stream(**kwargs) as _stream:
+                response = _stream.get_final_message()
             # Extract text + convert tool_use blocks into OpenAI-like tool_calls.
             text_parts: List[str] = []
             tool_calls: List[Dict[str, Any]] = []
