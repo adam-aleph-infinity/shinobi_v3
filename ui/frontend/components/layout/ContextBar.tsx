@@ -139,7 +139,7 @@ function PipelinePicker({
 }
 
 // ── ContextBar ─────────────────────────────────────────────────────────────────
-export function ContextBar() {
+export function ContextBar({ showPipelinePicker = true }: { showPipelinePicker?: boolean }) {
   const {
     salesAgent, customer, callId,
     activePipelineId, activePipelineName,
@@ -355,16 +355,18 @@ export function ContextBar() {
         onOpenCrm={openCrmOverlay}
         onOpenCalls={openCallsOverlay}
       />
-      <div className="px-4 py-1.5 flex items-center gap-3 text-xs border-t border-gray-800/60">
-        <span className="text-[10px] text-gray-500 uppercase tracking-wide shrink-0">Execution</span>
-        <PipelinePicker
-          activeId={activePipelineId}
-          activeName={activePipelineName}
-          pipelines={pipelines}
-          onSelect={p => setActivePipeline(p.id, p.name)}
-          onClear={() => setActivePipeline("", "")}
-        />
-      </div>
+      {showPipelinePicker && (
+        <div className="px-4 py-1.5 flex items-center gap-3 text-xs border-t border-gray-800/60">
+          <span className="text-[10px] text-gray-500 uppercase tracking-wide shrink-0">Execution</span>
+          <PipelinePicker
+            activeId={activePipelineId}
+            activeName={activePipelineName}
+            pipelines={pipelines}
+            onSelect={p => setActivePipeline(p.id, p.name)}
+            onClear={() => setActivePipeline("", "")}
+          />
+        </div>
+      )}
 
       {showCallsPanel && (
         <div className="fixed inset-0 z-[80] bg-black p-3 flex items-center justify-center">

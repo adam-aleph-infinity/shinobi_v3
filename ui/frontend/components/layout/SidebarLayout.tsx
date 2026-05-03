@@ -124,8 +124,12 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const isAgentDashboardPage =
     path === "/agent-dashboard" ||
     path.startsWith("/agent-dashboard/");
-  // ContextBar (pipeline selector + context) only on the two analyze screens.
-  const showContextBar = isAgentDashboardPage || isAgentDeepDivePage;
+  const isCrmPage = path === "/crm" || path.startsWith("/crm/");
+  const isCallsPage = path === "/calls" || path.startsWith("/calls/");
+  // Analyze pages get the full ContextBar (agent/customer/call + pipeline picker).
+  // CRM and Calls get ContextBar without the pipeline picker (context only).
+  const showContextBar = isAgentDashboardPage || isAgentDeepDivePage || isCrmPage || isCallsPage;
+  const showPipelinePicker = isAgentDashboardPage || isAgentDeepDivePage;
   const sidebarPanelWidth = mounted && collapsed ? 0 : SIDEBAR_WIDTH;
   const copilotPanelWidth = mounted && copilotCollapsed ? 0 : copilotWidth;
 
@@ -211,7 +215,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       <section className="min-w-0 flex-1 h-full flex flex-col">
         {mounted && showContextBar && (
           <div className="shrink-0 z-20">
-            <ContextBar />
+            <ContextBar showPipelinePicker={showPipelinePicker} />
           </div>
         )}
         <main
