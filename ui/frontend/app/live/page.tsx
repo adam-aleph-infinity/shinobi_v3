@@ -5,6 +5,7 @@ import useSWR from "swr";
 import { useRouter } from "next/navigation";
 import { Activity, CheckCircle2, ChevronRight, Clock3, Loader2, Workflow, XCircle } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
+import { useUserProfile } from "@/lib/user-profile";
 import { parseServerDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
@@ -417,6 +418,7 @@ function inferRunCallId(run: PipelineRunRecord): string {
 }
 
 export default function LivePage() {
+  const { permissions } = useUserProfile();
   const router = useRouter();
   const { setCustomer, setCallId, setActivePipeline } = useAppCtx();
 
@@ -475,18 +477,23 @@ export default function LivePage() {
     data: rejectedData,
     mutate: mutateRejected,
   } = useSWR<{ ok?: boolean; count?: number; total_count?: number; returned_count?: number; items?: RejectedWebhookItem[] }>(
-    "/api/pipelines/live-webhook/rejections?limit=20000&status=all",
+    "/api/pipelines/live-webhook/rejections?limit=2000&status=all",
     fetcher,
-    { refreshInterval: 7000 },
+    {
+      refreshInterval: 10000,
+      keepPreviousData: true,
+      revalidateOnFocus: true,
+    },
   );
-  const liveReadOnly = hostReadOnly || !!liveCfg?.read_only;
+  const liveReadOnly = hostReadOnly || !!liveCfg?.read_only || !permissions.can_manage_live_jobs;
 
-  // Use backend max (2000) so older date folders remain visible in Jobs history.
-  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=2000&compact=1&mirror=1";
+  // Balance speed and history depth in Jobs page.
+  const runsUrl = "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=1200&compact=1&mirror=1";
 
   const { data: runsData, mutate: mutateRuns, isLoading, error: runsError } = useSWR<PipelineRunRecord[]>(runsUrl, fetcher, {
-    refreshInterval: 2500,
+    refreshInterval: 4000,
     keepPreviousData: true,
+    revalidateOnFocus: true,
   });
 
   const pipelineList: PipelineLite[] = Array.isArray(pipelines) ? pipelines : [];
@@ -1102,14 +1109,22 @@ export default function LivePage() {
 
   const openRunInCanvas = (run: PipelineRunRecord) => {
     const runCallId = inferRunCallId(run);
+    const runPipelineId = String(run.pipeline_id || "").trim();
+    const runPipelineNameRaw = String(run.pipeline_name || "").trim();
+    const resolvedById = runPipelineId ? pipelineList.find((p) => String(p.id || "").trim() === runPipelineId) : null;
+    const resolvedByName = !resolvedById && runPipelineNameRaw
+      ? pipelineList.find((p) => String(p.name || "").trim() === runPipelineNameRaw)
+      : null;
+    const resolvedPipelineId = resolvedById?.id || resolvedByName?.id || runPipelineId || "";
+    const resolvedPipelineName = resolvedById?.name || resolvedByName?.name || runPipelineNameRaw || resolvedPipelineId;
     setCustomer(run.customer || "", run.sales_agent || "");
     setCallId(runCallId);
-    setActivePipeline(run.pipeline_id || "", run.pipeline_name || "");
+    setActivePipeline(resolvedPipelineId, resolvedPipelineName || "");
     const payload = {
       source: "live_page",
       run_id: run.id,
-      pipeline_id: run.pipeline_id,
-      pipeline_name: run.pipeline_name,
+      pipeline_id: resolvedPipelineId,
+      pipeline_name: resolvedPipelineName,
       sales_agent: run.sales_agent,
       customer: run.customer,
       call_id: runCallId,

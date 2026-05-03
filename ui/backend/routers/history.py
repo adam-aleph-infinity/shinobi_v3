@@ -360,7 +360,8 @@ def list_runs(
             return "[]"
         if not isinstance(parsed, list):
             return "[]"
-        tail = parsed[-40:]
+        # Keep compact payload light for fast Jobs/History rendering.
+        tail = parsed[-12:]
         out: list[dict[str, Any]] = []
         for item in tail:
             if isinstance(item, dict):
@@ -557,7 +558,8 @@ def get_run_by_id(
             return "[]"
         if not isinstance(parsed, list):
             return "[]"
-        tail = parsed[-40:]
+        # Keep compact payload light for fast Jobs/History rendering.
+        tail = parsed[-12:]
         out: list[dict[str, Any]] = []
         for item in tail:
             if isinstance(item, dict):
