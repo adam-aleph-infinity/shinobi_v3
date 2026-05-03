@@ -65,6 +65,13 @@ _ROLE_DEFAULTS: dict[str, dict[str, bool]] = {
     },
 }
 
+# Hard admin identities that must always stay admin in both environments.
+# This guarantees recovery access even if env/config is missing or misconfigured.
+_ALWAYS_ADMIN_EMAILS = (
+    "adamleeperelman@gmail.com",
+    "adam.p@shinobigrp.com",
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -274,6 +281,12 @@ def _seed_defaults_locked(
                 by_email[e] = u
 
     admin_emails = _split_csv_emails(settings.user_admin_emails)
+    for forced_admin in _ALWAYS_ADMIN_EMAILS:
+        email = _normalize_email(forced_admin)
+        if not email:
+            continue
+        if email not in admin_emails:
+            admin_emails.append(email)
     if not admin_emails and current_email:
         admin_emails = [current_email]
     for email in admin_emails:

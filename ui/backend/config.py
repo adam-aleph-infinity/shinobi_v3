@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     live_mirror_timeout_s: int = 20
     live_mirror_auth_header: str = "x-api-token"
     live_mirror_auth_token: str = ""
-    user_admin_emails: str = "adam@shinobigrp.com"
+    user_admin_emails: str = "adam@shinobigrp.com,adamleeperelman@gmail.com,adam.p@shinobigrp.com"
     user_seed_dev_viewer_emails: str = "eldad@shinobigrp.com"
     user_default_email: str = ""
     user_auto_provision_unknown: bool = True
