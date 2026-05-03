@@ -95,6 +95,8 @@ interface RejectedWebhookItem {
   webhook_type?: string;
   event_id?: string;
   event_file?: string;
+  account_id?: string;
+  crm_url?: string;
   sales_agent?: string;
   customer?: string;
   call_id?: string;
@@ -439,6 +441,8 @@ export default function LivePage() {
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [hostReadOnly, setHostReadOnly] = useState(false);
   const [expandedRejectedId, setExpandedRejectedId] = useState("");
+  const [loadingRejectedDetailId, setLoadingRejectedDetailId] = useState("");
+  const [rejectedDetailsById, setRejectedDetailsById] = useState<Record<string, RejectedWebhookItem>>({});
   const [requeueingRejectedId, setRequeueingRejectedId] = useState("");
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
@@ -477,7 +481,7 @@ export default function LivePage() {
     data: rejectedData,
     mutate: mutateRejected,
   } = useSWR<{ ok?: boolean; count?: number; total_count?: number; returned_count?: number; items?: RejectedWebhookItem[] }>(
-    "/api/pipelines/live-webhook/rejections?limit=2000&status=all",
+    "/api/pipelines/live-webhook/rejections?limit=20000&status=rejected&include_payload=0",
     fetcher,
     {
       refreshInterval: 10000,
@@ -867,14 +871,96 @@ export default function LivePage() {
         throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
       }
       const runCount = Array.isArray(body?.run_ids) ? body.run_ids.length : 0;
+      const nowIso = new Date().toISOString();
+      const rid = rejectionId;
+      await mutateRejected((current) => {
+        const obj = (current && typeof current === "object") ? current : {};
+        const prevItems = Array.isArray((obj as any).items) ? (obj as any).items as RejectedWebhookItem[] : [];
+        const nextItems = prevItems.filter((r) => String((r as any)?.id || "") !== rid);
+        const prevTotal = Number((obj as any).total_count ?? (obj as any).count ?? prevItems.length ?? 0) || 0;
+        const nextTotal = Math.max(0, prevTotal - (prevItems.length !== nextItems.length ? 1 : 0));
+        return {
+          ...(obj as any),
+          items: nextItems,
+          count: nextTotal,
+          total_count: nextTotal,
+          returned_count: nextItems.length,
+        } as any;
+      }, { revalidate: false });
+      await mutateRuns((current) => {
+        const prevRows = Array.isArray(current) ? current : [];
+        const existing = new Set(prevRows.map((r) => String(r.id || "")));
+        const pipelineRows = Array.isArray(body?.pipelines) ? body.pipelines : [];
+        const out: PipelineRunRecord[] = [...prevRows];
+        for (const p of pipelineRows) {
+          const newRunId = String((p && p.run_id) || "").trim();
+          if (!newRunId || existing.has(newRunId)) continue;
+          existing.add(newRunId);
+          out.unshift({
+            id: newRunId,
+            pipeline_id: String((p && p.pipeline_id) || preferredPipelineId || ""),
+            pipeline_name: String((p && p.pipeline_name) || pipelineNameById[String((p && p.pipeline_id) || "")] || ""),
+            sales_agent: String(item.sales_agent || ""),
+            customer: String(item.customer || ""),
+            call_id: String(item.call_id || ""),
+            crm_url: String(item.crm_url || ""),
+            started_at: nowIso,
+            finished_at: null,
+            status: "queued",
+            canvas_json: "",
+            steps_json: "[]",
+            log_json: JSON.stringify(
+              [{ ts: nowIso, text: "Queued from rejected webhook replay.", level: "pipeline" }],
+            ),
+            run_origin: "webhook",
+          });
+        }
+        return out;
+      }, { revalidate: false });
+      setRejectedDetailsById((prev) => {
+        const next = { ...prev };
+        delete next[rid];
+        return next;
+      });
+      setExpandedRejectedId((prev) => (prev === rid ? "" : prev));
       setRejectionActionErr(false);
       setRejectionActionMsg(`Moved to run queue (${runCount} run${runCount === 1 ? "" : "s"}).`);
-      await Promise.allSettled([mutateRejected(), mutateRuns()]);
+      void Promise.allSettled([mutateRejected(), mutateRuns()]);
     } catch (e: any) {
       setRejectionActionErr(true);
       setRejectionActionMsg(String(e?.message || "Failed moving rejected webhook to run queue."));
     } finally {
       setRequeueingRejectedId("");
+    }
+  };
+
+  const toggleRejectedExpanded = async (item: RejectedWebhookItem) => {
+    const rid = String(item.id || "").trim();
+    if (!rid) return;
+    if (expandedRejectedId === rid) {
+      setExpandedRejectedId("");
+      return;
+    }
+    setExpandedRejectedId(rid);
+    if (rejectedDetailsById[rid]) return;
+    setLoadingRejectedDetailId(rid);
+    try {
+      const res = await fetch(`/api/pipelines/live-webhook/rejections/${encodeURIComponent(rid)}?include_payload=1`, {
+        cache: "no-store",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(String((body as any)?.detail || (body as any)?.error || `HTTP ${res.status}`));
+      }
+      const full = ((body as any)?.item && typeof (body as any).item === "object")
+        ? ((body as any).item as RejectedWebhookItem)
+        : item;
+      setRejectedDetailsById((prev) => ({ ...prev, [rid]: full }));
+    } catch (e: any) {
+      setRejectionActionErr(true);
+      setRejectionActionMsg(String(e?.message || "Failed loading rejected webhook payload."));
+    } finally {
+      setLoadingRejectedDetailId((prev) => (prev === rid ? "" : prev));
     }
   };
 
@@ -1501,7 +1587,7 @@ export default function LivePage() {
                         <div className="flex items-start gap-1.5">
                           <button
                             type="button"
-                            onClick={() => setExpandedRejectedId(expanded ? "" : rid)}
+                            onClick={() => { void toggleRejectedExpanded(item); }}
                             className="mt-0.5 text-gray-500 hover:text-gray-300"
                             title={expanded ? "Hide payload" : "View payload"}
                           >
@@ -1535,9 +1621,16 @@ export default function LivePage() {
                           </button>
                         </div>
                         {expanded ? (
-                          <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-{JSON.stringify(item, null, 2)}
-                          </pre>
+                          loadingRejectedDetailId === rid ? (
+                            <div className="mt-2 text-[11px] text-gray-400 flex items-center gap-1.5">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Loading payload…
+                            </div>
+                          ) : (
+                            <pre className="mt-2 text-[10px] text-gray-300 bg-black/30 border border-gray-800 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
+{JSON.stringify(rejectedDetailsById[rid] || item, null, 2)}
+                            </pre>
+                          )
                         ) : null}
                       </div>
                     );

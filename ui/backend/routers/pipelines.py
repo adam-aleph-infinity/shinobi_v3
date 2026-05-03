@@ -4645,19 +4645,40 @@ def get_live_webhook_rejections(
     request: Request,
     limit: int = Query(20000, ge=1, le=20000),
     status: str = Query("all"),
+    include_payload: int = Query(0),
 ):
     status_norm = str(status or "all").strip().lower() or "all"
+    include_payload_flag = bool(include_payload)
     if _is_live_mirror_mode(request):
-        path = f"/api/pipelines/live-webhook/rejections?limit={int(limit)}&status={status_norm}"
+        path = (
+            f"/api/pipelines/live-webhook/rejections"
+            f"?limit={int(limit)}&status={status_norm}&include_payload={1 if include_payload_flag else 0}"
+        )
         return _live_mirror_request_json("GET", path, request=request)
     from ui.backend.routers import webhooks as _wh
 
-    all_items = _wh._list_rejected_webhooks(limit=20000, include_non_rejected=True, include_archive=True)
+    include_non_rejected = status_norm == "all"
+    all_items = _wh._list_rejected_webhooks(
+        limit=20000,
+        include_non_rejected=include_non_rejected,
+        include_archive=True,
+    )
     if status_norm != "all":
         all_items = [
             it for it in all_items
             if str((it or {}).get("status") or "").strip().lower() == status_norm
         ]
+    if not include_payload_flag:
+        compact_items: list[dict[str, Any]] = []
+        for row in all_items:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            payload = out.get("payload")
+            out["payload_present"] = isinstance(payload, dict)
+            out.pop("payload", None)
+            compact_items.append(out)
+        all_items = compact_items
     total_count = len(all_items)
     items = all_items[: int(limit)]
     return {
@@ -4667,6 +4688,36 @@ def get_live_webhook_rejections(
         "total_count": total_count,
         "items": items,
     }
+
+
+@router.get("/live-webhook/rejections/{rejection_id}")
+def get_live_webhook_rejection(
+    rejection_id: str,
+    request: Request,
+    include_payload: int = Query(1),
+):
+    rid = str(rejection_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing rejection id.")
+    include_payload_flag = bool(include_payload)
+    if _is_live_mirror_mode(request):
+        path = (
+            f"/api/pipelines/live-webhook/rejections/{rid}"
+            f"?include_payload={1 if include_payload_flag else 0}"
+        )
+        return _live_mirror_request_json("GET", path, request=request)
+
+    from ui.backend.routers import webhooks as _wh
+
+    row, _row_source = _wh._find_rejected_webhook(rid, include_archive=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Rejected webhook not found: {rid}")
+    out = dict(row)
+    payload = out.get("payload")
+    out["payload_present"] = isinstance(payload, dict)
+    if not include_payload_flag:
+        out.pop("payload", None)
+    return {"ok": True, "item": out}
 
 
 @router.post("/live-webhook/rejections/{rejection_id}/enqueue")
@@ -5299,14 +5350,20 @@ def list_live_webhook_rejections(
     request: Request,
     limit: int = Query(20000, ge=1, le=20000),
     status: str = Query("all"),
+    include_payload: int = Query(0),
 ):
+    status_norm = str(status or "all").strip().lower() or "all"
+    include_payload_flag = bool(include_payload)
     if _is_live_mirror_mode(request):
-        path = f"/api/pipelines/live-webhook/rejections?limit={int(limit)}&status={status}"
+        path = (
+            f"/api/pipelines/live-webhook/rejections"
+            f"?limit={int(limit)}&status={status_norm}&include_payload={1 if include_payload_flag else 0}"
+        )
         return _live_mirror_request_json("GET", path, request=request)
 
     from ui.backend.routers import webhooks as _wh
 
-    wanted_status = str(status or "all").strip().lower() or "all"
+    wanted_status = status_norm
     include_non_rejected = wanted_status == "all"
     all_items = _wh._list_rejected_webhooks(
         limit=20000,
@@ -5318,6 +5375,17 @@ def list_live_webhook_rejections(
             row for row in all_items
             if str((row or {}).get("status") or "rejected").strip().lower() == wanted_status
         ]
+    if not include_payload_flag:
+        compact_items: list[dict[str, Any]] = []
+        for row in all_items:
+            if not isinstance(row, dict):
+                continue
+            out = dict(row)
+            payload = out.get("payload")
+            out["payload_present"] = isinstance(payload, dict)
+            out.pop("payload", None)
+            compact_items.append(out)
+        all_items = compact_items
     total_count = len(all_items)
     items = all_items[: int(limit)]
     return {
