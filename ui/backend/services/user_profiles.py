@@ -6,12 +6,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, Request
+from sqlmodel import Session
 
 from ui.backend.config import settings
+from ui.backend.database import engine as _db_engine
+from ui.backend.models.app_state_kv import AppStateKV
 
 _LOCK = threading.Lock()
 _AUTH_DIR = settings.ui_data_dir / "_auth"
 _USERS_FILE = _AUTH_DIR / "users.json"
+_USER_STATE_KEY = "auth.users"
 
 ROLE_ADMIN = "admin"
 ROLE_EDITOR = "editor"
@@ -166,7 +170,15 @@ def _coerce_user_record(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _load_store_locked() -> dict[str, Any]:
+def _user_state_use_db() -> bool:
+    return bool(getattr(settings, "user_state_use_db", True))
+
+
+def _user_state_file_fallback() -> bool:
+    return bool(getattr(settings, "user_state_file_fallback", False))
+
+
+def _load_store_from_file_locked() -> dict[str, Any]:
     _AUTH_DIR.mkdir(parents=True, exist_ok=True)
     if not _USERS_FILE.exists():
         return _default_store()
@@ -195,14 +207,97 @@ def _load_store_locked() -> dict[str, Any]:
     return out
 
 
-def _save_store_locked(store: dict[str, Any]) -> None:
+def _save_store_to_file_locked(payload: dict[str, Any]) -> None:
     _AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    _USERS_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_store_from_db_locked() -> dict[str, Any] | None:
+    try:
+        with Session(_db_engine) as s:
+            row = s.get(AppStateKV, _USER_STATE_KEY)
+    except Exception:
+        return None
+    if row is None:
+        return None
+    raw = str(getattr(row, "value_json", "") or "").strip()
+    if not raw:
+        return _default_store()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return _default_store()
+    return _normalize_store(parsed)
+
+
+def _save_store_to_db_locked(payload: dict[str, Any]) -> bool:
+    try:
+        value_json = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return False
+    try:
+        with Session(_db_engine) as s:
+            row = s.get(AppStateKV, _USER_STATE_KEY)
+            if row is None:
+                row = AppStateKV(key=_USER_STATE_KEY)
+            row.value_json = value_json
+            row.updated_at = datetime.utcnow()
+            s.add(row)
+            s.commit()
+        return True
+    except Exception:
+        return False
+
+
+def _normalize_store(raw: Any) -> dict[str, Any]:
+    out = _default_store()
+    if isinstance(raw, dict):
+        out["version"] = int(raw.get("version") or 1)
+        out["updated_at"] = str(raw.get("updated_at") or "").strip()
+        users_raw = raw.get("users")
+        if isinstance(users_raw, list):
+            users: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in users_raw:
+                user = _coerce_user_record(item)
+                if not user:
+                    continue
+                email = user["email"]
+                if email in seen:
+                    continue
+                seen.add(email)
+                users.append(user)
+            out["users"] = users
+    return out
+
+
+def _load_store_locked() -> dict[str, Any]:
+    if _user_state_use_db():
+        db_store = _load_store_from_db_locked()
+        if db_store is not None:
+            return db_store
+        file_store = _load_store_from_file_locked()
+        users = file_store.get("users") if isinstance(file_store.get("users"), list) else []
+        if users:
+            _save_store_to_db_locked(file_store)
+        return file_store
+    return _load_store_from_file_locked()
+
+
+def _save_store_locked(store: dict[str, Any]) -> None:
     payload = {
         "version": 1,
         "updated_at": _now_iso(),
         "users": store.get("users") if isinstance(store.get("users"), list) else [],
     }
-    _USERS_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    wrote_db = False
+    if _user_state_use_db():
+        wrote_db = _save_store_to_db_locked(payload)
+    if wrote_db and not _user_state_file_fallback():
+        return
+    _save_store_to_file_locked(payload)
 
 
 def _detect_environment(request: Request | None) -> str:
