@@ -1282,6 +1282,8 @@ export default function LivePage() {
           dayId: group.dayId,
           label: group.label,
           runs: group.failedRuns,
+          productionRuns: group.failedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
+          testRuns: group.failedRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
         }))
         .filter((group) => group.runs.length > 0),
     [completedRunsByDay],
@@ -1293,6 +1295,8 @@ export default function LivePage() {
           dayId: group.dayId,
           label: group.label,
           runs: group.successRuns,
+          productionRuns: group.successRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
+          testRuns: group.successRuns.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
         }))
         .filter((group) => group.runs.length > 0),
     [completedRunsByDay],
@@ -1926,31 +1930,48 @@ export default function LivePage() {
                         </button>
                         {!collapsed && (
                           <div className="space-y-2 pl-2">
-                            {group.runs.map((run) => {
-                              const runKey = String(run.id || "").trim() || `${group.dayId}-${run.pipeline_id}-${run.call_id}-${run.started_at || ""}`;
-                              const canMove = normalizeRunOrigin(run.run_origin) === "webhook";
-                              const busy = retryingFailedRunId === run.id;
-                              return (
-                                <div key={`failed-run-${runKey}`} className="space-y-1">
-                                  {renderRunCard(run)}
-                                  <div className="flex justify-end">
-                                    <button
-                                      type="button"
-                                      disabled={!canMove || busy || liveReadOnly}
-                                      onClick={() => { void moveFailedRunToRetry(run); }}
-                                      className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
-                                      title={
-                                        !canMove
-                                          ? "Only production/webhook runs can be moved to retry"
-                                          : "Move failed run to retry"
-                                      }
-                                    >
-                                      {busy ? "Moving..." : "Move To Retry"}
-                                    </button>
-                                  </div>
+                            {group.productionRuns.length > 0 && (
+                              <>
+                                <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
+                                  PRODUCTION · webhook ({group.productionRuns.length})
                                 </div>
-                              );
-                            })}
+                                {group.productionRuns.map((run) => {
+                                  const runKey = String(run.id || "").trim() || `${group.dayId}-${run.pipeline_id}-${run.call_id}-${run.started_at || ""}`;
+                                  const busy = retryingFailedRunId === run.id;
+                                  return (
+                                    <div key={`failed-prod-${runKey}`} className="space-y-1">
+                                      {renderRunCard(run)}
+                                      <div className="flex justify-end">
+                                        <button
+                                          type="button"
+                                          disabled={busy || liveReadOnly}
+                                          onClick={() => { void moveFailedRunToRetry(run); }}
+                                          className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
+                                          title="Move failed run to retry"
+                                        >
+                                          {busy ? "Moving..." : "Move To Retry"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            )}
+                            {group.testRuns.length > 0 && (
+                              <>
+                                <div className="text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
+                                  TEST · local ({group.testRuns.length})
+                                </div>
+                                {group.testRuns.map((run) => {
+                                  const runKey = String(run.id || "").trim() || `${group.dayId}-${run.pipeline_id}-${run.call_id}-${run.started_at || ""}`;
+                                  return (
+                                    <div key={`failed-test-${runKey}`} className="space-y-1">
+                                      {renderRunCard(run)}
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1991,7 +2012,22 @@ export default function LivePage() {
                         </button>
                         {!collapsed && (
                           <div className="space-y-2 pl-2">
-                            {group.runs.map(renderRunCard)}
+                            {group.productionRuns.length > 0 && (
+                              <>
+                                <div className="text-[10px] font-semibold text-blue-200 border border-blue-800/50 bg-blue-950/30 rounded px-2 py-1">
+                                  PRODUCTION · webhook ({group.productionRuns.length})
+                                </div>
+                                {group.productionRuns.map(renderRunCard)}
+                              </>
+                            )}
+                            {group.testRuns.length > 0 && (
+                              <>
+                                <div className="text-[10px] font-semibold text-fuchsia-200 border border-fuchsia-800/50 bg-fuchsia-950/20 rounded px-2 py-1">
+                                  TEST · local ({group.testRuns.length})
+                                </div>
+                                {group.testRuns.map(renderRunCard)}
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
