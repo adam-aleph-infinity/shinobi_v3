@@ -687,20 +687,47 @@ def _list_rejected_webhooks(
             items.append(out)
 
     store = _load_rejections_store()
-    store_rows = store.get("items")
-    store_has_data = isinstance(store_rows, list) and len(store_rows) > 0
+    store_rows = store.get("items") or []
+    # Track IDs that exist in the store with a non-rejected status (e.g. queued_manual).
+    # Derived items with these IDs must not re-appear as rejected.
+    non_rejected_store_ids: set[str] = set()
+    for _r in store_rows:
+        if not isinstance(_r, dict):
+            continue
+        _st = str(_r.get("status") or "rejected").strip().lower()
+        if _st != "rejected":
+            non_rejected_store_ids.add(str(_r.get("id") or "").strip())
     _collect(store_rows, "active")
-    archive_has_data = False
+    archive_rows: list = []
     if include_archive:
         archive = _load_rejections_archive_store()
-        archive_rows = archive.get("items")
-        archive_has_data = isinstance(archive_rows, list) and len(archive_rows) > 0
+        archive_rows = archive.get("items") or []
+        for _r in archive_rows:
+            if not isinstance(_r, dict):
+                continue
+            _st = str(_r.get("status") or "rejected").strip().lower()
+            if _st != "rejected":
+                non_rejected_store_ids.add(str(_r.get("id") or "").strip())
         _collect(archive_rows, "archive")
-    # Only fall back to queue-derived if the store is genuinely empty (no items at all).
-    # Do NOT fall back just because all existing items were filtered out (e.g. queued_manual),
-    # otherwise a queued_manual item would reappear as "rejected" from the queue snapshot.
-    if not store_has_data and not archive_has_data:
-        _collect(_derive_rejected_from_live_queue(limit=20000), "live_queue_derived")
+    # Always try derived fallback for items that aren't already tracked in the store.
+    # Skip any derived item whose ID already exists in the store with a moved/non-rejected status.
+    derived = _derive_rejected_from_live_queue(limit=20000)
+    store_ids: set[str] = {
+        str((_r or {}).get("id") or "").strip()
+        for _r in list(store_rows) + list(archive_rows)
+        if isinstance(_r, dict)
+    }
+    for derived_row in derived:
+        if not isinstance(derived_row, dict):
+            continue
+        did = str(derived_row.get("id") or "").strip()
+        if did in store_ids:
+            continue  # already in store (either rejected or queued_manual)
+        if did in non_rejected_store_ids:
+            continue  # was moved, don't re-derive as rejected
+        out = dict(derived_row)
+        out["source"] = "live_queue_derived"
+        items.append(out)
 
     items.sort(key=_rejection_sort_key, reverse=True)
     return items[:lim]
