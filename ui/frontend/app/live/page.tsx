@@ -26,6 +26,31 @@ const fetcher = async (url: string) => {
   return data;
 };
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
+const LIVE_RUNS_CACHE_KEY = "shinobi.live.runs_cache.v1";
+const LIVE_RUNS_CACHE_MAX = 300;
+
+function loadRunsCache(): PipelineRunRecord[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(LIVE_RUNS_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRunsCache(runs: PipelineRunRecord[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    // Only cache completed/terminal runs — active runs will refresh quickly anyway.
+    const toCache = runs.slice(0, LIVE_RUNS_CACHE_MAX);
+    window.localStorage.setItem(LIVE_RUNS_CACHE_KEY, JSON.stringify(toCache));
+  } catch {
+    // localStorage full or unavailable — silently skip
+  }
+}
 
 interface PipelineLite {
   id: string;
@@ -509,8 +534,9 @@ export default function LivePage() {
   // Incremental load: full baseline every 30s, delta every 4s (only new/changed rows since last seen).
   const [sinceTs, setSinceTs] = useState("");
   const sinceTsRef = useRef("");
-  const [runsState, setRunsState] = useState<PipelineRunRecord[]>([]);
-  const [runsInitialLoading, setRunsInitialLoading] = useState(true);
+  // Seed from localStorage so the view is instant on load (stale-while-revalidate).
+  const [runsState, setRunsState] = useState<PipelineRunRecord[]>(() => loadRunsCache());
+  const [runsInitialLoading, setRunsInitialLoading] = useState(() => loadRunsCache().length === 0);
   const [runsError, setRunsError] = useState<Error | null>(null);
 
   const { mutate: mutateRunsBase } = useSWR<PipelineRunRecord[]>(
@@ -529,7 +555,11 @@ export default function LivePage() {
           sinceTsRef.current = max;
           setSinceTs(max);
         }
-        setRunsState((prev) => mergeRunsById(prev, data));
+        setRunsState((prev) => {
+          const next = mergeRunsById(prev, data);
+          saveRunsCache(next);
+          return next;
+        });
       },
       onError: (err: Error) => {
         setRunsInitialLoading(false);
@@ -548,7 +578,11 @@ export default function LivePage() {
       keepPreviousData: true,
       onSuccess: (data) => {
         if (!Array.isArray(data)) return;
-        setRunsState((prev) => mergeRunsById(prev, data));
+        setRunsState((prev) => {
+          const next = mergeRunsById(prev, data);
+          saveRunsCache(next);
+          return next;
+        });
       },
     },
   );
@@ -565,7 +599,11 @@ export default function LivePage() {
         sinceTsRef.current = max;
         setSinceTs(max);
       }
-      setRunsState((prev) => mergeRunsById(prev, delta));
+      setRunsState((prev) => {
+        const next = mergeRunsById(prev, delta);
+        saveRunsCache(next);
+        return next;
+      });
     },
   });
 
