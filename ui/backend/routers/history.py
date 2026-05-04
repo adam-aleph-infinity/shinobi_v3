@@ -499,6 +499,12 @@ def list_runs(
             "steps_json": r.steps_json,
             "log_json": r.log_json,
             "run_origin": run_origin,
+            "note_sent": bool(getattr(r, "note_sent", False)),
+            "note_sent_at": (
+                r.note_sent_at.isoformat()
+                if getattr(r, "note_sent_at", None) is not None
+                else None
+            ),
         }
         if bool(compact):
             row_payload["canvas_json"] = ""
@@ -689,6 +695,12 @@ def get_run_by_id(
         "steps_json": r.steps_json,
         "log_json": r.log_json,
         "run_origin": run_origin,
+        "note_sent": bool(getattr(r, "note_sent", False)),
+        "note_sent_at": (
+            r.note_sent_at.isoformat()
+            if getattr(r, "note_sent_at", None) is not None
+            else None
+        ),
     }
     if bool(compact):
         row_payload["canvas_json"] = ""

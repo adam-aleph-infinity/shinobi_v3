@@ -8019,6 +8019,7 @@ async def run_pipeline(
                 except Exception:
                     pass
             # For production runs triggered by webhook, optionally push notes back to CRM.
+            _auto_note_sent_at: Optional[datetime] = None
             try:
                 if run_final_status == "done" and run_origin == "webhook":
                     if bool(settings.live_mirror_enabled):
@@ -8044,10 +8045,12 @@ async def run_pipeline(
                                         _push = send_note_to_crm_internal(
                                             note_id=_note_id,
                                             account_id="",
+                                            run_id=run_id,
                                             db=_note_s,
                                         )
                                     _crm_status = str(_push.get("crm_status") or "")
                                     _endpoint = str(_push.get("endpoint") or "")
+                                    _auto_note_sent_at = datetime.utcnow()
                                     log_buffer.emit(
                                         f"[CRM-PUSH] ✓ Sent note {_note_id} to CRM"
                                         + (f" (status {_crm_status})" if _crm_status else "")
@@ -8079,19 +8082,24 @@ async def run_pipeline(
                 final_finished_at = datetime.utcnow()
                 finalized_db = False
                 with Session(_db_engine) as _s:
-                    _s.execute(
-                        _sql_text(
-                            "UPDATE pipeline_run SET finished_at = :finished_at, status = :status,"
-                            " steps_json = :steps_json, log_json = :log_json WHERE id = :id"
-                        ),
-                        {
-                            "finished_at": final_finished_at,
-                            "status": run_final_status,
-                            "steps_json": final_steps_json,
-                            "log_json": final_log_json,
-                            "id": run_id,
-                        },
+                    _note_sent_val = _auto_note_sent_at is not None
+                    _sql_parts = (
+                        "UPDATE pipeline_run SET finished_at = :finished_at, status = :status,"
+                        " steps_json = :steps_json, log_json = :log_json"
                     )
+                    _sql_params: dict[str, Any] = {
+                        "finished_at": final_finished_at,
+                        "status": run_final_status,
+                        "steps_json": final_steps_json,
+                        "log_json": final_log_json,
+                        "id": run_id,
+                    }
+                    if _note_sent_val:
+                        _sql_parts += ", note_sent = :note_sent, note_sent_at = :note_sent_at"
+                        _sql_params["note_sent"] = True
+                        _sql_params["note_sent_at"] = _auto_note_sent_at
+                    _sql_parts += " WHERE id = :id"
+                    _s.execute(_sql_text(_sql_parts), _sql_params)
                     _s.commit()
                     finalized_db = True
                 if not finalized_db:
@@ -8106,6 +8114,9 @@ async def run_pipeline(
                             _row.finished_at = datetime.utcnow()
                             _row.status = run_final_status
                             _row.steps_json = json.dumps(run_steps, ensure_ascii=False)
+                            if _auto_note_sent_at is not None:
+                                _row.note_sent = True
+                                _row.note_sent_at = _auto_note_sent_at
                             _row.log_json = json.dumps(log_lines[-200:], ensure_ascii=False)
                             _s.add(_row)
                             _s.commit()

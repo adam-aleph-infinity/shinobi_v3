@@ -32,6 +32,8 @@ def _migrate():
         # Column additions (run on both Postgres and SQLite)
         for ddl in [
             "ALTER TABLE pipeline_run ADD COLUMN run_origin TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE pipeline_run ADD COLUMN note_sent BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE pipeline_run ADD COLUMN note_sent_at TIMESTAMP",
         ]:
             _exec_safe(conn, ddl)
 
