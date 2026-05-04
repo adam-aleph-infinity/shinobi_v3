@@ -1565,6 +1565,23 @@ export default function LivePage() {
     },
     [sortRunsNewestFirst],
   );
+  const buildNoteTargetsByBulkTuple = useCallback(
+    (rows: PipelineRunRecord[]) => {
+      const byTuple = new Map<string, { noteId: string; runId: string }>();
+      for (const run of sortRunsNewestFirst(rows)) {
+        const runId = String(run?.id || "").trim();
+        if (!runId) continue;
+        const noteId = String(inferRunNoteId(run) || "").trim();
+        if (!noteId) continue;
+        const tupleKey = runBulkTupleKey(run);
+        if (!byTuple.has(tupleKey)) {
+          byTuple.set(tupleKey, { noteId, runId });
+        }
+      }
+      return [...byTuple.values()];
+    },
+    [sortRunsNewestFirst],
+  );
   const tableFailedProductionRuns = useMemo(() => {
     const candidates = filteredRuns.filter(
       (run) => normalizeRunOrigin(run.run_origin) === "webhook" && isFailedCompletedRun(getRunStatus(run)),
@@ -1572,7 +1589,7 @@ export default function LivePage() {
     return dedupeRunsByBulkTuple(candidates);
   }, [filteredRuns, getRunStatus, dedupeRunsByBulkTuple]);
   const tableUnsentNoteTargets = useMemo(() => {
-    const dedupedRuns = dedupeRunsByBulkTuple(
+    return buildNoteTargetsByBulkTuple(
       filteredRuns.filter(
         (run) =>
           normalizeRunOrigin(run.run_origin) === "webhook"
@@ -1580,15 +1597,7 @@ export default function LivePage() {
           && !inferNotePushState(run).sent,
       ),
     );
-    const targets: Array<{ noteId: string; runId: string }> = [];
-    for (const run of dedupedRuns) {
-      const noteId = inferRunNoteId(run);
-      const runId = String(run.id || "").trim();
-      if (!noteId || !runId) continue;
-      targets.push({ noteId, runId });
-    }
-    return targets;
-  }, [filteredRuns, getRunStatus, dedupeRunsByBulkTuple]);
+  }, [filteredRuns, getRunStatus, buildNoteTargetsByBulkTuple]);
 
   const queuedRuns = useMemo(
     () => filteredRuns.filter((r) => isQueuedRun(getRunStatus(r))),
@@ -1700,16 +1709,8 @@ export default function LivePage() {
         candidates.push(run);
       }
     }
-    const dedupedRuns = dedupeRunsByBulkTuple(candidates);
-    const targets: Array<{ noteId: string; runId: string }> = [];
-    for (const run of dedupedRuns) {
-      const noteId = inferRunNoteId(run);
-      const runId = String(run.id || "").trim();
-      if (!noteId || !runId) continue;
-      targets.push({ noteId, runId });
-    }
-    return targets;
-  }, [completedSuccessByDay, dedupeRunsByBulkTuple]);
+    return buildNoteTargetsByBulkTuple(candidates);
+  }, [completedSuccessByDay, buildNoteTargetsByBulkTuple]);
   const tableBulkActionBusy = retryingAllFailed || sendingMissingNotes || !!retryingFailedRunId;
 
   // Group filteredRuns by (call_id, agent, customer) for consolidated table view.
@@ -1800,18 +1801,10 @@ export default function LivePage() {
   // De-duped by pipeline+agent+customer+call_id so one note send per logical run tuple.
   const selectedNoteTargets = useMemo(() => {
     if (selectedGroupRuns.length === 0) return [] as Array<{ noteId: string; runId: string }>;
-    const dedupedRuns = dedupeRunsByBulkTuple(
+    return buildNoteTargetsByBulkTuple(
       selectedGroupRuns.filter((run) => isSuccessCompletedRun(getRunStatus(run))),
     );
-    const result: Array<{ noteId: string; runId: string }> = [];
-    for (const run of dedupedRuns) {
-      const noteId = inferRunNoteId(run);
-      const runId = String(run.id || "").trim();
-      if (!noteId || !runId) continue;
-      result.push({ noteId, runId });
-    }
-    return result;
-  }, [selectedGroupRuns, getRunStatus, dedupeRunsByBulkTuple]);
+  }, [selectedGroupRuns, getRunStatus, buildNoteTargetsByBulkTuple]);
 
   useEffect(() => {
     setCollapsedCompletedFailedDayIds((prev) => {
