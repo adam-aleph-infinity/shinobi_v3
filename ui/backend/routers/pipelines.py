@@ -42,6 +42,7 @@ _FOLDERS_FILE = settings.ui_data_dir / "_pipelines_folders.json"
 _WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
 _WEBHOOK_DIR = settings.ui_data_dir / "_webhooks"
 _WEBHOOK_CONFIG_FILE = _WEBHOOK_DIR / "call_ended_config.json"
+_STATE_KEY_LIVE_CONFIG = "webhooks.live_config"
 _WEBHOOK_STATS_FILE = _WEBHOOK_DIR / "stats.json"
 _ACTIVE_RUN_LOCK = threading.Lock()
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
@@ -394,23 +395,35 @@ def _normalize_live_webhook_config(raw: Any) -> dict[str, Any]:
 
 
 def _load_live_webhook_config() -> dict[str, Any]:
+    from ui.backend.routers.webhooks import _live_state_use_db, _load_state_blob_db, _save_state_blob_db
+    if _live_state_use_db():
+        ok, raw = _load_state_blob_db(_STATE_KEY_LIVE_CONFIG)
+        if ok and isinstance(raw, dict):
+            return _normalize_live_webhook_config(raw)
     _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     if not _WEBHOOK_CONFIG_FILE.exists():
         cfg = _default_live_webhook_config()
         _WEBHOOK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        if _live_state_use_db():
+            _save_state_blob_db(_STATE_KEY_LIVE_CONFIG, cfg)
         return cfg
     try:
         raw = json.loads(_WEBHOOK_CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
         raw = {}
     cfg = _normalize_live_webhook_config(raw)
-    _WEBHOOK_CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Promote local file into DB on first read so both VMs converge.
+    if _live_state_use_db():
+        _save_state_blob_db(_STATE_KEY_LIVE_CONFIG, cfg)
     return cfg
 
 
 def _save_live_webhook_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
+    from ui.backend.routers.webhooks import _live_state_use_db, _save_state_blob_db
     norm = _normalize_live_webhook_config(cfg)
+    if _live_state_use_db():
+        _save_state_blob_db(_STATE_KEY_LIVE_CONFIG, norm)
+    _WEBHOOK_DIR.mkdir(parents=True, exist_ok=True)
     _WEBHOOK_CONFIG_FILE.write_text(json.dumps(norm, indent=2, ensure_ascii=False), encoding="utf-8")
     return norm
 
