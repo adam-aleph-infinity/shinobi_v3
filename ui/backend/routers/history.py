@@ -274,6 +274,7 @@ def list_runs(
         if mirror_error:
             print(f"[history] mirror fallback to local runs: {mirror_error}")
 
+    from ui.backend.models.note import Note
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.crm import CRMCall, CRMPair
 
@@ -383,6 +384,35 @@ def list_runs(
         except Exception:
             # Best effort only; fallback to per-row query path below.
             pass
+    note_id_by_triplet: dict[tuple[str, str, str], str] = {}
+    note_created_by_triplet: dict[tuple[str, str, str], Optional[datetime]] = {}
+    note_id_by_call: dict[str, str] = {}
+    note_created_by_call: dict[str, Optional[datetime]] = {}
+    if call_ids:
+        try:
+            note_rows = db.exec(select(Note).where(Note.call_id.in_(call_ids))).all()
+        except Exception:
+            note_rows = []
+        for n in note_rows:
+            n_id = str(getattr(n, "id", "") or "").strip()
+            if not n_id:
+                continue
+            n_call = norm(getattr(n, "call_id", ""))
+            if not n_call:
+                continue
+            n_agent = norm(getattr(n, "agent", ""))
+            n_customer = norm(getattr(n, "customer", ""))
+            n_created = getattr(n, "created_at", None)
+            if n_agent and n_customer:
+                n_key = (n_call, n_agent, n_customer)
+                prev = note_created_by_triplet.get(n_key)
+                if prev is None or (n_created is not None and n_created > prev):
+                    note_created_by_triplet[n_key] = n_created
+                    note_id_by_triplet[n_key] = n_id
+            prev_call = note_created_by_call.get(n_call)
+            if prev_call is None or (n_created is not None and n_created > prev_call):
+                note_created_by_call[n_call] = n_created
+                note_id_by_call[n_call] = n_id
     webhook_idx_loaded = False
     webhook_by_key: dict[tuple[str, str, str], list[float]] = {}
     webhook_by_call: dict[str, list[float]] = {}
@@ -413,6 +443,8 @@ def list_runs(
                     "state": str(item.get("state") or item.get("status") or ""),
                     "start_time": item.get("start_time"),
                     "end_time": item.get("end_time"),
+                    "note_id": str(item.get("note_id") or ""),
+                    "note_call_id": str(item.get("note_call_id") or ""),
                 }
             )
         return json.dumps(compact_steps, ensure_ascii=False)
@@ -439,6 +471,21 @@ def list_runs(
             else:
                 out.append({"text": str(item)})
         return json.dumps(out, ensure_ascii=False)
+
+    def _extract_note_id_from_steps_json(raw: Any) -> str:
+        try:
+            parsed = json.loads(str(raw or "[]"))
+        except Exception:
+            return ""
+        if not isinstance(parsed, list):
+            return ""
+        for item in reversed(parsed):
+            if not isinstance(item, dict):
+                continue
+            nid = str(item.get("note_id") or "").strip()
+            if nid:
+                return nid
+        return ""
 
     for r in rows:
         effective_status = derive_effective_run_status(
@@ -484,6 +531,13 @@ def list_runs(
         if not run_origin:
             run_origin = "local"
 
+        step_note_id = _extract_note_id_from_steps_json(r.steps_json)
+        resolved_note_id = (
+            step_note_id
+            or note_id_by_triplet.get((call_key, pair_key[0], pair_key[1]), "")
+            or note_id_by_call.get(call_key, "")
+        )
+
         row_payload = {
             "id": r.id,
             "pipeline_id": r.pipeline_id,
@@ -505,6 +559,7 @@ def list_runs(
                 if getattr(r, "note_sent_at", None) is not None
                 else None
             ),
+            "note_id": resolved_note_id,
         }
         if bool(compact):
             row_payload["canvas_json"] = ""
@@ -558,6 +613,7 @@ def get_run_by_id(
             except Exception as e:
                 raise HTTPException(502, f"Live mirror request failed: {e}") from e
 
+    from ui.backend.models.note import Note
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.crm import CRMCall, CRMPair
 
@@ -636,6 +692,43 @@ def get_run_by_id(
     if not run_origin:
         run_origin = "local"
 
+    def _extract_note_id_from_steps_json(raw: Any) -> str:
+        try:
+            parsed = json.loads(str(raw or "[]"))
+        except Exception:
+            return ""
+        if not isinstance(parsed, list):
+            return ""
+        for item in reversed(parsed):
+            if not isinstance(item, dict):
+                continue
+            nid = str(item.get("note_id") or "").strip()
+            if nid:
+                return nid
+        return ""
+
+    resolved_note_id = _extract_note_id_from_steps_json(r.steps_json)
+    if not resolved_note_id and call_key:
+        try:
+            notes = db.exec(select(Note).where(Note.call_id == str(r.call_id or "").strip())).all()
+        except Exception:
+            notes = []
+        want_agent = norm(r.sales_agent)
+        want_customer = norm(r.customer)
+        best_pair: tuple[Optional[datetime], str] = (None, "")
+        best_call: tuple[Optional[datetime], str] = (None, "")
+        for n in notes:
+            n_id = str(getattr(n, "id", "") or "").strip()
+            if not n_id:
+                continue
+            n_created = getattr(n, "created_at", None)
+            if best_call[0] is None or (n_created is not None and n_created > best_call[0]):
+                best_call = (n_created, n_id)
+            if norm(getattr(n, "agent", "")) == want_agent and norm(getattr(n, "customer", "")) == want_customer:
+                if best_pair[0] is None or (n_created is not None and n_created > best_pair[0]):
+                    best_pair = (n_created, n_id)
+        resolved_note_id = best_pair[1] or best_call[1]
+
     def _compact_steps_json(raw: Any) -> str:
         try:
             parsed = json.loads(str(raw or "[]"))
@@ -653,6 +746,8 @@ def get_run_by_id(
                     "state": str(item.get("state") or item.get("status") or ""),
                     "start_time": item.get("start_time"),
                     "end_time": item.get("end_time"),
+                    "note_id": str(item.get("note_id") or ""),
+                    "note_call_id": str(item.get("note_call_id") or ""),
                 }
             )
         return json.dumps(compact_steps, ensure_ascii=False)
@@ -701,6 +796,7 @@ def get_run_by_id(
             if getattr(r, "note_sent_at", None) is not None
             else None
         ),
+        "note_id": resolved_note_id,
     }
     if bool(compact):
         row_payload["canvas_json"] = ""

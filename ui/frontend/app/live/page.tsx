@@ -64,6 +64,7 @@ interface PipelineRunRecord {
   sales_agent: string;
   customer: string;
   call_id: string;
+  note_id?: string;
   crm_url?: string;
   started_at: string | null;
   finished_at: string | null;
@@ -358,6 +359,8 @@ function inferNotePushState(run: PipelineRunRecord): { sent: boolean; sentAt: st
 }
 
 function inferRunNoteId(run: PipelineRunRecord): string {
+  const direct = String(run.note_id || "").trim();
+  if (direct) return direct;
   const steps = _safeJsonArray(run.steps_json);
   for (let idx = steps.length - 1; idx >= 0; idx -= 1) {
     const step = steps[idx];
