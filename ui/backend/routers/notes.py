@@ -898,12 +898,148 @@ def delete_note(note_id: str, db: Session = Depends(get_session)):
 
 class NoteSendToCRMRequest(BaseModel):
     account_id: str = ""
+    run_id: str = ""
+
+
+def _append_manual_note_push_history(
+    *,
+    db: Session,
+    note: Note,
+    note_id: str,
+    crm_status: int,
+    endpoint: str,
+    run_id: str = "",
+) -> list[str]:
+    """
+    Best-effort audit trail so manual note push is visible in run history.
+    """
+    from ui.backend.models.pipeline_run import PipelineRun
+
+    now_iso = datetime.utcnow().isoformat()
+    rid = str(run_id or "").strip()
+    endpoint_text = str(endpoint or "").strip()
+    base_text = f"[CRM-PUSH] ✓ Sent note {note_id} to CRM (manual"
+    if int(crm_status or 0) > 0:
+        base_text += f", status {int(crm_status)}"
+    base_text += ")"
+    endpoint_line = f"[CRM-PUSH] endpoint: {endpoint_text}" if endpoint_text else ""
+
+    target_rows: list[PipelineRun] = []
+    seen: set[str] = set()
+
+    def _add_row(row: Optional[PipelineRun]) -> None:
+        if row is None:
+            return
+        row_id = str(getattr(row, "id", "") or "").strip()
+        if not row_id or row_id in seen:
+            return
+        seen.add(row_id)
+        target_rows.append(row)
+
+    if rid:
+        _add_row(db.get(PipelineRun, rid))
+
+    if not target_rows:
+        try:
+            rows = db.exec(
+                select(PipelineRun)
+                .where(PipelineRun.call_id == str(note.call_id or ""))
+                .order_by(PipelineRun.started_at.desc())
+                .limit(120)
+            ).all()
+        except Exception:
+            rows = []
+        wanted_agent = str(note.agent or "").strip().lower()
+        wanted_customer = str(note.customer or "").strip().lower()
+        matched_with_note: list[PipelineRun] = []
+        matched_done: list[PipelineRun] = []
+        for row in rows or []:
+            row_agent = str(getattr(row, "sales_agent", "") or "").strip().lower()
+            row_customer = str(getattr(row, "customer", "") or "").strip().lower()
+            if row_agent != wanted_agent or row_customer != wanted_customer:
+                continue
+            try:
+                parsed_steps = json.loads(str(getattr(row, "steps_json", "") or "[]"))
+            except Exception:
+                parsed_steps = []
+            has_note = False
+            if isinstance(parsed_steps, list):
+                for step in parsed_steps:
+                    if not isinstance(step, dict):
+                        continue
+                    if str(step.get("note_id") or "").strip() == note_id:
+                        has_note = True
+                        break
+            if has_note:
+                matched_with_note.append(row)
+            if str(getattr(row, "status", "") or "").strip().lower() in {"done", "completed"}:
+                matched_done.append(row)
+        if matched_with_note:
+            _add_row(matched_with_note[0])
+        elif matched_done:
+            _add_row(matched_done[0])
+
+    updated_run_ids: list[str] = []
+    for row in target_rows:
+        try:
+            logs = []
+            try:
+                parsed_logs = json.loads(str(getattr(row, "log_json", "") or "[]"))
+                if isinstance(parsed_logs, list):
+                    logs = parsed_logs
+            except Exception:
+                logs = []
+            logs.append({"ts": now_iso, "text": base_text, "level": "info"})
+            if endpoint_line:
+                logs.append({"ts": now_iso, "text": endpoint_line, "level": "info"})
+            row.log_json = json.dumps(logs[-400:], ensure_ascii=False)
+
+            try:
+                parsed_steps = json.loads(str(getattr(row, "steps_json", "") or "[]"))
+            except Exception:
+                parsed_steps = []
+            if isinstance(parsed_steps, list):
+                changed_steps = False
+                for step in parsed_steps:
+                    if not isinstance(step, dict):
+                        continue
+                    if str(step.get("note_id") or "").strip() != note_id:
+                        continue
+                    step["note_sent"] = True
+                    step["note_sent_at"] = now_iso
+                    if int(crm_status or 0) > 0:
+                        step["note_sent_status"] = str(int(crm_status))
+                    if endpoint_text:
+                        step["note_sent_endpoint"] = endpoint_text
+                    changed_steps = True
+                if changed_steps:
+                    row.steps_json = json.dumps(parsed_steps, ensure_ascii=False)
+
+            # Write note_sent state directly to DB column (shared across VMs).
+            row.note_sent = True
+            row.note_sent_at = datetime.utcnow()
+            db.add(row)
+            updated_run_ids.append(str(getattr(row, "id", "") or ""))
+        except Exception:
+            continue
+
+    if updated_run_ids:
+        try:
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return []
+    return updated_run_ids
 
 
 def send_note_to_crm_internal(
     note_id: str,
     account_id: str,
     db: Session,
+    run_id: str = "",
 ):
     # Safety guard: development mirror host must never push notes back to CRM.
     if bool(settings.live_mirror_enabled):
@@ -999,6 +1135,19 @@ def send_note_to_crm_internal(
     print(f"[crm-push] note={note.id} request={json.dumps(request_log, ensure_ascii=False)}")
     print(f"[crm-push] note={note.id} response={json.dumps(response_log, ensure_ascii=False)}")
 
+    history_run_ids: list[str] = []
+    try:
+        history_run_ids = _append_manual_note_push_history(
+            db=db,
+            note=note,
+            note_id=str(note.id),
+            crm_status=int(resp.status_code or 0),
+            endpoint=endpoint_used,
+            run_id=str(run_id or "").strip(),
+        )
+    except Exception:
+        history_run_ids = []
+
     return {
         "ok": True,
         "message": "Note sent to CRM",
@@ -1013,6 +1162,7 @@ def send_note_to_crm_internal(
         "account_id": account_id,
         "crm_url": crm_url,
         "note_id": note.id,
+        "history_run_ids": history_run_ids,
     }
 
 
@@ -1026,6 +1176,7 @@ def send_note_to_crm(
     return send_note_to_crm_internal(
         note_id=note_id,
         account_id=str(req.account_id or "").strip(),
+        run_id=str(req.run_id or "").strip(),
         db=db,
     )
 

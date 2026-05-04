@@ -3418,7 +3418,7 @@ function PipelineCanvas() {
     setTimeout(() => setToast(null), 3500);
   }
 
-  const sendNoteToCrmFromCanvas = useCallback(async (noteId: string) => {
+  const sendNoteToCrmFromCanvas = useCallback(async (noteId: string, runId?: string) => {
     if (!canRunPipelines) {
       showToast("You do not have permission to send notes to CRM.", false);
       return;
@@ -3435,7 +3435,7 @@ function PipelineCanvas() {
       const res = await fetch(`/api/notes/${encodeURIComponent(nid)}/send-to-crm`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ account_id: "" }),
+        body: JSON.stringify({ account_id: "", run_id: String(runId || "").trim() }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -3447,11 +3447,22 @@ function PipelineCanvas() {
       const statusRaw = Number(body?.crm_status);
       const statusText = Number.isFinite(statusRaw) ? `status ${statusRaw}` : "status unknown";
       const endpoint = String(body?.endpoint || "").trim();
+      const historyRunIds = Array.isArray(body?.history_run_ids)
+        ? body.history_run_ids.map((v: any) => String(v || "").trim()).filter(Boolean)
+        : [];
       setManualNoteSendError(false);
       setManualNoteSendMessage(
         endpoint
-          ? `Sent manually (${statusText}) via ${endpoint}.`
-          : `Sent manually (${statusText}).`,
+          ? (
+              historyRunIds.length
+                ? `Sent manually (${statusText}) via ${endpoint}. Logged in history run ${historyRunIds[0].slice(0, 8)}.`
+                : `Sent manually (${statusText}) via ${endpoint}.`
+            )
+          : (
+              historyRunIds.length
+                ? `Sent manually (${statusText}). Logged in history run ${historyRunIds[0].slice(0, 8)}.`
+                : `Sent manually (${statusText}).`
+            ),
       );
       showToast(`Note sent to CRM (${statusText})`, true);
       void Promise.allSettled([mutateRuns(), mutateLivePipelineState()]);
@@ -6672,7 +6683,7 @@ function PipelineCanvas() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => void sendNoteToCrmFromCanvas(outputNoteId)}
+                          onClick={() => void sendNoteToCrmFromCanvas(outputNoteId, String(outputCache?.runId || "").trim())}
                           disabled={!canRunPipelines || !outputNoteId || manualNoteSendPendingId === outputNoteId}
                           title={
                             !canRunPipelines
