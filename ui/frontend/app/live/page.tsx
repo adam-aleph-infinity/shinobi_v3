@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
-import { Activity, CheckCircle2, ChevronRight, Clock3, Loader2, Workflow, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, ChevronRight, Clock3, LayoutList, Loader2, Rows3, Workflow, XCircle } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { useUserProfile } from "@/lib/user-profile";
 import { parseServerDate } from "@/lib/time";
@@ -504,6 +504,15 @@ export default function LivePage() {
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
   const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
   const [dismissedRejectedIds, setDismissedRejectedIds] = useState<Record<string, boolean>>({});
+  const [viewMode, setViewMode] = useState<"cards" | "table">(() => {
+    if (typeof window === "undefined") return "cards";
+    try { return (window.localStorage.getItem("shinobi.live.view_mode") as "cards" | "table") || "cards"; } catch { return "cards"; }
+  });
+
+  const setViewModeAndSave = (mode: "cards" | "table") => {
+    setViewMode(mode);
+    try { window.localStorage.setItem("shinobi.live.view_mode", mode); } catch {}
+  };
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -1647,6 +1656,37 @@ export default function LivePage() {
               Clear filters
             </button>
           </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] text-gray-400">View</span>
+            <div className="h-8 flex rounded border border-gray-700 overflow-hidden">
+              <button
+                onClick={() => setViewModeAndSave("cards")}
+                className={cn(
+                  "flex-1 flex items-center justify-center gap-1 text-xs transition-colors px-2",
+                  viewMode === "cards"
+                    ? "bg-indigo-900/60 text-indigo-200 border-r border-indigo-700/60"
+                    : "bg-gray-800 text-gray-400 hover:bg-gray-700 border-r border-gray-700",
+                )}
+                title="Card view"
+              >
+                <Rows3 className="w-3 h-3" />
+                Cards
+              </button>
+              <button
+                onClick={() => setViewModeAndSave("table")}
+                className={cn(
+                  "flex-1 flex items-center justify-center gap-1 text-xs transition-colors px-2",
+                  viewMode === "table"
+                    ? "bg-indigo-900/60 text-indigo-200"
+                    : "bg-gray-800 text-gray-400 hover:bg-gray-700",
+                )}
+                title="Table view"
+              >
+                <LayoutList className="w-3 h-3" />
+                Table
+              </button>
+            </div>
+          </div>
         </div>
         <div className="mt-2 text-[11px] text-gray-500">
           Showing {filteredRuns.length} of {runs.length} runs
@@ -1664,6 +1704,103 @@ export default function LivePage() {
           <div className="h-full flex items-center justify-center gap-2 text-gray-500">
             <Loader2 className="w-5 h-5 animate-spin" />
             Loading live runs…
+          </div>
+        ) : viewMode === "table" ? (
+          <div className="h-full overflow-y-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700">
+                <tr>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[80px]">Type</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[90px]">Status</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[72px]">Run ID</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Pipeline</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Agent</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Customer</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Call ID</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Started</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Dur</th>
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRuns.length === 0 && (
+                  <tr>
+                    <td colSpan={10} className="px-4 py-8 text-center text-gray-600 italic text-xs">
+                      No runs match the current filters.
+                    </td>
+                  </tr>
+                )}
+                {filteredRuns.map((run, idx) => {
+                  const runStatus = getRunStatus(run);
+                  const runCallId = inferRunCallId(run);
+                  const notePush = inferNotePushState(run);
+                  const isProd = normalizeRunOrigin(run.run_origin) === "webhook";
+                  const isActive = !isCompletedRun(runStatus);
+                  return (
+                    <tr
+                      key={run.id}
+                      onClick={() => openRunInCanvas(run)}
+                      className={cn(
+                        "border-b border-gray-800/60 cursor-pointer transition-colors",
+                        idx % 2 === 0 ? "bg-gray-950/40" : "bg-gray-900/20",
+                        "hover:bg-indigo-950/30 hover:border-indigo-800/40",
+                      )}
+                      title="Open in Pipeline canvas"
+                    >
+                      <td className="px-3 py-1.5 whitespace-nowrap">
+                        <span className={cn(
+                          "text-[10px] px-1.5 py-0.5 rounded border font-semibold",
+                          isProd
+                            ? "text-blue-200 border-blue-700/60 bg-blue-950/50"
+                            : "text-fuchsia-200 border-fuchsia-700/60 bg-fuchsia-950/40",
+                        )}>
+                          {isProd ? "PROD" : "TEST"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap">
+                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(runStatus))}>
+                          {statusLabel(runStatus)}
+                        </span>
+                        {isActive && (
+                          <Loader2 className="inline-block ml-1 w-2.5 h-2.5 animate-spin text-amber-400" />
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap font-mono text-[10px] text-indigo-300">
+                        {String(run.id || "").slice(0, 8)}
+                      </td>
+                      <td className="px-3 py-1.5 max-w-[140px] truncate text-gray-100">
+                        {run.pipeline_name || "—"}
+                      </td>
+                      <td className="px-3 py-1.5 max-w-[120px] truncate text-gray-300">
+                        {run.sales_agent || "—"}
+                      </td>
+                      <td className="px-3 py-1.5 max-w-[120px] truncate text-gray-300">
+                        {run.customer || "—"}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap font-mono text-[10px] text-gray-400">
+                        {runCallId || "—"}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap text-[10px] text-gray-400">
+                        {relativeTime(run.started_at, nowMs)}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap text-[10px] text-gray-500">
+                        {durationStr(run.started_at, run.finished_at, nowMs)}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap">
+                        {notePush.sent && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-cyan-200 border-cyan-700/60 bg-cyan-950/40"
+                            title={notePush.sentAt ? `CRM note sent at ${notePush.sentAt}` : "CRM note sent"}
+                          >
+                            SENT
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         ) : (
           <div
