@@ -595,10 +595,16 @@ export default function LivePage() {
   // Incremental load: full baseline every 30s, delta every 4s (only new/changed rows since last seen).
   const [sinceTs, setSinceTs] = useState("");
   const sinceTsRef = useRef("");
-  // Seed from localStorage so the view is instant on load (stale-while-revalidate).
-  const [runsState, setRunsState] = useState<PipelineRunRecord[]>(() => loadRunsCache());
-  const [runsInitialLoading, setRunsInitialLoading] = useState(() => loadRunsCache().length === 0);
+  // Keep the initial render deterministic for SSR/hydration; hydrate cache after mount.
+  const [runsState, setRunsState] = useState<PipelineRunRecord[]>([]);
+  const [runsInitialLoading, setRunsInitialLoading] = useState(true);
   const [runsError, setRunsError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    const cached = loadRunsCache();
+    if (cached.length) setRunsState(cached);
+    setRunsInitialLoading(cached.length === 0);
+  }, []);
 
   const { mutate: mutateRunsBase } = useSWR<PipelineRunRecord[]>(
     "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=500&compact=1&mirror=1&run_origin=webhook",
