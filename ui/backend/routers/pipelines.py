@@ -4995,8 +4995,9 @@ async def enqueue_live_webhook_rejection(
         )
 
     _wh._mark_rejection_queued_manual(rid, run_ids, pipeline_ids)
+    # Keep a single long-lived dispatcher loop. Spawning a one-shot dispatch
+    # task per manual action can saturate workers during bulk operations.
     _wh.ensure_live_dispatcher_started()
-    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
 
     return {
         "ok": True,
@@ -5097,8 +5098,9 @@ async def enqueue_live_webhook_run(
             log_line=f"Queued manually from failed run replay ({source_run_id[:8]})",
         )
 
+    # Keep a single long-lived dispatcher loop. Spawning a one-shot dispatch
+    # task per manual action can saturate workers during bulk operations.
     _wh.ensure_live_dispatcher_started()
-    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
 
     return {
         "ok": True,
@@ -5197,8 +5199,9 @@ async def cancel_live_webhook_run(
             log_line=f"Cancelled from queue by user: {reason[:300]}",
         )
 
+    # Keep a single long-lived dispatcher loop. Spawning a one-shot dispatch
+    # task per manual action can saturate workers during bulk operations.
     _wh.ensure_live_dispatcher_started()
-    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
 
     return {
         "ok": True,
@@ -5338,8 +5341,9 @@ async def retry_live_webhook_run(
         ),
     )
 
+    # Keep a single long-lived dispatcher loop. Spawning a one-shot dispatch
+    # task per manual action can saturate workers during bulk operations.
     _wh.ensure_live_dispatcher_started()
-    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
 
     return {
         "ok": True,
@@ -5690,8 +5694,9 @@ async def enqueue_live_webhook_rejection(
             run_ids.append(effective_run_id)
 
     _wh._mark_rejection_queued_manual(rid, run_ids, target_pipeline_ids)
+    # Keep a single long-lived dispatcher loop. Spawning a one-shot dispatch
+    # task per manual action can saturate workers during bulk operations.
     _wh.ensure_live_dispatcher_started()
-    asyncio.create_task(_wh._dispatch_live_queue_once(str(request.base_url or "")))
 
     return {
         "ok": True,

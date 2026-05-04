@@ -3208,9 +3208,9 @@ async def _handle_call_webhook(
                     if entry.get("message"):
                         pipeline_info["message"] = str(entry.get("message") or "")
 
+            # Keep a single long-lived dispatcher loop. Spawning one-shot
+            # dispatch tasks per webhook can starve workers under burst load.
             ensure_live_dispatcher_started()
-            # Kick dispatcher in background; webhook response must return immediately.
-            asyncio.create_task(_dispatch_live_queue_once(str(request.base_url or "")))
 
             # Refresh state after dispatch attempt (some queued runs may become running immediately).
             for entry in pipeline_runs:
