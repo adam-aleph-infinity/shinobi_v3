@@ -1703,23 +1703,38 @@ export default function LivePage() {
     [completedFailedByDay, supersededRunIds],
   );
 
-  // Runs selected via checkbox that are failed prod → eligible for bulk retry.
-  const selectedFailedRuns = useMemo(() => {
+  // All runs inside selected groups (primary + expanded siblings).
+  const selectedGroupRuns = useMemo(() => {
     if (selectedRunIds.size === 0) return [] as PipelineRunRecord[];
-    return tableGroups
-      .filter((g) => selectedRunIds.has(String(g.primaryRun.id || "")))
-      .map((g) => g.primaryRun)
-      .filter((run) => isFailedCompletedRun(getRunStatus(run)) && normalizeRunOrigin(run.run_origin) === "webhook");
-  }, [tableGroups, selectedRunIds, getRunStatus]);
+    const out: PipelineRunRecord[] = [];
+    const seen = new Set<string>();
+    for (const group of tableGroups) {
+      if (!selectedRunIds.has(String(group.primaryRun.id || ""))) continue;
+      for (const run of group.runs) {
+        const runId = String(run.id || "").trim();
+        if (!runId || seen.has(runId)) continue;
+        seen.add(runId);
+        out.push(run);
+      }
+    }
+    return out;
+  }, [tableGroups, selectedRunIds]);
+
+  // Runs selected via checkbox that are failed prod → eligible for bulk retry.
+  const selectedFailedRuns = useMemo(
+    () =>
+      selectedGroupRuns.filter(
+        (run) => isFailedCompletedRun(getRunStatus(run)) && normalizeRunOrigin(run.run_origin) === "webhook",
+      ),
+    [selectedGroupRuns, getRunStatus],
+  );
 
   // Runs selected via checkbox that are success + have an unsent note → eligible for bulk note send.
   const selectedUnsentTargets = useMemo(() => {
-    if (selectedRunIds.size === 0) return [] as Array<{ noteId: string; runId: string }>;
+    if (selectedGroupRuns.length === 0) return [] as Array<{ noteId: string; runId: string }>;
     const result: Array<{ noteId: string; runId: string }> = [];
     const seen = new Set<string>();
-    for (const g of tableGroups) {
-      if (!selectedRunIds.has(String(g.primaryRun.id || ""))) continue;
-      const run = g.primaryRun;
+    for (const run of selectedGroupRuns) {
       if (!isSuccessCompletedRun(getRunStatus(run))) continue;
       if (inferNotePushState(run).sent) continue;
       const noteId = inferRunNoteId(run);
@@ -1729,7 +1744,7 @@ export default function LivePage() {
       }
     }
     return result;
-  }, [tableGroups, selectedRunIds, getRunStatus]);
+  }, [selectedGroupRuns, getRunStatus]);
 
   useEffect(() => {
     setCollapsedCompletedFailedDayIds((prev) => {
