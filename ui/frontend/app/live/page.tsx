@@ -1765,6 +1765,8 @@ export default function LivePage() {
     const runCallId = inferRunCallId(run);
     const notePush = inferNotePushState(run);
     const selectable = !!String(run.id || "").trim();
+    const isActive = !isCompletedRun(runStatus);
+    const dur = durationStr(run.started_at, run.finished_at, nowMs);
     return (
     <button
       key={run.id}
@@ -1794,6 +1796,22 @@ export default function LivePage() {
         <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(runStatus))}>
           {statusLabel(runStatus)}
         </span>
+        {/* Running time badge — amber + live for active runs, gray for completed */}
+        {dur !== "—" && (
+          <span className={cn(
+            "inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold",
+            isActive
+              ? "text-amber-200 border-amber-700/60 bg-amber-950/40"
+              : "text-gray-400 border-gray-700/40 bg-gray-900/30",
+          )}>
+            {isActive ? (
+              <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+            ) : (
+              <Clock3 className="w-2.5 h-2.5 shrink-0" />
+            )}
+            {dur}
+          </span>
+        )}
         {isCompletedRun(runStatus) && notePush.sent && (
           <span
             className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-cyan-200 border-cyan-700/60 bg-cyan-950/40"
@@ -1808,7 +1826,6 @@ export default function LivePage() {
         <span>{run.sales_agent || "—"} · {run.customer || "—"}</span>
         <span>call {runCallId || "—"}</span>
         <span>{relativeTime(run.started_at, nowMs)}</span>
-        <span>{durationStr(run.started_at, run.finished_at, nowMs)}</span>
       </div>
       {(() => {
         const phases = inferPhaseBadges(run, runStatus);
