@@ -1927,9 +1927,14 @@ export default function LivePage() {
                       key={run.id}
                       onClick={() => openRunInCanvas(run)}
                       className={cn(
-                        "border-b border-gray-800/60 cursor-pointer transition-colors",
-                        idx % 2 === 0 ? "bg-gray-950/40" : "bg-gray-900/20",
-                        "hover:bg-indigo-950/30 hover:border-indigo-800/40",
+                        "border-b cursor-pointer transition-colors",
+                        isActive
+                          ? "border-gray-800/60 bg-amber-950/10 hover:bg-amber-950/20"
+                          : isSuccessCompletedRun(runStatus)
+                          ? "border-emerald-900/30 bg-emerald-950/10 hover:bg-emerald-950/20"
+                          : isCancelledLike(runStatus)
+                          ? "border-gray-800/40 bg-gray-900/10 hover:bg-gray-800/20"
+                          : "border-red-900/30 bg-red-950/10 hover:bg-red-950/20",
                       )}
                       title="Open in Pipeline canvas"
                     >
@@ -1944,11 +1949,28 @@ export default function LivePage() {
                         </span>
                       </td>
                       <td className="px-3 py-1.5 whitespace-nowrap">
-                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(runStatus))}>
-                          {statusLabel(runStatus)}
-                        </span>
-                        {isActive && (
-                          <Loader2 className="inline-block ml-1 w-2.5 h-2.5 animate-spin text-amber-400" />
+                        {isActive ? (
+                          <span className="inline-flex items-center gap-1">
+                            <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(runStatus))}>
+                              {statusLabel(runStatus)}
+                            </span>
+                            <Loader2 className="w-2.5 h-2.5 animate-spin text-amber-400 shrink-0" />
+                          </span>
+                        ) : isSuccessCompletedRun(runStatus) ? (
+                          <span className="inline-flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                            <span className="text-[11px] font-bold text-emerald-300">{statusLabel(runStatus)}</span>
+                          </span>
+                        ) : isCancelledLike(runStatus) ? (
+                          <span className="inline-flex items-center gap-1">
+                            <span className="text-gray-500 text-sm leading-none shrink-0">○</span>
+                            <span className="text-[11px] font-semibold text-gray-400">{statusLabel(runStatus)}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1">
+                            <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                            <span className="text-[11px] font-bold text-red-300">{statusLabel(runStatus)}</span>
+                          </span>
                         )}
                       </td>
                       <td className="px-3 py-1.5 whitespace-nowrap font-mono text-[10px] text-indigo-300">
