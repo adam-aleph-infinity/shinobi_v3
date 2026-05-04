@@ -1666,6 +1666,43 @@ export default function LivePage() {
       .sort((a, b) => ((b.primaryRun.started_at || "") > (a.primaryRun.started_at || "") ? 1 : -1));
   }, [filteredRuns]);
 
+  // Runs that have been superseded by a newer retry of the same job (same call_id + agent + customer).
+  // These are hidden from the Failed column so the user doesn't see a "5h ago" failed card alongside its active retry.
+  const supersededRunIds = useMemo((): Set<string> => {
+    const result = new Set<string>();
+    for (const group of tableGroups) {
+      if (group.runs.length <= 1) continue;
+      // group.runs is sorted newest-first. The latest (index 0) is the primary.
+      const primaryStatus = getRunStatus(group.primaryRun);
+      // If the latest run is NOT failed, older failed runs in this group are superseded.
+      if (!isFailedCompletedRun(primaryStatus)) {
+        for (const run of group.runs.slice(1)) {
+          if (isFailedCompletedRun(getRunStatus(run))) {
+            result.add(run.id);
+          }
+        }
+      }
+    }
+    return result;
+  }, [tableGroups, getRunStatus]);
+
+  // completedFailedByDay with superseded runs removed (retried jobs whose retry is now active/succeeded).
+  const visibleCompletedFailedByDay = useMemo(
+    () =>
+      completedFailedByDay
+        .map((group) => {
+          const runs = group.runs.filter((r) => !supersededRunIds.has(r.id));
+          return {
+            ...group,
+            runs,
+            productionRuns: runs.filter((r) => normalizeRunOrigin(r.run_origin) === "webhook"),
+            testRuns: runs.filter((r) => normalizeRunOrigin(r.run_origin) === "local"),
+          };
+        })
+        .filter((group) => group.runs.length > 0),
+    [completedFailedByDay, supersededRunIds],
+  );
+
   // Runs selected via checkbox that are failed prod → eligible for bulk retry.
   const selectedFailedRuns = useMemo(() => {
     if (selectedRunIds.size === 0) return [] as PipelineRunRecord[];
@@ -2619,7 +2656,7 @@ export default function LivePage() {
               <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/70 flex items-center gap-2 shrink-0">
                 <XCircle className="w-4 h-4 text-red-400" />
                 <p className="text-sm font-semibold text-gray-100">Failed</p>
-                <span className="text-xs text-gray-500">{completedFailedCount}</span>
+                <span className="text-xs text-gray-500">{visibleCompletedFailedByDay.reduce((n, g) => n + g.runs.length, 0)}</span>
                 <button
                   type="button"
                   disabled={liveReadOnly || retryingAllFailed || !!retryingFailedRunId || failedProductionRuns.length === 0}
@@ -2638,10 +2675,10 @@ export default function LivePage() {
                     {failedRunActionMsg}
                   </p>
                 ) : null}
-                {completedFailedCount === 0 ? (
+                {visibleCompletedFailedByDay.length === 0 ? (
                   <p className="text-xs text-gray-600 italic">No failed runs.</p>
                 ) : (
-                  completedFailedByDay.map((group) => {
+                  visibleCompletedFailedByDay.map((group) => {
                     const collapsed = !!collapsedCompletedFailedDayIds[group.dayId];
                     return (
                       <div key={`failed-${group.dayId}`} className="space-y-1.5">
