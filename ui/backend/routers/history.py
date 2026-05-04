@@ -423,20 +423,24 @@ def list_runs(
                 resolved_crm = str(pair_row.crm_url or "").strip() if pair_row else ""
                 crm_by_pair_cache[pair_key] = resolved_crm
 
-        run_origin = _extract_run_origin_from_steps_json(r.steps_json) or "local"
-        if run_origin != "webhook":
-            # Backfill detection for historical webhook-triggered runs that predate explicit run_origin tagging.
-            if str(r.call_id or "").strip():
-                ensure_webhook_idx()
-                if _matches_webhook_event(
-                    started_at=r.started_at.replace(tzinfo=timezone.utc) if r.started_at and r.started_at.tzinfo is None else r.started_at,
-                    call_id=r.call_id,
-                    agent=r.sales_agent,
-                    customer=r.customer,
-                    by_key=webhook_by_key,
-                    by_call=webhook_by_call,
-                ):
-                    run_origin = "webhook"
+        # Prefer the DB column (single source of truth, shared across VMs).
+        # Fall back to derivation only for legacy rows created before the column existed.
+        run_origin = _normalize_run_origin(getattr(r, "run_origin", None))
+        if not run_origin:
+            run_origin = _extract_run_origin_from_steps_json(r.steps_json)
+        if not run_origin and str(r.call_id or "").strip():
+            ensure_webhook_idx()
+            if _matches_webhook_event(
+                started_at=r.started_at.replace(tzinfo=timezone.utc) if r.started_at and r.started_at.tzinfo is None else r.started_at,
+                call_id=r.call_id,
+                agent=r.sales_agent,
+                customer=r.customer,
+                by_key=webhook_by_key,
+                by_call=webhook_by_call,
+            ):
+                run_origin = "webhook"
+        if not run_origin:
+            run_origin = "local"
 
         row_payload = {
             "id": r.id,
@@ -541,8 +545,10 @@ def get_run_by_id(
         except Exception:
             resolved_crm = ""
 
-    run_origin = _extract_run_origin_from_steps_json(r.steps_json) or "local"
-    if run_origin != "webhook" and str(r.call_id or "").strip():
+    run_origin = _normalize_run_origin(getattr(r, "run_origin", None))
+    if not run_origin:
+        run_origin = _extract_run_origin_from_steps_json(r.steps_json)
+    if not run_origin and str(r.call_id or "").strip():
         by_key, by_call = _load_webhook_event_index()
         started = r.started_at
         if started is not None and getattr(started, "tzinfo", None) is None:
@@ -556,6 +562,8 @@ def get_run_by_id(
             by_call=by_call,
         ):
             run_origin = "webhook"
+    if not run_origin:
+        run_origin = "local"
 
     def _compact_steps_json(raw: Any) -> str:
         try:

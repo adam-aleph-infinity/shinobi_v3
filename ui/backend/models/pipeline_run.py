@@ -15,6 +15,7 @@ class PipelineRun(SQLModel, table=True):
     started_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     finished_at: Optional[datetime] = None
     status: str = "running"  # running | done | error
+    run_origin: str = ""     # local | webhook — stored at creation, shared across VMs via DB
     canvas_json: str = ""    # JSON canvas snapshot {nodes, edges, stages}
     steps_json: str = ""     # JSON [{agent_id, agent_name, status, content, error_msg}]
     log_json: str = ""       # JSON [{ts, text, level}]

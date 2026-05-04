@@ -18,6 +18,16 @@ def _migrate():
     """Apply incremental schema migrations (idempotent)."""
     from sqlalchemy import text
     with engine.connect() as conn:
+        # Column additions (run on both Postgres and SQLite)
+        for ddl in [
+            "ALTER TABLE pipeline_run ADD COLUMN run_origin TEXT NOT NULL DEFAULT ''",
+        ]:
+            try:
+                conn.execute(text(ddl))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
         # SQLite-only column additions
         if not _DATABASE_URL:
             for ddl in [

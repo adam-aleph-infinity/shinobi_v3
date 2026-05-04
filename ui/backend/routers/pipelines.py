@@ -5978,6 +5978,7 @@ async def run_pipeline(
                     _row.customer = req.customer
                     _row.call_id = input_scope_call_id
                     _row.status = "running"
+                    _row.run_origin = run_origin
                     _row.canvas_json = json.dumps(pipeline_def.get("canvas", {}))
                     _row.steps_json = json.dumps(run_steps)
                     _row.log_json = ""
@@ -5992,6 +5993,7 @@ async def run_pipeline(
                     customer=req.customer,
                     call_id=input_scope_call_id,
                     status="running",
+                    run_origin=run_origin,
                     canvas_json=json.dumps(pipeline_def.get("canvas", {})),
                     steps_json=json.dumps(run_steps),
                 )

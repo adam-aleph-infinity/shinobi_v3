@@ -470,6 +470,48 @@ def _append_rejected_webhook(item: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _append_ingress_rejection(
+    *,
+    reason: str,
+    message: str,
+    webhook_type: str,
+    payload: CallEndedWebhookPayload,
+    stored: Optional[dict[str, Any]] = None,
+    cfg: Optional[dict[str, Any]] = None,
+    status: str = "rejected",
+) -> dict[str, Any]:
+    account_id = str(payload.account_id or "").strip()
+    call_id = str(payload.call_id or "").strip()
+    agent = str(payload.agent or "").strip()
+    customer = str(payload.customer or "").strip()
+    crm_url = str(payload.crm_url or "").strip()
+    pipeline_ids = _resolve_live_pipeline_ids(cfg or {})
+    return _append_rejected_webhook(
+        {
+            "source": "ingress",
+            "reason": str(reason or "ingress_error"),
+            "status": str(status or "rejected"),
+            "message": str(message or "Webhook ingress rejected."),
+            "webhook_type": str(webhook_type or "call-updated"),
+            "event_id": str((stored or {}).get("event_id") or ""),
+            "event_file": str((stored or {}).get("file") or ""),
+            "sales_agent": agent,
+            "customer": customer,
+            "call_id": call_id,
+            "account_id": account_id,
+            "crm_url": crm_url,
+            "pipeline_ids": pipeline_ids,
+            "pair": {
+                "crm_url": crm_url,
+                "account_id": account_id,
+                "agent": agent,
+                "customer": customer,
+            },
+            "payload": payload.model_dump(),
+        }
+    )
+
+
 def _rejection_sort_key(row: dict[str, Any]) -> str:
     if not isinstance(row, dict):
         return ""
@@ -539,6 +581,10 @@ def _infer_rejection_reason(error_text: str) -> str:
         "resolved_agent_mismatch",
         "no_agent_history",
         "missing_account_id",
+        "no_pair",
+        "pair_resolution_failed",
+        "missing_call_id",
+        "webhook_disabled",
     )
     for key in known:
         if key in raw:
@@ -858,6 +904,7 @@ def _upsert_pipeline_run_stub(
     call_id: str,
     status: str,
     log_line: str = "",
+    run_origin: str = "webhook",
 ) -> None:
     now_iso = _utc_now_iso()
     _status = str(status or "").strip().lower()
@@ -882,6 +929,7 @@ def _upsert_pipeline_run_stub(
                     customer=customer,
                     call_id=call_id,
                     status=status,
+                    run_origin=str(run_origin or "webhook").strip(),
                     started_at=datetime.now(timezone.utc).replace(tzinfo=None),
                     finished_at=(
                         datetime.now(timezone.utc).replace(tzinfo=None)
@@ -2735,8 +2783,6 @@ async def _handle_call_webhook(
     if bool(getattr(settings, "live_state_read_only", False)):
         raise HTTPException(status_code=403, detail="Live webhook writes are disabled in read-only mode.")
     cfg = _load_call_ended_config()
-    if not cfg.get("enabled", True):
-        raise HTTPException(status_code=403, detail="Call-ended webhook flow is disabled in config.")
 
     stored = _persist_webhook_event(
         webhook_type=webhook_type,
@@ -2744,6 +2790,17 @@ async def _handle_call_webhook(
         payload=payload.model_dump(),
         request=request,
     )
+    if not cfg.get("enabled", True):
+        msg = "Call-ended webhook flow is disabled in config."
+        _append_ingress_rejection(
+            reason="webhook_disabled",
+            message=msg,
+            webhook_type=webhook_type,
+            payload=payload,
+            stored=stored,
+            cfg=cfg,
+        )
+        raise HTTPException(status_code=403, detail=msg)
     if bool(cfg.get("ingest_only", True)):
         return {
             "ok": True,
@@ -2754,7 +2811,26 @@ async def _handle_call_webhook(
             "message": "Webhook payload received and saved. Runtime execution is disabled (ingest_only=true).",
         }
 
-    pair = _resolve_pair(db, payload)
+    try:
+        pair = _resolve_pair(db, payload)
+    except HTTPException as e:
+        detail = str(getattr(e, "detail", "") or "Pair resolution failed.")
+        status_code = int(getattr(e, "status_code", 500) or 500)
+        if status_code == 404:
+            reason = "no_pair"
+        elif status_code == 400 and "account_id" in detail.lower():
+            reason = "missing_account_id"
+        else:
+            reason = "pair_resolution_failed"
+        _append_ingress_rejection(
+            reason=reason,
+            message=detail,
+            webhook_type=webhook_type,
+            payload=payload,
+            stored=stored,
+            cfg=cfg,
+        )
+        raise
     if payload.customer and str(payload.customer).strip():
         pair["customer"] = str(payload.customer).strip()
     if payload.crm_url and str(payload.crm_url).strip():
@@ -2836,7 +2912,16 @@ async def _handle_call_webhook(
 
     call_id = str(payload.call_id or "").strip()
     if not call_id:
-        raise HTTPException(status_code=400, detail="Missing call_id in webhook payload.")
+        msg = "Missing call_id in webhook payload."
+        _append_ingress_rejection(
+            reason="missing_call_id",
+            message=msg,
+            webhook_type=webhook_type,
+            payload=payload,
+            stored=stored,
+            cfg=cfg,
+        )
+        raise HTTPException(status_code=400, detail=msg)
 
     record_path = _resolve_record_path(db, payload, pair)
 
