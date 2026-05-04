@@ -1006,6 +1006,13 @@ def _upsert_pipeline_run_stub(
                             row.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
                             row.note_sent = False
                             row.note_sent_at = None
+                            # Reused run_id = brand new attempt for Jobs/canvas.
+                            # Reset stale attempt artifacts so logs/step colors do not mix
+                            # previous failed/cancelled state with the new queued attempt.
+                            _reset_pid = str(pipeline_id or getattr(row, "pipeline_id", "") or "").strip()
+                            _reset_steps = _build_step_skeleton(_reset_pid)
+                            row.steps_json = json.dumps(_reset_steps, ensure_ascii=False)
+                            row.log_json = json.dumps([], ensure_ascii=False)
                         row.finished_at = None
                 elif row.finished_at is None:
                     row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)

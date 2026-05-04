@@ -2454,8 +2454,11 @@ function PipelineCanvas() {
 
   const historyRuns = useMemo(() => {
     const list = Array.isArray(runsData) ? [...runsData] : [];
-    if (selectedRunByIdData?.id && !list.some((r) => String(r.id || "") === String(selectedRunByIdData.id || ""))) {
-      list.unshift(selectedRunByIdData);
+    if (selectedRunByIdData?.id) {
+      const selectedId = String(selectedRunByIdData.id || "");
+      const idx = list.findIndex((r) => String(r.id || "") === selectedId);
+      if (idx >= 0) list[idx] = selectedRunByIdData;
+      else list.unshift(selectedRunByIdData);
     }
     const selectedRid = String(selectedCacheRunId || "").trim();
     return list.filter((r) => {
