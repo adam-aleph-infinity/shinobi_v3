@@ -1037,9 +1037,10 @@ def _upsert_pipeline_run_stub(
                                 if not str(step.get("error_msg") or "").strip():
                                     step["error_msg"] = "Run failed during preflight or dispatch."
                                 changed_steps = True
-                    elif _status == "retrying":
-                        # Reset failed/error step states so the canvas shows the run
-                        # as cleanly queued rather than carrying over old failure markers.
+                    elif _status in {"retrying", "queued"}:
+                        # Reset failed/error step states when a failed run is manually
+                        # moved back to the waiting queue, so stale failures do not
+                        # keep the card in "failed" after requeue.
                         for step in parsed_steps:
                             if not isinstance(step, dict):
                                 continue

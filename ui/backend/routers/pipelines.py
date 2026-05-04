@@ -5252,8 +5252,8 @@ async def retry_live_webhook_run(
                     status_code=409,
                     detail=f"Run is currently {queue_prev_state}; cancel it first before retrying.",
                 )
-            if queue_prev_state != "retrying":
-                item["state"] = "retrying"
+            if queue_prev_state != "queued":
+                item["state"] = "queued"
                 item["updated_at"] = now_iso
                 item["next_attempt_at"] = now_iso
                 if not str(item.get("last_error") or "").strip():
@@ -5298,7 +5298,7 @@ async def retry_live_webhook_run(
             "webhook_type": "failed-retry",
             "created_at": now_iso,
             "updated_at": now_iso,
-            "state": "retrying",
+            "state": "queued",
             "attempts": 0,
             "max_attempts": int(cfg.get("retry_max_attempts") or 2),
             "next_attempt_at": now_iso,
@@ -5319,8 +5319,8 @@ async def retry_live_webhook_run(
     else:
         meta = {
             "run_id": rid,
-            "state": "retrying",
-            "message": "Moved to retry queue.",
+            "state": "queued",
+            "message": "Moved to run queue.",
         }
 
     _wh._upsert_pipeline_run_stub(
@@ -5330,11 +5330,11 @@ async def retry_live_webhook_run(
         sales_agent=sales_agent,
         customer=customer,
         call_id=call_id,
-        status="retrying",
+        status="queued",
         log_line=(
-            "Manual retry requested; moved to retry queue."
+            "Manual retry requested; moved to run queue."
             if queue_found
-            else "Manual retry requested; queued for retry dispatch."
+            else "Manual retry requested; queued for dispatch."
         ),
     )
 
@@ -5350,7 +5350,7 @@ async def retry_live_webhook_run(
         "queue_prev_state": queue_prev_state,
         "queue_updated": queue_changed,
         "created_queue_item": bool(created),
-        "state": str(meta.get("state") or ("retrying" if (queue_found or created) else "")),
+        "state": str(meta.get("state") or ("queued" if (queue_found or created) else "")),
         "deduplicated": (not created and not queue_found),
         "message": str(meta.get("message") or ""),
     }

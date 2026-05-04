@@ -1160,7 +1160,7 @@ export default function LivePage() {
       return;
     }
     const ok = window.confirm(
-      `Move failed run ${sourceRunId.slice(0, 8)} to retry for pipeline "${run.pipeline_name}"?`,
+      `Move failed run ${sourceRunId.slice(0, 8)} to run queue for pipeline "${run.pipeline_name}"?`,
     );
     if (!ok) return;
 
@@ -1182,15 +1182,15 @@ export default function LivePage() {
       setFailedRunActionErr(false);
       setFailedRunActionMsg(
         retryRunId
-          ? `Moved to retry as run ${retryRunId.slice(0, 8)}.`
-          : "Moved failed run to retry.",
+          ? `Moved to queue as run ${retryRunId.slice(0, 8)}.`
+          : "Moved failed run to queue.",
       );
       // Optimistically move the card out of the failed section immediately.
       mutateRuns((current: PipelineRunRecord[]) => {
         if (!Array.isArray(current)) return current;
         return current.map((r) =>
           String(r.id || "") === sourceRunId
-            ? { ...r, status: "retrying", finished_at: undefined }
+            ? { ...r, status: "queued", finished_at: undefined }
             : r,
         );
       });
@@ -1999,9 +1999,9 @@ export default function LivePage() {
                                           disabled={busy || liveReadOnly}
                                           onClick={() => { void moveFailedRunToRetry(run); }}
                                           className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
-                                          title="Move failed run to retry"
+                                          title="Move failed run to run queue"
                                         >
-                                          {busy ? "Moving..." : "Move To Retry"}
+                                          {busy ? "Moving..." : "Move To Queue"}
                                         </button>
                                       </div>
                                     </div>
