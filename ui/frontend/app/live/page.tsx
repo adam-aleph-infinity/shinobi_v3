@@ -347,6 +347,18 @@ function inferNotePushState(run: PipelineRunRecord): { sent: boolean; sentAt: st
   return { sent, sentAt };
 }
 
+function inferRunNoteId(run: PipelineRunRecord): string {
+  const steps = _safeJsonArray(run.steps_json);
+  for (let idx = steps.length - 1; idx >= 0; idx -= 1) {
+    const step = steps[idx];
+    if (!step || typeof step !== "object") continue;
+    const stepObj = step as Record<string, unknown>;
+    const noteId = String(stepObj["note_id"] || "").trim();
+    if (noteId) return noteId;
+  }
+  return "";
+}
+
 function _phaseTone(label: string): string {
   const k = String(label || "").toLowerCase();
   if (k === "transcript") return "text-cyan-200 border-cyan-700/50 bg-cyan-950/40";
@@ -496,11 +508,15 @@ export default function LivePage() {
   const [rejectionActionMsg, setRejectionActionMsg] = useState("");
   const [rejectionActionErr, setRejectionActionErr] = useState(false);
   const [retryingFailedRunId, setRetryingFailedRunId] = useState("");
+  const [retryingAllFailed, setRetryingAllFailed] = useState(false);
   const [cancellingRunId, setCancellingRunId] = useState("");
   const [failedRunActionMsg, setFailedRunActionMsg] = useState("");
   const [failedRunActionErr, setFailedRunActionErr] = useState(false);
   const [runControlActionMsg, setRunControlActionMsg] = useState("");
   const [runControlActionErr, setRunControlActionErr] = useState(false);
+  const [sendingMissingNotes, setSendingMissingNotes] = useState(false);
+  const [noteActionMsg, setNoteActionMsg] = useState("");
+  const [noteActionErr, setNoteActionErr] = useState(false);
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
   const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
   const [dismissedRejectedIds, setDismissedRejectedIds] = useState<Record<string, boolean>>({});
@@ -1249,6 +1265,149 @@ export default function LivePage() {
     }
   };
 
+  const moveAllFailedRunsToRetry = async () => {
+    if (liveReadOnly) {
+      setFailedRunActionErr(true);
+      setFailedRunActionMsg("Read-only mirror mode: cannot move failed runs to retry from this environment.");
+      return;
+    }
+    const targets = failedProductionRuns;
+    if (!targets.length) {
+      setFailedRunActionErr(false);
+      setFailedRunActionMsg("No failed production runs available to move.");
+      return;
+    }
+    const ok = window.confirm(
+      `Move all ${targets.length} failed production run${targets.length === 1 ? "" : "s"} to queue for retry?`,
+    );
+    if (!ok) return;
+
+    setRetryingAllFailed(true);
+    setFailedRunActionMsg("");
+    try {
+      const movedSourceRunIds = new Set<string>();
+      const failures: string[] = [];
+      for (const run of targets) {
+        const sourceRunId = String(run.id || "").trim();
+        if (!sourceRunId) continue;
+        try {
+          const res = await fetch(`/api/pipelines/live-webhook/runs/${encodeURIComponent(sourceRunId)}/retry`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pipeline_id: String(run.pipeline_id || "").trim(),
+            }),
+          });
+          const body = await res.json().catch(() => ({} as any));
+          if (!res.ok) {
+            throw new Error(String(body?.detail || body?.error || `HTTP ${res.status}`));
+          }
+          movedSourceRunIds.add(sourceRunId);
+        } catch (e: any) {
+          const msg = String(e?.message || "failed");
+          failures.push(`${sourceRunId.slice(0, 8)}: ${msg}`);
+        }
+      }
+
+      if (movedSourceRunIds.size > 0) {
+        mutateRuns((current: PipelineRunRecord[]) => {
+          if (!Array.isArray(current)) return current;
+          return current.map((r) => {
+            const rid = String(r.id || "").trim();
+            if (!movedSourceRunIds.has(rid)) return r;
+            return { ...r, status: "queued", finished_at: null };
+          });
+        }, { revalidate: false });
+      }
+
+      const movedCount = movedSourceRunIds.size;
+      setFailedRunActionErr(failures.length > 0);
+      if (!failures.length) {
+        setFailedRunActionMsg(`Moved ${movedCount} failed run${movedCount === 1 ? "" : "s"} to queue.`);
+      } else {
+        const tail = failures.slice(0, 2).join(" | ");
+        setFailedRunActionMsg(
+          `Moved ${movedCount}/${targets.length} failed runs. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
+        );
+      }
+      await mutateRuns();
+    } finally {
+      setRetryingAllFailed(false);
+    }
+  };
+
+  const sendAllMissingNotesToCRM = async () => {
+    if (liveReadOnly) {
+      setNoteActionErr(true);
+      setNoteActionMsg("Read-only mirror mode: cannot send notes to CRM from this environment.");
+      return;
+    }
+    const targets = unsentNoteTargets;
+    if (!targets.length) {
+      setNoteActionErr(false);
+      setNoteActionMsg("No unsent notes found in successful production runs.");
+      return;
+    }
+    const ok = window.confirm(
+      `Send ${targets.length} unsent note${targets.length === 1 ? "" : "s"} to CRM now?`,
+    );
+    if (!ok) return;
+
+    setSendingMissingNotes(true);
+    setNoteActionMsg("");
+    try {
+      const sentRunIds = new Set<string>();
+      const failures: string[] = [];
+      let sentCount = 0;
+      for (const target of targets) {
+        try {
+          const res = await fetch(`/api/notes/${encodeURIComponent(target.noteId)}/send-to-crm`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              account_id: "",
+              run_id: target.runId,
+            }),
+          });
+          const body = await res.json().catch(() => ({} as any));
+          if (!res.ok || body?.ok === false) {
+            throw new Error(String(body?.detail || body?.error || body?.message || `HTTP ${res.status}`));
+          }
+          sentRunIds.add(target.runId);
+          sentCount += 1;
+        } catch (e: any) {
+          const msg = String(e?.message || "failed");
+          failures.push(`${target.noteId.slice(0, 8)}: ${msg}`);
+        }
+      }
+
+      if (sentRunIds.size > 0) {
+        const nowIso = new Date().toISOString();
+        mutateRuns((current: PipelineRunRecord[]) => {
+          if (!Array.isArray(current)) return current;
+          return current.map((r) => {
+            const rid = String(r.id || "").trim();
+            if (!sentRunIds.has(rid)) return r;
+            return { ...r, note_sent: true, note_sent_at: String(r.note_sent_at || "").trim() || nowIso };
+          });
+        }, { revalidate: false });
+      }
+
+      setNoteActionErr(failures.length > 0);
+      if (!failures.length) {
+        setNoteActionMsg(`Sent ${sentCount} note${sentCount === 1 ? "" : "s"} to CRM.`);
+      } else {
+        const tail = failures.slice(0, 2).join(" | ");
+        setNoteActionMsg(
+          `Sent ${sentCount}/${targets.length} notes. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
+        );
+      }
+      await mutateRuns();
+    } finally {
+      setSendingMissingNotes(false);
+    }
+  };
+
   const cancelLiveRun = async (run: PipelineRunRecord) => {
     const runId = String(run?.id || "").trim();
     if (!runId) return;
@@ -1408,6 +1567,33 @@ export default function LivePage() {
     () => completedSuccessByDay.reduce((n, group) => n + group.runs.length, 0),
     [completedSuccessByDay],
   );
+  const failedProductionRuns = useMemo(() => {
+    const byId = new Map<string, PipelineRunRecord>();
+    for (const group of completedFailedByDay) {
+      for (const run of group.productionRuns) {
+        const runId = String(run.id || "").trim();
+        if (!runId) continue;
+        if (!byId.has(runId)) byId.set(runId, run);
+      }
+    }
+    return [...byId.values()];
+  }, [completedFailedByDay]);
+  const unsentNoteTargets = useMemo(() => {
+    const byNoteId = new Map<string, { noteId: string; runId: string }>();
+    for (const group of completedSuccessByDay) {
+      for (const run of group.productionRuns) {
+        const runId = String(run.id || "").trim();
+        if (!runId) continue;
+        if (inferNotePushState(run).sent) continue;
+        const noteId = inferRunNoteId(run);
+        if (!noteId) continue;
+        if (!byNoteId.has(noteId)) {
+          byNoteId.set(noteId, { noteId, runId });
+        }
+      }
+    }
+    return [...byNoteId.values()];
+  }, [completedSuccessByDay]);
 
   useEffect(() => {
     setCollapsedCompletedFailedDayIds((prev) => {
@@ -2126,6 +2312,17 @@ export default function LivePage() {
                 <XCircle className="w-4 h-4 text-red-400" />
                 <p className="text-sm font-semibold text-gray-100">Failed</p>
                 <span className="text-xs text-gray-500">{completedFailedCount}</span>
+                <button
+                  type="button"
+                  disabled={liveReadOnly || retryingAllFailed || !!retryingFailedRunId || failedProductionRuns.length === 0}
+                  onClick={() => { void moveAllFailedRunsToRetry(); }}
+                  className="ml-auto text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
+                  title="Move all failed production runs to queue for retry"
+                >
+                  {retryingAllFailed
+                    ? "Moving..."
+                    : `Move All To Queue${failedProductionRuns.length > 0 ? ` (${failedProductionRuns.length})` : ""}`}
+                </button>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
                 {failedRunActionMsg ? (
@@ -2164,7 +2361,7 @@ export default function LivePage() {
                                 </div>
                                 {group.productionRuns.map((run) => {
                                   const runKey = String(run.id || "").trim() || `${group.dayId}-${run.pipeline_id}-${run.call_id}-${run.started_at || ""}`;
-                                  const busy = retryingFailedRunId === run.id;
+                                  const busy = retryingAllFailed || retryingFailedRunId === run.id;
                                   return (
                                     <div key={`failed-prod-${runKey}`} className="space-y-1">
                                       {renderRunCard(run)}
@@ -2213,8 +2410,24 @@ export default function LivePage() {
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                 <p className="text-sm font-semibold text-gray-100">Successful</p>
                 <span className="text-xs text-gray-500">{completedSuccessCount}</span>
+                <button
+                  type="button"
+                  disabled={liveReadOnly || sendingMissingNotes || unsentNoteTargets.length === 0}
+                  onClick={() => { void sendAllMissingNotesToCRM(); }}
+                  className="ml-auto text-[10px] px-2 py-1 rounded border border-cyan-700/70 bg-cyan-950/30 text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-50"
+                  title="Send all unsent notes from successful production runs to CRM"
+                >
+                  {sendingMissingNotes
+                    ? "Sending..."
+                    : `Send Missing Notes${unsentNoteTargets.length > 0 ? ` (${unsentNoteTargets.length})` : ""}`}
+                </button>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                {noteActionMsg ? (
+                  <p className={cn("text-[11px]", noteActionErr ? "text-red-300" : "text-emerald-300")}>
+                    {noteActionMsg}
+                  </p>
+                ) : null}
                 {completedSuccessCount === 0 ? (
                   <p className="text-xs text-gray-600 italic">No successful runs.</p>
                 ) : (

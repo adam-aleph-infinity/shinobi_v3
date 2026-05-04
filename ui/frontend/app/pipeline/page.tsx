@@ -1931,17 +1931,56 @@ function PipelineCanvas() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    let nextPayload: PipelineOpenRunPayload | null = null;
+
     const raw = window.localStorage.getItem(PIPELINE_OPEN_RUN_STORAGE_KEY);
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as PipelineOpenRunPayload;
-      if (parsed && typeof parsed === "object") {
-        setPendingOpenRunPayload(parsed);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as PipelineOpenRunPayload;
+        if (parsed && typeof parsed === "object") {
+          nextPayload = parsed;
+        }
+      } catch {
+        // ignore malformed payload
+      } finally {
+        window.localStorage.removeItem(PIPELINE_OPEN_RUN_STORAGE_KEY);
       }
-    } catch {
-      // ignore malformed payload
-    } finally {
-      window.localStorage.removeItem(PIPELINE_OPEN_RUN_STORAGE_KEY);
+    }
+
+    // Fallback: allow direct links like /pipeline?run_id=<id> to open run context.
+    if (!nextPayload) {
+      const qp = new URLSearchParams(window.location.search || "");
+      const runId = String(
+        qp.get("run_id")
+        || qp.get("runId")
+        || qp.get("runid")
+        || "",
+      ).trim();
+      if (runId) {
+        const parseBool = (value: string | null): boolean | undefined => {
+          if (value == null) return undefined;
+          const norm = String(value).trim().toLowerCase();
+          if (!norm) return undefined;
+          if (["1", "true", "yes", "on"].includes(norm)) return true;
+          if (["0", "false", "no", "off"].includes(norm)) return false;
+          return undefined;
+        };
+        const locked = parseBool(qp.get("locked"));
+        nextPayload = {
+          source: "pipeline_query",
+          run_id: runId,
+          pipeline_id: String(qp.get("pipeline_id") || qp.get("pipelineId") || qp.get("pipelineid") || "").trim(),
+          pipeline_name: String(qp.get("pipeline_name") || qp.get("pipelineName") || "").trim(),
+          sales_agent: String(qp.get("sales_agent") || qp.get("salesAgent") || "").trim(),
+          customer: String(qp.get("customer") || "").trim(),
+          call_id: String(qp.get("call_id") || qp.get("callId") || "").trim(),
+          ...(locked == null ? {} : { locked }),
+        };
+      }
+    }
+
+    if (nextPayload) {
+      setPendingOpenRunPayload(nextPayload);
     }
   }, []);
 
