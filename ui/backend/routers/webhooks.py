@@ -990,6 +990,7 @@ def _upsert_pipeline_run_stub(
                 row.customer = customer
                 row.call_id = call_id
                 existing_status = str(getattr(row, "status", "") or "").strip().lower()
+                existing_terminal_like = existing_status in _terminal_statuses or (row.finished_at is not None)
                 # Do not regress successful terminal runs back to active states due
                 # late queue/stub updates arriving out of order.
                 lock_done_status = existing_status in {"done", "completed"} and _status not in {"done", "completed"}
@@ -998,6 +999,13 @@ def _upsert_pipeline_run_stub(
                     if _status in _terminal_statuses:
                         row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     else:
+                        # Manual retry/requeue reuses the same run_id.
+                        # Reset the timing baseline so Jobs does not keep showing stale
+                        # "5h ago" / long duration from the previous failed attempt.
+                        if existing_terminal_like and _status in _running_like:
+                            row.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                            row.note_sent = False
+                            row.note_sent_at = None
                         row.finished_at = None
                 elif row.finished_at is None:
                     row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)

@@ -5990,6 +5990,10 @@ async def run_pipeline(
                 if _row is None:
                     existing_run_row = None
                 else:
+                    # This run_id is being reused for a new attempt (manual retry /
+                    # resumed webhook execution). Reset timing baseline so UI shows
+                    # fresh "started" and duration for this attempt.
+                    _row.started_at = datetime.utcnow()
                     _row.pipeline_id = pipeline_id
                     _row.pipeline_name = pipeline_name
                     _row.sales_agent = req.sales_agent
@@ -5997,6 +6001,8 @@ async def run_pipeline(
                     _row.call_id = input_scope_call_id
                     _row.status = "running"
                     _row.run_origin = run_origin
+                    _row.note_sent = False
+                    _row.note_sent_at = None
                     _row.canvas_json = json.dumps(pipeline_def.get("canvas", {}))
                     _row.steps_json = json.dumps(run_steps)
                     _row.log_json = ""
