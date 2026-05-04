@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
 import { Activity, CheckCircle2, ChevronRight, Clock3, LayoutList, Loader2, Rows3, Workflow, XCircle } from "lucide-react";
@@ -323,6 +323,16 @@ function _safeJsonArray(raw: unknown): any[] {
   }
 }
 
+function formatRunDate(isoStr: string | null | undefined): string {
+  const d = parseServerDate(isoStr);
+  if (!d) return "—";
+  const now = new Date();
+  const hhmm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (d.toDateString() === now.toDateString()) return `Today ${hhmm}`;
+  if (d.toDateString() === new Date(now.getTime() - 86400000).toDateString()) return `Yest. ${hhmm}`;
+  return `${(d.getMonth() + 1).toString().padStart(2, "0")}/${d.getDate().toString().padStart(2, "0")} ${hhmm}`;
+}
+
 function inferNotePushState(run: PipelineRunRecord): { sent: boolean; sentAt: string } {
   const directSent = !!(run.note_sent === true);
   const directSentAt = String(run.note_sent_at || "").trim();
@@ -529,6 +539,8 @@ export default function LivePage() {
     setViewMode(mode);
     try { window.localStorage.setItem("shinobi.live.view_mode", mode); } catch {}
   };
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -1265,20 +1277,24 @@ export default function LivePage() {
     }
   };
 
-  const moveAllFailedRunsToRetry = async () => {
+  const moveAllFailedRunsToRetry = async (
+    targetsOverride?: PipelineRunRecord[] | null,
+    opts?: { label?: string },
+  ) => {
     if (liveReadOnly) {
       setFailedRunActionErr(true);
       setFailedRunActionMsg("Read-only mirror mode: cannot move failed runs to retry from this environment.");
       return;
     }
-    const targets = failedProductionRuns;
+    const targets = Array.isArray(targetsOverride) ? targetsOverride : failedProductionRuns;
+    const label = String(opts?.label || "failed production runs").trim();
     if (!targets.length) {
       setFailedRunActionErr(false);
-      setFailedRunActionMsg("No failed production runs available to move.");
+      setFailedRunActionMsg(`No ${label} available to move.`);
       return;
     }
     const ok = window.confirm(
-      `Move all ${targets.length} failed production run${targets.length === 1 ? "" : "s"} to queue for retry?`,
+      `Move all ${targets.length} ${label} to queue for retry?`,
     );
     if (!ok) return;
 
@@ -1323,11 +1339,11 @@ export default function LivePage() {
       const movedCount = movedSourceRunIds.size;
       setFailedRunActionErr(failures.length > 0);
       if (!failures.length) {
-        setFailedRunActionMsg(`Moved ${movedCount} failed run${movedCount === 1 ? "" : "s"} to queue.`);
+        setFailedRunActionMsg(`Moved ${movedCount} ${label} to queue.`);
       } else {
         const tail = failures.slice(0, 2).join(" | ");
         setFailedRunActionMsg(
-          `Moved ${movedCount}/${targets.length} failed runs. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
+          `Moved ${movedCount}/${targets.length} ${label}. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
         );
       }
       await mutateRuns();
@@ -1336,20 +1352,24 @@ export default function LivePage() {
     }
   };
 
-  const sendAllMissingNotesToCRM = async () => {
+  const sendAllMissingNotesToCRM = async (
+    targetsOverride?: Array<{ noteId: string; runId: string }> | null,
+    opts?: { label?: string },
+  ) => {
     if (liveReadOnly) {
       setNoteActionErr(true);
       setNoteActionMsg("Read-only mirror mode: cannot send notes to CRM from this environment.");
       return;
     }
-    const targets = unsentNoteTargets;
+    const targets = Array.isArray(targetsOverride) ? targetsOverride : unsentNoteTargets;
+    const label = String(opts?.label || "unsent notes").trim();
     if (!targets.length) {
       setNoteActionErr(false);
-      setNoteActionMsg("No unsent notes found in successful production runs.");
+      setNoteActionMsg(`No ${label} found.`);
       return;
     }
     const ok = window.confirm(
-      `Send ${targets.length} unsent note${targets.length === 1 ? "" : "s"} to CRM now?`,
+      `Send ${targets.length} ${label} to CRM now?`,
     );
     if (!ok) return;
 
@@ -1395,11 +1415,11 @@ export default function LivePage() {
 
       setNoteActionErr(failures.length > 0);
       if (!failures.length) {
-        setNoteActionMsg(`Sent ${sentCount} note${sentCount === 1 ? "" : "s"} to CRM.`);
+        setNoteActionMsg(`Sent ${sentCount} ${label} to CRM.`);
       } else {
         const tail = failures.slice(0, 2).join(" | ");
         setNoteActionMsg(
-          `Sent ${sentCount}/${targets.length} notes. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
+          `Sent ${sentCount}/${targets.length} ${label}. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
         );
       }
       await mutateRuns();
@@ -1473,6 +1493,33 @@ export default function LivePage() {
       return true;
     });
   }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo, getRunStatus]);
+  const tableFailedProductionRuns = useMemo(() => {
+    const byId = new Map<string, PipelineRunRecord>();
+    for (const run of filteredRuns) {
+      const runId = String(run.id || "").trim();
+      if (!runId) continue;
+      if (normalizeRunOrigin(run.run_origin) !== "webhook") continue;
+      if (!isFailedCompletedRun(getRunStatus(run))) continue;
+      if (!byId.has(runId)) byId.set(runId, run);
+    }
+    return [...byId.values()];
+  }, [filteredRuns, getRunStatus]);
+  const tableUnsentNoteTargets = useMemo(() => {
+    const byNoteId = new Map<string, { noteId: string; runId: string }>();
+    for (const run of filteredRuns) {
+      const runId = String(run.id || "").trim();
+      if (!runId) continue;
+      if (normalizeRunOrigin(run.run_origin) !== "webhook") continue;
+      if (!isSuccessCompletedRun(getRunStatus(run))) continue;
+      if (inferNotePushState(run).sent) continue;
+      const noteId = inferRunNoteId(run);
+      if (!noteId) continue;
+      if (!byNoteId.has(noteId)) {
+        byNoteId.set(noteId, { noteId, runId });
+      }
+    }
+    return [...byNoteId.values()];
+  }, [filteredRuns, getRunStatus]);
 
   const queuedRuns = useMemo(
     () => filteredRuns.filter((r) => isQueuedRun(getRunStatus(r))),
@@ -1594,6 +1641,53 @@ export default function LivePage() {
     }
     return [...byNoteId.values()];
   }, [completedSuccessByDay]);
+  const tableBulkActionBusy = retryingAllFailed || sendingMissingNotes || !!retryingFailedRunId;
+
+  // Group filteredRuns by (call_id, agent, customer) for consolidated table view.
+  const tableGroups = useMemo(() => {
+    const groupMap = new Map<string, PipelineRunRecord[]>();
+    for (const run of filteredRuns) {
+      const callId = inferRunCallId(run);
+      const gkey = `${callId || run.id}|||${run.sales_agent || ""}|||${run.customer || ""}`;
+      const arr = groupMap.get(gkey) || [];
+      arr.push(run);
+      groupMap.set(gkey, arr);
+    }
+    return Array.from(groupMap.entries())
+      .map(([key, runs]) => {
+        const sorted = [...runs].sort((a, b) => ((b.started_at || "") > (a.started_at || "") ? 1 : -1));
+        return { key, runs: sorted, primaryRun: sorted[0] };
+      })
+      .sort((a, b) => ((b.primaryRun.started_at || "") > (a.primaryRun.started_at || "") ? 1 : -1));
+  }, [filteredRuns]);
+
+  // Runs selected via checkbox that are failed prod → eligible for bulk retry.
+  const selectedFailedRuns = useMemo(() => {
+    if (selectedRunIds.size === 0) return [] as PipelineRunRecord[];
+    return tableGroups
+      .filter((g) => selectedRunIds.has(String(g.primaryRun.id || "")))
+      .map((g) => g.primaryRun)
+      .filter((run) => isFailedCompletedRun(getRunStatus(run)) && normalizeRunOrigin(run.run_origin) === "webhook");
+  }, [tableGroups, selectedRunIds, getRunStatus]);
+
+  // Runs selected via checkbox that are success + have an unsent note → eligible for bulk note send.
+  const selectedUnsentTargets = useMemo(() => {
+    if (selectedRunIds.size === 0) return [] as Array<{ noteId: string; runId: string }>;
+    const result: Array<{ noteId: string; runId: string }> = [];
+    const seen = new Set<string>();
+    for (const g of tableGroups) {
+      if (!selectedRunIds.has(String(g.primaryRun.id || ""))) continue;
+      const run = g.primaryRun;
+      if (!isSuccessCompletedRun(getRunStatus(run))) continue;
+      if (inferNotePushState(run).sent) continue;
+      const noteId = inferRunNoteId(run);
+      if (noteId && !seen.has(noteId)) {
+        seen.add(noteId);
+        result.push({ noteId, runId: run.id });
+      }
+    }
+    return result;
+  }, [tableGroups, selectedRunIds, getRunStatus]);
 
   useEffect(() => {
     setCollapsedCompletedFailedDayIds((prev) => {
@@ -1892,123 +1986,293 @@ export default function LivePage() {
             Loading live runs…
           </div>
         ) : viewMode === "table" ? (
-          <div className="h-full overflow-y-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700">
-                <tr>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[80px]">Type</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[90px]">Status</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[72px]">Run ID</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Pipeline</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Agent</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Customer</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Call ID</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Started</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Dur</th>
-                  <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Note</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredRuns.length === 0 && (
+          <div className="h-full flex flex-col overflow-hidden">
+            {/* ── Bulk action bar ─────────────────────────────────────── */}
+            <div className="px-3 py-2 border-b border-gray-800 bg-gray-900/70 flex flex-wrap items-center gap-2 shrink-0">
+              {selectedRunIds.size > 0 ? (
+                <>
+                  <span className="text-[11px] font-semibold text-indigo-300">{selectedRunIds.size} selected</span>
+                  <button
+                    type="button"
+                    disabled={liveReadOnly || tableBulkActionBusy || selectedFailedRuns.length === 0}
+                    onClick={() => { void moveAllFailedRunsToRetry(selectedFailedRuns, { label: "selected failed" }); }}
+                    className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
+                  >
+                    {retryingAllFailed ? "Rerunning…" : `Queue Selected Failed (${selectedFailedRuns.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={liveReadOnly || tableBulkActionBusy || selectedUnsentTargets.length === 0}
+                    onClick={() => { void sendAllMissingNotesToCRM(selectedUnsentTargets, { label: "selected unsent notes" }); }}
+                    className="text-[10px] px-2 py-1 rounded border border-cyan-700/70 bg-cyan-950/30 text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-50"
+                  >
+                    {sendingMissingNotes ? "Sending…" : `Send Notes for Selected (${selectedUnsentTargets.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedRunIds(new Set())}
+                    className="text-[10px] px-2 py-1 rounded border border-gray-600 bg-gray-800 text-gray-300 hover:bg-gray-700"
+                  >
+                    Clear
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-[11px] font-semibold text-gray-400">All filtered</span>
+                  <button
+                    type="button"
+                    disabled={liveReadOnly || tableBulkActionBusy || tableFailedProductionRuns.length === 0}
+                    onClick={() => { void moveAllFailedRunsToRetry(tableFailedProductionRuns, { label: "failed runs" }); }}
+                    className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
+                  >
+                    {retryingAllFailed ? "Rerunning…" : `Queue All Failed (${tableFailedProductionRuns.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={liveReadOnly || tableBulkActionBusy || tableUnsentNoteTargets.length === 0}
+                    onClick={() => { void sendAllMissingNotesToCRM(tableUnsentNoteTargets, { label: "unsent notes" }); }}
+                    className="text-[10px] px-2 py-1 rounded border border-cyan-700/70 bg-cyan-950/30 text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-50"
+                  >
+                    {sendingMissingNotes ? "Sending…" : `Send Missing Notes (${tableUnsentNoteTargets.length})`}
+                  </button>
+                  {liveReadOnly && <span className="text-[10px] text-gray-500">Read-only</span>}
+                </>
+              )}
+            </div>
+            {(failedRunActionMsg || noteActionMsg) && (
+              <div className="px-3 py-1.5 border-b border-gray-800 bg-gray-900/50 flex flex-wrap gap-3 shrink-0">
+                {failedRunActionMsg && <p className={cn("text-[11px]", failedRunActionErr ? "text-red-300" : "text-emerald-300")}>{failedRunActionMsg}</p>}
+                {noteActionMsg && <p className={cn("text-[11px]", noteActionErr ? "text-red-300" : "text-emerald-300")}>{noteActionMsg}</p>}
+              </div>
+            )}
+            {/* ── Table ───────────────────────────────────────────────── */}
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700">
                   <tr>
-                    <td colSpan={10} className="px-4 py-8 text-center text-gray-600 italic text-xs">
-                      No runs match the current filters.
-                    </td>
+                    <th className="px-2 py-2 w-8">
+                      <input
+                        type="checkbox"
+                        className="accent-indigo-500"
+                        checked={tableGroups.length > 0 && selectedRunIds.size === tableGroups.length}
+                        onChange={(e) => setSelectedRunIds(
+                          e.target.checked
+                            ? new Set(tableGroups.map((g) => String(g.primaryRun.id || "")))
+                            : new Set(),
+                        )}
+                        title="Select all"
+                      />
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Date</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[62px]">Type</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Status</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap w-[80px]">Run ID</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Pipeline</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Agent</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400">Customer</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Call ID</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Dur</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-gray-400 whitespace-nowrap">Note</th>
                   </tr>
-                )}
-                {filteredRuns.map((run, idx) => {
-                  const runStatus = getRunStatus(run);
-                  const runCallId = inferRunCallId(run);
-                  const notePush = inferNotePushState(run);
-                  const isProd = normalizeRunOrigin(run.run_origin) === "webhook";
-                  const isActive = !isCompletedRun(runStatus);
-                  return (
-                    <tr
-                      key={run.id}
-                      onClick={() => openRunInCanvas(run)}
-                      className={cn(
-                        "border-b cursor-pointer transition-colors",
-                        isActive
-                          ? "border-gray-800/60 bg-amber-950/10 hover:bg-amber-950/20"
-                          : isSuccessCompletedRun(runStatus)
-                          ? "border-emerald-900/30 bg-emerald-950/10 hover:bg-emerald-950/20"
-                          : isCancelledLike(runStatus)
-                          ? "border-gray-800/40 bg-gray-900/10 hover:bg-gray-800/20"
-                          : "border-red-900/30 bg-red-950/10 hover:bg-red-950/20",
-                      )}
-                      title="Open in Pipeline canvas"
-                    >
-                      <td className="px-3 py-1.5 whitespace-nowrap">
-                        <span className={cn(
-                          "text-[10px] px-1.5 py-0.5 rounded border font-semibold",
-                          isProd
-                            ? "text-blue-200 border-blue-700/60 bg-blue-950/50"
-                            : "text-fuchsia-200 border-fuchsia-700/60 bg-fuchsia-950/40",
-                        )}>
-                          {isProd ? "PROD" : "TEST"}
-                        </span>
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap">
-                        {isActive ? (
-                          <span className="inline-flex items-center gap-1">
-                            <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(runStatus))}>
-                              {statusLabel(runStatus)}
-                            </span>
-                            <Loader2 className="w-2.5 h-2.5 animate-spin text-amber-400 shrink-0" />
-                          </span>
-                        ) : isSuccessCompletedRun(runStatus) ? (
-                          <span className="inline-flex items-center gap-1">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                            <span className="text-[11px] font-bold text-emerald-300">{statusLabel(runStatus)}</span>
-                          </span>
-                        ) : isCancelledLike(runStatus) ? (
-                          <span className="inline-flex items-center gap-1">
-                            <span className="text-gray-500 text-sm leading-none shrink-0">○</span>
-                            <span className="text-[11px] font-semibold text-gray-400">{statusLabel(runStatus)}</span>
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1">
-                            <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                            <span className="text-[11px] font-bold text-red-300">{statusLabel(runStatus)}</span>
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap font-mono text-[10px] text-indigo-300">
-                        {String(run.id || "").slice(0, 8)}
-                      </td>
-                      <td className="px-3 py-1.5 max-w-[140px] truncate text-gray-100">
-                        {run.pipeline_name || "—"}
-                      </td>
-                      <td className="px-3 py-1.5 max-w-[120px] truncate text-gray-300">
-                        {run.sales_agent || "—"}
-                      </td>
-                      <td className="px-3 py-1.5 max-w-[120px] truncate text-gray-300">
-                        {run.customer || "—"}
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap font-mono text-[10px] text-gray-400">
-                        {runCallId || "—"}
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap text-[10px] text-gray-400">
-                        {relativeTime(run.started_at, nowMs)}
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap text-[10px] text-gray-500">
-                        {durationStr(run.started_at, run.finished_at, nowMs)}
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap">
-                        {notePush.sent && (
-                          <span
-                            className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-cyan-200 border-cyan-700/60 bg-cyan-950/40"
-                            title={notePush.sentAt ? `CRM note sent at ${notePush.sentAt}` : "CRM note sent"}
-                          >
-                            SENT
-                          </span>
-                        )}
+                </thead>
+                <tbody>
+                  {tableGroups.length === 0 && (
+                    <tr>
+                      <td colSpan={11} className="px-4 py-8 text-center text-gray-600 italic text-xs">
+                        No runs match the current filters.
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  )}
+                  {tableGroups.map((group) => {
+                    const run = group.primaryRun;
+                    const runStatus = getRunStatus(run);
+                    const runCallId = inferRunCallId(run);
+                    const notePush = inferNotePushState(run);
+                    const isProd = normalizeRunOrigin(run.run_origin) === "webhook";
+                    const isActive = !isCompletedRun(runStatus);
+                    const isExpanded = expandedGroupKeys.has(group.key);
+                    const hasChildren = group.runs.length > 1;
+                    const isSelected = selectedRunIds.has(String(run.id || ""));
+                    const rowBg = isActive
+                      ? "border-gray-800/60 bg-amber-950/10"
+                      : isSuccessCompletedRun(runStatus)
+                      ? "border-emerald-900/30 bg-emerald-950/10"
+                      : isCancelledLike(runStatus)
+                      ? "border-gray-800/40 bg-gray-900/10"
+                      : "border-red-900/30 bg-red-950/10";
+
+                    const renderStatusCell = (st: string, active: boolean) => active ? (
+                      <span className="inline-flex items-center gap-1">
+                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold", statusTone(st))}>{statusLabel(st)}</span>
+                        <Loader2 className="w-2.5 h-2.5 animate-spin text-amber-400 shrink-0" />
+                      </span>
+                    ) : isSuccessCompletedRun(st) ? (
+                      <span className="inline-flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="text-[11px] font-bold text-emerald-300">{statusLabel(st)}</span>
+                      </span>
+                    ) : isCancelledLike(st) ? (
+                      <span className="inline-flex items-center gap-1">
+                        <span className="text-gray-500 text-sm leading-none shrink-0">○</span>
+                        <span className="text-[11px] font-semibold text-gray-400">{statusLabel(st)}</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1">
+                        <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                        <span className="text-[11px] font-bold text-red-300">{statusLabel(st)}</span>
+                      </span>
+                    );
+
+                    return (
+                      <Fragment key={group.key}>
+                        {/* ── Primary row ── */}
+                        <tr
+                          className={cn(
+                            "border-b transition-colors",
+                            rowBg,
+                            isSelected ? "outline outline-1 outline-indigo-600/50" : "",
+                            "hover:brightness-125",
+                          )}
+                        >
+                          <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              className="accent-indigo-500"
+                              checked={isSelected}
+                              onChange={(e) => setSelectedRunIds((prev) => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.add(String(run.id || ""));
+                                else next.delete(String(run.id || ""));
+                                return next;
+                              })}
+                            />
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap text-[10px] text-gray-400 cursor-pointer"
+                            onClick={() => openRunInCanvas(run)}
+                          >
+                            {formatRunDate(run.started_at)}
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            <span className={cn(
+                              "text-[10px] px-1.5 py-0.5 rounded border font-semibold",
+                              isProd ? "text-blue-200 border-blue-700/60 bg-blue-950/50" : "text-fuchsia-200 border-fuchsia-700/60 bg-fuchsia-950/40",
+                            )}>
+                              {isProd ? "PROD" : "TEST"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {renderStatusCell(runStatus, isActive)}
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap">
+                            <div className="flex items-center gap-1">
+                              {hasChildren && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedGroupKeys((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(group.key)) next.delete(group.key);
+                                    else next.add(group.key);
+                                    return next;
+                                  })}
+                                  className="text-gray-500 hover:text-gray-300"
+                                  title={isExpanded ? "Collapse" : `${group.runs.length} runs — expand`}
+                                >
+                                  <ChevronRight className={cn("w-3 h-3 transition-transform", isExpanded && "rotate-90")} />
+                                </button>
+                              )}
+                              <span
+                                className="font-mono text-[10px] text-indigo-300 cursor-pointer"
+                                onClick={() => openRunInCanvas(run)}
+                                title={run.id}
+                              >
+                                {String(run.id || "").slice(0, 8)}
+                              </span>
+                              {hasChildren && (
+                                <span className="text-[9px] text-gray-600">×{group.runs.length}</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-1.5 max-w-[140px] truncate text-gray-100 cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {run.pipeline_name || "—"}
+                          </td>
+                          <td className="px-3 py-1.5 max-w-[120px] truncate text-gray-300 cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {run.sales_agent || "—"}
+                          </td>
+                          <td className="px-3 py-1.5 max-w-[120px] truncate text-gray-300 cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {run.customer || "—"}
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap font-mono text-[10px] text-gray-400 cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {runCallId || "—"}
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap text-[10px] text-gray-500 cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {durationStr(run.started_at, run.finished_at, nowMs)}
+                          </td>
+                          <td className="px-3 py-1.5 whitespace-nowrap cursor-pointer" onClick={() => openRunInCanvas(run)}>
+                            {notePush.sent && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded border font-semibold text-cyan-200 border-cyan-700/60 bg-cyan-950/40" title={notePush.sentAt || "CRM note sent"}>
+                                SENT
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                        {/* ── Child rows (expanded siblings) ── */}
+                        {isExpanded && group.runs.slice(1).map((child) => {
+                          const cStatus = getRunStatus(child);
+                          const cActive = !isCompletedRun(cStatus);
+                          const cCallId = inferRunCallId(child);
+                          const cNote = inferNotePushState(child);
+                          return (
+                            <tr
+                              key={child.id}
+                              onClick={() => openRunInCanvas(child)}
+                              className={cn(
+                                "border-b cursor-pointer transition-colors text-[10px]",
+                                cActive ? "border-gray-800/40 bg-amber-950/5" :
+                                isSuccessCompletedRun(cStatus) ? "border-emerald-900/20 bg-emerald-950/5" :
+                                isCancelledLike(cStatus) ? "border-gray-800/20 bg-gray-900/5" :
+                                "border-red-900/20 bg-red-950/5",
+                                "hover:brightness-125",
+                              )}
+                              title="Open in Pipeline canvas"
+                            >
+                              <td className="px-2 py-1" />
+                              <td className="px-3 py-1 whitespace-nowrap text-gray-500 pl-6">
+                                ↳ {formatRunDate(child.started_at)}
+                              </td>
+                              <td className="px-3 py-1 whitespace-nowrap">
+                                <span className={cn(
+                                  "text-[9px] px-1 py-0.5 rounded border font-semibold",
+                                  normalizeRunOrigin(child.run_origin) === "webhook"
+                                    ? "text-blue-300 border-blue-800/50 bg-blue-950/30"
+                                    : "text-fuchsia-300 border-fuchsia-800/50 bg-fuchsia-950/20",
+                                )}>
+                                  {normalizeRunOrigin(child.run_origin) === "webhook" ? "PROD" : "TEST"}
+                                </span>
+                              </td>
+                              <td className="px-3 py-1 whitespace-nowrap">{renderStatusCell(cStatus, cActive)}</td>
+                              <td className="px-3 py-1 whitespace-nowrap font-mono text-[9px] text-indigo-400 pl-6" title={child.id}>
+                                {String(child.id || "").slice(0, 8)}
+                              </td>
+                              <td className="px-3 py-1 max-w-[140px] truncate text-gray-400">{child.pipeline_name || "—"}</td>
+                              <td className="px-3 py-1 max-w-[120px] truncate text-gray-500">{child.sales_agent || "—"}</td>
+                              <td className="px-3 py-1 max-w-[120px] truncate text-gray-500">{child.customer || "—"}</td>
+                              <td className="px-3 py-1 whitespace-nowrap font-mono text-[9px] text-gray-500">{cCallId || "—"}</td>
+                              <td className="px-3 py-1 whitespace-nowrap text-gray-600">{durationStr(child.started_at, child.finished_at, nowMs)}</td>
+                              <td className="px-3 py-1 whitespace-nowrap">
+                                {cNote.sent && (
+                                  <span className="text-[9px] px-1 py-0.5 rounded border font-semibold text-cyan-300 border-cyan-800/50 bg-cyan-950/20">SENT</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : (
           <div
