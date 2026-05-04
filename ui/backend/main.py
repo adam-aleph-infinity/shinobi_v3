@@ -104,8 +104,20 @@ async def on_startup():
 
     create_db()  # creates any missing tables
 
-    # Safe migrations — add new columns if they don't exist yet
+    # Safe migrations — add new columns if they don't exist yet.
+    # Important for Postgres: when one DDL fails, the transaction enters
+    # aborted state until rollback; continue statements must rollback first.
     with engine.connect() as conn:
+        def _exec_safe(stmt: str) -> None:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
         for stmt in [
             "ALTER TABLE job ADD COLUMN batch_id TEXT",
             "ALTER TABLE persona ADD COLUMN temperature REAL NOT NULL DEFAULT 0.3",
@@ -118,11 +130,7 @@ async def on_startup():
             "ALTER TABLE agent_result ADD COLUMN pipeline_step_index INTEGER NOT NULL DEFAULT -1",
             "ALTER TABLE agent_result ADD COLUMN input_fingerprint TEXT",
         ]:
-            try:
-                conn.execute(text(stmt))
-                conn.commit()
-            except Exception:
-                pass  # column already exists
+            _exec_safe(stmt)
         try:
             cols = {c["name"] for c in _sa_inspect(conn).get_columns("agent_result")}
             missing = [
@@ -134,6 +142,8 @@ async def on_startup():
                     "[startup] WARNING: agent_result missing columns "
                     f"{', '.join(missing)} — running in legacy cache compatibility mode"
                 )
+            else:
+                print("[startup] agent_result pipeline cache columns ready")
         except Exception:
             pass
 

@@ -232,6 +232,10 @@ function deriveEffectiveRunStatus(run: PipelineRunRecord): string {
   // Manual retry/requeue should be reflected immediately in Jobs, even if
   // stale failed step states still exist on the same run row.
   if (baseIsRetry) return "retrying";
+  // Real-status override: if no step is actively progressing and one step is
+  // already terminal failed/cancelled, prefer that over a stale live row status.
+  if (!hasActiveStep && hasFailedStep) return "failed";
+  if (!hasActiveStep && hasCancelledStep) return "cancelled";
   if (baseIsLive && !finished) return base;
 
   if (hasCancelledStep) return "cancelled";
@@ -244,6 +248,16 @@ function normalizeRunOrigin(origin: string | null | undefined): "webhook" | "loc
   const v = String(origin || "").trim().toLowerCase();
   if (v === "webhook" || v === "production") return "webhook";
   return "local";
+}
+
+function mergeRunsById(prev: PipelineRunRecord[], incoming: PipelineRunRecord[]): PipelineRunRecord[] {
+  const byId = new Map(prev.map((r) => [String(r.id || ""), r]));
+  for (const row of incoming) {
+    const rid = String(row?.id || "").trim();
+    if (!rid) continue;
+    byId.set(rid, row);
+  }
+  return [...byId.values()].sort((a, b) => ((b.started_at || "") > (a.started_at || "") ? 1 : -1));
 }
 
 function relativeTime(isoStr: string | null | undefined, nowMs?: number | null): string {
@@ -515,13 +529,7 @@ export default function LivePage() {
           sinceTsRef.current = max;
           setSinceTs(max);
         }
-        setRunsState((prev) => {
-          const byId = new Map(prev.map((r) => [r.id, r]));
-          for (const r of data) byId.set(r.id, r);
-          return [...byId.values()].sort((a, b) =>
-            (b.started_at || "") > (a.started_at || "") ? 1 : -1,
-          );
-        });
+        setRunsState((prev) => mergeRunsById(prev, data));
       },
       onError: (err: Error) => {
         setRunsInitialLoading(false);
@@ -540,13 +548,7 @@ export default function LivePage() {
       keepPreviousData: true,
       onSuccess: (data) => {
         if (!Array.isArray(data)) return;
-        setRunsState((prev) => {
-          const byId = new Map(prev.map((r) => [r.id, r]));
-          for (const r of data) byId.set(r.id, r);
-          return [...byId.values()].sort((a, b) =>
-            (b.started_at || "") > (a.started_at || "") ? 1 : -1,
-          );
-        });
+        setRunsState((prev) => mergeRunsById(prev, data));
       },
     },
   );
@@ -563,15 +565,65 @@ export default function LivePage() {
         sinceTsRef.current = max;
         setSinceTs(max);
       }
-      setRunsState((prev) => {
-        const byId = new Map(prev.map((r) => [r.id, r]));
-        for (const r of delta) byId.set(r.id, r);
-        return [...byId.values()].sort((a, b) =>
-          (b.started_at || "") > (a.started_at || "") ? 1 : -1,
-        );
-      });
+      setRunsState((prev) => mergeRunsById(prev, delta));
     },
   });
+
+  // Keep "active" cards truthful by polling those run ids directly.
+  // This catches status flips that don't change started_at and can otherwise
+  // be missed by started_at-based delta loading.
+  const activeRunIds = useMemo(() => {
+    const out: string[] = [];
+    for (const run of runsState) {
+      const rid = String(run?.id || "").trim();
+      if (!rid) continue;
+      const st = deriveEffectiveRunStatus(run);
+      if (!["queued", "preparing", "running", "retrying"].includes(st)) continue;
+      out.push(rid);
+      if (out.length >= 80) break;
+    }
+    return out;
+  }, [runsState]);
+  const activeRunIdsKey = useMemo(() => activeRunIds.join(","), [activeRunIds]);
+
+  useEffect(() => {
+    if (!activeRunIds.length) return;
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const poll = async () => {
+      try {
+        const rows = await Promise.all(
+          activeRunIds.map(async (rid) => {
+            const res = await fetch(`/api/history/runs/${encodeURIComponent(rid)}?compact=1&mirror=1`, {
+              cache: "no-store",
+              signal: controller.signal,
+            });
+            if (!res.ok) return null;
+            const data = await res.json().catch(() => null);
+            if (!data || typeof data !== "object") return null;
+            return data as PipelineRunRecord;
+          }),
+        );
+        if (cancelled) return;
+        const fresh = rows.filter((r): r is PipelineRunRecord => !!r && !!String(r.id || "").trim());
+        if (!fresh.length) return;
+        setRunsState((prev) => mergeRunsById(prev, fresh));
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+      }
+    };
+
+    void poll();
+    const t = window.setInterval(() => {
+      void poll();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearInterval(t);
+    };
+  }, [activeRunIdsKey]);
 
   const isLoading = runsInitialLoading;
   const mutateRuns = useCallback(

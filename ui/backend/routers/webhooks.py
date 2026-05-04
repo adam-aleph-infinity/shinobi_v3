@@ -21,6 +21,13 @@ from ui.backend.models.app_state_kv import AppStateKV
 from ui.backend.models.crm import CRMCall, CRMPair
 from ui.backend.models.job import Job
 from ui.backend.models.pipeline_run import PipelineRun
+from ui.backend.services.run_status import (
+    derive_effective_run_status,
+    is_active_run_like,
+    is_terminal_run_like,
+    normalize_state_token,
+    reconcile_run_row_status,
+)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -982,16 +989,23 @@ def _upsert_pipeline_run_stub(
                 row.sales_agent = sales_agent
                 row.customer = customer
                 row.call_id = call_id
-                row.status = status
-                if _status in _terminal_statuses:
+                existing_status = str(getattr(row, "status", "") or "").strip().lower()
+                # Do not regress successful terminal runs back to active states due
+                # late queue/stub updates arriving out of order.
+                lock_done_status = existing_status in {"done", "completed"} and _status not in {"done", "completed"}
+                if not lock_done_status:
+                    row.status = status
+                    if _status in _terminal_statuses:
+                        row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    else:
+                        row.finished_at = None
+                elif row.finished_at is None:
                     row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                else:
-                    row.finished_at = None
                 try:
                     parsed_steps = json.loads(str(row.steps_json or "[]"))
                 except Exception:
                     parsed_steps = []
-                if isinstance(parsed_steps, list) and parsed_steps:
+                if (not lock_done_status) and isinstance(parsed_steps, list) and parsed_steps:
                     changed_steps = False
                     if _status == "preparing":
                         # Show visible progress on canvas while backfill/transcription is active.
@@ -1157,6 +1171,28 @@ def _extract_run_error(run_row: Optional[PipelineRun]) -> str:
     if _status in {"error", "failed"}:
         return "Run ended with an error before a step-level error was recorded (likely interrupted)."
     return ""
+
+
+def _reconcile_pipeline_run_status(run_id: str) -> str:
+    """
+    Reconcile one pipeline_run row from step truth and return the effective status.
+    """
+    rid = str(run_id or "").strip()
+    if not rid:
+        return ""
+    try:
+        with Session(_db_engine) as s:
+            row = s.get(PipelineRun, rid)
+            if row is None:
+                return ""
+            effective, changed = reconcile_run_row_status(row)
+            if changed:
+                s.add(row)
+                s.commit()
+                return normalize_state_token(getattr(row, "status", "") or effective)
+            return normalize_state_token(effective or getattr(row, "status", ""))
+    except Exception:
+        return ""
 
 
 async def _wait_for_jobs(
@@ -1976,10 +2012,20 @@ async def _enqueue_live_item(item: dict[str, Any]) -> tuple[bool, dict[str, Any]
                         )
                     ).all()
                 for db_row in rows or []:
-                    if _steps_json_is_webhook_origin(getattr(db_row, "steps_json", "")):
+                    if not _steps_json_is_webhook_origin(getattr(db_row, "steps_json", "")):
+                        continue
+                    base_status = normalize_state_token(getattr(db_row, "status", ""))
+                    effective_status = derive_effective_run_status(
+                        base_status=base_status,
+                        steps_json=getattr(db_row, "steps_json", ""),
+                        finished_at=getattr(db_row, "finished_at", None),
+                    )
+                    if is_active_run_like(base_status) and is_terminal_run_like(effective_status) and (effective_status != base_status):
+                        _reconcile_pipeline_run_status(str(getattr(db_row, "id", "") or ""))
+                    if is_active_run_like(effective_status):
                         return False, {
                             "run_id": str(getattr(db_row, "id", "") or ""),
-                            "state": str(getattr(db_row, "status", "") or "queued"),
+                            "state": effective_status or str(getattr(db_row, "status", "") or "queued"),
                             "message": "Duplicate webhook suppressed (active run already exists).",
                         }
             except Exception:
@@ -2115,7 +2161,16 @@ def _recover_orphaned_live_queue_items(
         if not _steps_json_is_webhook_origin(getattr(row, "steps_json", "")):
             continue
 
-        row_status = str(getattr(row, "status", "") or "").strip().lower()
+        row_status = normalize_state_token(getattr(row, "status", "") or "")
+        effective_row_status = derive_effective_run_status(
+            base_status=row_status,
+            steps_json=getattr(row, "steps_json", ""),
+            finished_at=getattr(row, "finished_at", None),
+        )
+        if is_active_run_like(row_status) and is_terminal_run_like(effective_row_status) and (effective_row_status != row_status):
+            row_status = _reconcile_pipeline_run_status(run_id) or effective_row_status
+        else:
+            row_status = effective_row_status or row_status
         if row_status not in {"queued", "preparing", "running", "retrying"}:
             continue
 
@@ -2561,7 +2616,22 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                 row = None
 
             if state in {"running", "preparing", "retrying"}:
-                row_status = str(getattr(row, "status", "") or "").lower()
+                row_status = ""
+                if row is not None:
+                    base_row_status = normalize_state_token(getattr(row, "status", "") or "")
+                    effective_row_status = derive_effective_run_status(
+                        base_status=base_row_status,
+                        steps_json=getattr(row, "steps_json", ""),
+                        finished_at=getattr(row, "finished_at", None),
+                    )
+                    if (
+                        is_active_run_like(base_row_status)
+                        and is_terminal_run_like(effective_row_status)
+                        and (effective_row_status != base_row_status)
+                    ):
+                        row_status = _reconcile_pipeline_run_status(run_id) or effective_row_status or base_row_status
+                    else:
+                        row_status = effective_row_status or base_row_status
                 if row_status in {"done", "completed"}:
                     item["state"] = "done"
                     item["updated_at"] = _utc_now_iso()

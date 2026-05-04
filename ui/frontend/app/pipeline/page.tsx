@@ -17,7 +17,7 @@ import {
   Check, Loader2, TriangleAlert,
   Mic2, Layers, BookOpen, PenLine, FileText, Braces, AlignLeft,
   Plus, Trash2, ChevronRight, X, Download, Workflow, Copy, ClipboardCopy, ClipboardPaste,
-  Lock, Play, Square, History, Users, PhoneCall,
+  Lock, Play, Square, History, Users, PhoneCall, Send,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { useUserProfile } from "@/lib/user-profile";
@@ -282,6 +282,8 @@ interface PipelineRunStep {
   response_raw?: string;
   content?: string;
   error_msg?: string;
+  note_id?: string;
+  note_call_id?: string;
 }
 
 interface StepCacheDisplay {
@@ -299,6 +301,8 @@ interface StepCacheDisplay {
   requestRaw?: Record<string, any>;
   responseRaw?: string;
   content: string;
+  noteId?: string;
+  noteCallId?: string;
 }
 
 interface PipelineLiveStateStep {
@@ -1857,6 +1861,9 @@ function PipelineCanvas() {
   const [canvasViewport, setCanvasViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
+  const [manualNoteSendPendingId, setManualNoteSendPendingId] = useState("");
+  const [manualNoteSendMessage, setManualNoteSendMessage] = useState("");
+  const [manualNoteSendError, setManualNoteSendError] = useState(false);
   const [stepStatuses, setStepStatuses] = useState<RuntimeStatus[]>([]);
   const runAbortRef = useRef<AbortController | null>(null);
   const [expandedHistoryRunIds, setExpandedHistoryRunIds] = useState<Record<string, boolean>>({});
@@ -1915,6 +1922,12 @@ function PipelineCanvas() {
   useEffect(() => {
     if (!selectedNodeId) setDetailViewer(null);
   }, [selectedNodeId]);
+
+  useEffect(() => {
+    setManualNoteSendPendingId("");
+    setManualNoteSendMessage("");
+    setManualNoteSendError(false);
+  }, [selectedNodeId, selectedCacheRunId, currentRunId, runContextMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2853,6 +2866,8 @@ function PipelineCanvas() {
             : {},
           responseRaw: String(s.response_raw || ""),
           content: String(s.content || ""),
+          noteId: String((s as PipelineRunStep).note_id || ""),
+          noteCallId: String((s as PipelineRunStep).note_call_id || ""),
         };
       };
 
@@ -3402,6 +3417,53 @@ function PipelineCanvas() {
     setToast({ ok, msg });
     setTimeout(() => setToast(null), 3500);
   }
+
+  const sendNoteToCrmFromCanvas = useCallback(async (noteId: string) => {
+    if (!canRunPipelines) {
+      showToast("You do not have permission to send notes to CRM.", false);
+      return;
+    }
+    const nid = String(noteId || "").trim();
+    if (!nid) {
+      showToast("No saved note found for this step yet.", false);
+      return;
+    }
+    setManualNoteSendPendingId(nid);
+    setManualNoteSendMessage("");
+    setManualNoteSendError(false);
+    try {
+      const res = await fetch(`/api/notes/${encodeURIComponent(nid)}/send-to-crm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ account_id: "" }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = body?.detail;
+        const fallback = String(body?.message || body?.error || `HTTP ${res.status}`);
+        const msg = typeof detail === "string" ? detail : fallback;
+        throw new Error(msg);
+      }
+      const statusRaw = Number(body?.crm_status);
+      const statusText = Number.isFinite(statusRaw) ? `status ${statusRaw}` : "status unknown";
+      const endpoint = String(body?.endpoint || "").trim();
+      setManualNoteSendError(false);
+      setManualNoteSendMessage(
+        endpoint
+          ? `Sent manually (${statusText}) via ${endpoint}.`
+          : `Sent manually (${statusText}).`,
+      );
+      showToast(`Note sent to CRM (${statusText})`, true);
+      void Promise.allSettled([mutateRuns(), mutateLivePipelineState()]);
+    } catch (e: any) {
+      const msg = String(e?.message || "Manual CRM send failed.");
+      setManualNoteSendError(true);
+      setManualNoteSendMessage(msg);
+      showToast(msg, false);
+    } finally {
+      setManualNoteSendPendingId("");
+    }
+  }, [canRunPipelines, mutateRuns, mutateLivePipelineState]);
 
   // ── Core: add node → determine stage → position → auto-connect ────────────
 
@@ -6345,6 +6407,11 @@ function PipelineCanvas() {
           sourceHint: inputSource || "input",
         }
       : null;
+    const outputCache = ioCacheTarget ? getStepCacheDisplay(ioCacheTarget.stepIndex) : null;
+    const outputSubType = String(selData?.subType || "").trim().toLowerCase();
+    const outputIsNotesArtifact = selKind === "output" && (outputSubType === "notes" || outputSubType === "notes_compliance");
+    const outputNoteId = String(outputCache?.noteId || "").trim();
+    const outputNoteCallId = String(outputCache?.noteCallId || "").trim();
 
     return (
       <div className="h-full min-h-0 p-3">
@@ -6587,40 +6654,83 @@ function PipelineCanvas() {
                       {renderPopoutButton(ioCacheTarget ? {
                         title: "Artifact Result",
                         subtitle: ioCacheTarget.subtitle,
-                        content: String(getStepCacheDisplay(ioCacheTarget.stepIndex)?.content || ""),
+                        content: String(outputCache?.content || ""),
                         sourceHint: String(selData.subType || "output"),
                       } : null)}
                     </div>
                   </div>
+                  {outputIsNotesArtifact && ioCacheTarget && (
+                    <div className="shrink-0 rounded-lg border border-sky-800/40 bg-sky-950/20 px-2.5 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-semibold text-sky-200">Manual CRM Send</p>
+                          <p className="text-[10px] text-gray-500 truncate">
+                            {outputNoteId
+                              ? `Note ${outputNoteId.slice(0, 8)}${outputNoteCallId ? ` · call ${outputNoteCallId}` : ""}`
+                              : "No saved note_id on this step yet."}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void sendNoteToCrmFromCanvas(outputNoteId)}
+                          disabled={!canRunPipelines || !outputNoteId || manualNoteSendPendingId === outputNoteId}
+                          title={
+                            !canRunPipelines
+                              ? "You do not have permission to send notes."
+                              : !outputNoteId
+                                ? "Run this step first to persist a note artifact."
+                                : "Send this note to CRM manually"
+                          }
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] font-semibold transition-colors",
+                            !outputNoteId || manualNoteSendPendingId === outputNoteId
+                              ? "opacity-45 cursor-not-allowed border-gray-700 bg-gray-900 text-gray-400"
+                              : "border-sky-700 text-sky-200 bg-sky-900/40 hover:bg-sky-900/60",
+                          )}
+                        >
+                          {manualNoteSendPendingId === outputNoteId ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Send className="w-3 h-3" />
+                          )}
+                          {manualNoteSendPendingId === outputNoteId ? "Sending…" : "Send Note"}
+                        </button>
+                      </div>
+                      {manualNoteSendMessage && (
+                        <p className={cn(
+                          "mt-1.5 text-[10px] whitespace-pre-wrap",
+                          manualNoteSendError ? "text-red-300" : "text-emerald-300",
+                        )}>
+                          {manualNoteSendMessage}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {!ioCacheTarget ? (
                       <p className="text-[11px] text-gray-500">
                         Connect this artifact to a processing node to resolve its result.
                       </p>
-                    ) : (() => {
-                      const cache = getStepCacheDisplay(ioCacheTarget.stepIndex);
-                      if (!cache) {
-                        return <p className="text-[10px] text-gray-500">No artifact result for this step in the current context.</p>;
-                      }
-                      return (
-                        <div className="space-y-2 h-full min-h-0 flex flex-col">
-                          <p className="text-[10px] text-gray-500 shrink-0">
-                            {cache.source === "selected_run"
-                              ? `Run ${String(cache.runId || "").slice(0, 8)}`
-                              : cache.source === "current_run"
-                                ? `Current run ${String(cache.runId || "").slice(0, 8)}`
-                                : "Latest cache"}
-                            {cache.createdAt ? ` · ${new Date(cache.createdAt).toLocaleString()}` : ""}
-                          </p>
-                          {cache.errorMsg && (
-                            <p className="text-[10px] text-red-300 whitespace-pre-wrap shrink-0">{cache.errorMsg}</p>
-                          )}
-                          <div className="flex-1 min-h-0">
-                            <RenderResultContent content={cache.content || ""} expand />
-                          </div>
+                    ) : !outputCache ? (
+                      <p className="text-[10px] text-gray-500">No artifact result for this step in the current context.</p>
+                    ) : (
+                      <div className="space-y-2 h-full min-h-0 flex flex-col">
+                        <p className="text-[10px] text-gray-500 shrink-0">
+                          {outputCache.source === "selected_run"
+                            ? `Run ${String(outputCache.runId || "").slice(0, 8)}`
+                            : outputCache.source === "current_run"
+                              ? `Current run ${String(outputCache.runId || "").slice(0, 8)}`
+                              : "Latest cache"}
+                          {outputCache.createdAt ? ` · ${new Date(outputCache.createdAt).toLocaleString()}` : ""}
+                        </p>
+                        {outputCache.errorMsg && (
+                          <p className="text-[10px] text-red-300 whitespace-pre-wrap shrink-0">{outputCache.errorMsg}</p>
+                        )}
+                        <div className="flex-1 min-h-0">
+                          <RenderResultContent content={outputCache.content || ""} expand />
                         </div>
-                      );
-                    })()}
+                      </div>
+                    )}
                   </div>
                 </div>
               </PropertiesSection>

@@ -8074,6 +8074,10 @@ async def run_pipeline(
                     {"ts": l.ts, "text": l.text, "level": l.level}
                     for l in log_buffer.get_after(start_seq)
                 ]
+                final_steps_json = json.dumps(run_steps, ensure_ascii=False)
+                final_log_json = json.dumps(log_lines[-200:], ensure_ascii=False)
+                final_finished_at = datetime.utcnow()
+                finalized_db = False
                 with Session(_db_engine) as _s:
                     _s.execute(
                         _sql_text(
@@ -8081,16 +8085,49 @@ async def run_pipeline(
                             " steps_json = :steps_json, log_json = :log_json WHERE id = :id"
                         ),
                         {
-                            "finished_at": datetime.utcnow().isoformat(),
+                            "finished_at": final_finished_at,
                             "status": run_final_status,
-                            "steps_json": json.dumps(run_steps),
-                            "log_json": json.dumps(log_lines[-200:]),
+                            "steps_json": final_steps_json,
+                            "log_json": final_log_json,
                             "id": run_id,
                         },
                     )
                     _s.commit()
-            except Exception:
-                pass
+                    finalized_db = True
+                if not finalized_db:
+                    raise RuntimeError("final pipeline_run UPDATE did not report success")
+            except Exception as _final_write_err:
+                # Fallback path: avoid leaving rows stuck in 'running' if the raw SQL
+                # update fails for any adapter-specific reason.
+                try:
+                    with Session(_db_engine) as _s:
+                        _row = _s.get(PR, run_id)
+                        if _row is not None:
+                            _row.finished_at = datetime.utcnow()
+                            _row.status = run_final_status
+                            _row.steps_json = json.dumps(run_steps, ensure_ascii=False)
+                            _row.log_json = json.dumps(log_lines[-200:], ensure_ascii=False)
+                            _s.add(_row)
+                            _s.commit()
+                        else:
+                            raise RuntimeError(f"pipeline_run row not found: {run_id}")
+                except Exception as _fallback_err:
+                    _msg = (
+                        f"Pipeline final DB write failed (primary={_final_write_err}; "
+                        f"fallback={_fallback_err})"
+                    )
+                    log_buffer.emit(f"[PIPELINE] ⚠ {_msg} · {cid_short}")
+                    try:
+                        execution_logs.append_event(
+                            execution_session_id,
+                            "Pipeline final DB write failed",
+                            level="error",
+                            status="failed",
+                            error=_msg,
+                            data={"run_id": run_id, "pipeline_id": pipeline_id},
+                        )
+                    except Exception:
+                        pass
             try:
                 if not execution_error_msg:
                     _step_errors = [

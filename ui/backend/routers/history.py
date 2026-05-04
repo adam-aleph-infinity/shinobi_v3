@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from ui.backend.config import settings
 from ui.backend.database import get_session
+from ui.backend.services.run_status import derive_effective_run_status, reconcile_run_row_status
 
 router = APIRouter(prefix="/history", tags=["history"])
 _WEBHOOK_INBOX_DIR = settings.ui_data_dir / "_webhooks" / "inbox"
@@ -19,6 +20,7 @@ _WEBHOOK_INDEX_CACHE: dict[str, Any] = {
     "by_key": {},
     "by_call": {},
 }
+_RUN_STATUS_RECONCILE_CACHE: dict[str, float] = {"last_run_mono": 0.0}
 
 
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
@@ -145,6 +147,36 @@ def _load_webhook_event_index(
     return by_key, by_call
 
 
+def _maybe_reconcile_active_run_statuses(db: Session, throttle_s: float = 4.0) -> None:
+    """
+    Keep pipeline_run.status aligned with step truth for active rows.
+    Runs with a short process-local throttle to avoid write-heavy read paths.
+    """
+    now_mono = time.monotonic()
+    last_mono = float(_RUN_STATUS_RECONCILE_CACHE.get("last_run_mono") or 0.0)
+    if (now_mono - last_mono) < max(0.5, float(throttle_s or 1.0)):
+        return
+    _RUN_STATUS_RECONCILE_CACHE["last_run_mono"] = now_mono
+    try:
+        from ui.backend.models.pipeline_run import PipelineRun as PR
+
+        active_values = ["queued", "preparing", "running", "retrying", "loading", "started", "in_progress"]
+        rows = db.exec(select(PR).where(PR.status.in_(active_values)).limit(6000)).all()
+        changed = 0
+        for row in rows or []:
+            _, did_change = reconcile_run_row_status(row)
+            if did_change:
+                db.add(row)
+                changed += 1
+        if changed:
+            db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _matches_webhook_event(
     *,
     started_at: Optional[datetime],
@@ -244,6 +276,8 @@ def list_runs(
 
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.crm import CRMCall, CRMPair
+
+    _maybe_reconcile_active_run_statuses(db)
 
     stmt = select(PR)
 
@@ -407,6 +441,11 @@ def list_runs(
         return json.dumps(out, ensure_ascii=False)
 
     for r in rows:
+        effective_status = derive_effective_run_status(
+            base_status=r.status,
+            steps_json=r.steps_json,
+            finished_at=r.finished_at,
+        )
         call_key = norm(r.call_id)
         pair_key = (norm(r.sales_agent), norm(r.customer))
         resolved_crm = (
@@ -455,7 +494,7 @@ def list_runs(
             "crm_url": resolved_crm,
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-            "status": r.status,
+            "status": effective_status,
             "canvas_json": r.canvas_json,
             "steps_json": r.steps_json,
             "log_json": r.log_json,
@@ -519,6 +558,29 @@ def get_run_by_id(
     r = db.get(PR, rid)
     if not r:
         raise HTTPException(404, "Run not found")
+
+    effective_status, status_changed = reconcile_run_row_status(r)
+    if status_changed:
+        try:
+            db.add(r)
+            db.commit()
+            db.refresh(r)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            effective_status = derive_effective_run_status(
+                base_status=r.status,
+                steps_json=r.steps_json,
+                finished_at=r.finished_at,
+            )
+    else:
+        effective_status = derive_effective_run_status(
+            base_status=r.status,
+            steps_json=r.steps_json,
+            finished_at=r.finished_at,
+        )
 
     def norm(v: Any) -> str:
         return str(v or "").strip().lower()
@@ -622,7 +684,7 @@ def get_run_by_id(
         "crm_url": resolved_crm,
         "started_at": r.started_at.isoformat() if r.started_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-        "status": r.status,
+        "status": effective_status,
         "canvas_json": r.canvas_json,
         "steps_json": r.steps_json,
         "log_json": r.log_json,
