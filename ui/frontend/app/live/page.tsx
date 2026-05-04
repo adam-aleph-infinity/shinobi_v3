@@ -530,10 +530,15 @@ export default function LivePage() {
   const [collapsedRejectedFilters, setCollapsedRejectedFilters] = useState(true);
   const [collapsedRejectedDayIds, setCollapsedRejectedDayIds] = useState<Record<string, boolean>>({});
   const [dismissedRejectedIds, setDismissedRejectedIds] = useState<Record<string, boolean>>({});
-  const [viewMode, setViewMode] = useState<"cards" | "table">(() => {
-    if (typeof window === "undefined") return "cards";
-    try { return (window.localStorage.getItem("shinobi.live.view_mode") as "cards" | "table") || "cards"; } catch { return "cards"; }
-  });
+  const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
+
+  // Sync view mode from localStorage after mount (avoids SSR/hydration mismatch #418).
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("shinobi.live.view_mode");
+      if (saved === "table") setViewMode("table");
+    } catch {}
+  }, []);
 
   const setViewModeAndSave = (mode: "cards" | "table") => {
     setViewMode(mode);
