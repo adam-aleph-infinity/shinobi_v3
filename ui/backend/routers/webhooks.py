@@ -763,6 +763,7 @@ def _list_rejected_webhooks(
         for _r in list(store_rows) + list(archive_rows)
         if isinstance(_r, dict)
     }
+    new_derived: list[dict[str, Any]] = []
     for derived_row in derived:
         if not isinstance(derived_row, dict):
             continue
@@ -774,6 +775,27 @@ def _list_rejected_webhooks(
         out = dict(derived_row)
         out["source"] = "live_queue_derived"
         items.append(out)
+        new_derived.append(out)
+    # Promote derived items into the shared DB store so all VMs see them.
+    if new_derived:
+        try:
+            _store = _load_rejections_store()
+            _store_items = _store.get("items") if isinstance(_store.get("items"), list) else []
+            _existing_ids = {str(r.get("id") or "").strip() for r in _store_items if isinstance(r, dict)}
+            _added = False
+            for _row in new_derived:
+                _rid = str(_row.get("id") or "").strip()
+                if _rid and _rid not in _existing_ids:
+                    _store_items.append(_row)
+                    _existing_ids.add(_rid)
+                    _added = True
+            if _added:
+                if len(_store_items) > 20000:
+                    _store_items = _store_items[-20000:]
+                _store["items"] = _store_items
+                _save_rejections_store(_store)
+        except Exception:
+            pass
 
     items.sort(key=_rejection_sort_key, reverse=True)
     return items[:lim]
@@ -2369,6 +2391,29 @@ async def _execute_live_queue_item(
                 status="failed",
                 log_line=f"Dispatch failed: {err_text[:420]}",
             )
+            # Persist in shared rejection store so all VMs (dev + prod) see it.
+            _reason = _infer_rejection_reason(err_text) or "dispatch_failed"
+            try:
+                _append_rejected_webhook({
+                    "id": str(item.get("id") or run_id or ""),
+                    "source": "dispatch",
+                    "reason": _reason,
+                    "status": "rejected",
+                    "message": err_text[:500],
+                    "webhook_type": str(item.get("webhook_type") or "call-updated"),
+                    "event_id": str(item.get("event_id") or ""),
+                    "event_file": str(item.get("event_file") or ""),
+                    "sales_agent": str(item.get("sales_agent") or ""),
+                    "customer": str(item.get("customer") or ""),
+                    "call_id": str(item.get("call_id") or ""),
+                    "account_id": str((item.get("pair") or {}).get("account_id") or ""),
+                    "crm_url": str((item.get("pair") or {}).get("crm_url") or ""),
+                    "pipeline_ids": [pipeline_id] if pipeline_id else [],
+                    "created_at": str(item.get("created_at") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                })
+            except Exception:
+                pass
         return item
 
 
