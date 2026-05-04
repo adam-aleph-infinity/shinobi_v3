@@ -87,10 +87,7 @@ def _require_can_manage_live(request: Request) -> dict[str, Any]:
 
 
 def _workspace_owner_for_new_pipeline(request: Request, profile: dict[str, Any]) -> str:
-    env = str((profile or {}).get("environment") or "").strip().lower()
-    if env != "dev":
-        return ""
-    return str((profile or {}).get("email") or "").strip().lower()
+    return ""
 
 
 def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -> bool:
@@ -108,14 +105,6 @@ def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -
 
 def _assert_can_modify_pipeline_record(request: Request, profile: dict[str, Any], data: dict[str, Any]) -> None:
     _require_can_edit_pipeline(request)
-    if bool(profile.get("is_admin")):
-        return
-    env = str(profile.get("environment") or "").strip().lower()
-    if env != "dev":
-        return
-    owner = str(data.get("workspace_user_email") or "").strip().lower()
-    if owner and owner != str(profile.get("email") or "").strip().lower():
-        raise HTTPException(status_code=403, detail="This pipeline belongs to another user workspace.")
 
 
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
@@ -2257,8 +2246,6 @@ def list_pipeline_folders(request: Request):
         for p in visible
     ]
     global_folders = _load_folders()
-    if str(profile.get("environment") or "").strip().lower() == "dev" and not bool(profile.get("is_admin")):
-        global_folders = []
     merged = [*from_pipelines, *global_folders]
     deduped = []
     seen = set()
