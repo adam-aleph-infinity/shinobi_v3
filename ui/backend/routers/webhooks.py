@@ -1286,10 +1286,12 @@ async def _wait_for_jobs(
                 "failed_job_ids": failed_job_ids,
                 "failed_job_errors": failed_job_errors,
             }
-        # Only mark stalled when there are active workers but no observable status
-        # changes for too long. If all jobs are still pending (queue backlog), keep
-        # waiting until the global timeout instead of failing early.
-        if running > 0 and (time.monotonic() - _last_progress_at) >= stall_deadline:
+        # Mark stalled when there is no observable status change for too long.
+        # This now includes pending-only jobs as well, so a blocked/backlogged
+        # transcription queue cannot pin a run in "preparing" for hours.
+        no_progress_for = time.monotonic() - _last_progress_at
+        pending_only = pending > 0 and running == 0 and done < len(_ids)
+        if (running > 0 or pending_only) and no_progress_for >= stall_deadline:
             return {
                 "ok": False,
                 "failed": failed,
@@ -1297,6 +1299,7 @@ async def _wait_for_jobs(
                 "total": len(_ids),
                 "timed_out": False,
                 "stalled": True,
+                "stall_reason": "pending_no_progress" if pending_only else "running_no_progress",
                 "failed_job_ids": failed_job_ids,
                 "failed_job_errors": failed_job_errors,
             }
@@ -2316,8 +2319,13 @@ async def _execute_live_queue_item(
                 timeout=max(120, int(cfg.get("backfill_timeout_s") or 5400) + 60),
             )
             if not bool(backfill.get("ok")):
+                stall_reason = str(backfill.get("stall_reason") or "").strip().lower()
                 reason = (
-                    "stalled with no progress"
+                    (
+                        "pending with no progress"
+                        if stall_reason == "pending_no_progress"
+                        else "running with no progress"
+                    )
                     if bool(backfill.get("stalled"))
                     else ("timed out" if bool(backfill.get("timed_out")) else "failed")
                 )
