@@ -500,7 +500,7 @@ export default function LivePage() {
   const [runsError, setRunsError] = useState<Error | null>(null);
 
   const { mutate: mutateRunsBase } = useSWR<PipelineRunRecord[]>(
-    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=500&compact=1&mirror=1",
+    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=500&compact=1&mirror=1&run_origin=webhook",
     fetcher,
     {
       refreshInterval: 30000,
@@ -515,7 +515,13 @@ export default function LivePage() {
           sinceTsRef.current = max;
           setSinceTs(max);
         }
-        setRunsState(data);
+        setRunsState((prev) => {
+          const byId = new Map(prev.map((r) => [r.id, r]));
+          for (const r of data) byId.set(r.id, r);
+          return [...byId.values()].sort((a, b) =>
+            (b.started_at || "") > (a.started_at || "") ? 1 : -1,
+          );
+        });
       },
       onError: (err: Error) => {
         setRunsInitialLoading(false);
@@ -524,8 +530,29 @@ export default function LivePage() {
     },
   );
 
+  // Separate fetch for local/test runs — always fetched independently so they
+  // never get crowded out by the high volume of production webhook runs.
+  useSWR<PipelineRunRecord[]>(
+    "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=100&compact=1&run_origin=local",
+    fetcher,
+    {
+      refreshInterval: 60000,
+      keepPreviousData: true,
+      onSuccess: (data) => {
+        if (!Array.isArray(data)) return;
+        setRunsState((prev) => {
+          const byId = new Map(prev.map((r) => [r.id, r]));
+          for (const r of data) byId.set(r.id, r);
+          return [...byId.values()].sort((a, b) =>
+            (b.started_at || "") > (a.started_at || "") ? 1 : -1,
+          );
+        });
+      },
+    },
+  );
+
   const deltaUrl = sinceTs
-    ? `/api/history/runs?sort_by=started_at&sort_dir=desc&limit=100&compact=1&mirror=1&date_from=${encodeURIComponent(sinceTs)}`
+    ? `/api/history/runs?sort_by=started_at&sort_dir=desc&limit=100&compact=1&mirror=1&run_origin=webhook&date_from=${encodeURIComponent(sinceTs)}`
     : null;
   useSWR<PipelineRunRecord[]>(deltaUrl, fetcher, {
     refreshInterval: 4000,

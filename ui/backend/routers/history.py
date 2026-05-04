@@ -186,6 +186,7 @@ def list_runs(
     pipeline_id: str = Query(""),
     call_id: str = Query(""),
     status: str = Query(""),
+    run_origin: str = Query(""),
     crm_url: str = Query(""),
     date_from: str = Query(""),
     date_to: str = Query(""),
@@ -272,6 +273,8 @@ def list_runs(
         status_values = [s.strip().lower() for s in str(status).split(",") if s.strip()]
         if status_values:
             stmt = stmt.where(PR.status.in_(status_values))
+    if run_origin:
+        stmt = stmt.where(PR.run_origin == str(run_origin).strip().lower())
 
     from_dt = parse_dt(date_from, "date_from")
     to_dt = parse_dt(date_to, "date_to")
