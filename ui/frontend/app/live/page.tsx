@@ -491,6 +491,22 @@ function inferRunCallId(run: PipelineRunRecord): string {
   return "";
 }
 
+function _bulkKeyToken(raw: unknown): string {
+  return String(raw || "").trim().toLowerCase();
+}
+
+function runBulkTupleKey(run: PipelineRunRecord): string {
+  const pipeline = _bulkKeyToken(run.pipeline_id || run.pipeline_name);
+  const agent = _bulkKeyToken(run.sales_agent);
+  const customer = _bulkKeyToken(run.customer);
+  const callId = _bulkKeyToken(inferRunCallId(run) || run.call_id);
+  if (pipeline && agent && customer && callId) {
+    return `${pipeline}|||${agent}|||${customer}|||${callId}`;
+  }
+  const runId = _bulkKeyToken(run.id);
+  return runId ? `run:${runId}` : `${pipeline}|||${agent}|||${customer}|||${callId}`;
+}
+
 export default function LivePage() {
   const { permissions } = useUserProfile();
   const router = useRouter();
@@ -1284,7 +1300,7 @@ export default function LivePage() {
 
   const moveAllFailedRunsToRetry = async (
     targetsOverride?: PipelineRunRecord[] | null,
-    opts?: { label?: string },
+    opts?: { label?: string; clearSelection?: boolean },
   ) => {
     if (liveReadOnly) {
       setFailedRunActionErr(true);
@@ -1292,23 +1308,41 @@ export default function LivePage() {
       return;
     }
     const targets = Array.isArray(targetsOverride) ? targetsOverride : failedProductionRuns;
+    const dedupedTargets = (() => {
+      const byTuple = new Map<string, PipelineRunRecord>();
+      const sorted = [...targets].sort((a, b) => {
+        const ta = parseServerDate(a.started_at || a.finished_at)?.getTime() ?? 0;
+        const tb = parseServerDate(b.started_at || b.finished_at)?.getTime() ?? 0;
+        return tb - ta;
+      });
+      for (const run of sorted) {
+        const runId = String(run.id || "").trim();
+        if (!runId) continue;
+        const tupleKey = runBulkTupleKey(run);
+        if (!byTuple.has(tupleKey)) byTuple.set(tupleKey, run);
+      }
+      return [...byTuple.values()];
+    })();
     const label = String(opts?.label || "failed production runs").trim();
-    if (!targets.length) {
+    if (!dedupedTargets.length) {
       setFailedRunActionErr(false);
       setFailedRunActionMsg(`No ${label} available to move.`);
       return;
     }
     const ok = window.confirm(
-      `Move all ${targets.length} ${label} to queue for retry?`,
+      `Move all ${dedupedTargets.length} ${label} to queue for retry?`,
     );
     if (!ok) return;
+    if (opts?.clearSelection) {
+      setSelectedRunIds(new Set());
+    }
 
     setRetryingAllFailed(true);
     setFailedRunActionMsg("");
     try {
       const movedSourceRunIds = new Set<string>();
       const failures: string[] = [];
-      for (const run of targets) {
+      for (const run of dedupedTargets) {
         const sourceRunId = String(run.id || "").trim();
         if (!sourceRunId) continue;
         try {
@@ -1348,7 +1382,7 @@ export default function LivePage() {
       } else {
         const tail = failures.slice(0, 2).join(" | ");
         setFailedRunActionMsg(
-          `Moved ${movedCount}/${targets.length} ${label}. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
+          `Moved ${movedCount}/${dedupedTargets.length} ${label}. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
         );
       }
       await mutateRuns();
@@ -1367,14 +1401,25 @@ export default function LivePage() {
       return;
     }
     const targets = Array.isArray(targetsOverride) ? targetsOverride : unsentNoteTargets;
+    const dedupedTargets = (() => {
+      const byKey = new Map<string, { noteId: string; runId: string }>();
+      for (const target of targets) {
+        const noteId = String(target?.noteId || "").trim();
+        const runId = String(target?.runId || "").trim();
+        if (!noteId || !runId) continue;
+        const key = `${runId}|||${noteId}`;
+        if (!byKey.has(key)) byKey.set(key, { noteId, runId });
+      }
+      return [...byKey.values()];
+    })();
     const label = String(opts?.label || "unsent notes").trim();
-    if (!targets.length) {
+    if (!dedupedTargets.length) {
       setNoteActionErr(false);
       setNoteActionMsg(`No ${label} found.`);
       return;
     }
     const ok = window.confirm(
-      `Send ${targets.length} ${label} to CRM now?`,
+      `Send ${dedupedTargets.length} ${label} to CRM now?`,
     );
     if (!ok) return;
 
@@ -1384,7 +1429,7 @@ export default function LivePage() {
       const sentRunIds = new Set<string>();
       const failures: string[] = [];
       let sentCount = 0;
-      for (const target of targets) {
+      for (const target of dedupedTargets) {
         try {
           const res = await fetch(`/api/notes/${encodeURIComponent(target.noteId)}/send-to-crm`, {
             method: "POST",
@@ -1424,7 +1469,7 @@ export default function LivePage() {
       } else {
         const tail = failures.slice(0, 2).join(" | ");
         setNoteActionMsg(
-          `Sent ${sentCount}/${targets.length} ${label}. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
+          `Sent ${sentCount}/${dedupedTargets.length} ${label}. ${failures.length} failed${tail ? `: ${tail}` : "."}`,
         );
       }
       await mutateRuns();
@@ -1498,33 +1543,52 @@ export default function LivePage() {
       return true;
     });
   }, [runs, filterStatus, filterRunType, filterPipelineId, filterAgent, filterCustomer, filterDateFrom, filterDateTo, getRunStatus]);
-  const tableFailedProductionRuns = useMemo(() => {
-    const byId = new Map<string, PipelineRunRecord>();
-    for (const run of filteredRuns) {
-      const runId = String(run.id || "").trim();
-      if (!runId) continue;
-      if (normalizeRunOrigin(run.run_origin) !== "webhook") continue;
-      if (!isFailedCompletedRun(getRunStatus(run))) continue;
-      if (!byId.has(runId)) byId.set(runId, run);
-    }
-    return [...byId.values()];
-  }, [filteredRuns, getRunStatus]);
-  const tableUnsentNoteTargets = useMemo(() => {
-    const byNoteId = new Map<string, { noteId: string; runId: string }>();
-    for (const run of filteredRuns) {
-      const runId = String(run.id || "").trim();
-      if (!runId) continue;
-      if (normalizeRunOrigin(run.run_origin) !== "webhook") continue;
-      if (!isSuccessCompletedRun(getRunStatus(run))) continue;
-      if (inferNotePushState(run).sent) continue;
-      const noteId = inferRunNoteId(run);
-      if (!noteId) continue;
-      if (!byNoteId.has(noteId)) {
-        byNoteId.set(noteId, { noteId, runId });
+  const sortRunsNewestFirst = useCallback(
+    (rows: PipelineRunRecord[]) =>
+      [...rows].sort((a, b) => {
+        const ta = parseServerDate(a.started_at || a.finished_at)?.getTime() ?? 0;
+        const tb = parseServerDate(b.started_at || b.finished_at)?.getTime() ?? 0;
+        return tb - ta;
+      }),
+    [],
+  );
+  const dedupeRunsByBulkTuple = useCallback(
+    (rows: PipelineRunRecord[]) => {
+      const byTuple = new Map<string, PipelineRunRecord>();
+      for (const run of sortRunsNewestFirst(rows)) {
+        const runId = String(run?.id || "").trim();
+        if (!runId) continue;
+        const tupleKey = runBulkTupleKey(run);
+        if (!byTuple.has(tupleKey)) byTuple.set(tupleKey, run);
       }
+      return [...byTuple.values()];
+    },
+    [sortRunsNewestFirst],
+  );
+  const tableFailedProductionRuns = useMemo(() => {
+    const candidates = filteredRuns.filter(
+      (run) => normalizeRunOrigin(run.run_origin) === "webhook" && isFailedCompletedRun(getRunStatus(run)),
+    );
+    return dedupeRunsByBulkTuple(candidates);
+  }, [filteredRuns, getRunStatus, dedupeRunsByBulkTuple]);
+  const tableUnsentNoteTargets = useMemo(() => {
+    const dedupedRuns = dedupeRunsByBulkTuple(
+      filteredRuns.filter(
+        (run) =>
+          normalizeRunOrigin(run.run_origin) === "webhook"
+          && isSuccessCompletedRun(getRunStatus(run))
+          && !inferNotePushState(run).sent,
+      ),
+    );
+    const targets: Array<{ noteId: string; runId: string }> = [];
+    for (const run of dedupedRuns) {
+      const noteId = inferRunNoteId(run);
+      const runId = String(run.id || "").trim();
+      if (!noteId || !runId) continue;
+      targets.push({ noteId, runId });
     }
-    return [...byNoteId.values()];
-  }, [filteredRuns, getRunStatus]);
+    return targets;
+  }, [filteredRuns, getRunStatus, dedupeRunsByBulkTuple]);
 
   const queuedRuns = useMemo(
     () => filteredRuns.filter((r) => isQueuedRun(getRunStatus(r))),
@@ -1620,32 +1684,32 @@ export default function LivePage() {
     [completedSuccessByDay],
   );
   const failedProductionRuns = useMemo(() => {
-    const byId = new Map<string, PipelineRunRecord>();
+    const rows: PipelineRunRecord[] = [];
     for (const group of completedFailedByDay) {
       for (const run of group.productionRuns) {
-        const runId = String(run.id || "").trim();
-        if (!runId) continue;
-        if (!byId.has(runId)) byId.set(runId, run);
+        rows.push(run);
       }
     }
-    return [...byId.values()];
-  }, [completedFailedByDay]);
+    return dedupeRunsByBulkTuple(rows);
+  }, [completedFailedByDay, dedupeRunsByBulkTuple]);
   const unsentNoteTargets = useMemo(() => {
-    const byNoteId = new Map<string, { noteId: string; runId: string }>();
+    const candidates: PipelineRunRecord[] = [];
     for (const group of completedSuccessByDay) {
       for (const run of group.productionRuns) {
-        const runId = String(run.id || "").trim();
-        if (!runId) continue;
         if (inferNotePushState(run).sent) continue;
-        const noteId = inferRunNoteId(run);
-        if (!noteId) continue;
-        if (!byNoteId.has(noteId)) {
-          byNoteId.set(noteId, { noteId, runId });
-        }
+        candidates.push(run);
       }
     }
-    return [...byNoteId.values()];
-  }, [completedSuccessByDay]);
+    const dedupedRuns = dedupeRunsByBulkTuple(candidates);
+    const targets: Array<{ noteId: string; runId: string }> = [];
+    for (const run of dedupedRuns) {
+      const noteId = inferRunNoteId(run);
+      const runId = String(run.id || "").trim();
+      if (!noteId || !runId) continue;
+      targets.push({ noteId, runId });
+    }
+    return targets;
+  }, [completedSuccessByDay, dedupeRunsByBulkTuple]);
   const tableBulkActionBusy = retryingAllFailed || sendingMissingNotes || !!retryingFailedRunId;
 
   // Group filteredRuns by (call_id, agent, customer) for consolidated table view.
@@ -1721,30 +1785,33 @@ export default function LivePage() {
   }, [tableGroups, selectedRunIds]);
 
   // Runs selected via checkbox that are failed prod → eligible for bulk retry.
+  // De-duped by pipeline+agent+customer+call_id so one retry per logical run tuple.
   const selectedFailedRuns = useMemo(
-    () =>
-      selectedGroupRuns.filter(
+    () => {
+      const candidates = selectedGroupRuns.filter(
         (run) => isFailedCompletedRun(getRunStatus(run)) && normalizeRunOrigin(run.run_origin) === "webhook",
-      ),
-    [selectedGroupRuns, getRunStatus],
+      );
+      return dedupeRunsByBulkTuple(candidates);
+    },
+    [selectedGroupRuns, getRunStatus, dedupeRunsByBulkTuple],
   );
 
-  // Runs selected via checkbox that are success + have an unsent note → eligible for bulk note send.
-  const selectedUnsentTargets = useMemo(() => {
+  // Runs selected via checkbox that are success + have a note id → eligible for bulk note send/resend.
+  // De-duped by pipeline+agent+customer+call_id so one note send per logical run tuple.
+  const selectedNoteTargets = useMemo(() => {
     if (selectedGroupRuns.length === 0) return [] as Array<{ noteId: string; runId: string }>;
+    const dedupedRuns = dedupeRunsByBulkTuple(
+      selectedGroupRuns.filter((run) => isSuccessCompletedRun(getRunStatus(run))),
+    );
     const result: Array<{ noteId: string; runId: string }> = [];
-    const seen = new Set<string>();
-    for (const run of selectedGroupRuns) {
-      if (!isSuccessCompletedRun(getRunStatus(run))) continue;
-      if (inferNotePushState(run).sent) continue;
+    for (const run of dedupedRuns) {
       const noteId = inferRunNoteId(run);
-      if (noteId && !seen.has(noteId)) {
-        seen.add(noteId);
-        result.push({ noteId, runId: run.id });
-      }
+      const runId = String(run.id || "").trim();
+      if (!noteId || !runId) continue;
+      result.push({ noteId, runId });
     }
     return result;
-  }, [selectedGroupRuns, getRunStatus]);
+  }, [selectedGroupRuns, getRunStatus, dedupeRunsByBulkTuple]);
 
   useEffect(() => {
     setCollapsedCompletedFailedDayIds((prev) => {
@@ -2069,18 +2136,23 @@ export default function LivePage() {
                   <button
                     type="button"
                     disabled={liveReadOnly || tableBulkActionBusy || selectedFailedRuns.length === 0}
-                    onClick={() => { void moveAllFailedRunsToRetry(selectedFailedRuns, { label: "selected failed" }); }}
+                    onClick={() => {
+                      void moveAllFailedRunsToRetry(selectedFailedRuns, {
+                        label: "selected failed",
+                        clearSelection: true,
+                      });
+                    }}
                     className="text-[10px] px-2 py-1 rounded border border-amber-700/70 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
                   >
                     {retryingAllFailed ? "Rerunning…" : `Queue Selected Failed (${selectedFailedRuns.length})`}
                   </button>
                   <button
                     type="button"
-                    disabled={liveReadOnly || tableBulkActionBusy || selectedUnsentTargets.length === 0}
-                    onClick={() => { void sendAllMissingNotesToCRM(selectedUnsentTargets, { label: "selected unsent notes" }); }}
+                    disabled={liveReadOnly || tableBulkActionBusy || selectedNoteTargets.length === 0}
+                    onClick={() => { void sendAllMissingNotesToCRM(selectedNoteTargets, { label: "selected notes" }); }}
                     className="text-[10px] px-2 py-1 rounded border border-cyan-700/70 bg-cyan-950/30 text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-50"
                   >
-                    {sendingMissingNotes ? "Sending…" : `Send Notes for Selected (${selectedUnsentTargets.length})`}
+                    {sendingMissingNotes ? "Sending…" : `Send/Resend Notes (${selectedNoteTargets.length})`}
                   </button>
                   <button
                     type="button"
