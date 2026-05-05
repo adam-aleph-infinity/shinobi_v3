@@ -2018,8 +2018,9 @@ function PipelineCanvas() {
   const [collapsedPipelineOwnerIds, setCollapsedPipelineOwnerIds] = useState<Record<string, boolean>>({});
   const [collapsedPipelineFolderIds, setCollapsedPipelineFolderIds] = useState<Record<string, boolean>>({});
   const [dragOverPipelineFolder, setDragOverPipelineFolder] = useState<string | null>(null);
-  // Sidebar search
+  // Sidebar search + owner filter
   const [pipelineSidebarSearch, setPipelineSidebarSearch] = useState("");
+  const [sidebarOwnerFilter, setSidebarOwnerFilter] = useState<"all" | "mine" | "shared">("all");
   // Folder inline rename
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -2343,6 +2344,15 @@ function PipelineCanvas() {
     });
     return out;
   }, [allPipelines, pipelineFolders, pipelineSidebarSearch, profile?.email]);
+
+  const filteredPipelineOwners = useMemo(() => {
+    if (sidebarOwnerFilter === "all") return pipelineOwners;
+    const meEmail = String(profile?.email || "").trim().toLowerCase();
+    if (sidebarOwnerFilter === "mine") {
+      return pipelineOwners.filter(o => meEmail ? o.ownerEmail === meEmail : o.ownerKey !== "__shared__");
+    }
+    return pipelineOwners.filter(o => !meEmail || o.ownerEmail !== meEmail);
+  }, [pipelineOwners, sidebarOwnerFilter, profile?.email]);
 
   const normalizeCallId = (raw: string | null | undefined) => String(raw || "").trim().toLowerCase();
   const parseDurationSeconds = (raw: unknown): number | null => {
@@ -7593,7 +7603,7 @@ function PipelineCanvas() {
             </div>
 
             {/* Search */}
-            <div className="px-2 pb-1.5">
+            <div className="px-2 pb-1">
               <input
                 type="text"
                 value={pipelineSidebarSearch}
@@ -7602,26 +7612,38 @@ function PipelineCanvas() {
                 className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-1 text-[11px] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
               />
             </div>
+            {/* Owner filter chips */}
+            <div className="px-2 pb-1.5 flex gap-1">
+              {(["all", "mine", "shared"] as const).map(f => (
+                <button
+                  key={f}
+                  onClick={() => setSidebarOwnerFilter(f)}
+                  className={cn(
+                    "flex-1 text-[9px] font-bold uppercase tracking-widest py-0.5 rounded transition-colors border",
+                    sidebarOwnerFilter === f
+                      ? "bg-indigo-600/30 text-indigo-300 border-indigo-500/50"
+                      : "text-gray-600 hover:text-gray-400 border-gray-800 hover:border-gray-700"
+                  )}
+                >{f}</button>
+              ))}
+            </div>
 
             {/* Folder + pipeline tree */}
             <div className="px-2 pb-2">
               <div className="min-h-[200px] max-h-[52vh] resize-y overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/30 p-1.5 space-y-1.5">
-                {pipelineOwners.map((owner) => {
-                  const ownerCollapsed = !!collapsedPipelineOwnerIds[owner.ownerKey];
+                {filteredPipelineOwners.map((owner) => {
+                  const showOwnerDivider = filteredPipelineOwners.length > 1;
                   return (
-                    <div key={owner.ownerKey} className="rounded-lg border border-gray-800 bg-gray-900/35 p-1">
-                      {/* Owner header */}
-                      <button
-                        onClick={() => setCollapsedPipelineOwnerIds(prev => ({ ...prev, [owner.ownerKey]: !prev[owner.ownerKey] }))}
-                        className="w-full flex items-center gap-1.5 text-left hover:bg-gray-800/60 rounded px-1.5 py-1 transition-colors"
-                      >
-                        <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !ownerCollapsed && "rotate-90")} />
-                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest truncate">{owner.ownerLabel}</p>
-                        <span className="ml-auto text-[9px] text-gray-600 shrink-0">{owner.total}</span>
-                      </button>
-
-                      {!ownerCollapsed && (
-                        <div className="mt-1 space-y-1">
+                    <div key={owner.ownerKey}>
+                      {/* Slim owner separator — only when multiple owners visible */}
+                      {showOwnerDivider && (
+                        <div className="flex items-center gap-1.5 px-1 py-0.5 mb-0.5">
+                          <span className="text-[9px] font-bold text-gray-600 uppercase tracking-widest truncate">{owner.ownerLabel}</span>
+                          <span className="flex-1 border-t border-gray-800/70" />
+                          <span className="text-[9px] text-gray-700 shrink-0">{owner.total}</span>
+                        </div>
+                      )}
+                        <div className="space-y-1">
                           {owner.folders.map((section) => {
                             const list = section.pipelines ?? [];
                             const sectionId = `${owner.ownerKey}::${section.key || "__unfiled__"}`;
@@ -7793,7 +7815,6 @@ function PipelineCanvas() {
                             );
                           })}
                         </div>
-                      )}
                     </div>
                   );
                 })}
@@ -7813,15 +7834,17 @@ function PipelineCanvas() {
           <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
             <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-2 space-y-1.5">
               <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest px-0.5">Pipeline Actions</p>
-              <button
-                onClick={importPresets}
-                title="Import agent presets"
-                disabled={canvasLocked}
-                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Download className="w-3 h-3" />
-                Presets
-              </button>
+              {permissions.can_manage_users && (
+                <button
+                  onClick={importPresets}
+                  title="Import agent presets (admin only)"
+                  disabled={canvasLocked}
+                  className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-3 h-3" />
+                  Presets
+                </button>
+              )}
               <button
                 onClick={handleCopyPipelineBundle}
                 disabled={canvasLocked}
