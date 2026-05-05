@@ -911,6 +911,27 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         {
             "type": "function",
             "function": {
+                "name": "delete_universal_agent",
+                "description": "Permanently delete a universal agent by ID. Always confirm with the user before calling this.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"agent_id": {"type": "string"}},
+                    "required": ["agent_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_pipeline_folders",
+                "description": "List all existing pipeline folders.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "read_source_file",
                 "description": (
                     "Read any source file in the project (backend, frontend, config, deploy scripts). "
@@ -2150,6 +2171,25 @@ def _tool_list_agent_folders(args: dict[str, Any]) -> dict[str, Any]:
     return {"count": len(folders), "folders": folders}
 
 
+def _tool_delete_universal_agent(args: dict[str, Any]) -> dict[str, Any]:
+    agent_id = str(args.get("agent_id") or "").strip()
+    if not agent_id:
+        raise HTTPException(400, "agent_id is required")
+    f, data = universal_agents_router._find_file(agent_id)
+    name = str(data.get("name") or agent_id)
+    f.unlink()
+    try:
+        universal_agents_router._sync_ai_registry_agents()
+    except Exception:
+        pass
+    return {"ok": True, "deleted": True, "agent_id": agent_id, "name": name}
+
+
+def _tool_list_pipeline_folders(args: dict[str, Any]) -> dict[str, Any]:
+    folders = pipelines_router._load_folders()
+    return {"count": len(folders), "folders": folders}
+
+
 def _tool_get_app_map(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
     refresh = bool(args.get("refresh"))
     if refresh:
@@ -2402,6 +2442,8 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "create_pipeline_folder": _tool_create_pipeline_folder,
     "create_agent_folder": _tool_create_agent_folder,
     "list_agent_folders": _tool_list_agent_folders,
+    "delete_universal_agent": _tool_delete_universal_agent,
+    "list_pipeline_folders": _tool_list_pipeline_folders,
     "search_crm_context": _tool_search_crm_context,
     "set_context_bar": _tool_set_context_bar,
     "list_notes": _tool_list_notes,
