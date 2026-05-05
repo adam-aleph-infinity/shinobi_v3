@@ -6,6 +6,7 @@ import { useAppCtx } from "@/lib/app-context";
 import { cn, formatDuration } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { SectionContent } from "@/components/shared/SectionCards";
+import TaxonomyInsightPanel from "@/components/crm/TaxonomyInsightPanel";
 
 import {
   BarChart3,
@@ -938,6 +939,12 @@ export default function AgentDeepDiveView({
                   Each row uses the latest successful run for that call (fallback: latest run).
                 </span>
               </div>
+              <TaxonomyInsightPanel
+                pipelineId={activePipelineId || ""}
+                salesAgent={salesAgent}
+                customer={customer}
+                callArtifactRows={callArtifactRows}
+              />
               <div className="flex-1 min-h-0 overflow-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-gray-900 z-10 border-b border-gray-800">

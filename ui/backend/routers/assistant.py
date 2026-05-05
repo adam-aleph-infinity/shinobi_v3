@@ -864,6 +864,53 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         {
             "type": "function",
             "function": {
+                "name": "push_note_to_crm",
+                "description": (
+                    "Push an existing note (by note_id) to the CRM. "
+                    "Use list_notes to find the note_id first. "
+                    "Requires CRM_PUSH_ENABLED=true in server config. "
+                    "Always confirm with the user before pushing."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": {"type": "string", "description": "UUID of the note to push"},
+                        "account_id": {"type": "string", "default": "", "description": "CRM account_id; auto-resolved from agent+customer if omitted"},
+                        "run_id": {"type": "string", "default": "", "description": "Optional pipeline run_id to associate with this push"},
+                    },
+                    "required": ["note_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "trigger_pipeline_run",
+                "description": (
+                    "Trigger a pipeline to run for a specific agent/customer/call. "
+                    "Returns immediately with a run_id; the pipeline executes in the background. "
+                    "Use get_run(run_id) to check progress. "
+                    "Requires COPILOT_INTERNAL_TOKEN to be set in .env. "
+                    "Always confirm with the user before triggering a run."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pipeline_id": {"type": "string"},
+                        "sales_agent": {"type": "string", "default": ""},
+                        "customer": {"type": "string", "default": ""},
+                        "call_id": {"type": "string", "default": ""},
+                        "force": {"type": "boolean", "default": False, "description": "Bypass step cache and re-run all steps"},
+                    },
+                    "required": ["pipeline_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "query_db",
                 "description": (
                     "Run a read-only SQL SELECT query against the app database for analysis and reporting. "
@@ -906,6 +953,76 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
                 "name": "list_agent_folders",
                 "description": "List all existing agent folders.",
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_universal_agent",
+                "description": "Permanently delete a universal agent by ID. Always confirm with the user before calling this.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"agent_id": {"type": "string"}},
+                    "required": ["agent_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_pipeline_folders",
+                "description": "List all existing pipeline folders.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_webhook_events",
+                "description": (
+                    "List recent webhook ingestion events received by this server (call-ended payloads from CRM). "
+                    "Use to track what calls have been received and when."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_webhook_event",
+                "description": "Get the full payload of a specific webhook event by event_id or filename.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "string", "default": ""},
+                        "filename": {"type": "string", "default": "", "description": "Filename as returned by list_webhook_events"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_rejected_webhooks",
+                "description": (
+                    "List webhooks that were rejected or failed to process. "
+                    "Use to diagnose why a call didn't trigger a pipeline run."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+                    },
+                    "additionalProperties": False,
+                },
             },
         },
         {
@@ -954,6 +1071,30 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         )
 
     role = str(user_role or "").strip().lower()
+    if role in _ADMIN_ROLES:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_source_file",
+                    "description": (
+                        "Write content to any source file in the project with automatic .copilot_bak backup. "
+                        "Use relative path from project root, e.g. ui/backend/routers/assistant.py. "
+                        "Always read the file first with read_source_file before writing. "
+                        "Confirm with the user before writing to backend or frontend source files."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative path from project root"},
+                            "content": {"type": "string", "description": "Full new file content"},
+                        },
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
     if role in _SUPER_ADMIN_ROLES:
         tools.append(
             {
@@ -2103,6 +2244,98 @@ def _tool_create_note(args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "created": True, "updated": False, "id": note.id}
 
 
+def _tool_push_note_to_crm(args: dict[str, Any]) -> dict[str, Any]:
+    from ui.backend.routers.notes import send_note_to_crm_internal as _push
+    note_id = str(args.get("note_id") or "").strip()
+    account_id = str(args.get("account_id") or "").strip()
+    run_id = str(args.get("run_id") or "").strip()
+    if not note_id:
+        raise HTTPException(400, "note_id is required")
+    with Session(engine) as db:
+        result = _push(note_id=note_id, account_id=account_id, run_id=run_id, db=db)
+    return {"ok": True, "note_id": note_id, "result": result}
+
+
+async def _tool_trigger_pipeline_run(args: dict[str, Any]) -> dict[str, Any]:
+    import httpx as _httpx
+
+    pipeline_id = str(args.get("pipeline_id") or "").strip()
+    if not pipeline_id:
+        raise HTTPException(400, "pipeline_id is required")
+
+    _, pdef = pipelines_router._find_file(pipeline_id)
+
+    token = settings.copilot_internal_token
+    if not token:
+        raise HTTPException(
+            400,
+            "COPILOT_INTERNAL_TOKEN is not configured. "
+            "Set it in .env to enable trigger_pipeline_run. "
+            "Alternatively use run_shell_command (super_admin) to trigger runs manually.",
+        )
+
+    body = {
+        "sales_agent": str(args.get("sales_agent") or ""),
+        "customer": str(args.get("customer") or ""),
+        "call_id": str(args.get("call_id") or ""),
+        "run_origin": "webhook",
+        "force": bool(args.get("force", False)),
+    }
+
+    base_url = settings.crm_webhook_internal_base_url.rstrip("/")
+    url = f"{base_url}/pipelines/{pipeline_id}/run"
+    run_id: str = ""
+
+    try:
+        async with _httpx.AsyncClient(timeout=15.0) as client:
+            async with client.stream("POST", url, json=body, headers={"x-copilot-token": token}) as resp:
+                if resp.status_code != 200:
+                    body_text = await resp.aread()
+                    raise HTTPException(
+                        resp.status_code,
+                        f"Pipeline run endpoint returned {resp.status_code}: {body_text[:500]}",
+                    )
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:].strip())
+                    except Exception:
+                        continue
+                    event_data = event.get("data") or {}
+                    candidate = str(event_data.get("run_id") or "")
+                    if candidate:
+                        run_id = candidate
+                        break
+                    if event.get("type") in {"pipeline_start", "pipeline_error", "error"}:
+                        break
+    except _httpx.RequestError as exc:
+        raise HTTPException(500, f"Could not reach pipeline run endpoint: {exc}") from exc
+
+    if not run_id:
+        raise HTTPException(500, "Pipeline run started but run_id was not returned in the first SSE events")
+
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "pipeline_id": pipeline_id,
+        "pipeline_name": str(pdef.get("name") or pipeline_id),
+        "sales_agent": body["sales_agent"],
+        "customer": body["customer"],
+        "call_id": body["call_id"],
+        "message": f"Pipeline started. Use get_run('{run_id}') to check progress.",
+    }
+
+
+def _tool_trigger_pipeline_run_sync(args: dict[str, Any]) -> dict[str, Any]:
+    import asyncio as _asyncio
+    new_loop = _asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(_tool_trigger_pipeline_run(args))
+    finally:
+        new_loop.close()
+
+
 def _tool_query_db(args: dict[str, Any]) -> dict[str, Any]:
     sql = str(args.get("sql") or "").strip()
     if not sql:
@@ -2148,6 +2381,101 @@ def _tool_create_agent_folder(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_list_agent_folders(args: dict[str, Any]) -> dict[str, Any]:
     folders = universal_agents_router._load_folders()
     return {"count": len(folders), "folders": folders}
+
+
+def _tool_delete_universal_agent(args: dict[str, Any]) -> dict[str, Any]:
+    agent_id = str(args.get("agent_id") or "").strip()
+    if not agent_id:
+        raise HTTPException(400, "agent_id is required")
+    f, data = universal_agents_router._find_file(agent_id)
+    name = str(data.get("name") or agent_id)
+    f.unlink()
+    try:
+        universal_agents_router._sync_ai_registry_agents()
+    except Exception:
+        pass
+    return {"ok": True, "deleted": True, "agent_id": agent_id, "name": name}
+
+
+def _tool_list_pipeline_folders(args: dict[str, Any]) -> dict[str, Any]:
+    folders = pipelines_router._load_folders()
+    return {"count": len(folders), "folders": folders}
+
+
+def _tool_list_webhook_events(args: dict[str, Any]) -> dict[str, Any]:
+    limit = max(1, min(100, int(args.get("limit", 20) or 20)))
+    inbox = settings.ui_data_dir / "_webhooks" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    files = sorted(inbox.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    out: list[dict[str, Any]] = []
+    for fp in files:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        out.append({
+            "event_id": str(data.get("event_id") or ""),
+            "received_at": str(data.get("received_at") or ""),
+            "webhook_type": str(data.get("webhook_type") or ""),
+            "call_id": str(payload.get("call_id") or ""),
+            "account_id": str(payload.get("account_id") or ""),
+            "agent": str(payload.get("agent") or ""),
+            "file": fp.name,
+        })
+    return {"count": len(out), "events": out}
+
+
+def _tool_get_webhook_event(args: dict[str, Any]) -> dict[str, Any]:
+    event_id = str(args.get("event_id") or "").strip()
+    filename = str(args.get("filename") or "").strip()
+    if not event_id and not filename:
+        raise HTTPException(400, "Provide event_id or filename")
+    inbox = settings.ui_data_dir / "_webhooks" / "inbox"
+    if filename:
+        candidate = (inbox / filename).resolve()
+        if not str(candidate).startswith(str(inbox.resolve())):
+            raise HTTPException(400, "Invalid filename")
+        if not candidate.is_file():
+            raise HTTPException(404, "Webhook event file not found")
+        files = [candidate]
+    else:
+        files = list(inbox.glob("*.json"))
+    for fp in files:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if event_id and str(data.get("event_id") or "") != event_id:
+            continue
+        return {"ok": True, "file": fp.name, "event": data}
+    raise HTTPException(404, "Webhook event not found")
+
+
+def _tool_list_rejected_webhooks(args: dict[str, Any]) -> dict[str, Any]:
+    limit = max(1, min(200, int(args.get("limit", 20) or 20)))
+    rejections_file = settings.ui_data_dir / "_webhooks" / "rejections.json"
+    if not rejections_file.exists():
+        return {"count": 0, "rejections": []}
+    try:
+        raw = json.loads(rejections_file.read_text(encoding="utf-8"))
+        items = raw.get("items") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        return {"count": 0, "rejections": []}
+    items = sorted(items, key=lambda x: str(x.get("received_at") or ""), reverse=True)[:limit]
+    out = []
+    for r in items:
+        out.append({
+            "id": str(r.get("id") or r.get("rejection_id") or ""),
+            "received_at": str(r.get("received_at") or ""),
+            "reason": str(r.get("reason") or ""),
+            "message": str(r.get("message") or ""),
+            "call_id": str(r.get("call_id") or ""),
+            "webhook_type": str(r.get("webhook_type") or ""),
+        })
+    return {"count": len(out), "rejections": out}
 
 
 def _tool_get_app_map(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2398,14 +2726,22 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "cleanup_artifacts": _tool_cleanup_artifacts,
     "preview_workspace_file": _tool_preview_workspace_file,
     "read_source_file": _tool_read_source_file,
+    "write_source_file": _tool_write_source_file,
     "run_shell_command": _tool_run_shell_command,
     "create_pipeline_folder": _tool_create_pipeline_folder,
     "create_agent_folder": _tool_create_agent_folder,
     "list_agent_folders": _tool_list_agent_folders,
+    "delete_universal_agent": _tool_delete_universal_agent,
+    "list_pipeline_folders": _tool_list_pipeline_folders,
+    "list_webhook_events": _tool_list_webhook_events,
+    "get_webhook_event": _tool_get_webhook_event,
+    "list_rejected_webhooks": _tool_list_rejected_webhooks,
     "search_crm_context": _tool_search_crm_context,
     "set_context_bar": _tool_set_context_bar,
     "list_notes": _tool_list_notes,
     "create_note": _tool_create_note,
+    "push_note_to_crm": _tool_push_note_to_crm,
+    "trigger_pipeline_run": _tool_trigger_pipeline_run_sync,
     "query_db": _tool_query_db,
 }
 

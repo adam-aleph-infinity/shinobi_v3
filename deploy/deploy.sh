@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_ID="shinobi-v2-prod"
-VM_NAME="shinobi-v3-vm"
+VM_NAME="shinobi-vm"
 ZONE="us-central1-a"
 BRANCH="${1:-main}"
 
@@ -20,6 +20,7 @@ gcloud compute ssh $VM_NAME \
 
     PRESERVE_ROOT=/tmp/shinobi_runtime_preserve_\$(date +%Y%m%d_%H%M%S)
     PRESERVE_PATHS=(
+      ui/data/_auth
       ui/data/_pipelines
       ui/data/_pipelines_folders.json
       ui/data/_universal_agents

@@ -2351,7 +2351,7 @@ async def _execute_live_queue_item(
                     customer=str(item.get("customer") or ""),
                     call_id=str(item.get("call_id") or ""),
                     status="preparing",
-                    log_line=f"Backfill running ({done}/{total} complete, {failed_jobs} failed)",
+                    log_line=f"Transcribing {done}/{total} calls · {failed_jobs} failed · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
                 )
 
             _upsert_pipeline_run_stub(
@@ -2362,7 +2362,17 @@ async def _execute_live_queue_item(
                 customer=str(item.get("customer") or ""),
                 call_id=str(item.get("call_id") or ""),
                 status="preparing",
-                log_line="Backfilling historical transcripts (skipping existing)",
+                log_line=f"Refreshing call history from CRM · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
+            )
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=str(item.get("pipeline_name") or ""),
+                sales_agent=str(item.get("sales_agent") or ""),
+                customer=str(item.get("customer") or ""),
+                call_id=str(item.get("call_id") or ""),
+                status="preparing",
+                log_line=f"Starting transcript backfill (skip existing) · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
             )
             # Guard backfill so a stuck CRM/transcription dependency cannot pin live slots forever.
             backfill = await asyncio.wait_for(
@@ -2371,15 +2381,8 @@ async def _execute_live_queue_item(
             )
             if not bool(backfill.get("ok")):
                 stall_reason = str(backfill.get("stall_reason") or "").strip().lower()
-                reason = (
-                    (
-                        "pending with no progress"
-                        if stall_reason == "pending_no_progress"
-                        else "running with no progress"
-                    )
-                    if bool(backfill.get("stalled"))
-                    else ("timed out" if bool(backfill.get("timed_out")) else "failed")
-                )
+                _stalled = bool(backfill.get("stalled"))
+                _timed_out = bool(backfill.get("timed_out"))
                 failed_ids = [str(x) for x in (backfill.get("failed_job_ids") or []) if str(x).strip()]
                 failed_errs = [str(x) for x in (backfill.get("failed_job_errors") or []) if str(x).strip()]
                 if failed_ids:
@@ -2407,22 +2410,40 @@ async def _execute_live_queue_item(
                         status="preparing",
                         log_line=f"Backfill first error: {failed_errs[0][:300]}",
                     )
-                detail_parts: list[str] = []
-                if failed_ids:
-                    failed_ids_short = ", ".join(x[:8] for x in failed_ids[:8])
-                    if len(failed_ids) > 8:
-                        failed_ids_short += ", …"
-                    detail_parts.append(f"failed job ids: {failed_ids_short}")
-                if failed_errs:
-                    detail_parts.append(f"first error: {failed_errs[0]}")
-                if not detail_parts and int(backfill.get("failed") or 0) > 0:
-                    detail_parts.append("failed job details unavailable (inspect Jobs list for this pair)")
-                detail_suffix = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
-                raise RuntimeError(
-                    "Backfill "
-                    f"{reason} ({int(backfill.get('done') or 0)}/{int(backfill.get('total') or 0)} complete, "
-                    f"{int(backfill.get('failed') or 0)} failed jobs)."
-                    f"{detail_suffix}"
+                if _stalled or _timed_out:
+                    # Structural hang — block dispatch so the slot is not wasted.
+                    reason = (
+                        ("pending with no progress" if stall_reason == "pending_no_progress" else "running with no progress")
+                        if _stalled
+                        else "timed out"
+                    )
+                    detail_parts: list[str] = []
+                    if failed_ids:
+                        failed_ids_short = ", ".join(x[:8] for x in failed_ids[:8])
+                        if len(failed_ids) > 8:
+                            failed_ids_short += ", …"
+                        detail_parts.append(f"failed job ids: {failed_ids_short}")
+                    if failed_errs:
+                        detail_parts.append(f"first error: {failed_errs[0]}")
+                    detail_suffix = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
+                    raise RuntimeError(
+                        "Backfill "
+                        f"{reason} ({int(backfill.get('done') or 0)}/{int(backfill.get('total') or 0)} complete, "
+                        f"{int(backfill.get('failed') or 0)} failed jobs)."
+                        f"{detail_suffix}"
+                    )
+                # Job-level failures (e.g. missing/deleted audio files) — log and continue.
+                # These are historical recordings that no longer exist in storage; they do not
+                # block transcription of the current call which has its own valid record_path.
+                _upsert_pipeline_run_stub(
+                    run_id=run_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=str(item.get("pipeline_name") or ""),
+                    sales_agent=str(item.get("sales_agent") or ""),
+                    customer=str(item.get("customer") or ""),
+                    call_id=str(item.get("call_id") or ""),
+                    status="preparing",
+                    log_line=f"Backfill: {int(backfill.get('failed') or 0)} historical job(s) failed (likely missing recordings) — proceeding with pipeline",
                 )
             _upsert_pipeline_run_stub(
                 run_id=run_id,
@@ -2433,9 +2454,9 @@ async def _execute_live_queue_item(
                 call_id=str(item.get("call_id") or ""),
                 status="preparing",
                 log_line=(
-                    f"Backfill done: submitted {int(backfill.get('submitted') or 0)}, "
-                    f"skipped {int(backfill.get('skipped') or 0)}, "
-                    f"refresh added {int(backfill.get('refresh_count') or 0)} call(s)."
+                    f"Backfill done: {int(backfill.get('submitted') or 0)} new transcribed, "
+                    f"{int(backfill.get('skipped') or 0)} skipped (existing), "
+                    f"CRM added {int(backfill.get('refresh_count') or 0)} call(s)."
                 ),
             )
             if str(backfill.get("refresh_error") or "").strip():
@@ -2473,7 +2494,7 @@ async def _execute_live_queue_item(
             customer=str(item.get("customer") or ""),
             call_id=str(item.get("call_id") or ""),
             status="running",
-            log_line="Pipeline execution started from live queue.",
+            log_line=f"Pipeline started: {str(item.get('pipeline_name') or pipeline_id)} · call {str(item.get('call_id') or '')} · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
         )
         return item
     except Exception as exc:
@@ -2674,6 +2695,45 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
             except Exception:
                 row = None
 
+            # Reconcile queue terminal rows that can be left mismatched after
+            # restarts/interruption (e.g., queue=failed but run status still preparing).
+            if state in {"failed", "error", "cancelled", "canceled", "done", "completed"}:
+                if row is not None:
+                    base_row_status = normalize_state_token(getattr(row, "status", "") or "")
+                    effective_row_status = derive_effective_run_status(
+                        base_status=base_row_status,
+                        steps_json=getattr(row, "steps_json", ""),
+                        finished_at=getattr(row, "finished_at", None),
+                    )
+                    row_status = effective_row_status or base_row_status
+                    target_status = (
+                        "done"
+                        if state in {"done", "completed"}
+                        else ("cancelled" if state in {"cancelled", "canceled"} else "failed")
+                    )
+                    if row_status != target_status and row_status in {"queued", "preparing", "running", "retrying", "started", "loading"}:
+                        term_line = (
+                            "Recovered queue terminal state: completed."
+                            if target_status == "done"
+                            else (
+                                "Recovered queue terminal state: cancelled."
+                                if target_status == "cancelled"
+                                else f"Recovered queue terminal state: failed ({str(item.get('last_error') or 'unknown error')[:260]})"
+                            )
+                        )
+                        _upsert_pipeline_run_stub(
+                            run_id=run_id,
+                            pipeline_id=str(item.get("pipeline_id") or ""),
+                            pipeline_name=str(item.get("pipeline_name") or ""),
+                            sales_agent=str(item.get("sales_agent") or ""),
+                            customer=str(item.get("customer") or ""),
+                            call_id=str(item.get("call_id") or ""),
+                            status=target_status,
+                            log_line=term_line,
+                        )
+                        changed = True
+                continue
+
             if state in {"running", "preparing", "retrying"}:
                 row_status = ""
                 if row is not None:
@@ -2841,7 +2901,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                     customer=str(item.get("customer") or ""),
                     call_id=str(item.get("call_id") or ""),
                     status="preparing",
-                    log_line="Dequeued for preflight checks",
+                    log_line=f"Preflight checks · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')} · call {str(item.get('call_id') or '')}",
                 )
                 candidates.append(dict(item))
                 slots -= 1
@@ -3214,7 +3274,7 @@ async def _handle_call_webhook(
                             customer=pair["customer"],
                             call_id=call_id,
                             status="queued",
-                            log_line="Queued from webhook trigger",
+                            log_line=f"Queued: {pipeline_name} · {pair['agent']} → {pair['customer']} · call {call_id}",
                         )
                     entry.update(
                         {

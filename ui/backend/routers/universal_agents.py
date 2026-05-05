@@ -1320,6 +1320,53 @@ def _transcript_path_for_call(pair_dir: Any, call_id: str) -> Optional[Any]:
     return None
 
 
+def _scope_has_any_transcript(pair_dir: Any, upto_call_id: str = "") -> bool:
+    cutoff = _norm_call_id(upto_call_id)
+    cutoff_num: Optional[int] = None
+    if cutoff:
+        try:
+            cutoff_num = int(float(cutoff))
+        except Exception:
+            cutoff_num = None
+    if not pair_dir.exists():
+        return False
+    for d in pair_dir.iterdir():
+        if not d.is_dir() or d.name.startswith(".") or d.name.startswith("_"):
+            continue
+        cid = _norm_call_id(d.name)
+        if not cid:
+            continue
+        if cutoff_num is not None:
+            try:
+                if int(float(cid)) > cutoff_num:
+                    continue
+            except Exception:
+                continue
+        if _transcript_path_for_call(pair_dir, cid):
+            return True
+    return False
+
+
+def _merged_cache_needs_refresh(cached: str, pair_dir: Any, upto_call_id: str = "") -> bool:
+    head = str(cached or "")[:5000]
+    if not head:
+        return False
+    zero_marker = "No transcript bodies are available in this scope." in cached
+    if not zero_marker:
+        m = _re.search(r"Calls w/ Transcript:\s*(\d+)", head)
+        if m:
+            try:
+                zero_marker = int(m.group(1)) <= 0
+            except Exception:
+                zero_marker = False
+    if not zero_marker:
+        return False
+    try:
+        return _scope_has_any_transcript(pair_dir, upto_call_id=upto_call_id)
+    except Exception:
+        return False
+
+
 def _collect_pair_call_rows(
     sales_agent: str,
     customer: str,
@@ -1344,6 +1391,8 @@ def _collect_pair_call_rows(
                         "started_at": "",
                         "duration_s": None,
                         "record_path": "",
+                        "crm_url": "",
+                        "account_id": "",
                     })
                     if not row.get("started_at"):
                         row["started_at"] = c.get("started_at") or c.get("date") or ""
@@ -1353,6 +1402,10 @@ def _collect_pair_call_rows(
                             row["duration_s"] = c.get("audio_duration_s")
                     if not row.get("record_path"):
                         row["record_path"] = c.get("record_path") or ""
+                    if not row.get("crm_url"):
+                        row["crm_url"] = c.get("crm_url") or ""
+                    if not row.get("account_id"):
+                        row["account_id"] = c.get("account_id") or ""
         except Exception:
             pass
 
@@ -1369,6 +1422,8 @@ def _collect_pair_call_rows(
                     "started_at": "",
                     "duration_s": None,
                     "record_path": "",
+                    "crm_url": "",
+                    "account_id": "",
                 })
         except Exception:
             pass
@@ -1387,6 +1442,8 @@ def _collect_pair_call_rows(
                 "started_at": "",
                 "duration_s": None,
                 "record_path": "",
+                "crm_url": "",
+                "account_id": "",
             })
             if not row.get("started_at"):
                 row["started_at"] = getattr(r, "started_at", "") or ""
@@ -1394,6 +1451,10 @@ def _collect_pair_call_rows(
                 row["duration_s"] = getattr(r, "duration_s", None)
             if not row.get("record_path"):
                 row["record_path"] = getattr(r, "record_path", "") or ""
+            if not row.get("crm_url"):
+                row["crm_url"] = getattr(r, "crm_url", "") or ""
+            if not row.get("account_id"):
+                row["account_id"] = getattr(r, "account_id", "") or ""
     except Exception:
         pass
 
@@ -1408,6 +1469,8 @@ def _collect_pair_call_rows(
             "started_at": row.get("started_at") or "",
             "duration_s": row.get("duration_s"),
             "record_path": row.get("record_path") or "",
+            "crm_url": row.get("crm_url") or "",
+            "account_id": row.get("account_id") or "",
             "transcript_path": tx_path,
             "transcript_status": transcript_status,
         })
@@ -1443,6 +1506,92 @@ def _format_call_status_index(
             line += f" | NOTES_STATUS: {note_status}"
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+_AUTO_TRANSCRIBE_MIN_DURATION_S = 60
+
+
+def _auto_queue_untranscribed(
+    rows: list[dict],
+    db: Session,
+    sales_agent: str,
+    customer: str,
+) -> list[str]:
+    """For each NO_TRANSCRIPT call with audio in S3, queue a transcription job.
+
+    Only runs if call has a record_path, crm_url, and duration >= threshold.
+    Skips calls that already have a pending/running job.
+    Returns list of call_ids that were newly queued.
+    """
+    import uuid as _uuid
+    import json as _json
+    from ui.backend.models.job import Job, JobStatus
+    from ui.backend.services.job_runner import submit_job_no_stream, check_s3_exists
+
+    candidates = [
+        r for r in rows
+        if r.get("transcript_status") == "NO_TRANSCRIPT"
+        and r.get("record_path")
+        and r.get("crm_url")
+        and (r.get("duration_s") or 0) >= _AUTO_TRANSCRIBE_MIN_DURATION_S
+    ]
+    if not candidates:
+        return []
+
+    pair_slug = f"{sales_agent}/{customer}"
+    queued: list[str] = []
+
+    for row in candidates:
+        call_id = row["call_id"]
+        record_path = row["record_path"]
+        crm_url = row["crm_url"]
+        account_id = row.get("account_id") or ""
+        try:
+            existing = db.exec(
+                select(Job)
+                .where(Job.call_id == call_id)
+                .where(Job.pair_slug == pair_slug)
+                .where(Job.status.in_([JobStatus.pending, JobStatus.running]))
+            ).first()
+            if existing:
+                continue
+        except Exception:
+            continue
+
+        if not check_s3_exists(crm_url, record_path):
+            continue
+
+        extra = {
+            "crm_url": crm_url,
+            "account_id": account_id,
+            "agent": sales_agent,
+            "customer": customer,
+            "record_path": record_path,
+            "smooth_model": "gpt-5.4",
+        }
+        job = Job(
+            id=str(_uuid.uuid4()),
+            audio_path=record_path,
+            pair_slug=pair_slug,
+            call_id=call_id,
+            speaker_a="SPEAKER_00",
+            speaker_b="SPEAKER_01",
+            status=JobStatus.pending,
+            extra_config=_json.dumps(extra),
+        )
+        try:
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+            submit_job_no_stream(job)
+            queued.append(call_id)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    return queued
 
 
 def _build_merged_transcript_content(
@@ -2805,6 +2954,18 @@ def _resolve_input(source: str, agent_id: Optional[str],
     if source == "merged_transcript":
         pair_dir = ui_data / "agents" / sales_agent / customer
         pair_dir.mkdir(parents=True, exist_ok=True)
+
+        # Fire-and-forget: queue transcription for any call that has audio in S3 but no transcript
+        def _auto_queue_bg(_agent=sales_agent, _customer=customer):
+            try:
+                from ui.backend.database import engine as _bg_engine
+                with Session(_bg_engine) as bg_db:
+                    bg_rows = _collect_pair_call_rows(_agent, _customer, bg_db)
+                    _auto_queue_untranscribed(bg_rows, bg_db, _agent, _customer)
+            except Exception:
+                pass
+        threading.Thread(target=_auto_queue_bg, daemon=True).start()
+
         cutoff_call_id = _norm_call_id(call_id)
         if merged_scope_norm == "all":
             cutoff_call_id = ""
@@ -2822,6 +2983,10 @@ def _resolve_input(source: str, agent_id: Optional[str],
                 cached = merged.read_text(encoding="utf-8").strip()
                 # Rich merged transcript cache marker
                 if "CALL STATUS INDEX" in cached[:2000]:
+                    # If cached transcript was built while no transcripts existed, but
+                    # transcripts are now available, force a rebuild.
+                    if _merged_cache_needs_refresh(cached, pair_dir, upto_call_id=cutoff_call_id):
+                        raise RuntimeError("stale merged transcript cache")
                     if meta is not None:
                         meta["origin"] = "cache"
                         try:

@@ -939,45 +939,47 @@ def _append_manual_note_push_history(
     if rid:
         _add_row(db.get(PipelineRun, rid))
 
-    if not target_rows:
+    # Always scan siblings — the pipeline upserts notes (same note_id for re-runs of the
+    # same call), so multiple runs can reference the same note_id.  If we only mark the
+    # specified run_id, sibling runs stay note_sent=False and trigger duplicate CRM sends.
+    try:
+        sibling_rows = db.exec(
+            select(PipelineRun)
+            .where(PipelineRun.call_id == str(note.call_id or ""))
+            .order_by(PipelineRun.started_at.desc())
+            .limit(120)
+        ).all()
+    except Exception:
+        sibling_rows = []
+    wanted_agent = str(note.agent or "").strip().lower()
+    wanted_customer = str(note.customer or "").strip().lower()
+    fallback_done_row: Optional[PipelineRun] = None
+    for row in sibling_rows or []:
+        row_agent = str(getattr(row, "sales_agent", "") or "").strip().lower()
+        row_customer = str(getattr(row, "customer", "") or "").strip().lower()
+        if row_agent != wanted_agent or row_customer != wanted_customer:
+            continue
         try:
-            rows = db.exec(
-                select(PipelineRun)
-                .where(PipelineRun.call_id == str(note.call_id or ""))
-                .order_by(PipelineRun.started_at.desc())
-                .limit(120)
-            ).all()
+            parsed_steps = json.loads(str(getattr(row, "steps_json", "") or "[]"))
         except Exception:
-            rows = []
-        wanted_agent = str(note.agent or "").strip().lower()
-        wanted_customer = str(note.customer or "").strip().lower()
-        matched_with_note: list[PipelineRun] = []
-        matched_done: list[PipelineRun] = []
-        for row in rows or []:
-            row_agent = str(getattr(row, "sales_agent", "") or "").strip().lower()
-            row_customer = str(getattr(row, "customer", "") or "").strip().lower()
-            if row_agent != wanted_agent or row_customer != wanted_customer:
-                continue
-            try:
-                parsed_steps = json.loads(str(getattr(row, "steps_json", "") or "[]"))
-            except Exception:
-                parsed_steps = []
-            has_note = False
-            if isinstance(parsed_steps, list):
-                for step in parsed_steps:
-                    if not isinstance(step, dict):
-                        continue
-                    if str(step.get("note_id") or "").strip() == note_id:
-                        has_note = True
-                        break
-            if has_note:
-                matched_with_note.append(row)
-            if str(getattr(row, "status", "") or "").strip().lower() in {"done", "completed"}:
-                matched_done.append(row)
-        if matched_with_note:
-            _add_row(matched_with_note[0])
-        elif matched_done:
-            _add_row(matched_done[0])
+            parsed_steps = []
+        has_note = False
+        if isinstance(parsed_steps, list):
+            for step in parsed_steps:
+                if not isinstance(step, dict):
+                    continue
+                if str(step.get("note_id") or "").strip() == note_id:
+                    has_note = True
+                    break
+        if has_note:
+            _add_row(row)
+        elif fallback_done_row is None and str(getattr(row, "status", "") or "").strip().lower() in {
+            "done", "completed", "success", "ok", "finished", "cached"
+        }:
+            fallback_done_row = row
+    # Last resort: no run has this note_id in steps_json — mark the first done run.
+    if not target_rows and fallback_done_row is not None:
+        _add_row(fallback_done_row)
 
     updated_run_ids: list[str] = []
     for row in target_rows:
@@ -1524,3 +1526,66 @@ async def rollup_notes(req: NoteRollupRequest):
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
     })
+
+
+# ── Review Queue ─────────────────────────────────────────────────────────────
+
+class ReviewDecisionRequest(BaseModel):
+    action: str          # "approve" | "reject"
+    reason: Optional[str] = None
+
+
+@router.get("/review-queue")
+def list_review_queue(db: Session = Depends(get_session)):
+    """Return runs flagged for review that haven't been actioned yet."""
+    from ui.backend.lib.review_queue import get_review_queue
+    items = get_review_queue(db)
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/review/{run_id}")
+def submit_review_decision(
+    run_id: str,
+    body: ReviewDecisionRequest,
+    db: Session = Depends(get_session),
+):
+    """Approve or reject a run's note for CRM push."""
+    from ui.backend.lib.review_queue import apply_review_decision
+    result = apply_review_decision(
+        run_id=run_id,
+        action=body.action,
+        reason=body.reason or "",
+        db=db,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "Review failed"))
+
+    if body.action == "approve":
+        from ui.backend.models.pipeline_run import PipelineRun
+        run = db.get(PipelineRun, run_id)
+        if run:
+            import json as _json
+            steps = []
+            try:
+                steps = _json.loads(run.steps_json or "[]")
+            except Exception:
+                pass
+            note_id = next(
+                (str(s.get("note_id") or "").strip() for s in steps if s.get("note_id")),
+                "",
+            )
+            if note_id:
+                try:
+                    push = send_note_to_crm_internal(
+                        note_id=note_id,
+                        account_id="",
+                        run_id=run_id,
+                        db=db,
+                    )
+                    result["crm_push"] = push
+                except HTTPException as exc:
+                    result["crm_push_error"] = str(exc.detail)
+                except Exception as exc:
+                    result["crm_push_error"] = str(exc)
+
+    return result

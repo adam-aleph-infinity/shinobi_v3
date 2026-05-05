@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     live_state_read_only: bool = False
     # Persist user-profile/permission state in DB so prod/dev stay in sync.
     user_state_use_db: bool = True
-    # Optional compatibility write-through to legacy users.json file.
-    user_state_file_fallback: bool = False
+    # Write-through backup to ui/data/_auth/users.json (belt-and-suspenders).
+    user_state_file_fallback: bool = True
     user_admin_emails: str = "adam@shinobigrp.com,adamleeperelman@gmail.com,adam.p@shinobigrp.com"
     user_seed_dev_viewer_emails: str = "eldad@shinobigrp.com"
     user_default_email: str = ""
@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     dev_sync_timeout_s: int = 25
     dev_sync_auth_header: str = "x-api-token"
     dev_sync_auth_token: str = ""
+    copilot_internal_token: str = ""   # set COPILOT_INTERNAL_TOKEN in .env to enable trigger_pipeline_run
 
     model_config = {"env_file": str(Path(__file__).parent.parent.parent / ".env"), "extra": "ignore"}
 

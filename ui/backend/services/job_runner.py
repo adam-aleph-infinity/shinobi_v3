@@ -430,5 +430,36 @@ def submit_job(job: Job, loop: asyncio.AbstractEventLoop) -> str:
     return job.id
 
 
+def submit_job_no_stream(job: Job) -> str:
+    """Queue a job without an active SSE stream (auto-queue path, no loop required)."""
+    loop = asyncio.new_event_loop()
+    _streams[job.id] = _JobStream()
+    _executor.submit(
+        _run_job,
+        job.id, job.audio_path, job.speaker_a, job.speaker_b,
+        job.pair_slug, job.call_id, loop, job.extra_config,
+    )
+    return job.id
+
+
+def check_s3_exists(crm_url: str, record_path: str) -> bool:
+    """Return True if the S3 object exists (uses head_object, cheaper than presigned URL)."""
+    host = crm_url.replace("https://", "").replace("http://", "").split("/")[0]
+    bucket_info = _CRM_S3_BUCKETS.get(host)
+    if not bucket_info or not record_path:
+        return False
+    bucket, region = bucket_info
+    try:
+        from shared.crm_download import load_aws_env
+        load_aws_env()
+        import boto3
+        from botocore.config import Config
+        s3 = boto3.client("s3", region_name=region, config=Config(signature_version="s3v4"))
+        s3.head_object(Bucket=bucket, Key=record_path)
+        return True
+    except Exception:
+        return False
+
+
 def get_stream(job_id: str) -> Optional[_JobStream]:
     return _streams.get(job_id)
