@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     dev_sync_timeout_s: int = 25
     dev_sync_auth_header: str = "x-api-token"
     dev_sync_auth_token: str = ""
+    copilot_internal_token: str = ""   # set COPILOT_INTERNAL_TOKEN in .env to enable trigger_pipeline_run
 
     model_config = {"env_file": str(Path(__file__).parent.parent.parent / ".env"), "extra": "ignore"}
 

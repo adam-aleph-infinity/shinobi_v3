@@ -886,6 +886,31 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         {
             "type": "function",
             "function": {
+                "name": "trigger_pipeline_run",
+                "description": (
+                    "Trigger a pipeline to run for a specific agent/customer/call. "
+                    "Returns immediately with a run_id; the pipeline executes in the background. "
+                    "Use get_run(run_id) to check progress. "
+                    "Requires COPILOT_INTERNAL_TOKEN to be set in .env. "
+                    "Always confirm with the user before triggering a run."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pipeline_id": {"type": "string"},
+                        "sales_agent": {"type": "string", "default": ""},
+                        "customer": {"type": "string", "default": ""},
+                        "call_id": {"type": "string", "default": ""},
+                        "force": {"type": "boolean", "default": False, "description": "Bypass step cache and re-run all steps"},
+                    },
+                    "required": ["pipeline_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "query_db",
                 "description": (
                     "Run a read-only SQL SELECT query against the app database for analysis and reporting. "
@@ -2231,6 +2256,86 @@ def _tool_push_note_to_crm(args: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "note_id": note_id, "result": result}
 
 
+async def _tool_trigger_pipeline_run(args: dict[str, Any]) -> dict[str, Any]:
+    import httpx as _httpx
+
+    pipeline_id = str(args.get("pipeline_id") or "").strip()
+    if not pipeline_id:
+        raise HTTPException(400, "pipeline_id is required")
+
+    _, pdef = pipelines_router._find_file(pipeline_id)
+
+    token = settings.copilot_internal_token
+    if not token:
+        raise HTTPException(
+            400,
+            "COPILOT_INTERNAL_TOKEN is not configured. "
+            "Set it in .env to enable trigger_pipeline_run. "
+            "Alternatively use run_shell_command (super_admin) to trigger runs manually.",
+        )
+
+    body = {
+        "sales_agent": str(args.get("sales_agent") or ""),
+        "customer": str(args.get("customer") or ""),
+        "call_id": str(args.get("call_id") or ""),
+        "run_origin": "webhook",
+        "force": bool(args.get("force", False)),
+    }
+
+    base_url = settings.crm_webhook_internal_base_url.rstrip("/")
+    url = f"{base_url}/pipelines/{pipeline_id}/run"
+    run_id: str = ""
+
+    try:
+        async with _httpx.AsyncClient(timeout=15.0) as client:
+            async with client.stream("POST", url, json=body, headers={"x-copilot-token": token}) as resp:
+                if resp.status_code != 200:
+                    body_text = await resp.aread()
+                    raise HTTPException(
+                        resp.status_code,
+                        f"Pipeline run endpoint returned {resp.status_code}: {body_text[:500]}",
+                    )
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:].strip())
+                    except Exception:
+                        continue
+                    event_data = event.get("data") or {}
+                    candidate = str(event_data.get("run_id") or "")
+                    if candidate:
+                        run_id = candidate
+                        break
+                    if event.get("type") in {"pipeline_start", "pipeline_error", "error"}:
+                        break
+    except _httpx.RequestError as exc:
+        raise HTTPException(500, f"Could not reach pipeline run endpoint: {exc}") from exc
+
+    if not run_id:
+        raise HTTPException(500, "Pipeline run started but run_id was not returned in the first SSE events")
+
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "pipeline_id": pipeline_id,
+        "pipeline_name": str(pdef.get("name") or pipeline_id),
+        "sales_agent": body["sales_agent"],
+        "customer": body["customer"],
+        "call_id": body["call_id"],
+        "message": f"Pipeline started. Use get_run('{run_id}') to check progress.",
+    }
+
+
+def _tool_trigger_pipeline_run_sync(args: dict[str, Any]) -> dict[str, Any]:
+    import asyncio as _asyncio
+    new_loop = _asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(_tool_trigger_pipeline_run(args))
+    finally:
+        new_loop.close()
+
+
 def _tool_query_db(args: dict[str, Any]) -> dict[str, Any]:
     sql = str(args.get("sql") or "").strip()
     if not sql:
@@ -2636,6 +2741,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "list_notes": _tool_list_notes,
     "create_note": _tool_create_note,
     "push_note_to_crm": _tool_push_note_to_crm,
+    "trigger_pipeline_run": _tool_trigger_pipeline_run_sync,
     "query_db": _tool_query_db,
 }
 
