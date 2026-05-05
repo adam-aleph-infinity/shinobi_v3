@@ -34,6 +34,10 @@ def _migrate():
             "ALTER TABLE pipeline_run ADD COLUMN run_origin TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE pipeline_run ADD COLUMN note_sent BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE pipeline_run ADD COLUMN note_sent_at TIMESTAMP",
+            "ALTER TABLE pipeline_run ADD COLUMN review_required BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE pipeline_run ADD COLUMN review_status TEXT",
+            "ALTER TABLE pipeline_run ADD COLUMN review_note TEXT",
+            "ALTER TABLE pipeline_run ADD COLUMN reviewed_at TIMESTAMP",
         ]:
             _exec_safe(conn, ddl)
 
@@ -51,6 +55,8 @@ def _migrate():
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_run_origin ON pipeline_run (run_origin)",
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_note_sent ON pipeline_run (note_sent)",
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_note_sent_at ON pipeline_run (note_sent_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_run_review_required ON pipeline_run (review_required)",
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_run_review_status ON pipeline_run (review_status)",
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_pipeline_agent_customer_started ON pipeline_run (pipeline_id, sales_agent, customer, started_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_pipeline_agent_customer_call_started ON pipeline_run (pipeline_id, sales_agent, customer, call_id, started_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_note_call_id ON note (call_id)",

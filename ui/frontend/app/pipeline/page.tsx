@@ -4866,12 +4866,14 @@ function PipelineCanvas() {
     runAbortRef.current = ctrl;
     setRunning(true);
     setRunError("");
-    const freshStatuses = Array.from(
-      { length: runtimeGraph.stepToProcNodeIds.length },
-      () => "pending" as RuntimeStatus,
-    );
-    setStepStatuses(freshStatuses);
-    setStepInputReady(Array.from({ length: runtimeGraph.stepToProcNodeIds.length }, () => false));
+    if (executeStepIndices.length > 0) {
+      const targetSet = new Set(executeStepIndices);
+      setStepStatuses(prev => prev.map((s, i) => (targetSet.has(i) ? "pending" as RuntimeStatus : s)));
+      setStepInputReady(prev => prev.map((v, i) => (targetSet.has(i) ? false : v)));
+    } else {
+      setStepStatuses(Array.from({ length: runtimeGraph.stepToProcNodeIds.length }, () => "pending" as RuntimeStatus));
+      setStepInputReady(Array.from({ length: runtimeGraph.stepToProcNodeIds.length }, () => false));
+    }
     setSelectedNodeId(null);
     setLogsExpanded(true);
     setLogsCollapsed(false);
@@ -5102,7 +5104,6 @@ function PipelineCanvas() {
         appendRunLog("Pipeline run completed");
       }
       mutateCache();
-      mutateRuns();
       mutateLivePipelineState();
     } catch (e: any) {
       if (e?.name !== "AbortError") {
@@ -5111,6 +5112,7 @@ function PipelineCanvas() {
         appendRunLog(`Run failed: ${String(e?.message || "unknown error")}`, "error");
       }
     } finally {
+      try { await mutateRuns(); } catch { /* best-effort */ }
       setRunning(false);
     }
   }

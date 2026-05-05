@@ -46,6 +46,7 @@ from ui.backend.routers.webhooks import (
     router as webhooks_router,
     ensure_live_dispatcher_started,
 )
+from ui.backend.routers.ops import router as ops_router
 from ui.backend.services import log_buffer, app_logging
 from ui.backend.version import APP_VERSION
 
@@ -137,6 +138,7 @@ app.include_router(history_router)
 app.include_router(assistant_router)
 app.include_router(users_router)
 app.include_router(webhooks_router)
+app.include_router(ops_router)
 
 
 @app.on_event("startup")

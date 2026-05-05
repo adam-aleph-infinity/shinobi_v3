@@ -1526,3 +1526,66 @@ async def rollup_notes(req: NoteRollupRequest):
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
     })
+
+
+# ── Review Queue ─────────────────────────────────────────────────────────────
+
+class ReviewDecisionRequest(BaseModel):
+    action: str          # "approve" | "reject"
+    reason: Optional[str] = None
+
+
+@router.get("/review-queue")
+def list_review_queue(db: Session = Depends(get_session)):
+    """Return runs flagged for review that haven't been actioned yet."""
+    from ui.backend.lib.review_queue import get_review_queue
+    items = get_review_queue(db)
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/review/{run_id}")
+def submit_review_decision(
+    run_id: str,
+    body: ReviewDecisionRequest,
+    db: Session = Depends(get_session),
+):
+    """Approve or reject a run's note for CRM push."""
+    from ui.backend.lib.review_queue import apply_review_decision
+    result = apply_review_decision(
+        run_id=run_id,
+        action=body.action,
+        reason=body.reason or "",
+        db=db,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "Review failed"))
+
+    if body.action == "approve":
+        from ui.backend.models.pipeline_run import PipelineRun
+        run = db.get(PipelineRun, run_id)
+        if run:
+            import json as _json
+            steps = []
+            try:
+                steps = _json.loads(run.steps_json or "[]")
+            except Exception:
+                pass
+            note_id = next(
+                (str(s.get("note_id") or "").strip() for s in steps if s.get("note_id")),
+                "",
+            )
+            if note_id:
+                try:
+                    push = send_note_to_crm_internal(
+                        note_id=note_id,
+                        account_id="",
+                        run_id=run_id,
+                        db=db,
+                    )
+                    result["crm_push"] = push
+                except HTTPException as exc:
+                    result["crm_push_error"] = str(exc.detail)
+                except Exception as exc:
+                    result["crm_push_error"] = str(exc)
+
+    return result
