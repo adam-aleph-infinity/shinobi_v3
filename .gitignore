@@ -56,3 +56,19 @@ Thumbs.db
 
 # Agent orchestration DB (local state, not for git)
 .agent-orchestration/
+
+# Multi-agent coordination (runtime state, not for git)
+.agents/
+activeContext.md
+llm_talk.txt
+
+# Local data archives
+tony_bonney_pair.tgz
+
+# Runtime SQLite DB (dev/local only; production DB lives on VM)
+ui/data/app.db
+
+# Runtime automation and webhook configs (local state)
+ui/data/_automations/
+ui/data/_webhooks/
+ui/data/webhook_test/
