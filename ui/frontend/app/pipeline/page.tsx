@@ -3367,9 +3367,11 @@ function PipelineCanvas() {
         if (!ag) return n;
         const prevAgentName = String(d.agentName || "");
         const prevLabel = String(d.label || "");
-        const shouldSyncLabel = !prevLabel || prevLabel === ag.name || prevLabel === aid;
-        const nextLabel = shouldSyncLabel ? ag.name : prevLabel;
-        if (prevAgentName === ag.name && String(d.agentClass || "") === String(ag.agent_class || "") && prevLabel === nextLabel) {
+        const shouldSyncName  = !prevAgentName || prevAgentName === ag.name || prevAgentName === aid;
+        const shouldSyncLabel = !prevLabel     || prevLabel     === ag.name || prevLabel     === aid;
+        const nextAgentName = shouldSyncName  ? ag.name : prevAgentName;
+        const nextLabel     = shouldSyncLabel ? ag.name : prevLabel;
+        if (prevAgentName === nextAgentName && String(d.agentClass || "") === String(ag.agent_class || "") && prevLabel === nextLabel) {
           return n;
         }
         changed = true;
@@ -3377,7 +3379,7 @@ function PipelineCanvas() {
           ...n,
           data: {
             ...d,
-            agentName: ag.name,
+            agentName: nextAgentName,
             agentClass: ag.agent_class ?? "",
             label: nextLabel,
           } satisfies PipelineNodeData,
@@ -5557,8 +5559,11 @@ function PipelineCanvas() {
     // This prevents allAgents SWR re-fetches from stomping a name the user is mid-edit.
     if (agentDraftLoadedFor.current === loadKey && a) return;
 
+    // Prefer the node's current display name (set by inline/header renames) over the
+    // stale library name — the library won't reflect unsaved edits.
+    const nodeAgentName = String((selData as PipelineNodeData | null)?.agentName || "").trim();
     setAgentDraft({
-      name:          a?.name          ?? "",
+      name:          nodeAgentName  || (a?.name ?? ""),
       description:   a?.description   ?? "",
       agent_class:   a?.agent_class   ?? "",
       model:         a?.model         ?? "gpt-5.4",
@@ -6600,6 +6605,23 @@ function PipelineCanvas() {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
               {/* Left: settings */}
               <div className="lg:col-span-3 min-h-0 overflow-y-auto pr-1 space-y-2.5">
+                <PropertiesSection title="Name">
+                  <input
+                    key={`agent-name-${selectedNode.id}-${agId}`}
+                    defaultValue={String(selData.agentName || "")}
+                    onChange={e => {
+                      const next = e.target.value;
+                      markElementMutation();
+                      setAgentDraft(f => f ? { ...f, name: next } : f);
+                    }}
+                    onBlur={e => {
+                      const next = e.target.value;
+                      updateNodeData(selectedNode.id, { agentName: next, label: next });
+                    }}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                    placeholder="Agent name…"
+                  />
+                </PropertiesSection>
                 {!agId && (
                   <PropertiesSection title="Agent">
                     <button
@@ -6607,19 +6629,6 @@ function PipelineCanvas() {
                       className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-dashed border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 text-xs transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" /> Create agent for this node
-                    </button>
-                  </PropertiesSection>
-                )}
-                {agId && (
-                  <PropertiesSection title="Agent">
-                    <button
-                      onClick={handleDeleteAgent}
-                      disabled={agentDeleting}
-                      title="Permanently delete this agent"
-                      className="w-full flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40"
-                    >
-                      {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                      Delete agent
                     </button>
                   </PropertiesSection>
                 )}
