@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { useUserProfile } from "@/lib/user-profile";
-import { formatLocalTime, parseServerDate } from "@/lib/time";
+import { formatLocalTime, parseServerDate, utcHmsToLocal } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { SectionContent } from "@/components/shared/SectionCards";
@@ -1480,6 +1480,12 @@ function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLog
     }
     const s = String(value || "").trim();
     if (!s) return "—";
+    if (/^\d{2}:\d{2}:\d{2}$/.test(s)) {
+      return utcHmsToLocal(s);
+    }
+    if (/^\d{2}:\d{2}:\d{2}\.\d+$/.test(s)) {
+      return utcHmsToLocal(s.slice(0, 8));
+    }
     const parsed = parseServerDate(s);
     return parsed ? formatLocalTime(parsed, true) : s;
   };
