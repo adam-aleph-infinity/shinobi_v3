@@ -1788,7 +1788,7 @@ function PipelineCanvas() {
 
   // Backend data
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
-  const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
+  const { data: pipelinesData, error: pipelinesError } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
 
   const profileEmailKey = String(profile?.email || "").trim().toLowerCase();
@@ -5214,6 +5214,9 @@ function PipelineCanvas() {
 
   useEffect(() => {
     if (!pendingOpenRunPayload) return;
+    // Wait until pipeline list fetch is resolved (success or error) before consuming
+    // open-run payload, otherwise we can clear it too early and force manual selection.
+    if (pipelinesData === undefined && !pipelinesError) return;
     let cancelled = false;
 
     const targetAgent = String(pendingOpenRunPayload.sales_agent || "").trim();
@@ -5317,15 +5320,20 @@ function PipelineCanvas() {
           setActivePipeline(fallbackPipelineId, fallbackPipelineName || `Historical ${targetRunId.slice(0, 8)}`);
         } catch {
           // If fallback fails we still keep historical run context selected.
+        } finally {
+          if (!cancelled) setPendingOpenRunPayload(null);
         }
       })();
+      return () => {
+        cancelled = true;
+      };
     }
 
     setPendingOpenRunPayload(null);
     return () => {
       cancelled = true;
     };
-  }, [pendingOpenRunPayload, allPipelines, setCustomer, setCallId, setActivePipeline, setPendingRunCallId]);
+  }, [pendingOpenRunPayload, allPipelines, pipelinesData, pipelinesError, setCustomer, setCallId, setActivePipeline, setPendingRunCallId]);
 
   useEffect(() => {
     if (runContextMode !== "new") return;
