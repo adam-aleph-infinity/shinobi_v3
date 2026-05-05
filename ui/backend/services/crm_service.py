@@ -3,7 +3,7 @@ import json
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,110 @@ from ui.backend.config import settings
 _LOCAL_CACHE = settings.ui_data_dir / "all_crm_agents_customers.json"
 _INDEX_FILE = settings.ui_data_dir / "index.json"
 _ALIASES_FILE = Path(__file__).parent.parent / "agent_aliases.json"
+
+# Incremental sync watermark settings
+_WATERMARK_FALLBACK = "01/01/2025 00:00"   # used when no existing data found
+_WATERMARK_OVERLAP_DAYS = 14               # re-fetch this many days before max known call date
+
+
+def _parse_started_at(s: Any) -> datetime | None:
+    """Parse a started_at string in various formats to a naive datetime."""
+    if not s:
+        return None
+    raw = str(s).strip()
+    # Strip timezone suffix before parsing
+    clean = raw.split("+")[0].rstrip("Z").strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(clean, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_crm_date(dt: datetime) -> str:
+    """Format a datetime as the CRM API date_start/date_end string: DD/MM/YYYY HH:MM."""
+    return dt.strftime("%d/%m/%Y %H:%M")
+
+
+def _watermark_for_pair_calls(existing_calls: list[dict]) -> str:
+    """Return a date_start string for the CRM API based on the most recent call in the list.
+
+    Subtracts _WATERMARK_OVERLAP_DAYS as a safety margin so any calls near the boundary
+    are re-fetched and deduplication handles the overlap correctly.
+    Falls back to _WATERMARK_FALLBACK when the list is empty or has no parseable dates.
+    """
+    max_dt: datetime | None = None
+    for c in existing_calls:
+        dt = _parse_started_at(c.get("started_at"))
+        if dt and (max_dt is None or dt > max_dt):
+            max_dt = dt
+    if max_dt is None:
+        return _WATERMARK_FALLBACK
+    watermark = max_dt - timedelta(days=_WATERMARK_OVERLAP_DAYS)
+    return _format_crm_date(watermark)
+
+
+def _watermark_global() -> str:
+    """Return a global date_start for refresh_pairs, based on the last time pairs were synced.
+
+    Queries the DB for MAX(CRMPair.last_synced_at) and subtracts _WATERMARK_OVERLAP_DAYS.
+    Falls back to _WATERMARK_FALLBACK when the table is empty or the query fails.
+    """
+    try:
+        from sqlmodel import Session, select
+        from sqlalchemy import func
+        from ui.backend.database import engine
+        from ui.backend.models.crm import CRMPair
+        with Session(engine) as db:
+            result = db.exec(select(func.max(CRMPair.last_synced_at))).first()
+        if result:
+            max_sync = result if isinstance(result, datetime) else _parse_started_at(str(result))
+            if max_sync:
+                watermark = max_sync - timedelta(days=_WATERMARK_OVERLAP_DAYS)
+                crm_date = _format_crm_date(watermark)
+                print(f"[crm_service] Global watermark: {crm_date} "
+                      f"(last pair sync: {max_sync.strftime('%Y-%m-%d %H:%M')})")
+                return crm_date
+    except Exception as _e:
+        print(f"[crm_service] Warning: could not compute global watermark: {_e}")
+    print(f"[crm_service] Global watermark: falling back to {_WATERMARK_FALLBACK}")
+    return _WATERMARK_FALLBACK
+
+
+def _merge_pairs(existing: list[dict], fresh: list[dict]) -> list[dict]:
+    """Merge incremental (narrow-window) fresh pairs into the existing full cache.
+
+    Existing pairs not present in the fresh window are preserved unchanged.
+    Fresh pairs update existing stats but never decrease call counts (since a narrow window
+    contains fewer calls than the full history). New pairs found in the fresh window are added.
+    """
+    by_key: dict[tuple, dict] = {}
+    for p in existing:
+        key = (_norm_account_id(str(p.get("account_id", ""))), _norm_text(p.get("agent", "")))
+        by_key[key] = dict(p)
+    for p in fresh:
+        key = (_norm_account_id(str(p.get("account_id", ""))), _norm_text(p.get("agent", "")))
+        if key in by_key:
+            ex = by_key[key]
+            # Preserve the higher call count (window count is always ≤ historical)
+            ex["total_calls"]      = max(int(ex.get("total_calls",      0) or 0),
+                                         int(p .get("total_calls",      0) or 0))
+            ex["recorded_calls"]   = max(int(ex.get("recorded_calls",   0) or 0),
+                                         int(p .get("recorded_calls",   0) or 0))
+            ex["total_duration_s"] = max(int(ex.get("total_duration_s", 0) or 0),
+                                         int(p .get("total_duration_s", 0) or 0))
+            # Update financial fields if fresh has them
+            if p.get("ftd_at"):
+                ex["ftd_at"] = p["ftd_at"]
+        else:
+            by_key[key] = dict(p)
+    return list(by_key.values())
 
 
 def _norm_text(value: Any) -> str:
@@ -211,26 +315,33 @@ def seed_db(pairs: list[dict], session, replace_crm_urls: set[str] | None = None
 def refresh_pairs() -> dict:
     """Fetch fresh data from all CRM APIs, save to local file and DB. Returns {count, errors}.
 
-    CRMs that fail (e.g. IP not whitelisted) keep their existing cached data — they are
-    not wiped from the local file or DB just because one refresh attempt blocked.
+    Uses a rolling date watermark so only recent activity is re-fetched from the CRM API.
+    Incremental results are merged with the existing cache so no historical pairs are lost.
+    CRMs that fail (e.g. IP not whitelisted) keep their existing cached data.
     """
     creds = load_credentials()
     errors: list[str] = []
     succeeded_crms: set[str] = set()
     new_pairs: list[dict] = []
 
-    # Load existing cache keyed by crm_url so we can preserve data for blocked CRMs
+    # Load existing cache keyed by crm_url so we can merge and preserve data
     existing_by_crm: dict[str, list[dict]] = {}
     for p in _load_local():
         key = p.get("crm", p.get("crm_url", ""))
         existing_by_crm.setdefault(key, []).append(p)
 
+    date_start = _watermark_global()
+    print(f"[crm_service] refresh_pairs: date_start={date_start} date_end=today")
+
     for crm_url in creds.crm_urls:
         try:
-            pairs = list_agent_customer_pairs(crm_url, creds)
-            new_pairs.extend(pairs)
+            api_pairs = list_agent_customer_pairs(crm_url, creds, date_start=date_start)
+            # Merge incremental results into the full existing cache for this CRM
+            merged = _merge_pairs(existing_by_crm.get(crm_url, []), api_pairs)
+            new_pairs.extend(merged)
             succeeded_crms.add(crm_url)
-            print(f"[crm_service] Fetched {len(pairs)} pairs from {crm_url}")
+            print(f"[crm_service] {crm_url}: fetched {len(api_pairs)} pairs "
+                  f"→ {len(merged)} total after merge")
         except Exception as e:
             # Clean up HTML in the error message (e.g. Cloudflare block pages)
             msg = str(e)
@@ -466,6 +577,26 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
             except Exception as _e:
                 print(f"[crm_service] Discovery {crm}: {_e}")
 
+        # Load existing calls for dedup and watermark computation
+        calls_json_path = pair_dir / "calls.json"
+        existing_calls: list[dict] = []
+        existing_ids: set[str] = set()
+        if calls_json_path.exists():
+            try:
+                existing_calls = json.loads(calls_json_path.read_text())
+                for _c in existing_calls:
+                    _cid = str(_c.get("call_id", ""))
+                    if _cid:
+                        existing_ids.add(_cid)
+            except Exception:
+                existing_calls = []
+                existing_ids = set()
+
+        date_start = _watermark_for_pair_calls(existing_calls)
+        print(f"[crm_service] refresh_calls {agent_norm}/{customer_norm}: "
+              f"date_start={date_start} date_end=today "
+              f"(existing={len(existing_calls)} calls)")
+
         # Step 3: fetch calls — group pairs by CRM so we make one HTTP request
         # per unique CRM (all aliases batched into callers[] in a single call).
         pairs_by_crm: dict[str, set[int]] = defaultdict(set)
@@ -475,14 +606,14 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
             except (ValueError, TypeError):
                 pass
 
-        all_calls: list[dict] = []
-        existing_ids: set[str] = set()
+        new_calls: list[dict] = []  # calls not already in existing_ids
 
         for pair_crm, pair_acc_ints in pairs_by_crm.items():
             try:
-                # Reuse discovery data if already fetched; otherwise fetch now
+                # Reuse discovery data if available (full history, first-discovery only).
+                # Otherwise make an incremental call using the watermark date_start.
                 data = discovery_cache.get(pair_crm) or fetch_accounts(
-                    pair_crm, creds, callers=query_names
+                    pair_crm, creds, callers=query_names, date_start=date_start
                 )
                 for agent_entry in data:
                     fallback_aname = f'{agent_entry["fname"]} {agent_entry["lname"]}'.strip()
@@ -504,7 +635,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                                 continue
                             cid = str(c.get("id", ""))
                             if cid and cid not in existing_ids:
-                                all_calls.append({
+                                new_calls.append({
                                     "call_id":     c["id"],
                                     "account_id":  acc["id"],
                                     "customer":    cname,
@@ -517,7 +648,9 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
             except Exception as _e:
                 print(f"[crm_service] refresh_calls {pair_crm}: {_e}")
 
-        if not all_calls and not existing_ids:
+        all_calls = existing_calls + new_calls
+
+        if not all_calls:
             # Nothing found at all — return a soft error so the caller can surface it
             return {"count": 0, "error": f"No calls found across {len(all_pairs)} CRM(s)"}
 
@@ -530,8 +663,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                 "crm": crm_url_norm, "account_id": int(account_id_norm),
             }, indent=2))
 
-        if all_calls:
-            (pair_dir / "calls.json").write_text(json.dumps(all_calls, indent=2))
+        (pair_dir / "calls.json").write_text(json.dumps(all_calls, indent=2))
 
         # Upsert crm_pair DB row (keyed to the primary crm_url/account_id)
         try:
@@ -564,8 +696,9 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
             print(f"[crm_service] Warning: DB update failed after refresh_calls: {db_err}")
 
         print(f"[crm_service] refresh_calls {agent_norm}/{customer_norm}: "
-              f"{len(all_calls)} calls from {len(pairs_by_crm)} CRM(s) "
-              f"({len(query_names)} name(s) batched)")
+              f"date_start={date_start}, {len(new_calls)} new + {len(existing_calls)} existing "
+              f"= {len(all_calls)} total, {len(pairs_by_crm)} CRM(s), "
+              f"{len(query_names)} name(s) batched")
 
         return {"count": len(all_calls), "error": None}
 
