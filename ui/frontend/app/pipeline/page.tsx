@@ -1838,6 +1838,7 @@ function PipelineCanvas() {
       ? `/api/crm/call-dates?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
       : null,
     fetcher,
+    { refreshInterval: 8000, revalidateOnFocus: true },
   );
   const { data: transcriptCalls } = useSWR<FinalTranscriptCall[]>(
     salesAgent && customer
@@ -1850,6 +1851,7 @@ function PipelineCanvas() {
       ? `/api/crm/calls-by-pair?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
       : null,
     fetcher,
+    { refreshInterval: 8000, revalidateOnFocus: true },
   );
   const allAgents   = agentsData   ?? [];
   const allPipelines = pipelinesData ?? [];
@@ -3338,19 +3340,35 @@ function PipelineCanvas() {
       exitHistoricalRunContext(true);
       return;
     }
+    const runPipelineId = String(run.pipeline_id || "").trim();
+    const runPipelineName = String(run.pipeline_name || "").trim();
+    const runAgent = String(run.sales_agent || "").trim();
+    const runCustomer = String(run.customer || "").trim();
+    const runCallId = inferRunCallIdFromRecord(run);
+
     setCanvasLocked(false);
     setRunContextMode("historical");
     setSelectedCacheRunId(rid);
     setCurrentRunId(rid);
-    const runAgent = String(run.sales_agent || "").trim();
-    const runCustomer = String(run.customer || "").trim();
     if (runAgent && runCustomer && (runAgent !== salesAgent || runCustomer !== customer)) {
       setCustomer(runCustomer, runAgent);
     }
-    const runCallId = inferRunCallIdFromRecord(run);
     if (runCallId) {
       setPendingRunCallId(runCallId);
       setCallId(runCallId);
+    }
+    // If the run belongs to a different pipeline than what's currently loaded (or nothing
+    // is loaded), kick off the full pipeline-load flow so the canvas graph appears.
+    if (runPipelineId !== pipelineId || (!pipelineId && runPipelineName)) {
+      setPendingOpenRunPayload({
+        source: "history_sidebar",
+        run_id: rid,
+        pipeline_id: runPipelineId,
+        pipeline_name: runPipelineName,
+        sales_agent: runAgent,
+        customer: runCustomer,
+        call_id: runCallId,
+      });
     }
   }, [
     runContextMode,
@@ -3361,6 +3379,8 @@ function PipelineCanvas() {
     salesAgent,
     customer,
     setCustomer,
+    pipelineId,
+    setPendingOpenRunPayload,
   ]);
 
   const markElementMutation = useCallback(() => {
