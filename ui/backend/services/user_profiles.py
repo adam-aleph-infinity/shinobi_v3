@@ -277,7 +277,17 @@ def _load_store_locked() -> dict[str, Any]:
     if _user_state_use_db():
         db_store = _load_store_from_db_locked()
         if db_store is not None:
+            db_users = db_store.get("users") if isinstance(db_store.get("users"), list) else []
+            if db_users:
+                return db_store
+            # Table exists but empty — migrate from file if any users are there
+            file_store = _load_store_from_file_locked()
+            file_users = file_store.get("users") if isinstance(file_store.get("users"), list) else []
+            if file_users:
+                _save_store_to_db_locked(file_store)
+                return file_store
             return db_store
+        # Table missing (exception) — bootstrap from file
         file_store = _load_store_from_file_locked()
         users = file_store.get("users") if isinstance(file_store.get("users"), list) else []
         if users:
