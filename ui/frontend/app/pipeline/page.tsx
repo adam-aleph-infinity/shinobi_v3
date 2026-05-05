@@ -1999,6 +1999,7 @@ function PipelineCanvas() {
   const INIT_STAGES: NodeKind[] = ["input", "processing", "output"];
   const [stages, setStages]              = useState<NodeKind[]>(INIT_STAGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [multiSelectedNodeIds, setMultiSelectedNodeIds] = useState<string[]>([]);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
   const [showBundleImport, setShowBundleImport] = useState(false);
   const [bundleImportText, setBundleImportText] = useState("");
@@ -3686,12 +3687,17 @@ function PipelineCanvas() {
     const handler = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey;
       if (!ctrl) return;
+      // Skip if focus is in an input/textarea (let normal copy/paste work)
+      const tag = (document.activeElement?.tagName ?? "").toLowerCase();
+      const isInput = tag === "input" || tag === "textarea" || (document.activeElement as HTMLElement)?.isContentEditable;
       if (e.key === "z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
       if ((e.key === "y") || (e.key === "z" && e.shiftKey)) { e.preventDefault(); handleRedo(); }
+      if (e.key === "c" && !isInput) { e.preventDefault(); void handleCopySelectedNodes(); }
+      if (e.key === "v" && !isInput) { e.preventDefault(); void handlePasteFromClipboard(); }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo]);
+  }, [handleUndo, handleRedo, handleCopySelectedNodes, handlePasteFromClipboard]);
 
   // Snap processing/output nodes to the nearest same-type lane on drag end
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
@@ -4176,42 +4182,72 @@ function PipelineCanvas() {
     showToast(`Folder "${folderName}" deleted`, true);
   }
 
-  async function commitFolderRename(folderId: string) {
+  async function commitFolderRename(folderId: string, currentLabel: string) {
     const newName = renameDraft.trim();
+    // Clear both immediately — prevents double-call from onBlur firing after Enter
     setRenamingFolderId(null);
-    if (!newName) return;
+    setRenameDraft("");
+    if (!newName || newName === currentLabel.trim()) return;
 
-    // Resolve orphan folders (name-only, not yet in DB) by creating them first
-    let realFolderId = folderId;
-    if (folderId.startsWith("__name__") || folderId.startsWith("__orphan__")) {
-      const oldName = folderId.replace(/^__(?:name|orphan)__/, "");
-      if (oldName === newName) return;
-      const createRes = await fetch("/api/pipelines/folders", {
+    // Ensure the folder exists in the DB before patching.
+    // Handles: __name__xxx, __orphan__xxx, and stale UUIDs (folder deleted from DB).
+    const ensureFolder = async (id: string, name: string): Promise<string | null> => {
+      const res = await fetch("/api/pipelines/folders", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: oldName }),
+        body: JSON.stringify({ name }),
       });
-      if (!createRes.ok) { showToast("Could not rename folder", false); return; }
-      const created: PipelineFolderDef = await createRes.json();
-      realFolderId = created.id;
+      if (!res.ok) return null;
+      const f: PipelineFolderDef = await res.json();
+      return f.id;
+    };
+
+    let realFolderId = folderId;
+
+    // Step 1: resolve synthetic keys → real DB ID
+    if (folderId.startsWith("__name__") || folderId.startsWith("__orphan__")) {
+      const resolvedId = await ensureFolder(folderId, currentLabel.trim());
+      if (!resolvedId) { showToast("Could not rename folder (create failed)", false); return; }
+      realFolderId = resolvedId;
     }
 
-    const existing = pipelineFolders.find(f => f.id === realFolderId);
-    if (existing?.name === newName) return;
-
-    // Optimistic update — show new name immediately
+    // Step 2: optimistic update
     void mutate(
       "/api/pipelines/folders",
       (pipelineFoldersData ?? []).map(f => f.id === realFolderId ? { ...f, name: newName } : f),
       false,
     );
 
-    const res = await fetch(`/api/pipelines/folders/${realFolderId}`, {
+    // Step 3: PATCH
+    let res = await fetch(`/api/pipelines/folders/${realFolderId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: newName }),
     });
+
+    // Step 4: 404 means folder UUID doesn't exist in DB → create it then retry
+    if (res.status === 404) {
+      const resolvedId = await ensureFolder(realFolderId, currentLabel.trim());
+      if (!resolvedId) {
+        void mutate("/api/pipelines/folders");
+        showToast("Could not rename folder (404)", false);
+        return;
+      }
+      realFolderId = resolvedId;
+      // Update optimistic cache with the new real ID
+      void mutate(
+        "/api/pipelines/folders",
+        (pipelineFoldersData ?? []).map(f => f.id === realFolderId ? { ...f, name: newName } : f),
+        false,
+      );
+      res = await fetch(`/api/pipelines/folders/${realFolderId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName }),
+      });
+    }
+
     if (!res.ok) {
-      void mutate("/api/pipelines/folders"); // revert
-      showToast("Could not rename folder", false);
+      void mutate("/api/pipelines/folders");
+      const msg = res.status === 403 ? "No permission to rename this folder" : `Could not rename folder (${res.status})`;
+      showToast(msg, false);
       return;
     }
     void mutate("/api/pipelines");
@@ -4549,6 +4585,95 @@ function PipelineCanvas() {
       }
     } catch {
       showToast("Network error — could not export bundle", false);
+    }
+  }
+
+  // Copy selected nodes (or full pipeline if nothing selected) as a bundle to clipboard
+  async function handleCopySelectedNodes() {
+    if (canvasLocked) return;
+    const idsToUse = multiSelectedNodeIds.length > 0 ? multiSelectedNodeIds : null;
+    const processingNodes = nodes.filter(
+      n => n.type === "processing" && (n.data as PipelineNodeData).agentId &&
+        (!idsToUse || idsToUse.includes(n.id))
+    );
+    if (processingNodes.length === 0) {
+      // Fall back to full bundle export
+      await handleCopyPipelineBundle();
+      return;
+    }
+    const agentIds = processingNodes.map(n => (n.data as PipelineNodeData).agentId).filter(Boolean) as string[];
+    const bundleAgents = allAgents.filter(a => agentIds.includes(a.id));
+    const partialSteps = processingNodes
+      .sort((a, b) => {
+        const da = a.data as PipelineNodeData, db = b.data as PipelineNodeData;
+        return da.stageIndex !== db.stageIndex ? da.stageIndex - db.stageIndex : a.position.x - b.position.x;
+      })
+      .map(n => ({ agent_id: (n.data as PipelineNodeData).agentId as string }));
+    const selNodeIds = new Set(processingNodes.map(n => n.id));
+    const bundle = {
+      bundle_version: 1 as const,
+      bundle_id: crypto.randomUUID(),
+      bundle_name: idsToUse ? `${pipelineName || "Pipeline"} — selection` : (pipelineName || "Pipeline"),
+      created_at: new Date().toISOString(),
+      source: pipelineId ? { pipeline_id: pipelineId, pipeline_name: pipelineName || "" } : undefined,
+      pipeline: {
+        id: crypto.randomUUID(), name: idsToUse ? `${pipelineName || "Pipeline"} — selection` : (pipelineName || "Pipeline"),
+        description: "", folder: pipelineFolder ?? "",
+        steps: partialSteps,
+        canvas: {
+          nodes: processingNodes,
+          edges: edges.filter(e => selNodeIds.has(e.source) && selNodeIds.has(e.target)),
+          stages: [],
+        },
+      },
+      agents: bundleAgents,
+    };
+    const json = JSON.stringify(bundle, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      const label = idsToUse ? `${processingNodes.length} node(s) copied` : "Pipeline copied";
+      showToast(`${label} — Cmd+V on any canvas to paste`, true);
+    } catch {
+      showToast("Clipboard blocked — check browser permissions", false);
+    }
+  }
+
+  // Paste a bundle from clipboard directly onto the canvas (no modal)
+  async function handlePasteFromClipboard() {
+    if (canvasLocked || !canCreatePipelines) return;
+    let text = "";
+    try { text = await navigator.clipboard.readText(); } catch { return; }
+    if (!text.trim()) return;
+    let parsed: PipelineBundle | null = null;
+    try { parsed = JSON.parse(text) as PipelineBundle; } catch { return; }
+    if (!parsed?.pipeline || !Array.isArray(parsed.agents)) return;
+    setBundleImporting(true);
+    try {
+      const res = await fetch("/api/pipelines/bundles/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bundle: parsed, target_folder: pipelineFolder ?? "" }),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        showToast(`Paste failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
+        return;
+      }
+      const out = await res.json() as PipelineBundleImportResponse;
+      void mutate("/api/universal-agents");
+      void mutate("/api/pipelines");
+      void mutate("/api/pipelines/folders");
+      if (out?.pipeline?.id) {
+        loadPipelineToCanvas(out.pipeline.id, {
+          id: out.pipeline.id, name: out.pipeline.name,
+          folder: out.pipeline.folder ?? out.folder ?? "",
+          steps: out.pipeline.steps ?? [], canvas: out.pipeline.canvas,
+        });
+      }
+      showToast(`Pasted: ${out.agents_created} agent(s) imported`, true);
+    } catch {
+      showToast("Network error — paste failed", false);
+    } finally {
+      setBundleImporting(false);
     }
   }
 
@@ -7762,9 +7887,9 @@ function PipelineCanvas() {
                                         autoFocus
                                         value={renameDraft}
                                         onChange={e => setRenameDraft(e.target.value)}
-                                        onBlur={() => void commitFolderRename(section.folderId)}
+                                        onBlur={() => { if (renameDraft.trim()) void commitFolderRename(section.folderId, section.label); }}
                                         onKeyDown={e => {
-                                          if (e.key === "Enter") { e.preventDefault(); void commitFolderRename(section.folderId); }
+                                          if (e.key === "Enter") { e.preventDefault(); void commitFolderRename(section.folderId, section.label); }
                                           if (e.key === "Escape") { setRenamingFolderId(null); }
                                         }}
                                         className="flex-1 min-w-0 bg-gray-800 border border-indigo-500 rounded px-2 py-0.5 text-[11px] text-white focus:outline-none"
@@ -7898,22 +8023,22 @@ function PipelineCanvas() {
                 </button>
               )}
               <button
-                onClick={handleCopyPipelineBundle}
+                onClick={() => void handleCopySelectedNodes()}
                 disabled={canvasLocked}
-                title="Copy full pipeline bundle (workflow + agents)"
+                title="Copy selected nodes (or full pipeline) — Cmd+C"
                 className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ClipboardCopy className="w-3 h-3" />
-                Copy Bundle
+                Copy (Cmd+C)
               </button>
               <button
-                onClick={() => setShowBundleImport(true)}
+                onClick={() => void handlePasteFromClipboard()}
                 disabled={canvasLocked}
-                title="Paste bundle from another environment"
+                title="Paste pipeline from clipboard — Cmd+V"
                 className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ClipboardPaste className="w-3 h-3" />
-                Paste Bundle
+                Paste (Cmd+V)
               </button>
               <div className="flex gap-1 w-full">
                 <button
@@ -8053,6 +8178,7 @@ function PipelineCanvas() {
             onEdgesChange={onEdgesChange}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
+            onSelectionChange={({ nodes: sel }) => setMultiSelectedNodeIds(sel.map(n => n.id))}
             onConnect={onConnect}
             onNodeDragStop={onNodeDragStop}
             isValidConnection={isValidConnectionFn}
