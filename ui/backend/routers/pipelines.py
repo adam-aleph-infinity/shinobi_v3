@@ -2519,7 +2519,7 @@ def patch_pipeline_folder(folder_id: str, req: FolderPatchIn, request: Request, 
     if not row:
         raise HTTPException(404, "Folder not found")
     owner = str(profile.get("email") or "").strip().lower()
-    is_admin = profile.get("role") in ("admin", "super_admin")
+    is_admin = bool(profile.get("is_admin")) or profile.get("role") in ("admin", "super_admin") or bool(profile.get("can_manage_users"))
     if not is_admin and (row.owner_email or "").lower() != owner:
         raise HTTPException(403, "Not authorized to modify this folder")
 
@@ -2602,7 +2602,7 @@ def delete_pipeline_folder_by_id(folder_id: str, request: Request, db: Session =
     if not row:
         raise HTTPException(404, "Folder not found")
     owner = str(profile.get("email") or "").strip().lower()
-    is_admin = profile.get("role") in ("admin", "super_admin")
+    is_admin = bool(profile.get("is_admin")) or profile.get("role") in ("admin", "super_admin") or bool(profile.get("can_manage_users"))
     if not is_admin and (row.owner_email or "").lower() != owner:
         raise HTTPException(403, "Not authorized to delete this folder")
     folder_name = row.name

@@ -4115,18 +4115,33 @@ function PipelineCanvas() {
     if (!canCreatePipelines) { showToast("You do not have permission to create pipeline folders.", false); return false; }
     const name = (rawName ?? newPipelineFolderDraft).trim();
     if (!name) { showToast("Folder name is required", false); return false; }
+
+    // Dismiss modal immediately for speed
+    setShowCreatePipelineFolder(false);
+    setNewPipelineFolderDraft("");
+    setNewFolderColor("");
+
+    // Optimistic insert — temporary entry until real response arrives
+    const tempId = `__temp__${Date.now()}`;
+    const tempFolder: PipelineFolderDef = {
+      id: tempId, name,
+      color: opts?.color ?? newFolderColor ?? null,
+      description: opts?.description ?? null,
+      sort_order: 9999, owner_email: profileEmailKey,
+      pipeline_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    void mutate("/api/pipelines/folders", [...(pipelineFoldersData ?? []), tempFolder], false);
+
     const res = await fetch("/api/pipelines/folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, color: opts?.color ?? newFolderColor, description: opts?.description ?? "" }),
     });
+    void mutate("/api/pipelines/folders"); // revalidate (replaces temp with real record)
     if (!res.ok) { showToast("Could not create folder", false); return false; }
     const created: PipelineFolderDef = await res.json();
-    mutate("/api/pipelines/folders");
-    setShowCreatePipelineFolder(false);
-    setNewPipelineFolderDraft("");
-    setNewFolderColor("");
-    showToast(`Folder "${name}" created`, true);
     return created;
   }
 
@@ -4165,16 +4180,42 @@ function PipelineCanvas() {
     const newName = renameDraft.trim();
     setRenamingFolderId(null);
     if (!newName) return;
-    const existing = pipelineFolders.find(f => f.id === folderId);
+
+    // Resolve orphan folders (name-only, not yet in DB) by creating them first
+    let realFolderId = folderId;
+    if (folderId.startsWith("__name__") || folderId.startsWith("__orphan__")) {
+      const oldName = folderId.replace(/^__(?:name|orphan)__/, "");
+      if (oldName === newName) return;
+      const createRes = await fetch("/api/pipelines/folders", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: oldName }),
+      });
+      if (!createRes.ok) { showToast("Could not rename folder", false); return; }
+      const created: PipelineFolderDef = await createRes.json();
+      realFolderId = created.id;
+    }
+
+    const existing = pipelineFolders.find(f => f.id === realFolderId);
     if (existing?.name === newName) return;
-    const res = await fetch(`/api/pipelines/folders/${folderId}`, {
+
+    // Optimistic update — show new name immediately
+    void mutate(
+      "/api/pipelines/folders",
+      (pipelineFoldersData ?? []).map(f => f.id === realFolderId ? { ...f, name: newName } : f),
+      false,
+    );
+
+    const res = await fetch(`/api/pipelines/folders/${realFolderId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: newName }),
     });
-    if (!res.ok) { showToast("Could not rename folder", false); return; }
-    mutate("/api/pipelines");
-    mutate("/api/pipelines/folders");
-    showToast(`Folder renamed to "${newName}"`, true);
+    if (!res.ok) {
+      void mutate("/api/pipelines/folders"); // revert
+      showToast("Could not rename folder", false);
+      return;
+    }
+    void mutate("/api/pipelines");
+    void mutate("/api/pipelines/folders");
   }
 
   async function reorderFolders(orderedIds: string[]) {
@@ -8381,7 +8422,7 @@ function PipelineCanvas() {
                     value={newPipelineFolderDraft}
                     onChange={(e) => setNewPipelineFolderDraft(e.target.value)}
                     onKeyDown={(e) => {
-                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                      if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         void createPipelineFolder();
                       }
