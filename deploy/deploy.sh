@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_ID="shinobi-v2-prod"
-VM_NAME="shinobi-v3-vm"
+VM_NAME="shinobi-vm"
 ZONE="us-central1-a"
 BRANCH="${1:-main}"
 
