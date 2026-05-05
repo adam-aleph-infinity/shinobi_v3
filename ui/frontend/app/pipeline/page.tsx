@@ -2093,6 +2093,9 @@ function PipelineCanvas() {
     startX: number;
     startWidth: number;
   }>({ active: false, startX: 0, startWidth: 320 });
+  // Stable refs for copy/paste handlers — avoids re-registering keydown listener every render
+  const copySelectedRef = useRef<() => Promise<void>>(async () => {});
+  const pasteFromClipboardRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     return () => {
@@ -3683,6 +3686,10 @@ function PipelineCanvas() {
     markElementMutation();
   }, [setNodes, setEdges, markElementMutation]);
 
+  // Keep refs current each render so keydown handler always calls latest version
+  copySelectedRef.current = handleCopySelectedNodes;
+  pasteFromClipboardRef.current = handlePasteFromClipboard;
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey;
@@ -3692,12 +3699,12 @@ function PipelineCanvas() {
       const isInput = tag === "input" || tag === "textarea" || (document.activeElement as HTMLElement)?.isContentEditable;
       if (e.key === "z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
       if ((e.key === "y") || (e.key === "z" && e.shiftKey)) { e.preventDefault(); handleRedo(); }
-      if (e.key === "c" && !isInput) { e.preventDefault(); void handleCopySelectedNodes(); }
-      if (e.key === "v" && !isInput) { e.preventDefault(); void handlePasteFromClipboard(); }
+      if (e.key === "c" && !isInput) { e.preventDefault(); void copySelectedRef.current(); }
+      if (e.key === "v" && !isInput) { e.preventDefault(); void pasteFromClipboardRef.current(); }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo, handleCopySelectedNodes, handlePasteFromClipboard]);
+  }, [handleUndo, handleRedo]);
 
   // Snap processing/output nodes to the nearest same-type lane on drag end
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
@@ -8178,7 +8185,12 @@ function PipelineCanvas() {
             onEdgesChange={onEdgesChange}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
-            onSelectionChange={({ nodes: sel }) => setMultiSelectedNodeIds(sel.map(n => n.id))}
+            onSelectionChange={({ nodes: sel }) => {
+              const ids = sel.map(n => n.id);
+              setMultiSelectedNodeIds(prev =>
+                prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids
+              );
+            }}
             onConnect={onConnect}
             onNodeDragStop={onNodeDragStop}
             isValidConnection={isValidConnectionFn}
