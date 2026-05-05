@@ -3367,7 +3367,7 @@ function PipelineCanvas() {
         if (!ag) return n;
         const prevAgentName = String(d.agentName || "");
         const prevLabel = String(d.label || "");
-        const shouldSyncLabel = !prevLabel || prevLabel === prevAgentName || prevLabel === aid;
+        const shouldSyncLabel = !prevLabel || prevLabel === ag.name || prevLabel === aid;
         const nextLabel = shouldSyncLabel ? ag.name : prevLabel;
         if (prevAgentName === ag.name && String(d.agentClass || "") === String(ag.agent_class || "") && prevLabel === nextLabel) {
           return n;
@@ -8305,43 +8305,6 @@ function PipelineCanvas() {
                   <X className="w-6 h-6" />
                 </button>
                 <div className="h-full w-full rounded-[inherit] overflow-hidden flex flex-col">
-                  <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
-                    <div className="min-w-0">
-                      {canvasLocked ? (
-                        <div className="w-[min(58vw,680px)] max-w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-sm text-white font-semibold truncate">
-                          {selKind === "processing" && agentDraft
-                            ? agentDraft.name
-                            : String((selectedNode?.data as PipelineNodeData | undefined)?.label || "Element")}
-                        </div>
-                      ) : (
-                        <input
-                          value={
-                            selKind === "processing" && agentDraft
-                              ? agentDraft.name
-                              : String((selectedNode?.data as PipelineNodeData | undefined)?.label || "Element")
-                          }
-                          onChange={(e) => {
-                            if (!selectedNode) return;
-                            const next = e.target.value;
-                            if (selKind === "processing" && agentDraft) {
-                              setAgentDraft((prev) => (prev ? { ...prev, name: next } : prev));
-                            }
-                          }}
-                          onBlur={(e) => {
-                            if (!selectedNode) return;
-                            const next = e.target.value;
-                            const nodeData = selectedNode.data as PipelineNodeData;
-                            updateNodeData(selectedNode.id, {
-                              label: next,
-                              ...(selKind === "processing" && nodeData.agentId ? { agentName: next } : {}),
-                            });
-                          }}
-                          className="w-[min(58vw,680px)] max-w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-sm text-white font-semibold outline-none focus:border-indigo-500"
-                          placeholder="Element name"
-                        />
-                      )}
-                    </div>
-                  </div>
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {renderPanel()}
                   </div>
