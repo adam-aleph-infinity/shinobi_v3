@@ -23,6 +23,7 @@ from ui.backend.models.note import Note                     # noqa: F401 — reg
 from ui.backend.models.agent_result import AgentResult      # noqa: F401 — registers table
 from ui.backend.models.uploaded_file import UploadedFile    # noqa: F401 — registers table
 from ui.backend.models.pipeline_run import PipelineRun      # noqa: F401 — registers table
+from ui.backend.models.pipeline_folder import PipelineFolder  # noqa: F401 — registers table
 from ui.backend.models.pipeline_artifact import PipelineArtifact  # noqa: F401 — registers table
 from ui.backend.models.app_state_kv import AppStateKV       # noqa: F401 — registers table
 from ui.backend.models.session_analysis import SessionAnalysis  # noqa: F401 — registers table

@@ -187,12 +187,25 @@ interface UniversalAgent {
   is_default: boolean; created_at: string;
 }
 
+interface PipelineFolderDef {
+  id: string;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  sort_order: number;
+  owner_email?: string | null;
+  pipeline_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 interface PipelineDef {
   id: string;
   name: string;
   description: string;
   scope?: string;
   folder?: string;
+  folder_id?: string;
   workspace_user_email?: string;
   workspace_user_name?: string;
   steps: PipelineStepDef[];
@@ -1874,7 +1887,7 @@ function PipelineCanvas() {
   // Backend data
   const { data: agentsData }    = useSWR<UniversalAgent[]>("/api/universal-agents", fetcher);
   const { data: pipelinesData, error: pipelinesError } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
-  const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
+  const { data: pipelineFoldersData } = useSWR<PipelineFolderDef[]>("/api/pipelines/folders", fetcher);
 
   const profileEmailKey = String(profile?.email || "").trim().toLowerCase();
   useEffect(() => {
@@ -2001,9 +2014,19 @@ function PipelineCanvas() {
   const [pipelinesPanelWidth, setPipelinesPanelWidth] = useState(320);
   const [showCreatePipelineFolder, setShowCreatePipelineFolder] = useState(false);
   const [newPipelineFolderDraft, setNewPipelineFolderDraft] = useState("");
+  const [newFolderColor, setNewFolderColor] = useState("");
   const [collapsedPipelineOwnerIds, setCollapsedPipelineOwnerIds] = useState<Record<string, boolean>>({});
   const [collapsedPipelineFolderIds, setCollapsedPipelineFolderIds] = useState<Record<string, boolean>>({});
   const [dragOverPipelineFolder, setDragOverPipelineFolder] = useState<string | null>(null);
+  // Sidebar search
+  const [pipelineSidebarSearch, setPipelineSidebarSearch] = useState("");
+  // Folder inline rename
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  // Folder drag-to-reorder
+  const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null);
+  const [dragOverFolderReorderId, setDragOverFolderReorderId] = useState<string | null>(null);
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
   const [agentDeleting, setAgentDeleting] = useState(false);
@@ -2165,22 +2188,42 @@ function PipelineCanvas() {
   }, [allPipelines, pipelineId]);
 
   const normalizeFolder = (name?: string | null) => (name ?? "").trim();
-  const pipelineFolders = useMemo(() => {
-    const fromPipelines = allPipelines
-      .map(p => normalizeFolder(p.folder))
-      .filter(Boolean);
-    const fromFolders = (pipelineFoldersData ?? [])
-      .map(f => normalizeFolder(f))
-      .filter(Boolean);
-    return [...new Set([...fromFolders, ...fromPipelines])]
-      .sort((a, b) => a.localeCompare(b));
+  const normalizeOwnerEmail = (value?: string | null) => String(value || "").trim().toLowerCase();
+
+  // Rich folder objects from the DB-backed endpoint, sorted by sort_order
+  const pipelineFolders = useMemo((): PipelineFolderDef[] => {
+    const base = (pipelineFoldersData ?? []);
+    // Identify orphan folder strings from pipelines not yet in DB
+    const knownIds = new Set(base.map(f => f.id));
+    const knownNames = new Set(base.map(f => f.name.toLowerCase()));
+    const orphans: PipelineFolderDef[] = [];
+    const seenOrphan = new Set<string>();
+    for (const p of allPipelines) {
+      const fname = normalizeFolder(p.folder);
+      if (!fname) continue;
+      const fid = p.folder_id ?? "";
+      if ((fid && knownIds.has(fid)) || knownNames.has(fname.toLowerCase())) continue;
+      const key = fname.toLowerCase();
+      if (seenOrphan.has(key)) continue;
+      seenOrphan.add(key);
+      orphans.push({
+        id: `__orphan__${fname}`, name: fname,
+        description: null, color: null,
+        sort_order: 9999 + orphans.length, owner_email: null,
+        pipeline_count: 0, created_at: "", updated_at: "",
+      });
+    }
+    return [...base, ...orphans];
   }, [allPipelines, pipelineFoldersData]);
 
-  const pipelinesByFolder = useMemo(() => {
-    const grouped: Record<string, typeof allPipelines> = {};
+  // Keyed by folder_id (UUID) or "__name__<folderName>" for orphans/legacy
+  const pipelinesByFolderId = useMemo(() => {
+    const grouped: Record<string, PipelineDef[]> = {};
     for (const p of allPipelines) {
-      const folder = normalizeFolder(p.folder);
-      (grouped[folder] ??= []).push(p);
+      const fid = p.folder_id ?? "";
+      const fname = normalizeFolder(p.folder);
+      const key = fid || (fname ? `__name__${fname}` : "");
+      (grouped[key] ??= []).push(p);
     }
     for (const key of Object.keys(grouped)) {
       grouped[key].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
@@ -2188,83 +2231,108 @@ function PipelineCanvas() {
     return grouped;
   }, [allPipelines]);
 
-  const normalizeOwnerEmail = (value?: string | null) => String(value || "").trim().toLowerCase();
   const pipelineOwners = useMemo(() => {
-    const buckets = new Map<
-      string,
-      {
-        ownerKey: string;
-        ownerEmail: string;
-        ownerName: string;
-        pipelines: PipelineDef[];
-      }
-    >();
+    const meEmail = normalizeOwnerEmail(String(profile?.email || ""));
+
+    // Build a folderId → PipelineFolderDef map for sort order lookup
+    const folderById = new Map<string, PipelineFolderDef>();
+    for (const f of pipelineFolders) folderById.set(f.id, f);
+
+    // Resolve which folder a pipeline belongs to (returns folderId key)
+    const getPipelineFolderKey = (p: PipelineDef): string => {
+      if (p.folder_id) return p.folder_id;
+      const fname = normalizeFolder(p.folder);
+      return fname ? `__name__${fname}` : "";
+    };
+
+    const getFolderDef = (key: string): PipelineFolderDef | undefined => {
+      if (!key.startsWith("__name__")) return folderById.get(key);
+      const name = key.slice(8);
+      return pipelineFolders.find(f => f.name.toLowerCase() === name.toLowerCase());
+    };
+
+    const buckets = new Map<string, { ownerKey: string; ownerEmail: string; ownerName: string; pipelines: PipelineDef[] }>();
     for (const p of allPipelines) {
       const ownerEmail = normalizeOwnerEmail(p.workspace_user_email);
       const ownerKey = ownerEmail || "__shared__";
       if (!buckets.has(ownerKey)) {
-        buckets.set(ownerKey, {
-          ownerKey,
-          ownerEmail,
-          ownerName: String(p.workspace_user_name || "").trim(),
-          pipelines: [],
-        });
+        buckets.set(ownerKey, { ownerKey, ownerEmail, ownerName: String(p.workspace_user_name || "").trim(), pipelines: [] });
       }
       const bucket = buckets.get(ownerKey)!;
-      if (!bucket.ownerName) {
-        bucket.ownerName = String(p.workspace_user_name || "").trim();
-      }
+      if (!bucket.ownerName) bucket.ownerName = String(p.workspace_user_name || "").trim();
       bucket.pipelines.push(p);
     }
 
-    const meEmail = normalizeOwnerEmail(String(profile?.email || ""));
+    const searchLower = pipelineSidebarSearch.toLowerCase();
+
     const out = Array.from(buckets.values()).map((bucket) => {
       const byFolder: Record<string, PipelineDef[]> = {};
       for (const p of bucket.pipelines) {
-        const folder = normalizeFolder(p.folder);
-        (byFolder[folder] ??= []).push(p);
+        const key = getPipelineFolderKey(p);
+        (byFolder[key] ??= []).push(p);
       }
       for (const key of Object.keys(byFolder)) {
         byFolder[key].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
       }
-      const folderEntries = Object.keys(byFolder).sort((a, b) => a.localeCompare(b));
+
+      const folderEntries = Object.keys(byFolder).sort((a, b) => {
+        const defA = getFolderDef(a);
+        const defB = getFolderDef(b);
+        const orderA = defA?.sort_order ?? 9999;
+        const orderB = defB?.sort_order ?? 9999;
+        if (orderA !== orderB) return orderA - orderB;
+        const nameA = defA?.name || a;
+        const nameB = defB?.name || b;
+        return nameA.localeCompare(nameB);
+      });
+
       const ownerLabel = bucket.ownerKey === "__shared__"
         ? "Shared"
         : bucket.ownerName || (meEmail && bucket.ownerEmail === meEmail ? "You" : bucket.ownerEmail);
+
       return {
         ownerKey: bucket.ownerKey,
         ownerEmail: bucket.ownerEmail,
         ownerLabel,
         total: bucket.pipelines.length,
-        folders: folderEntries.map((folderKey) => ({
-          key: folderKey,
-          label: folderKey || "Unfiled",
-          pipelines: byFolder[folderKey] || [],
-        })),
+        folders: folderEntries.map((fKey) => {
+          const def = getFolderDef(fKey);
+          const pipelines = (byFolder[fKey] ?? []).filter(p =>
+            !searchLower || p.name.toLowerCase().includes(searchLower)
+          );
+          return {
+            key: fKey,
+            folderId: def?.id ?? fKey,
+            label: def?.name || (fKey.startsWith("__name__") ? fKey.slice(8) : fKey) || "Unfiled",
+            color: def?.color ?? null,
+            description: def?.description ?? null,
+            pipelineCount: def?.pipeline_count ?? pipelines.length,
+            pipelines,
+          };
+        }).filter(f => !searchLower || f.pipelines.length > 0 || !f.key),
       };
     });
 
-    // Add any empty global folders (from pipelineFoldersData) that have no pipelines yet.
-    // They go into the __shared__ bucket so they're always visible regardless of owner.
-    const allKnownFolders = new Set<string>();
-    for (const owner of out) {
-      for (const f of owner.folders) {
-        if (f.key) allKnownFolders.add(f.key.toLowerCase());
-      }
-    }
-    const emptyGlobalFolders = (pipelineFoldersData ?? [])
-      .map(f => normalizeFolder(f))
-      .filter(f => f && !allKnownFolders.has(f.toLowerCase()));
-    if (emptyGlobalFolders.length > 0) {
+    // Empty global folders from DB not yet used by any pipeline
+    const allKnownKeys = new Set<string>();
+    for (const owner of out) for (const f of owner.folders) allKnownKeys.add(f.key);
+    const emptyFolders = pipelineFolders.filter(f =>
+      !allKnownKeys.has(f.id) && !allKnownKeys.has(`__name__${f.name}`) && !allKnownKeys.has(f.name)
+    );
+    if (emptyFolders.length > 0) {
       let sharedGroup = out.find(o => o.ownerKey === "__shared__");
       if (!sharedGroup) {
         sharedGroup = { ownerKey: "__shared__", ownerEmail: "", ownerLabel: "Shared", total: 0, folders: [] };
         out.push(sharedGroup);
       }
-      for (const f of emptyGlobalFolders.sort((a, b) => a.localeCompare(b))) {
-        sharedGroup.folders.push({ key: f, label: f, pipelines: [] });
+      for (const f of emptyFolders) {
+        sharedGroup.folders.push({
+          key: f.id, folderId: f.id, label: f.name,
+          color: f.color ?? null, description: f.description ?? null,
+          pipelineCount: 0, pipelines: [],
+        });
       }
-      sharedGroup.folders.sort((a, b) => a.key.localeCompare(b.key));
+      sharedGroup.folders.sort((a, b) => a.label.localeCompare(b.label));
     }
 
     out.sort((a, b) => {
@@ -2274,7 +2342,7 @@ function PipelineCanvas() {
       return a.ownerLabel.localeCompare(b.ownerLabel);
     });
     return out;
-  }, [allPipelines, pipelineFoldersData, profile?.email]);
+  }, [allPipelines, pipelineFolders, pipelineSidebarSearch, profile?.email]);
 
   const normalizeCallId = (raw: string | null | undefined) => String(raw || "").trim().toLowerCase();
   const parseDurationSeconds = (raw: unknown): number | null => {
@@ -4032,71 +4100,99 @@ function PipelineCanvas() {
     } catch { showToast("Network error — could not delete pipeline", false); }
   }
 
-  async function createPipelineFolder(rawName?: string) {
+  async function createPipelineFolder(rawName?: string, opts?: { color?: string; description?: string }): Promise<PipelineFolderDef | false> {
     if (canvasLocked) return false;
-    if (!canCreatePipelines) {
-      showToast("You do not have permission to create pipeline folders.", false);
-      return false;
-    }
+    if (!canCreatePipelines) { showToast("You do not have permission to create pipeline folders.", false); return false; }
     const name = (rawName ?? newPipelineFolderDraft).trim();
-    if (!name) {
-      showToast("Folder name is required", false);
-      return false;
-    }
+    if (!name) { showToast("Folder name is required", false); return false; }
     const res = await fetch("/api/pipelines/folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, color: opts?.color ?? newFolderColor, description: opts?.description ?? "" }),
     });
-    if (!res.ok) {
-      showToast("Could not create folder", false);
-      return false;
-    }
+    if (!res.ok) { showToast("Could not create folder", false); return false; }
+    const created: PipelineFolderDef = await res.json();
     mutate("/api/pipelines/folders");
     setShowCreatePipelineFolder(false);
     setNewPipelineFolderDraft("");
-    showToast(`Folder \"${name}\" created`, true);
-    return true;
+    setNewFolderColor("");
+    showToast(`Folder "${name}" created`, true);
+    return created;
   }
 
-  async function deletePipelineFolder(folder: string) {
+  async function deletePipelineFolder(folderId: string, folderLabel?: string) {
     if (canvasLocked) return;
     if (!canEditPipelines) { showToast("You do not have permission to edit folders.", false); return; }
-    const name = (folder ?? "").trim();
-    if (!name) return;
-    const list = pipelinesByFolder[name] ?? [];
-    const msg = list.length > 0
-      ? `Delete folder "${name}"? ${list.length} pipeline(s) inside will be moved to Unfiled.`
-      : `Delete folder "${name}"?`;
+    if (!folderId) return;
+    const isOrphan = folderId.startsWith("__orphan__") || folderId.startsWith("__name__");
+    const folderName = folderLabel ?? (isOrphan ? folderId.replace(/^__(?:orphan|name)__/, "") : folderId);
+    const count = isOrphan
+      ? (pipelinesByFolderId[`__name__${folderName}`]?.length ?? 0)
+      : (pipelinesByFolderId[folderId]?.length ?? 0);
+    const msg = count > 0
+      ? `Delete folder "${folderName}"? ${count} pipeline(s) will move to Unfiled.`
+      : `Delete folder "${folderName}"?`;
     if (!window.confirm(msg)) return;
-    const res = await fetch("/api/pipelines/folders", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) {
-      showToast("Could not delete folder", false);
-      return;
+
+    let res: Response;
+    if (isOrphan) {
+      // Orphan: use legacy name-based delete endpoint
+      res = await fetch("/api/pipelines/folders", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: folderName }),
+      });
+    } else {
+      res = await fetch(`/api/pipelines/folders/${folderId}`, { method: "DELETE" });
     }
-    if (pipelineFolder === name) setPipelineFolder("");
+    if (!res.ok) { showToast("Could not delete folder", false); return; }
+    if (pipelineFolder === folderName) setPipelineFolder("");
     mutate("/api/pipelines");
     mutate("/api/pipelines/folders");
-    showToast(`Folder "${name}" deleted`, true);
+    showToast(`Folder "${folderName}" deleted`, true);
   }
 
-  async function movePipelineToFolder(pid: string, folder: string) {
+  async function commitFolderRename(folderId: string) {
+    const newName = renameDraft.trim();
+    setRenamingFolderId(null);
+    if (!newName) return;
+    const existing = pipelineFolders.find(f => f.id === folderId);
+    if (existing?.name === newName) return;
+    const res = await fetch(`/api/pipelines/folders/${folderId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName }),
+    });
+    if (!res.ok) { showToast("Could not rename folder", false); return; }
+    mutate("/api/pipelines");
+    mutate("/api/pipelines/folders");
+    showToast(`Folder renamed to "${newName}"`, true);
+  }
+
+  async function reorderFolders(orderedIds: string[]) {
+    await fetch("/api/pipelines/folders/reorder", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_ids: orderedIds }),
+    });
+    mutate("/api/pipelines/folders");
+  }
+
+  async function movePipelineToFolder(pid: string, folderId: string | null) {
     if (canvasLocked) return;
     if (!canEditPipelines) { showToast("You do not have permission to move pipelines.", false); return; }
-    const res = await fetch(`/api/pipelines/${pid}/folder`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ folder }),
-    });
-    if (!res.ok) {
-      showToast("Could not move pipeline", false);
-      return;
+    const isOrphan = folderId?.startsWith("__orphan__") || folderId?.startsWith("__name__");
+    let resolvedFolderId = folderId;
+    if (isOrphan && folderId) {
+      const name = folderId.replace(/^__(?:orphan|name)__/, "");
+      const created = await createPipelineFolder(name);
+      if (!created) return;
+      resolvedFolderId = created.id;
     }
-    if (pipelineId === pid) setPipelineFolder(folder);
+    const res = await fetch(`/api/pipelines/${pid}/folder`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_id: resolvedFolderId ?? null }),
+    });
+    if (!res.ok) { showToast("Could not move pipeline", false); return; }
+    const folderDef = pipelineFolders.find(f => f.id === resolvedFolderId);
+    if (pipelineId === pid) setPipelineFolder(folderDef?.name ?? "");
     mutate("/api/pipelines");
     mutate("/api/pipelines/folders");
   }
@@ -7495,6 +7591,15 @@ function PipelineCanvas() {
               </div>
             </div>
             <div className="px-2 pb-2">
+              <div className="mb-1.5">
+                <input
+                  type="text"
+                  value={pipelineSidebarSearch}
+                  onChange={e => setPipelineSidebarSearch(e.target.value)}
+                  placeholder="Search pipelines…"
+                  className="w-full bg-gray-950 border border-gray-800 rounded px-2 py-1 text-[11px] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                />
+              </div>
               <div className="min-h-[200px] max-h-[52vh] resize-y overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/30 p-1.5 space-y-1.5">
               {pipelineOwners.map((owner) => {
                 const ownerCollapsed = !!collapsedPipelineOwnerIds[owner.ownerKey];
@@ -7519,34 +7624,94 @@ function PipelineCanvas() {
                           return (
                             <div
                               key={sectionId}
-                              onDragOver={(e) => { e.preventDefault(); setDragOverPipelineFolder(sectionId); }}
-                              onDragLeave={() => setDragOverPipelineFolder(null)}
+                              draggable={section.key !== ""}
+                              onDragStart={(e) => {
+                                if (!section.key) return;
+                                e.stopPropagation();
+                                e.dataTransfer.setData("application/x-folder-id", section.folderId);
+                                e.dataTransfer.effectAllowed = "move";
+                                setDraggingFolderId(section.folderId);
+                              }}
+                              onDragEnd={() => { setDraggingFolderId(null); setDragOverFolderReorderId(null); }}
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                if (draggingFolderId && section.key !== "") {
+                                  setDragOverFolderReorderId(section.folderId);
+                                  setDragOverPipelineFolder(null);
+                                } else {
+                                  setDragOverPipelineFolder(sectionId);
+                                  setDragOverFolderReorderId(null);
+                                }
+                              }}
+                              onDragLeave={() => { setDragOverPipelineFolder(null); setDragOverFolderReorderId(null); }}
                               onDrop={async (e) => {
                                 if (canvasLocked) return;
                                 e.preventDefault();
-                                const pid = e.dataTransfer.getData("application/x-pipeline-id");
                                 setDragOverPipelineFolder(null);
+                                setDragOverFolderReorderId(null);
+                                const draggedFId = e.dataTransfer.getData("application/x-folder-id");
+                                if (draggedFId && draggedFId !== section.folderId && section.key !== "") {
+                                  setDraggingFolderId(null);
+                                  const currentOrder = owner.folders.filter(f => f.key !== "").map(f => f.folderId);
+                                  const fromIdx = currentOrder.indexOf(draggedFId);
+                                  const toIdx = currentOrder.indexOf(section.folderId);
+                                  if (fromIdx !== -1 && toIdx !== -1) {
+                                    const next = [...currentOrder];
+                                    next.splice(fromIdx, 1);
+                                    next.splice(toIdx, 0, draggedFId);
+                                    void reorderFolders(next);
+                                  }
+                                  return;
+                                }
+                                const pid = e.dataTransfer.getData("application/x-pipeline-id");
                                 if (!pid) return;
-                                await movePipelineToFolder(pid, section.key);
+                                await movePipelineToFolder(pid, section.folderId);
                               }}
                               className={cn(
                                 "rounded-lg border p-1 transition-colors",
+                                draggingFolderId === section.folderId && "opacity-50",
+                                dragOverFolderReorderId === section.folderId ? "border-blue-500 bg-blue-900/20" :
                                 dragOverPipelineFolder === sectionId ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
                               )}
                             >
                               <div className="flex items-center gap-1 px-1.5 mb-0.5">
+                                {section.color && (
+                                  <span className="w-2 h-2 rounded-full shrink-0 flex-none" style={{ background: section.color }} />
+                                )}
                                 <button
                                   onClick={() => setCollapsedPipelineFolderIds((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }))}
+                                  onDoubleClick={(e) => {
+                                    if (!section.key || section.key === "") return;
+                                    e.preventDefault();
+                                    setRenamingFolderId(section.folderId);
+                                    setRenameDraft(section.label);
+                                    setTimeout(() => renameInputRef.current?.select(), 50);
+                                  }}
                                   className="min-w-0 flex-1 flex items-center gap-1 text-left hover:bg-gray-800/60 rounded px-1 py-0.5 transition-colors"
-                                  title={folderCollapsed ? "Expand folder" : "Collapse folder"}
+                                  title={section.description ? section.description : (folderCollapsed ? "Expand folder" : "Double-click to rename")}
                                 >
                                   <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
-                                  <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest truncate">{section.label}</p>
+                                  {renamingFolderId === section.folderId ? (
+                                    <input
+                                      ref={renameInputRef}
+                                      value={renameDraft}
+                                      onChange={e => setRenameDraft(e.target.value)}
+                                      onBlur={() => void commitFolderRename(section.folderId)}
+                                      onKeyDown={e => {
+                                        if (e.key === "Enter") { e.preventDefault(); void commitFolderRename(section.folderId); }
+                                        if (e.key === "Escape") { setRenamingFolderId(null); }
+                                      }}
+                                      onClick={e => e.stopPropagation()}
+                                      className="flex-1 min-w-0 bg-gray-700 border border-indigo-500 rounded px-1 py-0 text-[9px] text-white focus:outline-none"
+                                    />
+                                  ) : (
+                                    <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest truncate">{section.label}</p>
+                                  )}
                                   <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
                                 </button>
                                 {section.key !== "" && (
                                   <button
-                                    onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.key); }}
+                                    onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.folderId, section.label); }}
                                     disabled={canvasLocked}
                                     title="Delete folder (move pipelines to Unfiled)"
                                     className="shrink-0 p-0.5 text-gray-700 hover:text-red-400 transition-colors"
@@ -7585,6 +7750,14 @@ function PipelineCanvas() {
                                         : "bg-gray-700"
                                     }`} title={pipelinesWithActiveRuns.has(p.id) ? "Has active runs" : p.id === activePipelineId ? "Active pipeline" : ""} />
                                     <span className="truncate flex-1">{p.name}</span>
+                                    {p.scope && p.scope !== "per_call" && (
+                                      <span
+                                        className="shrink-0 text-[8px] px-1 py-0.5 rounded bg-gray-800 text-gray-500 uppercase leading-none"
+                                        title={p.scope === "per_pair" ? "Runs once per agent-customer pair" : p.scope}
+                                      >
+                                        {p.scope === "per_pair" ? "pair" : p.scope}
+                                      </span>
+                                    )}
                                   </button>
                                   <button
                                     onClick={() => handleDuplicatePipeline(p.id)}

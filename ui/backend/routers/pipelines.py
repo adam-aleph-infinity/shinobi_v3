@@ -1082,6 +1082,36 @@ class FolderDeleteIn(BaseModel):
 
 class FolderMoveIn(BaseModel):
     folder: str = ""
+    folder_id: Optional[str] = None  # new: UUID; takes priority over folder string
+
+
+class FolderCreateIn(BaseModel):
+    name: str
+    description: str = ""
+    color: str = ""           # hex like "#4ade80" or empty string
+
+
+class FolderPatchIn(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    color: Optional[str] = None       # "" to clear
+    sort_order: Optional[int] = None
+
+
+class FolderReorderIn(BaseModel):
+    folder_ids: list[str]
+
+
+class PipelineFolderOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    color: Optional[str]
+    sort_order: int
+    owner_email: Optional[str]
+    pipeline_count: int
+    created_at: str
+    updated_at: str
 
 
 class PipelineBundleImportIn(BaseModel):
@@ -2385,66 +2415,256 @@ def list_pipelines(request: Request):
 
 
 @router.get("/folders")
-def list_pipeline_folders(request: Request):
+def list_pipeline_folders(request: Request, db: Session = Depends(get_session)):
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
     profile = _require_can_view(request)
     visible = [p for p in _load_all() if _can_access_pipeline_record(profile, p)]
-    from_pipelines = [
-        _normalise_folder(str(p.get("folder", "") or ""))
-        for p in visible
-    ]
+
+    # Build folder_id → count and name → count maps
+    fid_count: dict[str, int] = {}
+    fname_count: dict[str, int] = {}
+    for p in visible:
+        fid = str(p.get("folder_id") or "").strip()
+        fname = _normalise_folder(str(p.get("folder") or "")).lower()
+        if fid:
+            fid_count[fid] = fid_count.get(fid, 0) + 1
+        elif fname:
+            fname_count[fname] = fname_count.get(fname, 0) + 1
+
+    rows = db.exec(select(_PF).order_by(_PF.sort_order, _PF.name)).all()
+    result = []
+    seen_names: set[str] = set()
+    for row in rows:
+        count = fid_count.get(row.id, 0) + fname_count.get(row.name.lower(), 0)
+        seen_names.add(row.name.lower())
+        result.append(PipelineFolderOut(
+            id=row.id, name=row.name,
+            description=row.description, color=row.color,
+            sort_order=row.sort_order, owner_email=row.owner_email,
+            pipeline_count=count,
+            created_at=row.created_at.isoformat() if row.created_at else "",
+            updated_at=row.updated_at.isoformat() if row.updated_at else "",
+        ))
+
+    # Orphan folders from pipeline files not yet in DB
     global_folders = _load_folders()
-    merged = [*from_pipelines, *global_folders]
-    deduped = []
-    seen = set()
-    for folder in merged:
-        if not folder:
-            continue
-        key = folder.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(folder)
-    deduped.sort(key=lambda x: x.lower())
-    return deduped
+    orphan_names = [f for f in global_folders if f.lower() not in seen_names]
+    for i, fname in enumerate(orphan_names):
+        count = fname_count.get(fname.lower(), 0)
+        result.append(PipelineFolderOut(
+            id=f"__orphan__{fname}", name=fname,
+            description=None, color=None,
+            sort_order=9999 + i, owner_email=None,
+            pipeline_count=count, created_at="", updated_at="",
+        ))
+    return result
 
 
 @router.post("/folders")
-def create_pipeline_folder(req: FolderIn, request: Request):
-    _require_can_create_pipeline(request)
+def create_pipeline_folder(req: FolderCreateIn, request: Request, db: Session = Depends(get_session)):
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
+    profile = _require_can_create_pipeline(request)
     name = _normalise_folder(req.name)
     if not name:
         raise HTTPException(400, "Folder name is required")
-    _ensure_folder_exists(name)
-    return {"ok": True, "folder": name}
+    owner = str(profile.get("email") or "").strip().lower() or None
+    # Check duplicate (case-insensitive) for this owner
+    existing = db.exec(select(_PF).where(_PF.name == name)).first()
+    if existing:
+        # Return existing if same owner (idempotent)
+        if (existing.owner_email or "").lower() == (owner or ""):
+            count = sum(1 for p in _load_all()
+                        if _can_access_pipeline_record(profile, p)
+                        and (str(p.get("folder_id") or "") == existing.id
+                             or _normalise_folder(str(p.get("folder") or "")).lower() == name.lower()))
+            return PipelineFolderOut(
+                id=existing.id, name=existing.name,
+                description=existing.description, color=existing.color,
+                sort_order=existing.sort_order, owner_email=existing.owner_email,
+                pipeline_count=count,
+                created_at=existing.created_at.isoformat() if existing.created_at else "",
+                updated_at=existing.updated_at.isoformat() if existing.updated_at else "",
+            )
+    max_order_row = db.exec(select(_PF).order_by(_PF.sort_order.desc())).first()
+    sort_order = (max_order_row.sort_order + 1) if max_order_row else 0
+    now = datetime.utcnow()
+    folder = _PF(
+        name=name,
+        description=req.description.strip() or None,
+        color=req.color.strip() or None,
+        sort_order=sort_order,
+        owner_email=owner,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(folder)
+    db.commit()
+    db.refresh(folder)
+    _ensure_folder_exists(name)  # keep legacy JSON in sync
+    return PipelineFolderOut(
+        id=folder.id, name=folder.name,
+        description=folder.description, color=folder.color,
+        sort_order=folder.sort_order, owner_email=folder.owner_email,
+        pipeline_count=0,
+        created_at=folder.created_at.isoformat(),
+        updated_at=folder.updated_at.isoformat(),
+    )
+
+
+@router.patch("/folders/{folder_id}")
+def patch_pipeline_folder(folder_id: str, req: FolderPatchIn, request: Request, db: Session = Depends(get_session)):
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
+    profile = _require_can_edit_pipeline(request)
+    row = db.get(_PF, folder_id)
+    if not row:
+        raise HTTPException(404, "Folder not found")
+    owner = str(profile.get("email") or "").strip().lower()
+    is_admin = profile.get("role") in ("admin", "super_admin")
+    if not is_admin and (row.owner_email or "").lower() != owner:
+        raise HTTPException(403, "Not authorized to modify this folder")
+
+    old_name = row.name
+    if req.name is not None:
+        new_name = _normalise_folder(req.name)
+        if not new_name:
+            raise HTTPException(400, "Folder name cannot be empty")
+        row.name = new_name
+    if req.description is not None:
+        row.description = req.description.strip() or None
+    if req.color is not None:
+        row.color = req.color.strip() or None
+    if req.sort_order is not None:
+        row.sort_order = req.sort_order
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    # Propagate name change to pipeline JSON files
+    if req.name is not None and row.name != old_name:
+        for fpath in _DIR.glob("*.json"):
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            changed = False
+            if str(data.get("folder_id") or "") == folder_id:
+                data["folder"] = row.name
+                changed = True
+            elif _normalise_folder(str(data.get("folder") or "")).lower() == old_name.lower():
+                data["folder"] = row.name
+                changed = True
+            if changed:
+                data["updated_at"] = datetime.utcnow().isoformat()
+                fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Keep legacy JSON list in sync
+        folders = _load_folders()
+        updated = []
+        for f in folders:
+            updated.append(row.name if _normalise_folder(f).lower() == old_name.lower() else f)
+        _save_folders(updated)
+        _sync_ai_registry_pipelines()
+
+    visible = [p for p in _load_all() if _can_access_pipeline_record(profile, p)]
+    count = sum(1 for p in visible
+                if str(p.get("folder_id") or "") == row.id
+                or _normalise_folder(str(p.get("folder") or "")).lower() == row.name.lower())
+    return PipelineFolderOut(
+        id=row.id, name=row.name,
+        description=row.description, color=row.color,
+        sort_order=row.sort_order, owner_email=row.owner_email,
+        pipeline_count=count,
+        created_at=row.created_at.isoformat() if row.created_at else "",
+        updated_at=row.updated_at.isoformat() if row.updated_at else "",
+    )
+
+
+@router.put("/folders/reorder")
+def reorder_pipeline_folders(req: FolderReorderIn, request: Request, db: Session = Depends(get_session)):
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
+    _require_can_edit_pipeline(request)
+    now = datetime.utcnow()
+    for i, fid in enumerate(req.folder_ids):
+        row = db.get(_PF, fid)
+        if row:
+            row.sort_order = i
+            row.updated_at = now
+            db.add(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/folders/{folder_id}")
+def delete_pipeline_folder_by_id(folder_id: str, request: Request, db: Session = Depends(get_session)):
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
+    profile = _require_can_edit_pipeline(request)
+    row = db.get(_PF, folder_id)
+    if not row:
+        raise HTTPException(404, "Folder not found")
+    owner = str(profile.get("email") or "").strip().lower()
+    is_admin = profile.get("role") in ("admin", "super_admin")
+    if not is_admin and (row.owner_email or "").lower() != owner:
+        raise HTTPException(403, "Not authorized to delete this folder")
+    folder_name = row.name
+
+    # Clear folder from pipeline files
+    moved = 0
+    for fpath in _DIR.glob("*.json"):
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not _can_access_pipeline_record(profile, data):
+            continue
+        matches = (str(data.get("folder_id") or "") == folder_id
+                   or _normalise_folder(str(data.get("folder") or "")).lower() == folder_name.lower())
+        if not matches:
+            continue
+        data["folder"] = ""
+        data["folder_id"] = None
+        data["updated_at"] = datetime.utcnow().isoformat()
+        fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        moved += 1
+
+    # Remove from legacy JSON list
+    folders = [f for f in _load_folders() if _normalise_folder(f).lower() != folder_name.lower()]
+    _save_folders(folders)
+    db.delete(row)
+    db.commit()
+    _sync_ai_registry_pipelines()
+    return {"ok": True, "deleted_folder_id": folder_id, "moved_to_default": moved}
 
 
 @router.delete("/folders")
-def delete_pipeline_folder(req: FolderDeleteIn, request: Request):
+def delete_pipeline_folder_legacy(req: FolderDeleteIn, request: Request, db: Session = Depends(get_session)):
+    """Legacy endpoint — delete folder by name string. Kept for backward compat."""
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
     profile = _require_can_edit_pipeline(request)
     target = _normalise_folder(req.name)
     if not target:
         raise HTTPException(400, "Folder name is required")
-
-    # Default/Unfiled is represented as empty folder and cannot be deleted.
     if target.lower() in {"unfiled", "default"}:
         raise HTTPException(400, "Default folder cannot be deleted")
-
+    row = db.exec(select(_PF).where(_PF.name == target)).first()
+    if row:
+        return delete_pipeline_folder_by_id(row.id, request, db)
+    # Fall back: no DB row, just clean up files and JSON list
     moved = 0
-    for file in _DIR.glob("*.json"):
-        data = json.loads(file.read_text(encoding="utf-8"))
+    for fpath in _DIR.glob("*.json"):
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+        except Exception:
+            continue
         if not _can_access_pipeline_record(profile, data):
             continue
         _assert_can_modify_pipeline_record(request, profile, data)
-        cur = _normalise_folder(str(data.get("folder", "") or ""))
-        if cur.lower() != target.lower():
+        if _normalise_folder(str(data.get("folder") or "")).lower() != target.lower():
             continue
         data["folder"] = ""
         data["updated_at"] = datetime.utcnow().isoformat()
-        file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         moved += 1
-
-    folders = _load_folders()
-    folders = [f for f in folders if _normalise_folder(f).lower() != target.lower()]
+    folders = [f for f in _load_folders() if _normalise_folder(f).lower() != target.lower()]
     _save_folders(folders)
     _sync_ai_registry_pipelines()
     return {"ok": True, "deleted_folder": target, "moved_to_default": moved}
@@ -2840,6 +3060,16 @@ def update_pipeline(pipeline_id: str, req: PipelineIn, request: Request):
     data["folder"] = _normalise_folder(data.get("folder", ""))
     if data["folder"]:
         _ensure_folder_exists(data["folder"])
+        # Attach folder_id if not already set
+        if not data.get("folder_id"):
+            try:
+                from ui.backend.models.pipeline_folder import PipelineFolder as _PF2
+                with Session(_db_engine) as _db2:
+                    _fr = _db2.exec(select(_PF2).where(_PF2.name == data["folder"])).first()
+                    if _fr:
+                        data["folder_id"] = _fr.id
+            except Exception:
+                pass
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     f.write_text(payload, encoding="utf-8")
     # Snapshot for history restore
@@ -2891,18 +3121,40 @@ def get_pipeline_snapshot(pipeline_id: str, snapshot_id: str, request: Request):
 
 
 @router.patch("/{pipeline_id}/folder")
-def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn, request: Request):
+def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn, request: Request, db: Session = Depends(get_session)):
+    from ui.backend.models.pipeline_folder import PipelineFolder as _PF
     profile = _require_can_edit_pipeline(request)
     f, data = _find_file(pipeline_id)
     if not _can_access_pipeline_record(profile, data):
         raise HTTPException(status_code=404, detail="Pipeline not found.")
     _assert_can_modify_pipeline_record(request, profile, data)
-    folder = _normalise_folder(req.folder)
-    data["folder"] = folder
+
+    if req.folder_id is not None:
+        # New path: use folder_id UUID
+        if req.folder_id == "" or req.folder_id == "null":
+            data["folder"] = ""
+            data["folder_id"] = None
+        else:
+            row = db.get(_PF, req.folder_id)
+            if not row:
+                raise HTTPException(404, "Folder not found")
+            data["folder"] = row.name
+            data["folder_id"] = row.id
+            _ensure_folder_exists(row.name)
+    else:
+        # Legacy path: use folder string
+        folder = _normalise_folder(req.folder)
+        data["folder"] = folder
+        data["folder_id"] = None
+        if folder:
+            _ensure_folder_exists(folder)
+            # Try to find and attach folder_id from DB
+            row = db.exec(select(_PF).where(_PF.name == folder)).first()
+            if row:
+                data["folder_id"] = row.id
+
     data["updated_at"] = datetime.utcnow().isoformat()
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    if folder:
-        _ensure_folder_exists(folder)
     _sync_ai_registry_pipelines()
     return data
 

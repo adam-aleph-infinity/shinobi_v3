@@ -48,6 +48,16 @@ def _migrate():
             ]:
                 _exec_safe(conn, ddl)
 
+        # pipeline_folder indexes
+        for idx_ddl in [
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_folder_owner_email ON pipeline_folder (owner_email)",
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_folder_sort_order ON pipeline_folder (sort_order)",
+        ]:
+            _exec_safe(conn, idx_ddl)
+
+        # Seed pipeline_folder table from _pipelines_folders.json (one-time, idempotent)
+        _seed_pipeline_folders(conn)
+
         # Indexes missing from SQLModel auto-create (safe to run on both Postgres + SQLite)
         for idx_ddl in [
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_started_at ON pipeline_run (started_at DESC)",
@@ -86,6 +96,57 @@ def _migrate():
             "CREATE INDEX IF NOT EXISTS ix_app_log_job_ts ON app_log (job_id, ts DESC)",
         ]:
             _exec_safe(conn, idx_ddl)
+
+
+def _seed_pipeline_folders(conn) -> None:
+    """Seed pipeline_folder table from legacy _pipelines_folders.json. Idempotent."""
+    import json
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from pathlib import Path as _Path
+    from sqlalchemy import text as _text
+
+    try:
+        count = conn.execute(_text("SELECT COUNT(*) FROM pipeline_folder")).scalar()
+        if count and count > 0:
+            return  # already seeded
+    except Exception:
+        return
+
+    try:
+        from ui.backend.config import settings as _s
+        folders_file = _s.ui_data_dir / "_pipelines_folders.json"
+        if not folders_file.exists():
+            return
+        raw = json.loads(folders_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            return
+    except Exception:
+        return
+
+    seen: set[str] = set()
+    sort_idx = 0
+    now = _dt.utcnow().isoformat()
+    for item in raw:
+        name = " ".join(str(item or "").strip().split())
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        try:
+            conn.execute(
+                _text(
+                    "INSERT INTO pipeline_folder (id, name, description, color, sort_order, owner_email, created_at, updated_at) "
+                    "VALUES (:id, :name, NULL, NULL, :sort_order, NULL, :created_at, :updated_at)"
+                ),
+                {"id": str(_uuid.uuid4()), "name": name, "sort_order": sort_idx, "created_at": now, "updated_at": now},
+            )
+            conn.commit()
+            sort_idx += 1
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
 
 def create_db():
