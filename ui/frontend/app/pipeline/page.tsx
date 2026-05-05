@@ -7614,17 +7614,17 @@ function PipelineCanvas() {
             </div>
             {/* Owner filter chips */}
             <div className="px-2 pb-1.5 flex gap-1">
-              {(["all", "mine", "shared"] as const).map(f => (
+              {([["all", "All"], ["mine", "Mine"], ["shared", "Others"]] as const).map(([f, label]) => (
                 <button
                   key={f}
                   onClick={() => setSidebarOwnerFilter(f)}
                   className={cn(
-                    "flex-1 text-[9px] font-bold uppercase tracking-widest py-0.5 rounded transition-colors border",
+                    "flex-1 text-[9px] font-bold uppercase tracking-widest py-1 rounded transition-colors border",
                     sidebarOwnerFilter === f
                       ? "bg-indigo-600/30 text-indigo-300 border-indigo-500/50"
                       : "text-gray-600 hover:text-gray-400 border-gray-800 hover:border-gray-700"
                   )}
-                >{f}</button>
+                >{label}</button>
               ))}
             </div>
 
@@ -7737,28 +7737,34 @@ function PipelineCanvas() {
                                   ) : (
                                     <button
                                       onClick={() => setCollapsedPipelineFolderIds(prev => ({ ...prev, [sectionId]: !prev[sectionId] }))}
+                                      onDoubleClick={(e) => {
+                                        if (!section.key) return;
+                                        e.preventDefault();
+                                        setRenamingFolderId(section.folderId);
+                                        setRenameDraft(section.label);
+                                      }}
                                       className="flex-1 min-w-0 flex items-center gap-1 text-left hover:bg-gray-800/50 rounded px-1 py-0.5 transition-colors"
-                                      title={section.description || undefined}
+                                      title={section.key ? "Click to expand · Double-click to rename" : undefined}
                                     >
                                       <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
-                                      <span className="flex-1 min-w-0 text-[10px] font-semibold text-gray-400 truncate">{section.label}</span>
+                                      <span className="flex-1 min-w-0 text-[10px] font-semibold text-gray-300 truncate">{section.label}</span>
                                       <span className="text-[9px] text-gray-600 shrink-0">{list.length}</span>
                                     </button>
                                   )}
 
-                                  {/* Hover actions — rename + delete */}
+                                  {/* Always-visible rename + delete — full opacity on hover */}
                                   {section.key !== "" && !isRenaming && (
-                                    <div className="flex items-center gap-0.5 opacity-0 group-hover/folder:opacity-100 transition-opacity shrink-0">
+                                    <div className="flex items-center gap-0.5 opacity-20 group-hover/folder:opacity-100 transition-opacity shrink-0">
                                       <button
                                         onClick={() => { setRenamingFolderId(section.folderId); setRenameDraft(section.label); }}
-                                        title="Rename folder"
-                                        className="p-0.5 text-gray-600 hover:text-indigo-400 transition-colors"
+                                        title="Rename folder (or double-click name)"
+                                        className="p-0.5 text-gray-400 hover:text-indigo-400 transition-colors"
                                       ><PenLine className="w-3 h-3" /></button>
                                       <button
                                         onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.folderId, section.label); }}
                                         disabled={canvasLocked}
                                         title="Delete folder"
-                                        className="p-0.5 text-gray-600 hover:text-red-400 transition-colors disabled:opacity-30"
+                                        className="p-0.5 text-gray-400 hover:text-red-400 transition-colors disabled:opacity-30"
                                       ><Trash2 className="w-3 h-3" /></button>
                                     </div>
                                   )}
@@ -7792,6 +7798,11 @@ function PipelineCanvas() {
                                           <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", pipelinesWithActiveRuns.has(p.id) ? "bg-amber-400 animate-pulse" : p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700")}
                                             title={pipelinesWithActiveRuns.has(p.id) ? "Has active runs" : p.id === activePipelineId ? "Active" : ""} />
                                           <span className="truncate flex-1">{p.name}</span>
+                                          {showOwnerDivider && owner.ownerLabel && (
+                                            <span className="shrink-0 text-[8px] px-1 rounded bg-gray-800/80 text-gray-500 leading-none max-w-[48px] truncate" title={owner.ownerLabel}>
+                                              {owner.ownerLabel === "You" ? "me" : owner.ownerLabel.split(/\s+/)[0]}
+                                            </span>
+                                          )}
                                           {p.scope && p.scope !== "per_call" && (
                                             <span className="shrink-0 text-[8px] px-1 rounded bg-gray-800 text-gray-500 uppercase leading-none"
                                               title={p.scope === "per_pair" ? "Runs once per agent-customer pair" : p.scope}>
