@@ -337,7 +337,7 @@ function formatRunDate(isoStr: string | null | undefined): string {
 function inferNotePushState(run: PipelineRunRecord): { sent: boolean; sentAt: string } {
   const directSent = !!(run.note_sent === true);
   const directSentAt = String(run.note_sent_at || "").trim();
-  if (directSent) {
+  if (directSent || !!directSentAt) {
     return { sent: true, sentAt: directSentAt };
   }
 
@@ -366,7 +366,7 @@ function inferRunNoteId(run: PipelineRunRecord): string {
     const step = steps[idx];
     if (!step || typeof step !== "object") continue;
     const stepObj = step as Record<string, unknown>;
-    const noteId = String(stepObj["note_id"] || "").trim();
+    const noteId = String(stepObj["note_id"] || stepObj["noteId"] || "").trim();
     if (noteId) return noteId;
   }
   return "";
@@ -1401,8 +1401,8 @@ export default function LivePage() {
   };
 
   const sendAllMissingNotesToCRM = async (
-    targetsOverride?: Array<{ noteId: string; runId: string }> | null,
-    opts?: { label?: string },
+    targetsOverride?: Array<{ noteId: string; runId: string; tupleKey?: string }> | null,
+    opts?: { label?: string; clearSelection?: boolean },
   ) => {
     if (liveReadOnly) {
       setNoteActionErr(true);
@@ -1411,15 +1411,21 @@ export default function LivePage() {
     }
     const targets = Array.isArray(targetsOverride) ? targetsOverride : unsentNoteTargets;
     const dedupedTargets = (() => {
-      const byKey = new Map<string, { noteId: string; runId: string }>();
+      const byTuple = new Map<string, { noteId: string; runId: string; tupleKey?: string }>();
+      const byFallback = new Map<string, { noteId: string; runId: string; tupleKey?: string }>();
       for (const target of targets) {
         const noteId = String(target?.noteId || "").trim();
         const runId = String(target?.runId || "").trim();
         if (!noteId || !runId) continue;
+        const tupleKey = String(target?.tupleKey || "").trim();
+        if (tupleKey) {
+          if (!byTuple.has(tupleKey)) byTuple.set(tupleKey, { noteId, runId, tupleKey });
+          continue;
+        }
         const key = `${runId}|||${noteId}`;
-        if (!byKey.has(key)) byKey.set(key, { noteId, runId });
+        if (!byFallback.has(key)) byFallback.set(key, { noteId, runId });
       }
-      return [...byKey.values()];
+      return [...byTuple.values(), ...byFallback.values()];
     })();
     const label = String(opts?.label || "unsent notes").trim();
     if (!dedupedTargets.length) {
@@ -1431,6 +1437,9 @@ export default function LivePage() {
       `Send ${dedupedTargets.length} ${label} to CRM now?`,
     );
     if (!ok) return;
+    if (opts?.clearSelection) {
+      setSelectedRunIds(new Set());
+    }
 
     setSendingMissingNotes(true);
     setNoteActionMsg("");
@@ -1576,7 +1585,7 @@ export default function LivePage() {
   );
   const buildNoteTargetsByBulkTuple = useCallback(
     (rows: PipelineRunRecord[]) => {
-      const byTuple = new Map<string, { noteId: string; runId: string }>();
+      const byTuple = new Map<string, { noteId: string; runId: string; tupleKey: string }>();
       for (const run of sortRunsNewestFirst(rows)) {
         const runId = String(run?.id || "").trim();
         if (!runId) continue;
@@ -1584,7 +1593,7 @@ export default function LivePage() {
         if (!noteId) continue;
         const tupleKey = runBulkTupleKey(run);
         if (!byTuple.has(tupleKey)) {
-          byTuple.set(tupleKey, { noteId, runId });
+          byTuple.set(tupleKey, { noteId, runId, tupleKey });
         }
       }
       return [...byTuple.values()];
@@ -1602,7 +1611,7 @@ export default function LivePage() {
       filteredRuns.filter(
         (run) =>
           normalizeRunOrigin(run.run_origin) === "webhook"
-          && isSuccessCompletedRun(getRunStatus(run))
+          && isCompletedRun(getRunStatus(run))
           && !inferNotePushState(run).sent,
       ),
     );
@@ -1809,9 +1818,13 @@ export default function LivePage() {
   // Runs selected via checkbox that are success + have a note id → eligible for bulk note send/resend.
   // De-duped by pipeline+agent+customer+call_id so one note send per logical run tuple.
   const selectedNoteTargets = useMemo(() => {
-    if (selectedGroupRuns.length === 0) return [] as Array<{ noteId: string; runId: string }>;
+    if (selectedGroupRuns.length === 0) return [] as Array<{ noteId: string; runId: string; tupleKey?: string }>;
     return buildNoteTargetsByBulkTuple(
-      selectedGroupRuns.filter((run) => isSuccessCompletedRun(getRunStatus(run))),
+      selectedGroupRuns.filter(
+        (run) =>
+          normalizeRunOrigin(run.run_origin) === "webhook"
+          && isCompletedRun(getRunStatus(run)),
+      ),
     );
   }, [selectedGroupRuns, getRunStatus, buildNoteTargetsByBulkTuple]);
 
@@ -2151,7 +2164,7 @@ export default function LivePage() {
                   <button
                     type="button"
                     disabled={liveReadOnly || tableBulkActionBusy || selectedNoteTargets.length === 0}
-                    onClick={() => { void sendAllMissingNotesToCRM(selectedNoteTargets, { label: "selected notes" }); }}
+                    onClick={() => { void sendAllMissingNotesToCRM(selectedNoteTargets, { label: "selected notes", clearSelection: true }); }}
                     className="text-[10px] px-2 py-1 rounded border border-cyan-700/70 bg-cyan-950/30 text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-50"
                   >
                     {sendingMissingNotes ? "Sending…" : `Send/Resend Notes (${selectedNoteTargets.length})`}

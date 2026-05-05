@@ -430,9 +430,9 @@ def _run_sync(q: queue.Queue) -> None:
                         db_deleted += 1
 
                 for p in index_data:
-                    crm_url = p.get("crm", "")
-                    account_id = str(p.get("account_id", ""))
-                    agent = p.get("agent", "")
+                    crm_url = str(p.get("crm", "") or "").strip()
+                    account_id = str(p.get("account_id", "") or "").strip()
+                    agent = str(p.get("agent", "") or "").strip()
                     if not crm_url or not account_id or not agent:
                         continue
 

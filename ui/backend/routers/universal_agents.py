@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import inspect as _sa_inspect
@@ -22,6 +22,7 @@ from sqlmodel import Session, select
 from ui.backend.config import settings
 from ui.backend.database import get_session
 from ui.backend.services import log_buffer
+from ui.backend.services import user_profiles
 
 router = APIRouter(prefix="/universal-agents", tags=["universal-agents"])
 
@@ -331,16 +332,112 @@ def _get_table_columns(db_or_bind: Any, table_name: str) -> set[str]:
         return set()
 
 
+def _profile_email(profile: dict[str, Any]) -> str:
+    return str((profile or {}).get("email") or "").strip().lower()
+
+
+def _profile_name(profile: dict[str, Any]) -> str:
+    return str((profile or {}).get("name") or "").strip()
+
+
+def _record_owner_email(data: dict[str, Any]) -> str:
+    return str((data or {}).get("workspace_user_email") or "").strip().lower()
+
+
+def _record_lock_owner_email(data: dict[str, Any]) -> str:
+    return str((data or {}).get("locked_by_email") or "").strip().lower()
+
+
+def _require_can_view_agents(request: Request) -> dict[str, Any]:
+    profile = user_profiles.get_current_user_profile(request)
+    if not bool((profile.get("permissions") or {}).get("can_view")):
+        raise HTTPException(status_code=403, detail="User is not allowed to access this environment.")
+    return profile
+
+
+def _require_can_create_agents(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_create_pipelines")
+
+
+def _require_can_edit_agents(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_edit_pipelines")
+
+
+def _require_can_run_agents(request: Request) -> dict[str, Any]:
+    return user_profiles.require_permission(request, "can_run_pipelines")
+
+
+def _assert_can_modify_agent_record(request: Request, profile: dict[str, Any], data: dict[str, Any]) -> None:
+    _require_can_edit_agents(request)
+    me = _profile_email(profile)
+    if not me:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
+        raise HTTPException(
+            status_code=423,
+            detail=f"Agent is locked by {lock_owner}; copy it to make edits.",
+        )
+    if bool(profile.get("is_admin")):
+        return
+    owner = _record_owner_email(data)
+    if owner and owner != me:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the agent owner can edit this agent.",
+        )
+
+
+def _assert_can_run_agent_record(profile: dict[str, Any], data: dict[str, Any]) -> None:
+    me = _profile_email(profile)
+    if not me:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
+        raise HTTPException(
+            status_code=423,
+            detail=f"Agent is locked by {lock_owner}; copy it to run your own version.",
+        )
+
+
+def _workspace_owner_for_new_agent(profile: dict[str, Any]) -> str:
+    return _profile_email(profile)
+
+
+def _lock_agent_for_admin_run(agent_id: str, profile: dict[str, Any]) -> None:
+    if not bool(profile.get("is_admin")):
+        return
+    me = _profile_email(profile)
+    if not me:
+        return
+    try:
+        f, data = _find_file(agent_id)
+    except Exception:
+        return
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
+        return
+    if lock_owner == me:
+        return
+    data["locked_by_email"] = me
+    data["locked_by_name"] = _profile_name(profile)
+    data["locked_at"] = datetime.utcnow().isoformat()
+    data["lock_reason"] = "admin_run"
+    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("")
-def list_agents():
+def list_agents(request: Request):
+    _require_can_view_agents(request)
     _sync_ai_registry_agents()
     return _load_all()
 
 
 @router.get("/folders")
-def list_agent_folders():
+def list_agent_folders(request: Request):
+    _require_can_view_agents(request)
     from_agents = [
         _normalise_folder(str(a.get("folder", "") or ""))
         for a in _load_all()
@@ -361,7 +458,8 @@ def list_agent_folders():
 
 
 @router.post("/folders")
-def create_agent_folder(req: FolderIn):
+def create_agent_folder(req: FolderIn, request: Request):
+    _require_can_edit_agents(request)
     name = _normalise_folder(req.name)
     if not name:
         raise HTTPException(400, "Folder name is required")
@@ -370,10 +468,15 @@ def create_agent_folder(req: FolderIn):
 
 
 @router.post("")
-def create_agent(req: UniversalAgentIn):
+def create_agent(req: UniversalAgentIn, request: Request):
+    profile = _require_can_create_agents(request)
     _DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.utcnow().isoformat()
     record = _normalize_agent_record({"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()})
+    owner_email = _workspace_owner_for_new_agent(profile)
+    if owner_email:
+        record["workspace_user_email"] = owner_email
+        record["workspace_user_name"] = _profile_name(profile)
     if record["folder"]:
         _ensure_folder_exists(record["folder"])
     (_DIR / f"{record['id']}.json").write_text(
@@ -385,6 +488,7 @@ def create_agent(req: UniversalAgentIn):
 
 @router.get("/uploaded-files")
 def list_uploaded_files(
+    request: Request,
     provider: str = Query(""),
     sales_agent: str = Query(""),
     customer: str = Query(""),
@@ -393,6 +497,7 @@ def list_uploaded_files(
     db: Session = Depends(get_session),
 ):
     """List uploaded files, optionally filtered by context."""
+    _require_can_view_agents(request)
     from ui.backend.models.uploaded_file import UploadedFile as UF
     stmt = select(UF).order_by(UF.created_at.desc())
     if provider:    stmt = stmt.where(UF.provider == provider)
@@ -404,8 +509,9 @@ def list_uploaded_files(
 
 
 @router.delete("/uploaded-files/{record_id}")
-def delete_uploaded_file(record_id: str, db: Session = Depends(get_session)):
+def delete_uploaded_file(record_id: str, request: Request, db: Session = Depends(get_session)):
     """Delete a file record and attempt to remove the file from the provider."""
+    _require_can_edit_agents(request)
     from ui.backend.models.uploaded_file import UploadedFile as UF
     record = db.get(UF, record_id)
     if not record:
@@ -435,6 +541,7 @@ def delete_uploaded_file(record_id: str, db: Session = Depends(get_session)):
 
 @router.get("/raw-input")
 def get_raw_input(
+    request: Request,
     source: str = Query(""),
     agent_id: Optional[str] = Query(None),
     sales_agent: str = Query(""),
@@ -447,6 +554,7 @@ def get_raw_input(
     db: Session = Depends(get_session),
 ):
     """Resolve and return the raw text for a single input source."""
+    _require_can_view_agents(request)
     try:
         meta: dict[str, Any] = {}
         content = _resolve_input(
@@ -493,7 +601,8 @@ def get_raw_input(
 
 
 @router.get("/{agent_id}")
-def get_agent(agent_id: str):
+def get_agent(agent_id: str, request: Request):
+    _require_can_view_agents(request)
     _, data = _find_file(agent_id)
     return data
 
@@ -505,7 +614,8 @@ class FitTestRequest(BaseModel):
 
 
 @router.post("/{agent_id}/test-fit")
-def test_output_fit(agent_id: str, req: FitTestRequest, db: Session = Depends(get_session)):
+def test_output_fit(agent_id: str, req: FitTestRequest, request: Request, db: Session = Depends(get_session)):
+    _require_can_view_agents(request)
     _, agent_def = _find_file(agent_id)
     raw = str(req.raw_output or "")
     if not raw.strip():
@@ -544,8 +654,10 @@ def test_output_fit(agent_id: str, req: FitTestRequest, db: Session = Depends(ge
 
 
 @router.put("/{agent_id}")
-def update_agent(agent_id: str, req: UniversalAgentIn):
+def update_agent(agent_id: str, req: UniversalAgentIn, request: Request):
+    profile = _require_can_edit_agents(request)
     f, data = _find_file(agent_id)
+    _assert_can_modify_agent_record(request, profile, data)
     data.update(_normalize_agent_record({**req.model_dump()}))
     data["updated_at"] = datetime.utcnow().isoformat()
     if data["folder"]:
@@ -556,8 +668,10 @@ def update_agent(agent_id: str, req: UniversalAgentIn):
 
 
 @router.patch("/{agent_id}/folder")
-def move_agent_to_folder(agent_id: str, req: FolderMoveIn):
+def move_agent_to_folder(agent_id: str, req: FolderMoveIn, request: Request):
+    profile = _require_can_edit_agents(request)
     f, data = _find_file(agent_id)
+    _assert_can_modify_agent_record(request, profile, data)
     folder = _normalise_folder(req.folder)
     data["folder"] = folder
     data["updated_at"] = datetime.utcnow().isoformat()
@@ -569,7 +683,8 @@ def move_agent_to_folder(agent_id: str, req: FolderMoveIn):
 
 
 @router.post("/{agent_id}/copy")
-def copy_agent(agent_id: str):
+def copy_agent(agent_id: str, request: Request):
+    profile = _require_can_create_agents(request)
     _, data = _find_file(agent_id)
     now = datetime.utcnow().isoformat()
     copy_record = _normalize_agent_record({
@@ -580,6 +695,10 @@ def copy_agent(agent_id: str):
         "created_at": now,
         "updated_at": now,
     })
+    owner_email = _workspace_owner_for_new_agent(profile)
+    if owner_email:
+        copy_record["workspace_user_email"] = owner_email
+        copy_record["workspace_user_name"] = _profile_name(profile)
     if copy_record["folder"]:
         _ensure_folder_exists(copy_record["folder"])
     (_DIR / f"{copy_record['id']}.json").write_text(
@@ -590,15 +709,18 @@ def copy_agent(agent_id: str):
 
 
 @router.delete("/{agent_id}")
-def delete_agent(agent_id: str):
-    f, _ = _find_file(agent_id)
+def delete_agent(agent_id: str, request: Request):
+    profile = _require_can_edit_agents(request)
+    f, data = _find_file(agent_id)
+    _assert_can_modify_agent_record(request, profile, data)
     f.unlink()
     _sync_ai_registry_agents()
     return {"ok": True}
 
 
 @router.patch("/{agent_id}/default")
-def set_default(agent_id: str):
+def set_default(agent_id: str, request: Request):
+    user_profiles.require_permission(request, "can_manage_users")
     for f in _DIR.glob("*.json"):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
@@ -655,7 +777,12 @@ def _make_agent(name: str, model: str, temperature: float,
 
 
 @router.post("/import-presets")
-def import_presets():
+def import_presets(request: Request):
+    profile = user_profiles.require_permission(request, "can_manage_users")
+    owner_email = _profile_email(profile)
+    owner_name = _profile_name(profile)
+    if not owner_email:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email for pipeline ownership.")
     """
     One-shot import of legacy presets into the universal agents system.
     - _fpa_analyzer_presets/ → Generator agent + Scorer agent + Pipeline (per preset)
@@ -712,6 +839,8 @@ def import_presets():
                 is_default=bool(p.get("is_default", False)),
                 agent_class="persona",
             )
+            gen["workspace_user_email"] = owner_email
+            gen["workspace_user_name"] = owner_name
             _write_agent(gen)
             created_agents.append(gen_name)
 
@@ -736,6 +865,8 @@ def import_presets():
                 tags=["persona", "scorer"],
                 agent_class="scorer",
             )
+            scorer["workspace_user_email"] = owner_email
+            scorer["workspace_user_name"] = owner_name
             _write_agent(scorer)
             created_agents.append(score_name)
 
@@ -747,6 +878,8 @@ def import_presets():
                 "name": preset_name,
                 "description": f"Imported from FPA preset: {preset_name}",
                 "scope": "per_pair",
+                "workspace_user_email": owner_email,
+                "workspace_user_name": owner_name,
                 "steps": [
                     {"agent_id": gen["id"],    "input_overrides": {}},
                     {"agent_id": scorer["id"], "input_overrides": {}},
@@ -780,6 +913,8 @@ def import_presets():
                 is_default=bool(na.get("is_default", False)),
                 agent_class="notes",
             )
+            agent["workspace_user_email"] = owner_email
+            agent["workspace_user_name"] = owner_name
             _write_agent(agent)
             created_agents.append(agent_name)
 
@@ -1138,6 +1273,12 @@ def _fmt_duration(value: Any) -> str:
 
 def _norm_call_id(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _safe_cache_call_id(value: Any) -> str:
+    raw = _norm_call_id(value)
+    safe = _re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._")
+    return safe or "call"
 
 
 def _parse_call_datetime(value: Any) -> Optional[datetime]:
@@ -2616,6 +2757,10 @@ def _resolve_input(source: str, agent_id: Optional[str],
     from ui.backend.models.note import Note
     from ui.backend.models.persona import Persona
 
+    sales_agent = str(sales_agent or "").strip()
+    customer = str(customer or "").strip()
+    call_id = str(call_id or "").strip()
+
     ui_data = settings.ui_data_dir
     source = _normalize_input_source(source)
     merged_scope_norm = _normalize_merged_scope(merged_scope)
@@ -2668,22 +2813,24 @@ def _resolve_input(source: str, agent_id: Optional[str],
         if meta is not None:
             meta["resolved_call_id"] = cutoff_call_id
 
-        if not cutoff_call_id:
+        if cutoff_call_id:
+            merged = pair_dir / f"merged_transcript_upto_{_safe_cache_call_id(cutoff_call_id)}.txt"
+        else:
             merged = pair_dir / "merged_transcript.txt"
-            if merged.exists():
-                try:
-                    cached = merged.read_text(encoding="utf-8").strip()
-                    # Rich merged transcript cache marker
-                    if "CALL STATUS INDEX" in cached[:2000]:
-                        if meta is not None:
-                            meta["origin"] = "cache"
-                            try:
-                                meta["cache_file"] = str(merged.relative_to(ui_data))
-                            except Exception:
-                                meta["cache_file"] = str(merged)
-                        return cached
-                except Exception:
-                    pass
+        if merged.exists():
+            try:
+                cached = merged.read_text(encoding="utf-8").strip()
+                # Rich merged transcript cache marker
+                if "CALL STATUS INDEX" in cached[:2000]:
+                    if meta is not None:
+                        meta["origin"] = "cache"
+                        try:
+                            meta["cache_file"] = str(merged.relative_to(ui_data))
+                        except Exception:
+                            meta["cache_file"] = str(merged)
+                    return cached
+            except Exception:
+                pass
 
         content = _build_merged_transcript_content(
             sales_agent,
@@ -2699,7 +2846,7 @@ def _resolve_input(source: str, agent_id: Optional[str],
 
         try:
             if cutoff_call_id:
-                safe_id = _re.sub(r"[^A-Za-z0-9_.-]+", "_", cutoff_call_id).strip("._") or "call"
+                safe_id = _safe_cache_call_id(cutoff_call_id)
                 out_path = pair_dir / f"merged_transcript_upto_{safe_id}.txt"
             else:
                 out_path = pair_dir / "merged_transcript.txt"
@@ -2737,6 +2884,25 @@ def _resolve_input(source: str, agent_id: Optional[str],
             cutoff_call_id = ""
         elif merged_scope_norm == "upto_call" and fixed_merged_call_id:
             cutoff_call_id = fixed_merged_call_id
+        if meta is not None:
+            meta["resolved_call_id"] = cutoff_call_id
+        if cutoff_call_id:
+            merged = pair_dir / f"merged_notes_upto_{_safe_cache_call_id(cutoff_call_id)}.txt"
+        else:
+            merged = pair_dir / "merged_notes.txt"
+        if merged.exists():
+            try:
+                cached = merged.read_text(encoding="utf-8").strip()
+                if "CALL STATUS INDEX" in cached[:2000]:
+                    if meta is not None:
+                        meta["origin"] = "cache"
+                        try:
+                            meta["cache_file"] = str(merged.relative_to(ui_data))
+                        except Exception:
+                            meta["cache_file"] = str(merged)
+                    return cached
+            except Exception:
+                pass
         content = _build_merged_notes_content(
             sales_agent,
             customer,
@@ -2747,7 +2913,7 @@ def _resolve_input(source: str, agent_id: Optional[str],
             raise RuntimeError(f"No call metadata found for {sales_agent}/{customer}")
         try:
             if cutoff_call_id:
-                safe_id = _re.sub(r"[^A-Za-z0-9_.-]+", "_", cutoff_call_id).strip("._") or "call"
+                safe_id = _safe_cache_call_id(cutoff_call_id)
                 out_path = pair_dir / f"merged_notes_upto_{safe_id}.txt"
             else:
                 out_path = pair_dir / "merged_notes.txt"
@@ -2867,9 +3033,17 @@ class RunRequest(BaseModel):
 
 
 @router.post("/{agent_id}/run")
-async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_session)):
+async def run_agent(
+    agent_id: str,
+    req: RunRequest,
+    request: Request,
+    db: Session = Depends(get_session),
+):
     """Execute a universal agent against a given context and stream results via SSE."""
+    profile = _require_can_run_agents(request)
     _, agent_def = _find_file(agent_id)
+    _assert_can_run_agent_record(profile, agent_def)
+    _lock_agent_for_admin_run(agent_id, profile)
 
     async def stream():
         try:
@@ -3059,12 +3233,14 @@ async def run_agent(agent_id: str, req: RunRequest, db: Session = Depends(get_se
 @router.get("/{agent_id}/results")
 def get_results(
     agent_id: str,
+    request: Request,
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: str = Query(""),
     db: Session = Depends(get_session),
 ):
     """Fetch stored results for a given agent + context."""
+    _require_can_view_agents(request)
     sql = (
         "SELECT id, agent_id, agent_name, sales_agent, customer, call_id, content, model, created_at "
         "FROM agent_result "

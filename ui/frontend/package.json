@@ -1,11 +1,12 @@
 {
   "name": "shinobi-ui",
-  "version": "6.2.138",
+  "version": "6.2.141",
   "private": true,
   "scripts": {
     "dev": "NODE_OPTIONS=--no-deprecation next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "typecheck": "next build --no-lint"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.0.5",

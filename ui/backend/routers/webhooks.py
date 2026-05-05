@@ -1617,11 +1617,22 @@ def _resolve_pair(db: Session, payload: CallEndedWebhookPayload) -> dict[str, st
     rows: list[CRMPair] = []
     names = _agent_candidate_names(payload.agent)
     if names:
-        clause = _sql_or(*[_sql_func.lower(CRMPair.agent) == n.lower() for n in names])
-        stmt = select(CRMPair).where(_sql_func.trim(CRMPair.account_id) == account_id).where(clause)
+        stmt = select(CRMPair).where(CRMPair.account_id == account_id)
+        if len(names) == 1:
+            stmt = stmt.where(CRMPair.agent == names[0])
+        else:
+            stmt = stmt.where(CRMPair.agent.in_(names))
         rows = db.exec(stmt).all()
+        if not rows:
+            clause = _sql_or(*[_sql_func.lower(CRMPair.agent) == n.lower() for n in names])
+            stmt = select(CRMPair).where(CRMPair.account_id == account_id).where(clause)
+            rows = db.exec(stmt).all()
 
     if not rows:
+        stmt = select(CRMPair).where(CRMPair.account_id == account_id)
+        rows = db.exec(stmt).all()
+    if not rows:
+        # Legacy compatibility for historical rows that were saved with surrounding whitespace.
         stmt = select(CRMPair).where(_sql_func.trim(CRMPair.account_id) == account_id)
         rows = db.exec(stmt).all()
 
@@ -1721,20 +1732,33 @@ def _agent_continuity_check(
         return False, "missing_account_id", base_meta
 
     history_source = "crm_call"
-    stmt = select(CRMCall).where(_sql_func.trim(CRMCall.account_id) == account_id)
+    stmt = select(CRMCall).where(CRMCall.account_id == account_id)
     if crm_url:
-        stmt = stmt.where(_sql_func.trim(CRMCall.crm_url) == crm_url)
+        stmt = stmt.where(CRMCall.crm_url == crm_url)
     rows = db.exec(stmt).all()
     if not rows:
-        history_source = "crm_pair"
-        pair_stmt = select(CRMPair).where(_sql_func.trim(CRMPair.account_id) == account_id)
-        if customer:
-            pair_stmt = pair_stmt.where(_sql_func.lower(_sql_func.trim(CRMPair.customer)) == customer.lower())
+        # Legacy fallback for older whitespace-variant rows.
+        stmt = select(CRMCall).where(_sql_func.trim(CRMCall.account_id) == account_id)
         if crm_url:
-            pair_stmt = pair_stmt.where(_sql_func.trim(CRMPair.crm_url) == crm_url)
+            stmt = stmt.where(_sql_func.trim(CRMCall.crm_url) == crm_url)
+        rows = db.exec(stmt).all()
+    if not rows:
+        history_source = "crm_pair"
+        pair_stmt = select(CRMPair).where(CRMPair.account_id == account_id)
+        if customer:
+            pair_stmt = pair_stmt.where(CRMPair.customer == customer)
+        if crm_url:
+            pair_stmt = pair_stmt.where(CRMPair.crm_url == crm_url)
         rows = db.exec(pair_stmt).all()
         if not rows:
+            pair_stmt = select(CRMPair).where(CRMPair.account_id == account_id)
+            rows = db.exec(pair_stmt).all()
+        if not rows:
             pair_stmt = select(CRMPair).where(_sql_func.trim(CRMPair.account_id) == account_id)
+            if customer:
+                pair_stmt = pair_stmt.where(_sql_func.lower(_sql_func.trim(CRMPair.customer)) == customer.lower())
+            if crm_url:
+                pair_stmt = pair_stmt.where(_sql_func.trim(CRMPair.crm_url) == crm_url)
             rows = db.exec(pair_stmt).all()
 
     raw_agents = sorted(
@@ -1818,14 +1842,25 @@ def _resolve_record_path(
         return ""
 
     stmt = select(CRMCall).where(
-        _sql_func.trim(CRMCall.account_id) == account_id,
-        _sql_func.trim(CRMCall.call_id) == call_id,
+        CRMCall.account_id == account_id,
+        CRMCall.call_id == call_id,
     )
     names = _agent_candidate_names(payload.agent or pair.get("agent", ""))
     if names:
-        clause = _sql_or(*[_sql_func.lower(CRMCall.agent) == n.lower() for n in names])
-        stmt = stmt.where(clause)
+        if len(names) == 1:
+            stmt = stmt.where(CRMCall.agent == names[0])
+        else:
+            stmt = stmt.where(CRMCall.agent.in_(names))
     rows = db.exec(stmt).all()
+    if not rows:
+        stmt = select(CRMCall).where(
+            _sql_func.trim(CRMCall.account_id) == account_id,
+            _sql_func.trim(CRMCall.call_id) == call_id,
+        )
+        if names:
+            clause = _sql_or(*[_sql_func.lower(CRMCall.agent) == n.lower() for n in names])
+            stmt = stmt.where(clause)
+        rows = db.exec(stmt).all()
     for row in rows:
         rp = str(getattr(row, "record_path", "") or "").strip()
         if rp:

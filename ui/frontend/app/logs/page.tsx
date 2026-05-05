@@ -16,7 +16,19 @@ import { formatLocalTime, utcHmsToLocal } from "@/lib/time";
 const API = "/api";
 const MAX_WORKERS = 4; // fallback default only — real value comes from /api/jobs/config
 
-type LogLine = { ts: string; text: string; level: string; job_id?: string | null };
+type LogLine = {
+  id?: number;
+  ts: string;
+  text: string;
+  level: string;
+  job_id?: string | null;
+  category?: string;
+  source?: string;
+  component?: string;
+  trace_id?: string;
+  user_email?: string;
+  service?: string;
+};
 
 const LEVEL_COLOR: Record<string, string> = {
   error: "text-red-400",
@@ -24,6 +36,20 @@ const LEVEL_COLOR: Record<string, string> = {
   stage: "text-indigo-300 font-semibold",
   llm:   "text-teal-300 font-medium",
   info:  "text-gray-400",
+};
+
+const CATEGORY_COLOR: Record<string, string> = {
+  pipeline: "text-indigo-300",
+  llm: "text-teal-300",
+  elevenlabs: "text-fuchsia-300",
+  auth: "text-amber-300",
+  http: "text-cyan-300",
+  webhook: "text-violet-300",
+  crm: "text-emerald-300",
+  job: "text-orange-300",
+  ui: "text-blue-300",
+  transcription: "text-pink-300",
+  system: "text-gray-500",
 };
 
 // Stable color rotation for job IDs in global log view
@@ -47,7 +73,56 @@ function classifyLine(text: string): string {
   return "info";
 }
 
-type FilterMode = "all" | "llm" | "pipeline" | "errors";
+function inferCategory(text: string): string {
+  const t = text.toUpperCase();
+  if (t.includes("ELEVENLABS")) return "elevenlabs";
+  if (t.includes("LLM") || t.includes("OPENAI") || t.includes("GPT-") || t.includes("GEMINI") || t.includes("ANTHROPIC")) return "llm";
+  if (t.includes("PIPELINE") || t.includes("CANVAS") || t.includes("STEP ")) return "pipeline";
+  if (t.includes("WEBHOOK")) return "webhook";
+  if (t.includes("AUTH") || t.includes("FORBIDDEN") || t.includes("PERMISSION")) return "auth";
+  if (t.includes("CRM") || t.includes("SYNC")) return "crm";
+  if (t.includes("TRANSCRIB") || t.includes("AUDIO")) return "transcription";
+  if (t.includes("JOB ") || t.includes("DEQUEUED")) return "job";
+  if (t.includes("GET ") || t.includes("POST ") || t.includes("PUT ") || t.includes("PATCH ") || t.includes("DELETE ")) return "http";
+  return "system";
+}
+
+function normalizeCategory(category: unknown, text: string): string {
+  const c = String(category || "").trim().toLowerCase();
+  return c || inferCategory(text);
+}
+
+function toDisplayTs(value: string): string {
+  if (!value) return formatLocalTime(new Date(), true);
+  if (/^\d{2}:\d{2}:\d{2}$/.test(value)) return utcHmsToLocal(value);
+  const d = new Date(value);
+  if (!Number.isNaN(d.getTime())) return formatLocalTime(d, true);
+  return value;
+}
+
+function lineKey(line: LogLine): string {
+  return [line.id ?? "", line.ts, line.level, line.category ?? "", line.job_id ?? "", line.text].join("|");
+}
+
+type FilterMode =
+  | "all"
+  | "llm"
+  | "pipeline"
+  | "errors"
+  | "elevenlabs"
+  | "auth"
+  | "http"
+  | "webhook"
+  | "crm";
+
+function matchesFilterMode(line: LogLine, mode: FilterMode): boolean {
+  const category = String(line.category || "").toLowerCase();
+  if (mode === "all") return true;
+  if (mode === "errors") return line.level === "error" || line.level === "warn";
+  if (mode === "llm") return category === "llm" || line.level === "llm";
+  if (mode === "pipeline") return category === "pipeline" || line.level === "stage";
+  return category === mode;
+}
 
 // ── sessionStorage helpers ─────────────────────────────────────────────────────
 
@@ -354,7 +429,15 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
     if (!incoming.length) return;
     hasReceivedRef.current = true;
     setLines(prev => {
-      const next = [...prev, ...incoming];
+      const seen = new Set(prev.slice(-1200).map(lineKey));
+      const merged = [...prev];
+      for (const line of incoming) {
+        const key = lineKey(line);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(line);
+      }
+      const next = merged;
       const trimmed = next.length > 2000 ? next.slice(-2000) : next;
       onLinesChange?.(trimmed);
       return trimmed;
@@ -368,6 +451,34 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
     setConnected(false);
     hasReceivedRef.current = false;
     const url = focusJob ? `${API}/jobs/${focusJob.id}/stream` : `${API}/logs/stream`;
+    if (!focusJob) {
+      fetch(`${API}/logs/app/recent?limit=500`)
+        .then(async (res) => {
+          if (!res.ok) return [];
+          const rows = await res.json();
+          return Array.isArray(rows) ? rows : [];
+        })
+        .then((rows: any[]) => {
+          const history: LogLine[] = rows.map((row) => {
+            const text = String(row.message || row.text || "");
+            return {
+              id: Number(row.id || 0) || undefined,
+              ts: toDisplayTs(String(row.ts || "")),
+              text,
+              level: String(row.level || classifyLine(text) || "info"),
+              job_id: row.job_id || undefined,
+              category: normalizeCategory(row.category, text),
+              source: row.source || "",
+              component: row.component || "",
+              trace_id: row.trace_id || "",
+              user_email: row.user_email || "",
+              service: row.service || "",
+            };
+          });
+          if (history.length) appendMany(history);
+        })
+        .catch(() => {});
+    }
     const es = new EventSource(url);
     const batch: LogLine[] = [];
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -402,7 +513,17 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
         if (focusJob) {
           const text = (data.message as string || "").trim();
           if (!text) return;
-          line = { ts: formatLocalTime(new Date(), true), text, level: classifyLine(text) };
+          line = {
+            ts: formatLocalTime(new Date(), true),
+            text,
+            level: classifyLine(text),
+            category: normalizeCategory(data.category, text),
+            source: data.source || "",
+            component: data.component || "",
+            trace_id: data.trace_id || "",
+            user_email: data.user_email || "",
+            service: data.service || "",
+          };
           batch.push(line);
           if (!timer) timer = setTimeout(flush, 80);
           // Close once the job signals done — prevents EventSource auto-reconnect loop
@@ -411,11 +532,18 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
             es.close();
           }
         } else {
+          const text = data.text || data.message || "";
           line = {
-            ts: utcHmsToLocal(data.ts || ""),
-            text: data.text || "",
-            level: data.level || "info",
+            ts: toDisplayTs(data.ts || ""),
+            text,
+            level: data.level || classifyLine(text),
             job_id: data.job_id,
+            category: normalizeCategory(data.category, text),
+            source: data.source || "",
+            component: data.component || "",
+            trace_id: data.trace_id || "",
+            user_email: data.user_email || "",
+            service: data.service || "",
           };
           batch.push(line);
           if (!timer) timer = setTimeout(flush, 80);
@@ -427,11 +555,7 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
     return () => { es.close(); if (timer) clearTimeout(timer); };
   }, [focusJob?.id, reconnectKey]); // eslint-disable-line
 
-  const modeFiltered = filterMode === "all" ? lines
-    : filterMode === "llm"      ? lines.filter(l => l.level === "llm")
-    : filterMode === "pipeline" ? lines.filter(l => l.level === "stage")
-    : filterMode === "errors"   ? lines.filter(l => l.level === "error" || l.level === "warn")
-    : lines;
+  const modeFiltered = lines.filter((l) => matchesFilterMode(l, filterMode));
   const filtered = filter
     ? modeFiltered.filter(l => l.text.toLowerCase().includes(filter.toLowerCase()))
     : modeFiltered;
@@ -533,7 +657,17 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
       {/* Filter mode tabs */}
       {!focusJob && (
         <div className="flex items-center gap-1 px-3 py-1.5 border-b border-gray-800 shrink-0 bg-gray-950">
-          {(["all", "llm", "pipeline", "errors"] as FilterMode[]).map(mode => (
+          {([
+            "all",
+            "llm",
+            "pipeline",
+            "elevenlabs",
+            "auth",
+            "http",
+            "webhook",
+            "crm",
+            "errors",
+          ] as FilterMode[]).map(mode => (
             <button
               key={mode}
               onClick={() => handleSetFilterMode(mode)}
@@ -542,12 +676,25 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
                 filterMode === mode
                   ? mode === "llm"      ? "bg-teal-800/60 text-teal-300"
                   : mode === "pipeline" ? "bg-indigo-800/60 text-indigo-300"
+                  : mode === "elevenlabs" ? "bg-fuchsia-800/60 text-fuchsia-300"
+                  : mode === "auth" ? "bg-amber-800/60 text-amber-300"
+                  : mode === "http" ? "bg-cyan-800/60 text-cyan-300"
+                  : mode === "webhook" ? "bg-violet-800/60 text-violet-300"
+                  : mode === "crm" ? "bg-emerald-800/60 text-emerald-300"
                   : mode === "errors"   ? "bg-red-800/60 text-red-300"
                   : "bg-gray-700 text-white"
                   : "text-gray-600 hover:text-gray-400"
               )}
             >
-              {mode === "all" ? "All" : mode === "llm" ? "LLM Ops" : mode === "pipeline" ? "Pipeline" : "Errors"}
+              {mode === "all" ? "All"
+                : mode === "llm" ? "LLM"
+                : mode === "pipeline" ? "Pipeline"
+                : mode === "elevenlabs" ? "ElevenLabs"
+                : mode === "auth" ? "Auth"
+                : mode === "http" ? "HTTP"
+                : mode === "webhook" ? "Webhook"
+                : mode === "crm" ? "CRM"
+                : "Errors"}
             </button>
           ))}
         </div>
@@ -593,6 +740,11 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
                   {groupLines.map((l, i) => (
                     <div key={i} className="flex gap-2 leading-5 items-start">
                       <span className="text-gray-700 shrink-0 select-none w-16">{l.ts}</span>
+                      {l.category && l.category !== "system" && (
+                        <span className={cn("shrink-0 text-[9px] uppercase tracking-wide mt-0.5", CATEGORY_COLOR[l.category] || "text-gray-600")}>
+                          {l.category}
+                        </span>
+                      )}
                       <span className={cn("min-w-0 whitespace-pre-wrap break-words", LEVEL_COLOR[l.level] || "text-gray-300")}>{l.text}</span>
                     </div>
                   ))}
@@ -613,6 +765,11 @@ function TerminalPane({ focusJob, jobBadgeMap, onLinesChange, initialGrouped, on
                   {badge && (
                     <span className={cn("shrink-0 text-[9px] font-mono px-1 py-0.5 rounded leading-none mt-0.5", badge)}>
                       {l.job_id!.slice(0, 6)}
+                    </span>
+                  )}
+                  {l.category && l.category !== "system" && (
+                    <span className={cn("shrink-0 text-[9px] uppercase tracking-wide mt-0.5", CATEGORY_COLOR[l.category] || "text-gray-600")}>
+                      {l.category}
                     </span>
                   )}
                   <span className={cn("min-w-0 whitespace-pre-wrap break-words", LEVEL_COLOR[l.level] || "text-gray-300")}>{l.text}</span>
@@ -639,7 +796,17 @@ export default function LogsPage() {
   });
   const [filterMode, setFilterMode] = useState<FilterMode>(() => {
     const v = ssGet("filterMode");
-    return (v === "all" || v === "llm" || v === "pipeline" || v === "errors") ? v as FilterMode : "all";
+    return (
+      v === "all" ||
+      v === "llm" ||
+      v === "pipeline" ||
+      v === "errors" ||
+      v === "elevenlabs" ||
+      v === "auth" ||
+      v === "http" ||
+      v === "webhook" ||
+      v === "crm"
+    ) ? v as FilterMode : "all";
   });
   const [initialGrouped] = useState<boolean>(() => {
     const v = ssGet("grouped");

@@ -20,6 +20,7 @@ node_modules/
 out/
 npm-debug.log*
 yarn-debug.log*
+*.tsbuildinfo
 
 # Database — persists on VM, never in git
 ui/database/shinobi.db
@@ -49,3 +50,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Multi-agent worktrees (never commit these)
+.trees/
+
+# Agent orchestration DB (local state, not for git)
+.agent-orchestration/

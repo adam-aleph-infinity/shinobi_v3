@@ -87,8 +87,20 @@ def _require_can_manage_live(request: Request) -> dict[str, Any]:
     return user_profiles.require_permission(request, "can_manage_live_jobs")
 
 
+def _profile_email(profile: dict[str, Any]) -> str:
+    return str((profile or {}).get("email") or "").strip().lower()
+
+
+def _profile_name(profile: dict[str, Any]) -> str:
+    return str((profile or {}).get("name") or "").strip()
+
+
+def _record_lock_owner_email(data: dict[str, Any]) -> str:
+    return _norm_ci((data or {}).get("locked_by_email"))
+
+
 def _workspace_owner_for_new_pipeline(request: Request, profile: dict[str, Any]) -> str:
-    return ""
+    return _profile_email(profile)
 
 
 def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -> bool:
@@ -106,6 +118,111 @@ def _can_access_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -
 
 def _assert_can_modify_pipeline_record(request: Request, profile: dict[str, Any], data: dict[str, Any]) -> None:
     _require_can_edit_pipeline(request)
+    me = _profile_email(profile)
+    if not me:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
+    if bool(profile.get("is_admin")):
+        return
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
+        raise HTTPException(
+            status_code=423,
+            detail=f"Pipeline is locked by {lock_owner}; duplicate it to make edits.",
+        )
+    owner = _norm_ci((data or {}).get("workspace_user_email"))
+    if not owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Pipeline is not linked to an owner email. Duplicate it to claim ownership.",
+        )
+    if owner != me:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the pipeline owner can edit this pipeline.",
+        )
+
+
+def _assert_can_run_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -> None:
+    me = _profile_email(profile)
+    if not me:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
+    if bool(profile.get("is_admin")):
+        return
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
+        raise HTTPException(
+            status_code=423,
+            detail=f"Pipeline is locked by {lock_owner}; duplicate it to run your own copy.",
+        )
+    owner = _norm_ci((data or {}).get("workspace_user_email"))
+    if not owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Pipeline is not linked to an owner email. Duplicate it to claim ownership.",
+        )
+    if owner != me:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the pipeline owner can run this pipeline.",
+        )
+
+
+def _lock_pipeline_for_admin_run(pipeline_id: str, profile: dict[str, Any]) -> None:
+    if not bool(profile.get("is_admin")):
+        return
+    me = _profile_email(profile)
+    if not me:
+        return
+    try:
+        f, data = _find_file(pipeline_id)
+    except Exception:
+        return
+    if _record_lock_owner_email(data) == me:
+        return
+    data["locked_by_email"] = me
+    data["locked_by_name"] = _profile_name(profile)
+    data["locked_at"] = datetime.utcnow().isoformat()
+    data["lock_reason"] = "admin_run"
+    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[str, Any]) -> None:
+    if not bool(profile.get("is_admin")):
+        return
+    me = _profile_email(profile)
+    if not me:
+        return
+    try:
+        from ui.backend.routers import universal_agents as _ua
+    except Exception:
+        return
+
+    seen: set[str] = set()
+    changed = False
+    for step in (steps or []):
+        if not isinstance(step, dict):
+            continue
+        aid = str(step.get("agent_id") or "").strip()
+        if not aid or aid in seen:
+            continue
+        seen.add(aid)
+        try:
+            af, adata = _ua._find_file(aid)
+        except Exception:
+            continue
+        if _norm_ci((adata or {}).get("locked_by_email")) == me:
+            continue
+        adata["locked_by_email"] = me
+        adata["locked_by_name"] = _profile_name(profile)
+        adata["locked_at"] = datetime.utcnow().isoformat()
+        adata["lock_reason"] = "admin_run"
+        af.write_text(json.dumps(adata, indent=2, ensure_ascii=False), encoding="utf-8")
+        changed = True
+    if changed:
+        try:
+            _ua._sync_ai_registry_agents()
+        except Exception:
+            pass
 
 
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
@@ -2324,9 +2441,10 @@ def create_pipeline(req: PipelineIn, request: Request):
     now = datetime.utcnow().isoformat()
     record = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, **req.model_dump()}
     owner_email = _workspace_owner_for_new_pipeline(request, profile)
-    if owner_email:
-        record["workspace_user_email"] = owner_email
-        record["workspace_user_name"] = str(profile.get("name") or "").strip()
+    if not owner_email:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email for pipeline ownership.")
+    record["workspace_user_email"] = owner_email
+    record["workspace_user_name"] = str(profile.get("name") or "").strip()
     record["folder"] = _normalise_folder(record.get("folder", ""))
     if record["folder"]:
         _ensure_folder_exists(record["folder"])
@@ -2339,10 +2457,12 @@ def create_pipeline(req: PipelineIn, request: Request):
 
 @router.get("/artifact-template")
 def get_artifact_template(
+    request: Request,
     agent_id: str = Query(...),
     artifact_sub_type: str = Query(...),
     db: Session = Depends(get_session),
 ):
+    _require_can_view(request)
     aid = str(agent_id or "").strip()
     sub_type = str(artifact_sub_type or "").strip().lower()
     if not aid:
@@ -2515,6 +2635,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
     pipeline_in = dict(pipeline_raw)
     pipeline_name = str(pipeline_in.get("name") or "Imported Pipeline").strip() or "Imported Pipeline"
     folder_name = _bundle_folder_name(payload, pipeline_name, req.target_folder)
+    owner_email = _workspace_owner_for_new_pipeline(request, profile)
+    owner_name = _profile_name(profile)
+    if not owner_email:
+        raise HTTPException(status_code=403, detail="Unable to resolve current user email for pipeline ownership.")
 
     existing_pipeline_names = {
         str((p or {}).get("name") or "").strip().lower()
@@ -2574,6 +2698,8 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
         agent["updated_at"] = now
         agent["is_default"] = False
         agent["folder"] = folder_name
+        agent["workspace_user_email"] = owner_email
+        agent["workspace_user_name"] = owner_name
         agent["name"] = _next_unique_name(str(agent.get("name") or "Imported Agent"), existing_agent_names)
         next_inputs: list[dict[str, Any]] = []
         for inp in (agent.get("inputs") or []):
@@ -2598,10 +2724,8 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
     pipeline_out["updated_at"] = now
     pipeline_out["name"] = unique_pipeline_name
     pipeline_out["folder"] = folder_name
-    owner_email = _workspace_owner_for_new_pipeline(request, profile)
-    if owner_email:
-        pipeline_out["workspace_user_email"] = owner_email
-        pipeline_out["workspace_user_name"] = str(profile.get("name") or "").strip()
+    pipeline_out["workspace_user_email"] = owner_email
+    pipeline_out["workspace_user_name"] = owner_name
 
     # Remap pipeline step agent ids.
     remapped_steps: list[dict[str, Any]] = []
@@ -2808,19 +2932,26 @@ class LiveWebhookRunRetryIn(BaseModel):
 @router.get("/{pipeline_id}/results")
 def get_pipeline_results(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = "",
     customer: str = "",
     call_id: Optional[str] = Query(None),
     db: Session = Depends(get_session),
 ):
     """Return the latest cached AgentResult for each pipeline step."""
+    profile = _require_can_view(request)
     from ui.backend.models.pipeline_run import PipelineRun as PR
 
     _, pipeline_def = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pipeline_def):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     steps = pipeline_def.get("steps", [])
-    call_id_norm = (call_id or "").strip().lower()
+    call_id_exact = (call_id or "").strip()
+    call_id_norm = call_id_exact.lower()
     filter_by_call_id = call_id is not None and call_id_norm != ""
     has_pipeline_cols = _agent_result_supports_pipeline_cache(db)
+    sales_agent_exact = str(sales_agent or "").strip()
+    customer_exact = str(customer or "").strip()
 
     def _to_iso(v: Any) -> Optional[str]:
         if v is None:
@@ -2855,17 +2986,31 @@ def get_pipeline_results(
     try:
         run_stmt = select(PR).where(
             PR.pipeline_id == pipeline_id,
-            _sql_func.lower(PR.sales_agent) == (sales_agent or "").lower(),
-            _sql_func.lower(PR.customer) == (customer or "").lower(),
+            PR.sales_agent == sales_agent_exact,
+            PR.customer == customer_exact,
         )
         # For pipeline_run fallback, respect explicit call_id including empty string.
         if call_id is not None:
             if filter_by_call_id:
-                run_stmt = run_stmt.where(_sql_func.lower(_sql_func.trim(PR.call_id)) == call_id_norm)
+                run_stmt = run_stmt.where(PR.call_id == call_id_exact)
             else:
                 run_stmt = run_stmt.where(PR.call_id == "")
         run_stmt = run_stmt.order_by(PR.started_at.desc()).limit(40)
         run_rows = db.exec(run_stmt).all()
+        # Backward-compatibility fallback for older rows where casing/spacing drifted.
+        if not run_rows and (sales_agent_exact or customer_exact):
+            run_stmt = select(PR).where(
+                PR.pipeline_id == pipeline_id,
+                _sql_func.lower(PR.sales_agent) == sales_agent_exact.lower(),
+                _sql_func.lower(PR.customer) == customer_exact.lower(),
+            )
+            if call_id is not None:
+                if filter_by_call_id:
+                    run_stmt = run_stmt.where(_sql_func.lower(_sql_func.trim(PR.call_id)) == call_id_norm)
+                else:
+                    run_stmt = run_stmt.where(PR.call_id == "")
+            run_stmt = run_stmt.order_by(PR.started_at.desc()).limit(40)
+            run_rows = db.exec(run_stmt).all()
         for run_row in run_rows:
             raw_steps = run_row.steps_json
             if not (isinstance(raw_steps, str) and raw_steps.strip()):
@@ -2900,48 +3045,94 @@ def get_pipeline_results(
                 "SELECT id, content, agent_name, created_at "
                 "FROM agent_result "
                 "WHERE agent_id = :agent_id "
-                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                "AND LOWER(customer) = LOWER(:customer) "
+                "AND sales_agent = :sales_agent "
+                "AND customer = :customer "
                 "AND pipeline_id = :pipeline_id "
                 "AND pipeline_step_index = :step_idx "
             )
             params = {
                 "agent_id": agent_id,
-                "sales_agent": sales_agent,
-                "customer": customer,
+                "sales_agent": sales_agent_exact,
+                "customer": customer_exact,
                 "pipeline_id": pipeline_id,
                 "step_idx": idx,
             }
             if filter_by_call_id:
-                sql += "AND LOWER(TRIM(call_id)) = :call_id_norm "
-                params["call_id_norm"] = call_id_norm
+                sql += "AND call_id = :call_id_exact "
+                params["call_id_exact"] = call_id_exact
             sql += "ORDER BY created_at DESC LIMIT 1"
             try:
                 cached_row = db.execute(_sql_text(sql), params).first()
             except Exception:
                 cached_row = None
+            if not cached_row:
+                sql = (
+                    "SELECT id, content, agent_name, created_at "
+                    "FROM agent_result "
+                    "WHERE agent_id = :agent_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND pipeline_id = :pipeline_id "
+                    "AND pipeline_step_index = :step_idx "
+                )
+                params = {
+                    "agent_id": agent_id,
+                    "sales_agent": sales_agent_exact,
+                    "customer": customer_exact,
+                    "pipeline_id": pipeline_id,
+                    "step_idx": idx,
+                }
+                if filter_by_call_id:
+                    sql += "AND LOWER(TRIM(call_id)) = :call_id_norm "
+                    params["call_id_norm"] = call_id_norm
+                sql += "ORDER BY created_at DESC LIMIT 1"
+                try:
+                    cached_row = db.execute(_sql_text(sql), params).first()
+                except Exception:
+                    cached_row = None
 
         if not cached_row:
             sql2 = (
                 "SELECT id, content, agent_name, created_at "
                 "FROM agent_result "
                 "WHERE agent_id = :agent_id "
-                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                "AND LOWER(customer) = LOWER(:customer) "
+                "AND sales_agent = :sales_agent "
+                "AND customer = :customer "
             )
             params2 = {
                 "agent_id": agent_id,
-                "sales_agent": sales_agent,
-                "customer": customer,
+                "sales_agent": sales_agent_exact,
+                "customer": customer_exact,
             }
             if filter_by_call_id:
-                sql2 += "AND LOWER(TRIM(call_id)) = :call_id_norm "
-                params2["call_id_norm"] = call_id_norm
+                sql2 += "AND call_id = :call_id_exact "
+                params2["call_id_exact"] = call_id_exact
             sql2 += "ORDER BY created_at DESC LIMIT 1"
             try:
                 cached_row = db.execute(_sql_text(sql2), params2).first()
             except Exception:
                 cached_row = None
+            if not cached_row:
+                sql2 = (
+                    "SELECT id, content, agent_name, created_at "
+                    "FROM agent_result "
+                    "WHERE agent_id = :agent_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                )
+                params2 = {
+                    "agent_id": agent_id,
+                    "sales_agent": sales_agent_exact,
+                    "customer": customer_exact,
+                }
+                if filter_by_call_id:
+                    sql2 += "AND LOWER(TRIM(call_id)) = :call_id_norm "
+                    params2["call_id_norm"] = call_id_norm
+                sql2 += "ORDER BY created_at DESC LIMIT 1"
+                try:
+                    cached_row = db.execute(_sql_text(sql2), params2).first()
+                except Exception:
+                    cached_row = None
 
         cached = _row_to_result(cached_row)
         if not cached:
@@ -3220,6 +3411,7 @@ def _get_merged_call_index(
 @router.get("/{pipeline_id}/call-artifacts")
 def get_pipeline_call_artifacts(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = "",
     customer: str = "",
     call_id: str = Query(""),
@@ -3235,6 +3427,7 @@ def get_pipeline_call_artifacts(
     call_id_norm = call_id_raw.lower()
     if not call_id_norm:
         raise HTTPException(400, "call_id is required")
+    profile = _require_can_view(request)
     cache_key = (
         str(pipeline_id or "").strip(),
         str(sales_agent or "").strip().lower(),
@@ -3247,6 +3440,8 @@ def get_pipeline_call_artifacts(
         return cached_payload
 
     _, pipeline_def = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pipeline_def):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     pipeline_scope = str(pipeline_def.get("scope") or "per_pair")
     steps = pipeline_def.get("steps") or []
     has_pipeline_cols = _agent_result_supports_pipeline_cache(db)
@@ -3306,18 +3501,23 @@ def get_pipeline_call_artifacts(
     step_meta = _step_artifact_meta()
 
     def _fetch_latest_result(step_idx: int, agent_id: str, target_call_id: str) -> Optional[dict[str, Any]]:
+        sales_agent_exact = str(sales_agent or "").strip()
+        customer_exact = str(customer or "").strip()
+        target_call_id_exact = str(target_call_id or "").strip()
+        target_call_id_norm = target_call_id_exact.lower()
+
         params: dict[str, Any] = {
             "agent_id": agent_id,
-            "sales_agent": sales_agent,
-            "customer": customer,
+            "sales_agent": sales_agent_exact,
+            "customer": customer_exact,
         }
         if has_pipeline_cols:
             sql = (
                 "SELECT id, content, model, agent_name, created_at "
                 "FROM agent_result "
                 "WHERE agent_id = :agent_id "
-                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                "AND LOWER(customer) = LOWER(:customer) "
+                "AND sales_agent = :sales_agent "
+                "AND customer = :customer "
                 "AND pipeline_id = :pipeline_id "
                 "AND pipeline_step_index = :step_idx "
             )
@@ -3327,21 +3527,57 @@ def get_pipeline_call_artifacts(
                 "SELECT id, content, model, agent_name, created_at "
                 "FROM agent_result "
                 "WHERE agent_id = :agent_id "
-                "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                "AND LOWER(customer) = LOWER(:customer) "
+                "AND sales_agent = :sales_agent "
+                "AND customer = :customer "
             )
 
-        if target_call_id:
-            sql += "AND LOWER(TRIM(call_id)) = :call_id_norm "
-            params["call_id_norm"] = target_call_id.strip().lower()
+        if target_call_id_exact:
+            sql += "AND call_id = :call_id_exact "
+            params["call_id_exact"] = target_call_id_exact
         else:
-            sql += "AND TRIM(call_id) = '' "
+            sql += "AND call_id = '' "
 
         sql += "ORDER BY created_at DESC LIMIT 1"
         try:
             row = db.execute(_sql_text(sql), params).first()
         except Exception:
             return None
+        if row is None:
+            # Backward-compatibility path for older rows saved with case/whitespace drift.
+            params_fb: dict[str, Any] = {
+                "agent_id": agent_id,
+                "sales_agent": sales_agent_exact,
+                "customer": customer_exact,
+            }
+            if has_pipeline_cols:
+                sql_fb = (
+                    "SELECT id, content, model, agent_name, created_at "
+                    "FROM agent_result "
+                    "WHERE agent_id = :agent_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND pipeline_id = :pipeline_id "
+                    "AND pipeline_step_index = :step_idx "
+                )
+                params_fb.update({"pipeline_id": pipeline_id, "step_idx": step_idx})
+            else:
+                sql_fb = (
+                    "SELECT id, content, model, agent_name, created_at "
+                    "FROM agent_result "
+                    "WHERE agent_id = :agent_id "
+                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                    "AND LOWER(customer) = LOWER(:customer) "
+                )
+            if target_call_id_exact:
+                sql_fb += "AND LOWER(TRIM(call_id)) = :call_id_norm "
+                params_fb["call_id_norm"] = target_call_id_norm
+            else:
+                sql_fb += "AND TRIM(call_id) = '' "
+            sql_fb += "ORDER BY created_at DESC LIMIT 1"
+            try:
+                row = db.execute(_sql_text(sql_fb), params_fb).first()
+            except Exception:
+                row = None
         if not row:
             return None
         m = getattr(row, "_mapping", row)
@@ -3631,13 +3867,17 @@ def get_pipeline_call_artifacts(
 @router.get("/{pipeline_id}/artifact-status")
 def get_pipeline_artifact_status(
     pipeline_id: str,
+    request: Request,
     sales_agent: str = "",
     customer: str = "",
     call_ids: str = Query(""),
     db: Session = Depends(get_session),
 ):
     """Pipeline artifact coverage by call/pair for badge rendering in Calls UI."""
+    profile = _require_can_view(request)
     _, pipeline_def = _find_file(pipeline_id)
+    if not _can_access_pipeline_record(profile, pipeline_def):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
     total_steps = len(pipeline_def.get("steps", []) or [])
 
     def _norm_call_id(v: Any) -> str:
@@ -3788,8 +4028,8 @@ def get_pipeline_artifact_status(
                     "SELECT call_id, pipeline_step_index, MAX(updated_at) AS last_at "
                     "FROM pipeline_artifact "
                     "WHERE pipeline_id = :pipeline_id "
-                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND sales_agent = :sales_agent "
+                    "AND customer = :customer "
                     "GROUP BY call_id, pipeline_step_index"
                 ),
                 {
@@ -3812,8 +4052,8 @@ def get_pipeline_artifact_status(
                     "SELECT call_id, pipeline_step_index, MAX(created_at) AS last_at "
                     "FROM agent_result "
                     "WHERE pipeline_id = :pipeline_id "
-                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND sales_agent = :sales_agent "
+                    "AND customer = :customer "
                     "GROUP BY call_id, pipeline_step_index"
                 ),
                 {
@@ -3843,8 +4083,8 @@ def get_pipeline_artifact_status(
                     _sql_text(
                         "SELECT call_id, agent_id, MAX(created_at) AS last_at "
                         "FROM agent_result "
-                        "WHERE LOWER(sales_agent) = LOWER(:sales_agent) "
-                        "AND LOWER(customer) = LOWER(:customer) "
+                        "WHERE sales_agent = :sales_agent "
+                        "AND customer = :customer "
                         "GROUP BY call_id, agent_id"
                     ),
                     {
@@ -3890,8 +4130,8 @@ def get_pipeline_artifact_status(
                     "SELECT call_id, COALESCE(finished_at, started_at) AS last_at, log_json "
                     "FROM pipeline_run "
                     "WHERE pipeline_id = :pipeline_id "
-                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND sales_agent = :sales_agent "
+                    "AND customer = :customer "
                     "AND status = 'done' "
                     "ORDER BY COALESCE(finished_at, started_at) DESC "
                     "LIMIT 1000"
@@ -4096,7 +4336,9 @@ def list_pipeline_runs(
     sales_agent: str = Query(""),
     customer: str = Query(""),
     call_id: Optional[str] = Query(None),
-    limit: int = Query(30),
+    limit: int = Query(30, ge=1, le=2500),
+    include_canvas: int = Query(0),
+    include_logs: int = Query(0),
     db: Session = Depends(get_session),
 ):
     """Return recent runs for a specific pipeline."""
@@ -4112,6 +4354,35 @@ def list_pipeline_runs(
     if call_id is not None:  stmt = stmt.where(PR.call_id == call_id)
     stmt = stmt.order_by(PR.started_at.desc()).limit(limit)
     rows = db.exec(stmt).all()
+
+    def _compact_log_json(raw: Any) -> str:
+        raw_text = str(raw or "")
+        if not raw_text:
+            return "[]"
+        # Keep deep-dive payload lean; only tail logs are needed for fallback call-id inference.
+        if len(raw_text) > 25000:
+            return "[]"
+        try:
+            parsed = json.loads(raw_text)
+        except Exception:
+            return "[]"
+        if not isinstance(parsed, list):
+            return "[]"
+        tail = parsed[-12:]
+        out: list[dict[str, Any]] = []
+        for item in tail:
+            if isinstance(item, dict):
+                out.append(
+                    {
+                        "ts": item.get("ts"),
+                        "text": item.get("text") or item.get("message") or item.get("msg"),
+                        "level": item.get("level"),
+                    }
+                )
+            else:
+                out.append({"text": str(item)})
+        return json.dumps(out, ensure_ascii=False)
+
     return [
         {
             "id": r.id,
@@ -4123,9 +4394,9 @@ def list_pipeline_runs(
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
             "status": r.status,
-            "canvas_json": r.canvas_json,
+            "canvas_json": (r.canvas_json if bool(include_canvas) else ""),
             "steps_json": r.steps_json,
-            "log_json": r.log_json,
+            "log_json": (_compact_log_json(r.log_json) if bool(include_logs) else "[]"),
         }
         for r in rows
     ]
@@ -5771,6 +6042,7 @@ async def run_pipeline(
     _, pdef = _find_file(pipeline_id)
     if not _can_access_pipeline_record(profile, pdef):
         raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _assert_can_run_pipeline_record(profile, pdef)
     from ui.backend.models.agent_result import AgentResult as AR
     from ui.backend.models.note import Note
     from ui.backend.models.pipeline_artifact import PipelineArtifact as PA
@@ -5786,6 +6058,12 @@ async def run_pipeline(
     _, pipeline_def = _find_file(pipeline_id)
     steps = pipeline_def.get("steps", [])
     agent_map: dict[str, dict] = {a["id"]: a for a in _load_agents()}
+    run_origin_norm = str(req.run_origin or "").strip().lower()
+    if run_origin_norm != "webhook":
+        # Explicit admin local/manual run creates a lock on this workflow + agents.
+        # Other users can still duplicate and run their own copy.
+        _lock_pipeline_for_admin_run(pipeline_id, profile)
+        _lock_step_agents_for_admin_run(steps, profile)
 
     requested_call_id = str(req.call_id or "").strip()
     effective_call_id = str(req.context_call_id or "").strip() or requested_call_id
@@ -6213,18 +6491,21 @@ async def run_pipeline(
             _input_fingerprint: str,
         ) -> tuple[Optional[Any], bool]:
             """Return (cached_row, used_resume_partial_fallback)."""
+            _sales_agent_exact = str(req.sales_agent or "").strip()
+            _customer_exact = str(req.customer or "").strip()
+
             def _legacy_lookup_latest() -> Optional[Any]:
                 _sql = (
                     "SELECT id, content, created_at "
                     "FROM agent_result "
                     "WHERE agent_id = :agent_id "
-                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND sales_agent = :sales_agent "
+                    "AND customer = :customer "
                 )
                 _params = {
                     "agent_id": _agent_id,
-                    "sales_agent": req.sales_agent or "",
-                    "customer": req.customer or "",
+                    "sales_agent": _sales_agent_exact,
+                    "customer": _customer_exact,
                 }
                 if input_scope_call_id:
                     _sql += "AND call_id = :call_id "
@@ -6233,6 +6514,26 @@ async def run_pipeline(
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
                 _row = _sess.execute(_sql_text(_sql), _params).first()
+                if not _row:
+                    _sql = (
+                        "SELECT id, content, created_at "
+                        "FROM agent_result "
+                        "WHERE agent_id = :agent_id "
+                        "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                        "AND LOWER(customer) = LOWER(:customer) "
+                    )
+                    _params = {
+                        "agent_id": _agent_id,
+                        "sales_agent": _sales_agent_exact,
+                        "customer": _customer_exact,
+                    }
+                    if input_scope_call_id:
+                        _sql += "AND call_id = :call_id "
+                        _params["call_id"] = input_scope_call_id
+                    else:
+                        _sql += "AND call_id = '' "
+                    _sql += "ORDER BY created_at DESC LIMIT 1"
+                    _row = _sess.execute(_sql_text(_sql), _params).first()
                 if not _row:
                     return None
                 _m = getattr(_row, "_mapping", _row)
@@ -6252,8 +6553,8 @@ async def run_pipeline(
 
             _base = select(AR).where(
                 AR.agent_id == _agent_id,
-                _sql_func.lower(AR.sales_agent) == (req.sales_agent or "").lower(),
-                _sql_func.lower(AR.customer) == (req.customer or "").lower(),
+                AR.sales_agent == _sales_agent_exact,
+                AR.customer == _customer_exact,
             )
             if _agent_result_has_pipeline_cache:
                 _base = _base.where(
@@ -6270,6 +6571,25 @@ async def run_pipeline(
                 _exact = _exact.where(AR.input_fingerprint == _input_fingerprint)
             _exact = _exact.order_by(AR.created_at.desc())
             _cached = _sess.exec(_exact).first()
+            if not _cached:
+                _base_ci = select(AR).where(
+                    AR.agent_id == _agent_id,
+                    _sql_func.lower(AR.sales_agent) == _sales_agent_exact.lower(),
+                    _sql_func.lower(AR.customer) == _customer_exact.lower(),
+                )
+                if _agent_result_has_pipeline_cache:
+                    _base_ci = _base_ci.where(
+                        AR.pipeline_id == pipeline_id,
+                        AR.pipeline_step_index == _step_idx,
+                    )
+                if input_scope_call_id:
+                    _base_ci = _base_ci.where(AR.call_id == input_scope_call_id)
+                else:
+                    _base_ci = _base_ci.where(AR.call_id == "")
+                _exact_ci = _base_ci
+                if _agent_result_has_pipeline_cache:
+                    _exact_ci = _exact_ci.where(AR.input_fingerprint == _input_fingerprint)
+                _cached = _sess.exec(_exact_ci.order_by(AR.created_at.desc())).first()
             if _cached:
                 return _cached, False
 
@@ -6277,6 +6597,22 @@ async def run_pipeline(
             # cached artifact for this pipeline step in the current context.
             if req.resume_partial and _agent_result_has_pipeline_cache:
                 _fallback = _sess.exec(_base.order_by(AR.created_at.desc())).first()
+                if not _fallback:
+                    _base_ci = select(AR).where(
+                        AR.agent_id == _agent_id,
+                        _sql_func.lower(AR.sales_agent) == _sales_agent_exact.lower(),
+                        _sql_func.lower(AR.customer) == _customer_exact.lower(),
+                    )
+                    if _agent_result_has_pipeline_cache:
+                        _base_ci = _base_ci.where(
+                            AR.pipeline_id == pipeline_id,
+                            AR.pipeline_step_index == _step_idx,
+                        )
+                    if input_scope_call_id:
+                        _base_ci = _base_ci.where(AR.call_id == input_scope_call_id)
+                    else:
+                        _base_ci = _base_ci.where(AR.call_id == "")
+                    _fallback = _sess.exec(_base_ci.order_by(AR.created_at.desc())).first()
                 if _fallback:
                     return _fallback, True
             return None, False
@@ -6287,18 +6623,21 @@ async def run_pipeline(
             _step_idx: int,
         ) -> Optional[Any]:
             """Best-effort step cache lookup for resume mode before input-resolution."""
+            _sales_agent_exact = str(req.sales_agent or "").strip()
+            _customer_exact = str(req.customer or "").strip()
+
             if not _agent_result_has_pipeline_cache:
                 _sql = (
                     "SELECT id, content, created_at "
                     "FROM agent_result "
                     "WHERE agent_id = :agent_id "
-                    "AND LOWER(sales_agent) = LOWER(:sales_agent) "
-                    "AND LOWER(customer) = LOWER(:customer) "
+                    "AND sales_agent = :sales_agent "
+                    "AND customer = :customer "
                 )
                 _params = {
                     "agent_id": _agent_id,
-                    "sales_agent": req.sales_agent or "",
-                    "customer": req.customer or "",
+                    "sales_agent": _sales_agent_exact,
+                    "customer": _customer_exact,
                 }
                 if input_scope_call_id:
                     _sql += "AND call_id = :call_id "
@@ -6307,6 +6646,26 @@ async def run_pipeline(
                     _sql += "AND call_id = '' "
                 _sql += "ORDER BY created_at DESC LIMIT 1"
                 _row = _sess.execute(_sql_text(_sql), _params).first()
+                if not _row:
+                    _sql = (
+                        "SELECT id, content, created_at "
+                        "FROM agent_result "
+                        "WHERE agent_id = :agent_id "
+                        "AND LOWER(sales_agent) = LOWER(:sales_agent) "
+                        "AND LOWER(customer) = LOWER(:customer) "
+                    )
+                    _params = {
+                        "agent_id": _agent_id,
+                        "sales_agent": _sales_agent_exact,
+                        "customer": _customer_exact,
+                    }
+                    if input_scope_call_id:
+                        _sql += "AND call_id = :call_id "
+                        _params["call_id"] = input_scope_call_id
+                    else:
+                        _sql += "AND call_id = '' "
+                    _sql += "ORDER BY created_at DESC LIMIT 1"
+                    _row = _sess.execute(_sql_text(_sql), _params).first()
                 if not _row:
                     return None
                 _m = getattr(_row, "_mapping", _row)
@@ -6320,8 +6679,8 @@ async def run_pipeline(
 
             _base = select(AR).where(
                 AR.agent_id == _agent_id,
-                _sql_func.lower(AR.sales_agent) == (req.sales_agent or "").lower(),
-                _sql_func.lower(AR.customer) == (req.customer or "").lower(),
+                AR.sales_agent == _sales_agent_exact,
+                AR.customer == _customer_exact,
             )
             if _agent_result_has_pipeline_cache:
                 _base = _base.where(
@@ -6332,7 +6691,24 @@ async def run_pipeline(
                 _base = _base.where(AR.call_id == input_scope_call_id)
             else:
                 _base = _base.where(AR.call_id == "")
-            return _sess.exec(_base.order_by(AR.created_at.desc())).first()
+            _row = _sess.exec(_base.order_by(AR.created_at.desc())).first()
+            if _row:
+                return _row
+            _base_ci = select(AR).where(
+                AR.agent_id == _agent_id,
+                _sql_func.lower(AR.sales_agent) == _sales_agent_exact.lower(),
+                _sql_func.lower(AR.customer) == _customer_exact.lower(),
+            )
+            if _agent_result_has_pipeline_cache:
+                _base_ci = _base_ci.where(
+                    AR.pipeline_id == pipeline_id,
+                    AR.pipeline_step_index == _step_idx,
+                )
+            if input_scope_call_id:
+                _base_ci = _base_ci.where(AR.call_id == input_scope_call_id)
+            else:
+                _base_ci = _base_ci.where(AR.call_id == "")
+            return _sess.exec(_base_ci.order_by(AR.created_at.desc())).first()
 
         def _has_call_transcript(_call_id: str) -> bool:
             if not _call_id:
@@ -7103,14 +7479,17 @@ async def run_pipeline(
                         _input_key: str,
                         _merged_scope: str,
                         _merged_until_call_id: str,
-                    ) -> str:
+                    ) -> tuple[str, dict]:
+                        _meta: dict[str, Any] = {}
                         with Session(_db_engine) as _ldb:
-                            return _resolve_input(
+                            _text = _resolve_input(
                                 _source, _ref_id, req.sales_agent, req.customer, input_scope_call_id,
                                 _manual_inputs, _ldb, input_key=_input_key,
                                 merged_scope=_merged_scope,
                                 merged_until_call_id=_merged_until_call_id,
+                                meta=_meta,
                             )
+                        return _text, _meta
                     for inp in runtime_agent_def.get("inputs", []):
                         key    = inp.get("key", "input")
                         source = _public_input_source(
@@ -7120,11 +7499,17 @@ async def run_pipeline(
                         merged_scope = str(inp.get("merged_scope") or "auto")
                         merged_until_call_id = str(inp.get("merged_until_call_id") or "")
                         try:
-                            text = await loop.run_in_executor(
+                            text, res_meta = await loop.run_in_executor(
                                 None,
                                 lambda s=source, a=ref_id, m=manual_inputs, k=key, ms=merged_scope, mc=merged_until_call_id: _resolve_input_worker(s, a, m, k, ms, mc),
                             )
                             resolved[key] = text
+                            for _src_entry in run_steps[step_idx]["input_sources"]:
+                                if _src_entry.get("key") == key:
+                                    _src_entry["resolved_call_id"] = str(res_meta.get("resolved_call_id") or "")
+                                    _src_entry["merged_scope"] = merged_scope
+                                    _src_entry["merged_until_call_id"] = merged_until_call_id
+                                    break
                         except Exception as exc:
                             run_steps[step_idx].update({"state": "failed", "end_time": datetime.utcnow().isoformat(), "error_msg": str(exc)})
                             log_buffer.emit(f"[PIPELINE] ✗ Step {step_idx + 1}/{len(steps)}: {agent_name} → error (resolve input) · {cid_short}")

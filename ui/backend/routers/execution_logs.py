@@ -1,9 +1,10 @@
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ui.backend.services import execution_logs
+from ui.backend.services import app_logging
 
 router = APIRouter(prefix="/execution-logs", tags=["execution-logs"])
 
@@ -42,7 +43,7 @@ def get_execution_log(session_id: str):
 
 
 @router.post("/client-event")
-def client_execution_event(req: ClientExecutionEventIn):
+def client_execution_event(req: ClientExecutionEventIn, request: Request):
     sid = execution_logs.start_session(
         action=req.action,
         source=req.source or "frontend",
@@ -72,5 +73,29 @@ def client_execution_event(req: ClientExecutionEventIn):
             report=req.report or None,
             error=req.error or "",
         )
-    return {"ok": True, "session_id": sid}
 
+    # Mirror client telemetry into persistent structured app logs.
+    user_email = app_logging.extract_user_email_from_headers(request)
+    app_logging.emit(
+        req.message or f"client_event:{req.action}",
+        level=req.level or "info",
+        category="ui",
+        source="ui",
+        component=req.action or "client_event",
+        service="frontend",
+        user_email=user_email,
+        trace_id=str(request.headers.get("x-request-id") or "").strip(),
+        context={
+            "session_id": sid,
+            "status": req.status or "",
+            "action": req.action,
+            "context": req.context or {},
+            "data": req.data or {},
+            "client_local_time": req.client_local_time or "",
+            "client_timezone": req.client_timezone or "",
+            "error": req.error or "",
+        },
+        error_body=req.error or "",
+        stream=False,
+    )
+    return {"ok": True, "session_id": sid}

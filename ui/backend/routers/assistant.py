@@ -1854,7 +1854,7 @@ def _tool_search_crm_context(args: dict[str, Any]) -> dict[str, Any]:
     try:
         with Session(engine) as db:
             agents_sql = _sql_text(
-                "SELECT DISTINCT agent FROM pipeline_run WHERE LOWER(agent) LIKE :q ORDER BY agent LIMIT :lim"
+                "SELECT DISTINCT sales_agent FROM pipeline_run WHERE LOWER(sales_agent) LIKE :q ORDER BY sales_agent LIMIT :lim"
             )
             customers_sql = _sql_text(
                 "SELECT DISTINCT customer FROM pipeline_run WHERE LOWER(customer) LIKE :q ORDER BY customer LIMIT :lim"

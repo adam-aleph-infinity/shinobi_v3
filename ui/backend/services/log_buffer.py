@@ -10,7 +10,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 _MAX_LINES = 2000
 _lock = threading.Lock()
@@ -26,6 +26,13 @@ class LogLine:
     text: str
     level: str = "info"   # info | warn | error | stage
     job_id: Optional[str] = None  # set when emitted from a pipeline thread
+    category: str = "system"
+    source: str = "stdout"
+    component: str = ""
+    trace_id: str = ""
+    user_email: str = ""
+    service: str = "backend"
+    context_json: str = ""
 
 
 # Circular buffer + monotonic sequence counter
@@ -48,6 +55,7 @@ def _classify(text: str) -> str:
 
 
 _job_hooks: list = []  # populated by job_runner to forward lines to per-job streams
+_persistent_hooks: list[Callable[[LogLine], None]] = []
 
 
 def set_job_context(job_id: Optional[str]):
@@ -55,18 +63,38 @@ def set_job_context(job_id: Optional[str]):
     _current_job.job_id = job_id
 
 
-def emit(text: str):
+def emit(
+    text: str,
+    *,
+    level: Optional[str] = None,
+    category: str = "",
+    source: str = "stdout",
+    component: str = "",
+    trace_id: str = "",
+    user_email: str = "",
+    service: str = "backend",
+    context_json: str = "",
+    persist: bool = True,
+    job_id: Optional[str] = None,
+):
     """Append a line to the buffer. Thread-safe — no asyncio interaction."""
     global _seq
-    job_id = getattr(_current_job, "job_id", None)
+    resolved_job_id = job_id if job_id is not None else getattr(_current_job, "job_id", None)
     with _lock:
         _seq += 1
         line = LogLine(
             seq=_seq,
             ts=datetime.utcnow().strftime("%H:%M:%S"),
             text=text,
-            level=_classify(text),
-            job_id=job_id,
+            level=level or _classify(text),
+            job_id=resolved_job_id,
+            category=(category or "system"),
+            source=(source or "stdout"),
+            component=(component or ""),
+            trace_id=(trace_id or ""),
+            user_email=(user_email or ""),
+            service=(service or "backend"),
+            context_json=(context_json or ""),
         )
         _buffer.append(line)
     for hook in _job_hooks:
@@ -74,6 +102,19 @@ def emit(text: str):
             hook(text)
         except Exception:
             pass
+    if persist:
+        for hook in _persistent_hooks:
+            try:
+                hook(line)
+            except Exception:
+                pass
+
+
+def register_persistent_hook(hook: Callable[[LogLine], None]) -> None:
+    """Register a hook that persists or forwards every emitted line."""
+    if hook in _persistent_hooks:
+        return
+    _persistent_hooks.append(hook)
 
 
 def clear():

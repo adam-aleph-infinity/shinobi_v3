@@ -22,6 +22,15 @@ _INDEX_FILE = settings.ui_data_dir / "index.json"
 _ALIASES_FILE = Path(__file__).parent.parent / "agent_aliases.json"
 
 
+def _norm_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _norm_account_id(value: Any) -> str:
+    # Normalize once on write/read so equality filters can use DB indexes.
+    return _norm_text(value)
+
+
 def _load_aliases() -> dict[str, str]:
     """Return {alias_name: primary_name} from agent_aliases.json.
     e.g. {"Ron Silver-re10": "Ron Silver"}"""
@@ -177,9 +186,9 @@ def seed_db(pairs: list[dict], session, replace_crm_urls: set[str] | None = None
             session.exec(text("DELETE FROM crm_pair WHERE crm_url = :u").bindparams(u=url))
     now = datetime.now(timezone.utc)
     for p in pairs:
-        crm_url = p.get("crm", p.get("crm_url", ""))
-        account_id = str(p.get("account_id", ""))
-        agent = p.get("agent", "")
+        crm_url = _norm_text(p.get("crm", p.get("crm_url", "")))
+        account_id = _norm_account_id(p.get("account_id", ""))
+        agent = _norm_text(p.get("agent", ""))
         row = CRMPair(
             id=f"{crm_url}::{account_id}::{agent}",
             crm_url=crm_url,
@@ -299,10 +308,12 @@ def get_calls(account_id: str, crm_url: str, agent: str = "", customer: str = ""
         from sqlmodel import Session, select
         from ui.backend.database import engine
         from ui.backend.models.crm import CRMCall
+        account_id_norm = _norm_account_id(account_id)
+        crm_url_norm = _norm_text(crm_url)
         with Session(engine) as db:
             stmt = select(CRMCall).where(
-                CRMCall.crm_url == crm_url,
-                CRMCall.account_id == str(account_id),
+                CRMCall.crm_url == crm_url_norm,
+                CRMCall.account_id == account_id_norm,
             )
             if agent:
                 # Include calls stored under alias names (e.g. Ron Silver-re10 → Ron Silver)
@@ -369,7 +380,7 @@ def _all_crm_accounts_for_pair(canonical_agent: str, customer: str) -> list[tupl
         p_agent   = p.get("agent", "")
         p_cust    = p.get("customer", "")
         p_crm     = p.get("crm", p.get("crm_url", ""))
-        p_acc     = str(p.get("account_id", ""))
+        p_acc     = _norm_account_id(p.get("account_id", ""))
 
         if not p_crm or not p_acc:
             continue
@@ -395,14 +406,18 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
     """
     try:
         creds = load_credentials()
+        account_id_norm = _norm_account_id(account_id)
+        crm_url_norm = _norm_text(crm_url)
+        agent_norm = _norm_text(agent)
+        customer_norm = _norm_text(customer)
 
         # Build the full set of names to try on each CRM
         file_aliases = _load_aliases()
-        auto_aliases = _auto_detect_re_aliases([agent])
+        auto_aliases = _auto_detect_re_aliases([agent_norm])
         all_aliases  = {**auto_aliases, **file_aliases}
-        alias_names  = [k for k, v in all_aliases.items() if v == agent]
+        alias_names  = [k for k, v in all_aliases.items() if v == agent_norm]
 
-        pair_dir = settings.agents_dir / agent / customer
+        pair_dir = settings.agents_dir / agent_norm / customer_norm
         manifest_callers: list[str] = []
         manifest_path = pair_dir / "manifest.json"
         if manifest_path.exists():
@@ -414,15 +429,15 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
 
         # Deduplicated ordered list: canonical first, then aliases, then also_callers
         query_names: list[str] = list(dict.fromkeys(
-            [agent] + alias_names + manifest_callers
+            [agent_norm] + alias_names + manifest_callers
         ))
 
         # Step 1: find known (crm_url, account_id) pairs from local cache
-        all_pairs = _all_crm_accounts_for_pair(agent, customer)
+        all_pairs = _all_crm_accounts_for_pair(agent_norm, customer_norm)
 
         # Always include the explicitly requested pair (may not be in cache yet)
-        if (crm_url, str(account_id)) not in {(c, a) for c, a in all_pairs}:
-            all_pairs.insert(0, (crm_url, str(account_id)))
+        if (crm_url_norm, account_id_norm) not in {(c, a) for c, a in all_pairs}:
+            all_pairs.insert(0, (crm_url_norm, account_id_norm))
 
         # Step 2: for any configured CRM not covered by the cache, discover
         # account IDs with a single batched request (all aliases at once).
@@ -439,7 +454,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                     for acc in agent_entry.get("accounts", []):
                         cname = f'{acc["fname"]} {acc.get("mname", "")} {acc["lname"]}'.strip()
                         cname = " ".join(cname.split())
-                        if cname.lower() != customer.lower():
+                        if cname.lower() != customer_norm.lower():
                             continue
                         acc_id = str(acc["id"])
                         if (crm, acc_id) not in seen_pairs:
@@ -447,7 +462,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                             seen_pairs.add((crm, acc_id))
                             covered_crms.add(crm)
                             print(f"[crm_service] Discovered account {acc_id} on {crm} "
-                                  f"for {customer}")
+                                  f"for {customer_norm}")
             except Exception as _e:
                 print(f"[crm_service] Discovery {crm}: {_e}")
 
@@ -493,7 +508,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                                     "call_id":     c["id"],
                                     "account_id":  acc["id"],
                                     "customer":    cname,
-                                    "agent":       agent,
+                                    "agent":       agent_norm,
                                     "duration_s":  c.get("duration"),
                                     "started_at":  c.get("call_started_at"),
                                     "record_path": c.get("record_path"),
@@ -511,8 +526,8 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
         # Write manifest if it doesn't exist
         if not manifest_path.exists():
             manifest_path.write_text(json.dumps({
-                "agent": agent, "customer": customer,
-                "crm": crm_url, "account_id": int(account_id),
+                "agent": agent_norm, "customer": customer_norm,
+                "crm": crm_url_norm, "account_id": int(account_id_norm),
             }, indent=2))
 
         if all_calls:
@@ -525,7 +540,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
             from ui.backend.database import engine
             from ui.backend.models.crm import CRMPair
             total_duration = sum(int(c.get("duration_s") or 0) for c in all_calls)
-            row_id = f"{crm_url}::{account_id}::{agent}"
+            row_id = f"{crm_url_norm}::{account_id_norm}::{agent_norm}"
             with Session(engine) as db:
                 existing = db.get(CRMPair, row_id)
                 if existing:
@@ -536,10 +551,10 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
                 else:
                     db.add(CRMPair(
                         id=row_id,
-                        crm_url=crm_url,
-                        account_id=str(account_id),
-                        agent=agent,
-                        customer=customer,
+                        crm_url=crm_url_norm,
+                        account_id=account_id_norm,
+                        agent=agent_norm,
+                        customer=customer_norm,
                         call_count=len(all_calls),
                         total_duration_s=total_duration,
                         last_synced_at=datetime.now(timezone.utc),
@@ -548,7 +563,7 @@ def refresh_calls(account_id: str, crm_url: str, agent: str = "", customer: str 
         except Exception as db_err:
             print(f"[crm_service] Warning: DB update failed after refresh_calls: {db_err}")
 
-        print(f"[crm_service] refresh_calls {agent}/{customer}: "
+        print(f"[crm_service] refresh_calls {agent_norm}/{customer_norm}: "
               f"{len(all_calls)} calls from {len(pairs_by_crm)} CRM(s) "
               f"({len(query_names)} name(s) batched)")
 

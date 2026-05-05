@@ -30,6 +30,13 @@ class DevPipelineSyncIn(BaseModel):
     overwrite_existing: bool = True
 
 
+class PipelineOwnerBackfillIn(BaseModel):
+    owner_email: str = ""
+    owner_name: str = ""
+    overwrite_existing: bool = False
+    dry_run: bool = False
+
+
 @router.get("/me")
 def get_me(request: Request):
     return user_profiles.get_current_user_profile(request)
@@ -60,6 +67,68 @@ def upsert_user(email: str, req: UserUpsertIn, request: Request):
 @router.delete("/{email}")
 def delete_user(email: str, request: Request):
     return user_profiles.delete_user_for_admin(request, email)
+
+
+@router.post("/backfill/pipeline-owners")
+def backfill_pipeline_owners(req: PipelineOwnerBackfillIn, request: Request):
+    profile = user_profiles.require_permission(request, "can_manage_users")
+    from ui.backend.routers import pipelines as pipes
+
+    target_email = str(req.owner_email or profile.get("email") or "").strip().lower()
+    if not target_email or "@" not in target_email:
+        raise HTTPException(status_code=400, detail="A valid owner_email is required.")
+    target_name = str(req.owner_name or profile.get("name") or "").strip() or target_email.split("@", 1)[0]
+    overwrite_existing = bool(req.overwrite_existing)
+    dry_run = bool(req.dry_run)
+
+    pipes._DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(pipes._DIR.glob("*.json"))
+
+    updated = 0
+    unchanged = 0
+    invalid = 0
+    errors: list[str] = []
+    touched_ids: list[str] = []
+
+    for fp in files:
+        try:
+            row = json.loads(fp.read_text(encoding="utf-8"))
+            if not isinstance(row, dict):
+                invalid += 1
+                continue
+            current_owner = str(row.get("workspace_user_email") or "").strip().lower()
+            if current_owner and not overwrite_existing:
+                unchanged += 1
+                continue
+
+            row["workspace_user_email"] = target_email
+            row["workspace_user_name"] = target_name
+            row["updated_at"] = datetime.utcnow().isoformat()
+            if not dry_run:
+                fp.write_text(json.dumps(row, indent=2, ensure_ascii=False), encoding="utf-8")
+            updated += 1
+            pid = str(row.get("id") or "").strip()
+            if pid:
+                touched_ids.append(pid)
+        except Exception:
+            errors.append(str(fp))
+
+    if updated > 0 and not dry_run:
+        pipes._sync_ai_registry_pipelines()
+
+    return {
+        "ok": True,
+        "target_owner_email": target_email,
+        "target_owner_name": target_name,
+        "overwrite_existing": overwrite_existing,
+        "dry_run": dry_run,
+        "total_files": len(files),
+        "updated": updated,
+        "unchanged": unchanged,
+        "invalid": invalid,
+        "errors": errors,
+        "touched_pipeline_ids": touched_ids[:500],
+    }
 
 
 @router.get("/{email}/work")
@@ -227,6 +296,13 @@ def sync_dev_pipelines(req: DevPipelineSyncIn, request: Request):
             payload["updated_at"] = now_iso
             payload["synced_from_dev_at"] = now_iso
             payload["synced_from_dev_by"] = str(profile.get("email") or "")
+            payload_owner = str(payload.get("workspace_user_email") or "").strip().lower()
+            if not payload_owner:
+                payload_owner = owner_email or acting_email
+            if payload_owner:
+                payload["workspace_user_email"] = payload_owner
+                if not str(payload.get("workspace_user_name") or "").strip():
+                    payload["workspace_user_name"] = payload_owner.split("@", 1)[0]
             if not str(payload.get("created_at") or "").strip():
                 payload["created_at"] = now_iso
             if str(payload.get("folder") or "").strip():

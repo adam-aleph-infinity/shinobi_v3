@@ -78,10 +78,11 @@ gcloud compute ssh $VM_NAME \
     echo '▶ Build frontend...'
     cd ui/frontend
     npm install --legacy-peer-deps -q
-    rm -rf .next
     npm run build
     mkdir -p .next/standalone/.next/static .next/standalone/public
-    rsync -a --delete .next/static/ .next/standalone/.next/static/
+    # Preserve prior chunk files during rollout to avoid ChunkLoadError for users
+    # who still have the previous runtime in their browser tab.
+    rsync -a .next/static/ .next/standalone/.next/static/
     rsync -a --delete public/ .next/standalone/public/
     cd ~/shinobi_v3
 

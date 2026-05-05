@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -9,8 +10,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from ui.backend.config import settings
 from ui.backend.database import create_db
@@ -23,6 +25,8 @@ from ui.backend.models.uploaded_file import UploadedFile    # noqa: F401 — reg
 from ui.backend.models.pipeline_run import PipelineRun      # noqa: F401 — registers table
 from ui.backend.models.pipeline_artifact import PipelineArtifact  # noqa: F401 — registers table
 from ui.backend.models.app_state_kv import AppStateKV       # noqa: F401 — registers table
+from ui.backend.models.session_analysis import SessionAnalysis  # noqa: F401 — registers table
+from ui.backend.models.app_log import AppLog               # noqa: F401 — registers table
 from ui.backend.routers import crm, jobs, personas, logs, workspace, execution_logs
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router
@@ -42,7 +46,7 @@ from ui.backend.routers.webhooks import (
     router as webhooks_router,
     ensure_live_dispatcher_started,
 )
-from ui.backend.services import log_buffer
+from ui.backend.services import log_buffer, app_logging
 from ui.backend.version import APP_VERSION
 
 app = FastAPI(title="Shinobi V3 API", version=APP_VERSION)
@@ -55,6 +59,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_context_and_logging(request: Request, call_next):
+    trace_id = str(request.headers.get("x-request-id") or app_logging.new_trace_id()).strip()
+    user_email = app_logging.extract_user_email_from_headers(request)
+    started = time.monotonic()
+    tokens = app_logging.push_context(trace_id=trace_id, user_email=user_email)
+    status_code = 500
+    response = None
+    try:
+        response = await call_next(request)
+        status_code = int(getattr(response, "status_code", 200) or 200)
+    except Exception as exc:
+        status_code = 500
+        app_logging.emit_exception(
+            exc,
+            message="Unhandled request exception",
+            category="http",
+            source="http",
+            component=request.url.path,
+            user_email=user_email,
+            trace_id=trace_id,
+            context={
+                "method": request.method,
+                "path": request.url.path,
+                "query": request.url.query,
+                "client": getattr(request.client, "host", ""),
+            },
+            stream=True,
+        )
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": "Internal Server Error", "request_id": trace_id},
+        )
+
+    duration_ms = app_logging.timed_ms(started)
+    app_logging.log_http_access(
+        method=request.method,
+        path=request.url.path,
+        status_code=status_code,
+        duration_ms=duration_ms,
+        user_email=user_email,
+        trace_id=trace_id,
+        context={
+            "query": request.url.query,
+            "client": getattr(request.client, "host", ""),
+        },
+    )
+
+    if response is not None:
+        response.headers["X-Request-ID"] = trace_id
+    app_logging.pop_context(tokens)
+    return response
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 app.include_router(crm.router)
@@ -103,6 +161,8 @@ async def on_startup():
             print(f"[startup] Migrated DB: {old_db} → {DB_PATH}")
 
     create_db()  # creates any missing tables
+    app_logging.start()
+    log_buffer.install()
 
     # Safe migrations — add new columns if they don't exist yet.
     # Important for Postgres: when one DDL fails, the transaction enters
@@ -314,8 +374,6 @@ async def on_startup():
         except Exception as e:
             print(f"[startup] Pipeline run cleanup failed: {e}")
 
-    log_buffer.install()
-
     # Seed crm_pair in background — only when DB is empty
     async def _seed_crm_bg():
         from sqlalchemy import func
@@ -488,6 +546,10 @@ async def on_shutdown():
         from ui.backend.services.automations import stop_scheduler as _stop_automation_scheduler
 
         _stop_automation_scheduler()
+    except Exception:
+        pass
+    try:
+        app_logging.stop()
     except Exception:
         pass
 

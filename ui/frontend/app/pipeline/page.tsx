@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { useUserProfile } from "@/lib/user-profile";
+import { formatLocalTime, parseServerDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 import { SectionContent } from "@/components/shared/SectionCards";
@@ -126,6 +127,18 @@ function isActiveRunLike(value: unknown): boolean {
   const s = normalizeStateToken(value);
   if (!s) return false;
   return s === "running" || s === "queued" || s === "preparing" || s === "retrying";
+}
+
+function runtimeStatusFromToken(value: unknown, hasCached = false): RuntimeStatus {
+  const s = normalizeStateToken(value);
+  if (!s) return "pending";
+  if (s === "cached" || s === "cache_hit") return "cached";
+  if (isCancelledLike(s)) return "cancelled";
+  if (isFailedLike(s)) return "error";
+  if (isRunningLike(s)) return "loading";
+  if (isCompletedLike(s)) return hasCached ? "cached" : "done";
+  if (s === "input_prepared" || s === "prepared") return "pending";
+  return "pending";
 }
 
 // ── Universal agent types & constants ────────────────────────────────────────
@@ -255,6 +268,9 @@ interface PipelineRunRecord {
 interface PipelineRunStepInputSource {
   key?: string;
   source?: string;
+  resolved_call_id?: string;
+  merged_scope?: string;
+  merged_until_call_id?: string;
 }
 interface PipelineRunStepCachedLocation {
   type?: string;
@@ -360,6 +376,7 @@ interface InputPreviewState {
   loading: boolean;
   content: string;
   error: string;
+  requestKey?: string;
   source?: string;
   origin?: string;
   cacheFile?: string;
@@ -1459,12 +1476,12 @@ function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLog
 
   const toTs = (value: unknown): string => {
     if (typeof value === "number" && Number.isFinite(value)) {
-      return new Date(value).toLocaleTimeString();
+      return formatLocalTime(value, true);
     }
     const s = String(value || "").trim();
     if (!s) return "—";
-    const parsed = Date.parse(s);
-    return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString() : s;
+    const parsed = parseServerDate(s);
+    return parsed ? formatLocalTime(parsed, true) : s;
   };
 
   const normalizeLevel = (value: unknown, text: string): CanvasLogLine["level"] => {
@@ -1735,6 +1752,14 @@ function PipelineCanvas() {
   const { data: pipelinesData } = useSWR<PipelineDef[]>("/api/pipelines", fetcher);
   const { data: pipelineFoldersData } = useSWR<string[]>("/api/pipelines/folders", fetcher);
 
+  const profileEmailKey = String(profile?.email || "").trim().toLowerCase();
+  useEffect(() => {
+    if (!profileEmailKey) return;
+    void mutate("/api/universal-agents");
+    void mutate("/api/pipelines");
+    void mutate("/api/pipelines/folders");
+  }, [profileEmailKey, mutate]);
+
   // Poll active runs to highlight pipelines that have live jobs
   const { data: liveRunsData } = useSWR<{ id: string; pipeline_id: string; status: string }[]>(
     "/api/history/runs?sort_by=started_at&sort_dir=desc&limit=100&compact=1",
@@ -1894,6 +1919,8 @@ function PipelineCanvas() {
   const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("rendered");
   const [renderedLlmCache, setRenderedLlmCache] = useState<Record<string, RenderedLlmCacheEntry>>({});
   const [inputPreviewBySource, setInputPreviewBySource] = useState<Record<string, InputPreviewState>>({});
+  const inputPreviewSnapshotRef = useRef<Record<string, InputPreviewState>>({});
+  const inputPreviewInFlightRef = useRef<Record<string, Promise<void>>>({});
   const [callTranscriptText, setCallTranscriptText] = useState("");
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState("");
@@ -2419,7 +2446,7 @@ function PipelineCanvas() {
   }, [showCallsPanel, salesAgent, customer, callId, selectedTranscriptCall]);
 
   const runsUrl = useMemo(() => {
-    const qp = new URLSearchParams({ limit: "300" });
+    const qp = new URLSearchParams({ limit: "300", compact: "1" });
     if (pipelineId) qp.set("pipeline_id", pipelineId);
     if (salesAgent) qp.set("sales_agent", salesAgent);
     if (customer) qp.set("customer", customer);
@@ -3854,29 +3881,47 @@ function PipelineCanvas() {
     const pl = allPipelines.find(p => p.id === pid);
     if (!pl) return;
     try {
-      const fullPl = await fetch(`/api/pipelines/${pid}`).then(r => r.json());
-      const newName = `Copy of ${pl.name}`;
-      const res = await fetch("/api/pipelines", {
+      // Deep copy via bundle export/import so dependent agents are duplicated too.
+      const bundleRes = await fetch(`/api/pipelines/${pid}/bundle`);
+      if (!bundleRes.ok) {
+        const txt = await bundleRes.text().catch(() => "");
+        showToast(`Duplicate failed (${bundleRes.status})${txt ? `: ${txt.slice(0, 120)}` : ""}`, false);
+        return;
+      }
+      const bundle = await bundleRes.json() as PipelineBundle;
+      const importRes = await fetch("/api/pipelines/bundles/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: newName,
-          steps: fullPl.steps ?? [],
-          scope: fullPl.scope ?? "per_call",
-          canvas: fullPl.canvas ?? {},
-          folder: fullPl.folder ?? pl.folder ?? "",
+          bundle,
+          target_folder: String(bundle?.pipeline?.folder || pl.folder || "").trim(),
         }),
       });
-      if (!res.ok) { showToast(`Duplicate failed (${res.status})`, false); return; }
-      const saved = await res.json();
+      if (!importRes.ok) {
+        const txt = await importRes.text().catch(() => "");
+        showToast(`Duplicate failed (${importRes.status})${txt ? `: ${txt.slice(0, 120)}` : ""}`, false);
+        return;
+      }
+      const saved = await importRes.json() as PipelineBundleImportResponse;
+      const outPipeline = saved?.pipeline;
+      if (!outPipeline?.id) {
+        showToast("Duplicate failed (invalid import response)", false);
+        return;
+      }
+      mutate("/api/universal-agents");
+      mutate("/api/universal-agents/folders");
       mutate("/api/pipelines");
-      showToast(`Duplicated as "${newName}"`, true);
-      loadPipelineToCanvas(saved.id, {
-        id: saved.id,
-        name: newName,
-        folder: fullPl.folder ?? pl.folder ?? "",
-        steps: fullPl.steps ?? [],
-        canvas: fullPl.canvas,
+      mutate("/api/pipelines/folders");
+      showToast(
+        `Duplicated as "${outPipeline.name}" (${Number(saved?.agents_created || 0)} agent copies)`,
+        true,
+      );
+      loadPipelineToCanvas(outPipeline.id, {
+        id: outPipeline.id,
+        name: outPipeline.name,
+        folder: outPipeline.folder ?? "",
+        steps: outPipeline.steps ?? [],
+        canvas: outPipeline.canvas,
       });
     } catch { showToast("Network error — could not duplicate pipeline", false); }
   }
@@ -4554,7 +4599,7 @@ function PipelineCanvas() {
   }
 
   const appendRunLog = useCallback((line: string, levelHint?: CanvasLogLine["level"]) => {
-    const ts = new Date().toLocaleTimeString();
+    const ts = formatLocalTime(new Date(), true);
     const text = String(line || "");
     const level = levelHint ?? classifyCanvasLogLine(text);
     setRunLogLines((prev) => {
@@ -5218,10 +5263,102 @@ function PipelineCanvas() {
     setCurrentRunId(fromLive);
   }, [running, runContextMode, currentRunId, livePipelineState?.run_id, livePipelineState?.status]);
 
-  // Sync agentDraft when selected node changes — always init so prompts are visible immediately
+  // SSE can be buffered or flaky in some browser/network paths.
+  // While a run is active, use polled live-state snapshots as a fallback so
+  // node runtime animation still updates in near real-time.
+  useEffect(() => {
+    if (!running) return;
+    if (runContextMode !== "new") return;
+
+    const live = livePipelineState;
+    if (!live) return;
+
+    const liveRunId = String(live.run_id || "").trim();
+    const activeRunId = String(currentRunId || "").trim();
+    if (activeRunId && liveRunId && activeRunId !== liveRunId) return;
+
+    const stepCount = runtimeGraph.stepToProcNodeIds.length;
+    if (stepCount <= 0) return;
+
+    const processingStates = live.node_states?.processing || {};
+    const liveSteps = Array.isArray(live.steps) ? live.steps : [];
+    const liveRunStatus = normalizeStateToken(live.status || "");
+
+    const observedStatuses = Array.from({ length: stepCount }, (_, idx): RuntimeStatus => {
+      const procNodeId = runtimeGraph.stepToProcNodeIds[idx];
+      const fromNodeState = runtimeStatusFromToken((processingStates as Record<string, string>)[procNodeId]);
+      if (fromNodeState !== "pending") return fromNodeState;
+      const row = liveSteps[idx];
+      const cachedCount = Array.isArray(row?.cached_locations) ? row.cached_locations.length : 0;
+      return runtimeStatusFromToken(row?.state || row?.status || "", cachedCount > 0);
+    });
+
+    if (isCancelledLike(liveRunStatus)) {
+      for (let i = 0; i < observedStatuses.length; i += 1) {
+        if (observedStatuses[i] === "pending" || observedStatuses[i] === "loading") {
+          observedStatuses[i] = "cancelled";
+        }
+      }
+    } else if (isFailedLike(liveRunStatus)) {
+      for (let i = 0; i < observedStatuses.length; i += 1) {
+        if (observedStatuses[i] === "pending" || observedStatuses[i] === "loading") {
+          observedStatuses[i] = "error";
+        }
+      }
+    } else if (isCompletedLike(liveRunStatus)) {
+      for (let i = 0; i < observedStatuses.length; i += 1) {
+        if (observedStatuses[i] === "pending" || observedStatuses[i] === "loading") {
+          observedStatuses[i] = "done";
+        }
+      }
+    }
+
+    const observedInputReady = Array.from({ length: stepCount }, (_, idx) => {
+      const row = liveSteps[idx];
+      if (!row) return observedStatuses[idx] === "done" || observedStatuses[idx] === "cached";
+      return !!row.input_ready || observedStatuses[idx] === "done" || observedStatuses[idx] === "cached";
+    });
+
+    setStepStatuses((prev) => {
+      const base = prev.length === stepCount
+        ? prev
+        : Array.from({ length: stepCount }, () => "pending" as RuntimeStatus);
+      let changed = false;
+      const merged = base.map((current, idx) => {
+        const observed = observedStatuses[idx] ?? "pending";
+        let next = observed;
+        if (current === "loading" && observed === "pending") next = current;
+        if ((current === "done" || current === "cached") && (observed === "pending" || observed === "loading")) next = current;
+        if (current === "error" && observed === "pending") next = current;
+        if (next !== current) changed = true;
+        return next;
+      });
+      return changed ? merged : prev;
+    });
+
+    setStepInputReady((prev) => {
+      const base = prev.length === stepCount
+        ? prev
+        : Array.from({ length: stepCount }, () => false);
+      let changed = false;
+      const merged = base.map((current, idx) => {
+        const next = current || !!observedInputReady[idx];
+        if (next !== current) changed = true;
+        return next;
+      });
+      return changed ? merged : prev;
+    });
+  }, [running, runContextMode, livePipelineState, currentRunId, runtimeGraph.stepToProcNodeIds]);
+
+  const selectedNodeAgentId = useMemo(() => {
+    if (!selData || selKind !== "processing") return "";
+    return String((selData as PipelineNodeData).agentId || "").trim();
+  }, [selData, selKind]);
+
+  // Sync agentDraft when selected node or agent library changes.
   useEffect(() => {
     if (!selData || selKind !== "processing") { setAgentDraft(null); return; }
-    const agId = selData.agentId as string;
+    const agId = selectedNodeAgentId;
     const a    = agId ? allAgents.find(x => x.id === agId) : null;
     setAgentDraft({
       name:          a?.name          ?? "",
@@ -5238,8 +5375,7 @@ function PipelineCanvas() {
       tags:          a?.tags          ?? [],
       is_default:    a?.is_default    ?? false,
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNodeId, allAgents.length]);
+  }, [selectedNodeId, selData, selKind, selectedNodeAgentId, allAgents]);
 
   useEffect(() => {
     if (selKind !== "processing" || !selectedNodeId || !agentDraft) return;
@@ -5285,15 +5421,57 @@ function PipelineCanvas() {
     return String(callId || "").trim();
   }, [runContextMode, selectedCacheRun, callId]);
 
-  const fetchInputPreviewForSource = useCallback(async (source: string, includeFileRefs = false) => {
+  useEffect(() => {
+    inputPreviewSnapshotRef.current = inputPreviewBySource;
+  }, [inputPreviewBySource]);
+
+  const fetchInputPreviewForSource = useCallback(async (
+    source: string,
+    includeFileRefs = false,
+    historicalMeta?: { resolvedCallId: string; mergedScope: string; mergedUntilCallId: string },
+  ) => {
     const src = String(source || "").trim();
+    const agentCtx = String(salesAgent || "").trim();
+    const customerCtx = String(customer || "").trim();
+    const callCtx = String(previewCallId || "").trim();
+    const runId = runContextMode === "historical" ? String(selectedCacheRunId || "").trim() : "";
+    const heavyFileRefSources = new Set(["transcript", "merged_transcript", "notes", "merged_notes"]);
+    const requestFileRefs = includeFileRefs && !heavyFileRefSources.has(src);
+    const metaSuffix = historicalMeta?.resolvedCallId ? `${historicalMeta.resolvedCallId}|${historicalMeta.mergedScope}` : "";
+    const requestKey = `${src}||${agentCtx.toLowerCase()}||${customerCtx.toLowerCase()}||${callCtx.toLowerCase()}||${runId}||${metaSuffix}||${requestFileRefs ? "refs" : "norefs"}`;
     if (!src) return;
 
-    if (!salesAgent || !customer) {
+    if (!agentCtx || !customerCtx) {
       setInputPreviewBySource((prev) => ({
         ...prev,
-        [src]: { loading: false, content: "", error: "Select sales agent + customer first." },
+        [src]: {
+          loading: false,
+          content: "",
+          error: "Select sales agent + customer first.",
+          requestKey,
+        },
       }));
+      return;
+    }
+
+    const existing = inputPreviewSnapshotRef.current[src];
+    const existingHasFileRefs = !!(
+      (existing?.fileRefs && Object.keys(existing.fileRefs).length > 0)
+      || String(existing?.fileRefsError || "").trim()
+    );
+    if (
+      existing
+      && !existing.loading
+      && !existing.error
+      && existing.requestKey === requestKey
+      && (!requestFileRefs || existingHasFileRefs)
+    ) {
+      return;
+    }
+
+    const inFlight = inputPreviewInFlightRef.current[requestKey];
+    if (inFlight) {
+      await inFlight;
       return;
     }
 
@@ -5303,6 +5481,7 @@ function PipelineCanvas() {
         loading: true,
         content: "",
         error: "",
+        requestKey,
         source: src,
         origin: "",
         cacheFile: "",
@@ -5312,63 +5491,88 @@ function PipelineCanvas() {
       },
     }));
 
+    const run = (async () => {
+      try {
+        const params = new URLSearchParams({
+          source: src,
+          sales_agent: agentCtx,
+          customer: customerCtx,
+        });
+        if (historicalMeta?.resolvedCallId) {
+          params.set("call_id", historicalMeta.resolvedCallId);
+          params.set("merged_scope", "upto_call");
+          params.set("merged_until_call_id", historicalMeta.resolvedCallId);
+        } else if (callCtx) {
+          params.set("call_id", callCtx);
+        }
+        if (requestFileRefs) {
+          params.set("model", "gpt-5.4");
+          params.set("include_file_refs", "1");
+        }
+        const res = await fetch(`/api/universal-agents/raw-input?${params.toString()}`);
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(txt || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        const content = String(data?.content || "");
+        const meta = (data?.meta && typeof data.meta === "object") ? data.meta : {};
+        const fileRefs = (data?.file_refs && typeof data.file_refs === "object")
+          ? (data.file_refs as Record<string, string>)
+          : {};
+        const fileRefsError = requestFileRefs
+          ? String(data?.file_refs_error || "")
+          : (
+            includeFileRefs
+              ? "Skipped provider file-ref lookup for large source to keep preview fast."
+              : ""
+          );
+        setInputPreviewBySource((prev) => ({
+          ...prev,
+          [src]: {
+            loading: false,
+            content,
+            error: "",
+            requestKey,
+            source: src,
+            origin: String(meta?.origin || ""),
+            cacheFile: String(meta?.cache_file || ""),
+            resolvedCallId: String(meta?.resolved_call_id || ""),
+            fileRefs,
+            fileRefsError,
+          },
+        }));
+      } catch (e: any) {
+        setInputPreviewBySource((prev) => ({
+          ...prev,
+          [src]: {
+            loading: false,
+            content: "",
+            error: `Could not load input preview: ${e?.message || "fetch failed"}`,
+            requestKey,
+            source: src,
+            origin: "",
+            cacheFile: "",
+            resolvedCallId: "",
+            fileRefs: {},
+            fileRefsError: "",
+          },
+        }));
+      }
+    })();
+    inputPreviewInFlightRef.current[requestKey] = run;
     try {
-      const params = new URLSearchParams({
-        source: src,
-        sales_agent: salesAgent,
-        customer,
-      });
-      if (previewCallId) params.set("call_id", previewCallId);
-      if (includeFileRefs) {
-        params.set("model", "gpt-5.4");
-        params.set("include_file_refs", "1");
-      }
-      const res = await fetch(`/api/universal-agents/raw-input?${params.toString()}`);
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(txt || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      const content = String(data?.content || "");
-      const meta = (data?.meta && typeof data.meta === "object") ? data.meta : {};
-      const fileRefs = (data?.file_refs && typeof data.file_refs === "object")
-        ? (data.file_refs as Record<string, string>)
-        : {};
-      setInputPreviewBySource((prev) => ({
-        ...prev,
-        [src]: {
-          loading: false,
-          content,
-          error: "",
-          source: src,
-          origin: String(meta?.origin || ""),
-          cacheFile: String(meta?.cache_file || ""),
-          resolvedCallId: String(meta?.resolved_call_id || ""),
-          fileRefs,
-          fileRefsError: String(data?.file_refs_error || ""),
-        },
-      }));
-    } catch (e: any) {
-      setInputPreviewBySource((prev) => ({
-        ...prev,
-        [src]: {
-          loading: false,
-          content: "",
-          error: `Could not load input preview: ${e?.message || "fetch failed"}`,
-          source: src,
-          origin: "",
-          cacheFile: "",
-          resolvedCallId: "",
-          fileRefs: {},
-          fileRefsError: "",
-        },
-      }));
+      await run;
+    } finally {
+      delete inputPreviewInFlightRef.current[requestKey];
     }
-  }, [salesAgent, customer, previewCallId]);
+  }, [salesAgent, customer, previewCallId, runContextMode, selectedCacheRunId]);
 
   useEffect(() => {
     setInputPreviewBySource({});
-  }, [salesAgent, customer]);
+    inputPreviewSnapshotRef.current = {};
+    inputPreviewInFlightRef.current = {};
+  }, [salesAgent, customer, previewCallId, selectedCacheRunId]);
 
   useEffect(() => {
     if (!selectedNode || !selKind) return;
@@ -5388,11 +5592,34 @@ function PipelineCanvas() {
         });
     }
 
+    // In historical mode, find resolved metadata stored during the run
+    let resolvedMetaBySource: Map<string, { resolvedCallId: string; mergedScope: string; mergedUntilCallId: string }> | null = null;
+    if (runContextMode === "historical" && selectedCacheRun) {
+      const nodeData = selectedNode.data as PipelineNodeData;
+      const stepIdx = typeof nodeData.runStepIndex === "number" ? nodeData.runStepIndex : null;
+      const runSteps = parsedRunStepsById.get(selectedCacheRun.id) ?? [];
+      if (stepIdx !== null && runSteps[stepIdx]) {
+        resolvedMetaBySource = new Map();
+        for (const srcEntry of (runSteps[stepIdx].input_sources || [])) {
+          const s = String(srcEntry.source || "").trim();
+          const resolvedCallId = String(srcEntry.resolved_call_id || "").trim();
+          if (s && resolvedCallId) {
+            resolvedMetaBySource.set(s, {
+              resolvedCallId,
+              mergedScope: String(srcEntry.merged_scope || "auto"),
+              mergedUntilCallId: String(srcEntry.merged_until_call_id || ""),
+            });
+          }
+        }
+      }
+    }
+
     const shouldIncludeFileRefs = selKind === "input";
     Array.from(wantedSources).forEach((src) => {
-      void fetchInputPreviewForSource(src, shouldIncludeFileRefs);
+      const histMeta = resolvedMetaBySource?.get(src);
+      void fetchInputPreviewForSource(src, shouldIncludeFileRefs, histMeta);
     });
-  }, [selectedNode, selKind, edges, nodes, fetchInputPreviewForSource]);
+  }, [selectedNode, selKind, edges, nodes, fetchInputPreviewForSource, runContextMode, selectedCacheRun, parsedRunStepsById]);
 
   function renderResultViewToggle() {
     return (
@@ -7059,7 +7286,7 @@ function PipelineCanvas() {
         )}
         {liveModeEnabled && liveTriggeredAt && (
           <span className="text-[10px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/40 px-2 py-1 rounded-lg max-w-[260px] truncate">
-            Last live trigger: {new Date(liveTriggeredAt).toLocaleTimeString()}
+            Last live trigger: {formatLocalTime(liveTriggeredAt, true)}
           </span>
         )}
         </div>

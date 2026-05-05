@@ -21,7 +21,11 @@ def _norm_agent_name(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
 
-def _build_account_agent_uniqueness_index(db: Session) -> dict[str, dict[str, object]]:
+def _build_account_agent_uniqueness_index(
+    db: Session,
+    *,
+    account_ids: Optional[set[str]] = None,
+) -> dict[str, dict[str, object]]:
     """
     Returns:
       {
@@ -32,15 +36,26 @@ def _build_account_agent_uniqueness_index(db: Session) -> dict[str, dict[str, ob
         }
       }
     """
-    rows = db.exec(select(CRMPair)).all()
+    stmt = select(CRMPair.account_id, CRMPair.agent)
+    cleaned_ids = sorted(
+        {
+            str(a or "").strip()
+            for a in (account_ids or set())
+            if str(a or "").strip()
+        }
+    )
+    if cleaned_ids:
+        stmt = stmt.where(CRMPair.account_id.in_(cleaned_ids))
+
+    rows = db.exec(stmt).all()
     if not rows:
         return {}
 
     raw_names = sorted(
         {
-            str(getattr(r, "agent", "") or "").strip()
-            for r in rows
-            if str(getattr(r, "agent", "") or "").strip()
+            str(agent_raw or "").strip()
+            for _account_id_raw, agent_raw in rows
+            if str(agent_raw or "").strip()
         }
     )
     alias_map: dict[str, str] = {}
@@ -52,11 +67,11 @@ def _build_account_agent_uniqueness_index(db: Session) -> dict[str, dict[str, ob
         alias_map = {}
 
     account_agents: dict[str, set[str]] = {}
-    for row in rows:
-        account_id = str(getattr(row, "account_id", "") or "").strip()
+    for account_id_raw, agent_raw in rows:
+        account_id = str(account_id_raw or "").strip()
         if not account_id:
             continue
-        raw_agent = str(getattr(row, "agent", "") or "").strip()
+        raw_agent = str(agent_raw or "").strip()
         canonical = str(alias_map.get(raw_agent) or raw_agent).strip()
         canonical_norm = _norm_agent_name(canonical)
         if not canonical_norm:
@@ -74,13 +89,13 @@ def _build_account_agent_uniqueness_index(db: Session) -> dict[str, dict[str, ob
     return out
 
 
-
 @router.get("/pairs")
 def get_pairs(
     crm: str = Query(""),
     agent: str = Query(""),
     agent_exact: bool = Query(False),  # True = exact match, False = LIKE (for search)
     customer: str = Query(""),
+    account_id: str = Query(""),
     sort: str = Query("agent"),       # agent|customer|crm|calls|duration|deposits
     dir: str = Query("asc"),          # asc|desc
     min_calls: int = Query(0),
@@ -91,11 +106,12 @@ def get_pairs(
     max_agent_deposits: float = Query(0.0),  # max total net dep across all agent's customers
     ftd_after: str = Query(""),        # ISO date string, e.g. "2025-01-01"
     ftd_before: str = Query(""),       # ISO date string, e.g. "2025-12-31"
+    limit: int = Query(0, ge=0, le=20000),   # 0 = no limit (legacy behavior)
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_session),
 ):
     from sqlalchemy import func as sa_func, select as sa_select
     try:
-        uniqueness_index = _build_account_agent_uniqueness_index(db)
         stmt = select(CRMPair)
         if crm:
             stmt = stmt.where(CRMPair.crm_url.ilike(f"%{crm}%"))
@@ -106,6 +122,8 @@ def get_pairs(
                 stmt = stmt.where(CRMPair.agent.ilike(f"%{agent}%"))
         if customer:
             stmt = stmt.where(CRMPair.customer.ilike(f"%{customer}%"))
+        if account_id:
+            stmt = stmt.where(CRMPair.account_id.ilike(f"%{account_id}%"))
         if min_calls:
             stmt = stmt.where(CRMPair.call_count >= min_calls)
         if min_duration:
@@ -144,8 +162,20 @@ def get_pairs(
         }
         col = col_map.get(sort, CRMPair.agent)
         stmt = stmt.order_by(col.desc() if dir == "desc" else col.asc())
+        if offset:
+            stmt = stmt.offset(int(offset))
+        if limit:
+            stmt = stmt.limit(int(limit))
 
         pairs = db.exec(stmt).all()
+        uniqueness_index = _build_account_agent_uniqueness_index(
+            db,
+            account_ids={
+                str(getattr(p, "account_id", "") or "").strip()
+                for p in pairs
+                if str(getattr(p, "account_id", "") or "").strip()
+            },
+        )
         return [
             {
                 "id": p.id,

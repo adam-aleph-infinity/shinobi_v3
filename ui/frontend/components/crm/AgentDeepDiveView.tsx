@@ -303,7 +303,7 @@ export default function AgentDeepDiveView({
   );
   const { data: pipelineRuns } = useSWR<PipelineRunLite[]>(
     activePipelineId && salesAgent && customer
-      ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/runs?limit=2500&sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
+      ? `/api/pipelines/${encodeURIComponent(activePipelineId)}/runs?limit=1000&include_logs=1&sales_agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}`
       : null,
     fetcher,
     { refreshInterval: 10000 },

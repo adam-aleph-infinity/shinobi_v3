@@ -42,7 +42,8 @@ cd ui/frontend
 npm install --legacy-peer-deps -q
 npm run build
 mkdir -p .next/standalone/.next/static .next/standalone/public
-rsync -a --delete .next/static/ .next/standalone/.next/static/
+# Preserve prior chunk files across rebuilds to reduce client chunk mismatches.
+rsync -a .next/static/ .next/standalone/.next/static/
 rsync -a --delete public/ .next/standalone/public/
 cd $APP_DIR
 

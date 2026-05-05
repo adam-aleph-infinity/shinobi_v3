@@ -275,8 +275,9 @@ echo "▶ Frontend build..."
 cd ui/frontend
 npm install --legacy-peer-deps -q
 npm run build
-cp -r .next/static .next/standalone/.next/static
-cp -r public .next/standalone/public
+# Keep previous chunks available during rollout to reduce ChunkLoadError in open tabs.
+rsync -a .next/static/ .next/standalone/.next/static/
+rsync -a --delete public/ .next/standalone/public/
 cd $APP_DIR
 
 echo "▶ Create data directories..."
@@ -664,14 +665,14 @@ gcloud compute ssh $VM_NAME \
     pip install -r requirements.txt -q
     pip install -r ui/backend/requirements.txt -q
 
-    echo '▶ Build frontend...'
-    cd ui/frontend
-    npm install --legacy-peer-deps -q
-    rm -rf .next
-    npm run build
-    cp -r .next/static .next/standalone/.next/static
-    cp -r public .next/standalone/public
-    cd ~/shinobi
+echo '▶ Build frontend...'
+cd ui/frontend
+npm install --legacy-peer-deps -q
+npm run build
+# Keep previous chunks available during rollout to reduce ChunkLoadError in open tabs.
+rsync -a .next/static/ .next/standalone/.next/static/
+rsync -a --delete public/ .next/standalone/public/
+cd ~/shinobi
 
     echo '▶ Restart services...'
     sudo systemctl restart shinobi-backend shinobi-frontend

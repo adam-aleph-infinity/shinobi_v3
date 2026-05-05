@@ -14,10 +14,10 @@ class PipelineRun(SQLModel, table=True):
     call_id: str = Field(default="", index=True)
     started_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     finished_at: Optional[datetime] = None
-    status: str = "running"  # running | done | error
-    run_origin: str = ""     # local | webhook — stored at creation, shared across VMs via DB
-    note_sent: bool = False  # True once a CRM note was successfully pushed for this run
-    note_sent_at: Optional[datetime] = None  # timestamp of the successful push
+    status: str = Field(default="running", index=True)  # running | done | error
+    run_origin: str = Field(default="", index=True)     # local | webhook — stored at creation, shared across VMs via DB
+    note_sent: bool = Field(default=False, index=True)  # True once a CRM note was successfully pushed for this run
+    note_sent_at: Optional[datetime] = Field(default=None, index=True)  # timestamp of the successful push
     canvas_json: str = ""    # JSON canvas snapshot {nodes, edges, stages}
     steps_json: str = ""     # JSON [{agent_id, agent_name, status, content, error_msg}]
     log_json: str = ""       # JSON [{ts, text, level}]

@@ -13,10 +13,10 @@ class JobStatus(str, Enum):
 
 class Job(SQLModel, table=True):
     id: str = Field(primary_key=True)
-    status: JobStatus = Field(default=JobStatus.pending)
+    status: JobStatus = Field(default=JobStatus.pending, index=True)
     audio_path: str
-    pair_slug: str
-    call_id: str
+    pair_slug: str = Field(index=True)
+    call_id: str = Field(index=True)
     speaker_a: str = "Ron"
     speaker_b: str = "Chris"
     stage: int = 0
@@ -26,5 +26,5 @@ class Job(SQLModel, table=True):
     error: Optional[str] = None
     extra_config: Optional[str] = None  # JSON: engines, noise_reduction, voice_isolation, etc.
     batch_id: Optional[str] = None      # groups jobs submitted together (UUID)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     completed_at: Optional[datetime] = None

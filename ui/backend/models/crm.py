@@ -8,7 +8,7 @@ class CRMPair(SQLModel, table=True):
 
     id: str = Field(primary_key=True)            # "{crm_url}::{account_id}::{agent}"
     crm_url: str = Field(index=True)
-    account_id: str
+    account_id: str = Field(index=True)
     agent: str = Field(index=True)
     customer: str = Field(index=True)
     call_count: int = Field(default=0)
@@ -26,7 +26,7 @@ class CRMCall(SQLModel, table=True):
     id: str = Field(primary_key=True)            # "{crm_url}::{call_id}"
     crm_url: str = Field(index=True)
     call_id: str = Field(index=True)
-    account_id: str
+    account_id: str = Field(index=True)
     agent: str = Field(index=True)
     customer: str = Field(index=True)
     duration_s: int = Field(default=0)           # from CRM API

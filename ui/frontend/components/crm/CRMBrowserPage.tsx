@@ -105,6 +105,8 @@ const ARTIFACT_SORT_KEYS: SortKey[] = [
   "artifact_agent_avg_score",
   "artifact_agent_total_violations",
 ];
+const DEFAULT_PAIRS_LIMIT = 1200;
+const PAIRS_LIMIT_STEP = 1200;
 
 function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
   if (!active) return <ChevronsUpDown className="w-3.5 h-3.5 text-gray-600" />;
@@ -193,6 +195,7 @@ export default function CRMBrowserPage({
   const [maxArtifactAgentAvgScore, _setMaxArtifactAgentAvgScore] = useState("");
   const [minArtifactAgentTotalViolations, _setMinArtifactAgentTotalViolations] = useState("");
   const [maxArtifactAgentTotalViolations, _setMaxArtifactAgentTotalViolations] = useState("");
+  const [pairsLimit, setPairsLimit] = useState(DEFAULT_PAIRS_LIMIT);
   const ftdAfterRef  = useRef<HTMLInputElement>(null);
   const ftdBeforeRef = useRef<HTMLInputElement>(null);
   const artifactRunFromRef = useRef<HTMLInputElement>(null);
@@ -322,6 +325,7 @@ export default function CRMBrowserPage({
   if (agentFilter)    params.set("agent",               agentFilter);
   if (customerFilter) params.set("customer",            customerFilter);
   if (crmFilter)      params.set("crm",                 crmFilter);
+  if (accountIdFilter) params.set("account_id",         accountIdFilter);
   if (minCalls)       params.set("min_calls",           minCalls);
   if (minDuration)    params.set("min_duration",        minDuration);
   if (minDeposits)    params.set("min_deposits",        minDeposits);
@@ -330,6 +334,7 @@ export default function CRMBrowserPage({
   if (maxAgentDep)    params.set("max_agent_deposits",  maxAgentDep);
   if (ftdAfter)       params.set("ftd_after",           ftdAfter);
   if (ftdBefore)      params.set("ftd_before",          ftdBefore);
+  params.set("limit", String(pairsLimit));
 
   const { data: pairs, isLoading, error, mutate } = useSWR<AgentCustomerPair[]>(
     filtersReady ? `/crm/pairs?${params.toString()}` : null,
@@ -565,6 +570,7 @@ export default function CRMBrowserPage({
     setAgentFilter(""); setCustomerFilter(""); setAccountIdFilter(""); setCrmFilter("");
     setMinCalls(""); setMinDuration(""); setMinTx(""); setMinDeposits(""); setMaxDeposits("");
     setMinAgentDep(""); setMaxAgentDep(""); setFtdAfter(""); setFtdBefore("");
+    setPairsLimit(DEFAULT_PAIRS_LIMIT);
     if (artifactsEnabled) {
       setArtifactRunFrom(""); setArtifactRunTo("");
       setMinArtifactAvgScore(""); setMaxArtifactAvgScore("");
@@ -714,6 +720,7 @@ export default function CRMBrowserPage({
   const visibleIds  = displayPairs.map(p => p.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
   const someSelected = selectedIds.size > 0;
+  const maybeTruncated = pairsSafe.length >= pairsLimit;
 
   function toggleSelectAll() {
     if (pairPickerMode) {
@@ -1448,8 +1455,18 @@ export default function CRMBrowserPage({
               {(pairsSafe.length > 0 || totalPairsCount > 0 || hasFilter)
                 ? `${displayPairs.length}${hasFilter && totalPairsCount > 0 ? ` of ${totalPairsCount}` : ""} pair${displayPairs.length !== 1 ? "s" : ""}`
                 : ""}
+              {maybeTruncated && ` · showing first ${pairsLimit.toLocaleString()}`}
               {someSelected && ` · ${selectedIds.size} selected`}
             </span>
+
+            {maybeTruncated && (
+              <button
+                onClick={() => setPairsLimit((v) => Math.min(v + PAIRS_LIMIT_STEP, 20000))}
+                className="px-2.5 py-1 rounded border border-gray-700 bg-gray-900/70 text-[11px] text-gray-200 hover:bg-gray-800 transition-colors"
+              >
+                Load {PAIRS_LIMIT_STEP.toLocaleString()} more
+              </button>
+            )}
 
             {transcribeResult && (
               <span className={`text-xs ${transcribeResult.skipped === -1 ? "text-red-400" : "text-teal-400"}`}>

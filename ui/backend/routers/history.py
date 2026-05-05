@@ -7,6 +7,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import tuple_
+from sqlalchemy.orm import load_only
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
@@ -147,7 +148,7 @@ def _load_webhook_event_index(
     return by_key, by_call
 
 
-def _maybe_reconcile_active_run_statuses(db: Session, throttle_s: float = 4.0) -> None:
+def _maybe_reconcile_active_run_statuses(db: Session, throttle_s: float = 10.0) -> None:
     """
     Keep pipeline_run.status aligned with step truth for active rows.
     Runs with a short process-local throttle to avoid write-heavy read paths.
@@ -161,7 +162,8 @@ def _maybe_reconcile_active_run_statuses(db: Session, throttle_s: float = 4.0) -
         from ui.backend.models.pipeline_run import PipelineRun as PR
 
         active_values = ["queued", "preparing", "running", "retrying", "loading", "started", "in_progress"]
-        rows = db.exec(select(PR).where(PR.status.in_(active_values)).limit(6000)).all()
+        # Keep reconciliation bounded so list endpoints stay responsive under load.
+        rows = db.exec(select(PR).where(PR.status.in_(active_values)).limit(2000)).all()
         changed = 0
         for row in rows or []:
             _, did_change = reconcile_run_row_status(row)
@@ -281,6 +283,26 @@ def list_runs(
     _maybe_reconcile_active_run_statuses(db)
 
     stmt = select(PR)
+    if bool(compact):
+        # Compact mode powers high-frequency Jobs polling; skip large canvas blobs.
+        stmt = stmt.options(
+            load_only(
+                PR.id,
+                PR.pipeline_id,
+                PR.pipeline_name,
+                PR.sales_agent,
+                PR.customer,
+                PR.call_id,
+                PR.started_at,
+                PR.finished_at,
+                PR.status,
+                PR.steps_json,
+                PR.log_json,
+                PR.run_origin,
+                PR.note_sent,
+                PR.note_sent_at,
+            )
+        )
 
     def parse_dt(raw: str, field_name: str) -> Optional[datetime]:
         s = str(raw or "").strip()
@@ -450,8 +472,15 @@ def list_runs(
         return json.dumps(compact_steps, ensure_ascii=False)
 
     def _compact_log_json(raw: Any) -> str:
+        raw_text = str(raw or "")
+        if not raw_text:
+            return "[]"
+        # Large log blobs dominate response CPU time on list endpoints.
+        # In compact mode, prefer fast list rendering over detailed logs.
+        if len(raw_text) > 25000:
+            return "[]"
         try:
-            parsed = json.loads(str(raw or "[]"))
+            parsed = json.loads(raw_text)
         except Exception:
             return "[]"
         if not isinstance(parsed, list):
@@ -486,6 +515,18 @@ def list_runs(
             if nid:
                 return nid
         return ""
+
+    def _derive_note_sent_flags(row: Any) -> tuple[bool, Optional[str]]:
+        sent = bool(getattr(row, "note_sent", False))
+        sent_at_raw = getattr(row, "note_sent_at", None)
+        sent_at = sent_at_raw.isoformat() if sent_at_raw is not None else None
+        if sent or sent_at:
+            return True, sent_at
+        # Legacy fallback: older rows may only have CRM push evidence in logs.
+        log_blob = str(getattr(row, "log_json", "") or "")
+        if "[CRM-PUSH] ✓ Sent note " in log_blob:
+            return True, sent_at
+        return False, sent_at
 
     for r in rows:
         effective_status = derive_effective_run_status(
@@ -537,6 +578,7 @@ def list_runs(
             or note_id_by_triplet.get((call_key, pair_key[0], pair_key[1]), "")
             or note_id_by_call.get(call_key, "")
         )
+        note_sent, note_sent_at = _derive_note_sent_flags(r)
 
         row_payload = {
             "id": r.id,
@@ -549,20 +591,15 @@ def list_runs(
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
             "status": effective_status,
-            "canvas_json": r.canvas_json,
+            "canvas_json": "" if bool(compact) else r.canvas_json,
             "steps_json": r.steps_json,
             "log_json": r.log_json,
             "run_origin": run_origin,
-            "note_sent": bool(getattr(r, "note_sent", False)),
-            "note_sent_at": (
-                r.note_sent_at.isoformat()
-                if getattr(r, "note_sent_at", None) is not None
-                else None
-            ),
+            "note_sent": note_sent,
+            "note_sent_at": note_sent_at,
             "note_id": resolved_note_id,
         }
         if bool(compact):
-            row_payload["canvas_json"] = ""
             row_payload["steps_json"] = _compact_steps_json(r.steps_json)
             row_payload["log_json"] = _compact_log_json(r.log_json)
         out_rows.append(row_payload)
@@ -617,7 +654,32 @@ def get_run_by_id(
     from ui.backend.models.pipeline_run import PipelineRun as PR
     from ui.backend.models.crm import CRMCall, CRMPair
 
-    r = db.get(PR, rid)
+    if bool(compact):
+        r = db.exec(
+            select(PR)
+            .options(
+                load_only(
+                    PR.id,
+                    PR.pipeline_id,
+                    PR.pipeline_name,
+                    PR.sales_agent,
+                    PR.customer,
+                    PR.call_id,
+                    PR.started_at,
+                    PR.finished_at,
+                    PR.status,
+                    PR.steps_json,
+                    PR.log_json,
+                    PR.run_origin,
+                    PR.note_sent,
+                    PR.note_sent_at,
+                )
+            )
+            .where(PR.id == rid)
+            .limit(1)
+        ).first()
+    else:
+        r = db.get(PR, rid)
     if not r:
         raise HTTPException(404, "Run not found")
 
@@ -626,7 +688,8 @@ def get_run_by_id(
         try:
             db.add(r)
             db.commit()
-            db.refresh(r)
+            if not bool(compact):
+                db.refresh(r)
         except Exception:
             try:
                 db.rollback()
@@ -707,6 +770,17 @@ def get_run_by_id(
                 return nid
         return ""
 
+    def _derive_note_sent_flags(row: Any) -> tuple[bool, Optional[str]]:
+        sent = bool(getattr(row, "note_sent", False))
+        sent_at_raw = getattr(row, "note_sent_at", None)
+        sent_at = sent_at_raw.isoformat() if sent_at_raw is not None else None
+        if sent or sent_at:
+            return True, sent_at
+        log_blob = str(getattr(row, "log_json", "") or "")
+        if "[CRM-PUSH] ✓ Sent note " in log_blob:
+            return True, sent_at
+        return False, sent_at
+
     resolved_note_id = _extract_note_id_from_steps_json(r.steps_json)
     if not resolved_note_id and call_key:
         try:
@@ -728,6 +802,7 @@ def get_run_by_id(
                 if best_pair[0] is None or (n_created is not None and n_created > best_pair[0]):
                     best_pair = (n_created, n_id)
         resolved_note_id = best_pair[1] or best_call[1]
+    note_sent, note_sent_at = _derive_note_sent_flags(r)
 
     def _compact_steps_json(raw: Any) -> str:
         try:
@@ -786,20 +861,15 @@ def get_run_by_id(
         "started_at": r.started_at.isoformat() if r.started_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
         "status": effective_status,
-        "canvas_json": r.canvas_json,
+        "canvas_json": "" if bool(compact) else r.canvas_json,
         "steps_json": r.steps_json,
         "log_json": r.log_json,
         "run_origin": run_origin,
-        "note_sent": bool(getattr(r, "note_sent", False)),
-        "note_sent_at": (
-            r.note_sent_at.isoformat()
-            if getattr(r, "note_sent_at", None) is not None
-            else None
-        ),
+        "note_sent": note_sent,
+        "note_sent_at": note_sent_at,
         "note_id": resolved_note_id,
     }
     if bool(compact):
-        row_payload["canvas_json"] = ""
         row_payload["steps_json"] = _compact_steps_json(r.steps_json)
         row_payload["log_json"] = _compact_log_json(r.log_json)
     return row_payload
