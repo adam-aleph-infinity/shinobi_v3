@@ -30,7 +30,7 @@ import ContextTopBar from "@/components/shared/ContextTopBar";
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
 // v3: invalidate stale cached run-log timestamps persisted before robust ts normalization.
-const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v3";
+const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v4";
 const PIPELINE_ACTIVE_RUNS_STORAGE_KEY = "shinobi.pipeline.active_runs.v1";
 const MAX_PERSISTED_RUN_LOG_BUCKETS = 40;
 
@@ -1686,7 +1686,7 @@ function persistRunLogLines(contextKey: string, runId: string, lines: CanvasLogL
     return;
   }
   const bucket: PersistedRunLogBucket = {
-    lines: lines.map(normalizeCanvasLogLine),
+    lines,
     updated_at: Date.now(),
     run_id: rid || undefined,
   };
@@ -1701,10 +1701,10 @@ function restoreRunLogLines(contextKey: string, runId: string): CanvasLogLine[] 
   const rid = String(runId || "").trim();
   const store = readPersistedRunLogStore();
   if (rid && store.by_run_id[rid]?.lines?.length) {
-    return store.by_run_id[rid].lines.map(normalizeCanvasLogLine);
+    return store.by_run_id[rid].lines;
   }
   if (ctx && store.by_context[ctx]?.lines?.length) {
-    return store.by_context[ctx].lines.map(normalizeCanvasLogLine);
+    return store.by_context[ctx].lines;
   }
   return [];
 }
@@ -8030,7 +8030,7 @@ function PipelineCanvas() {
                             <div className="pl-2 border-l border-gray-800 space-y-0.5">
                               {lines.map((line, idx) => (
                                 <div key={`${group}-${idx}`} className="flex gap-2 leading-5 items-start">
-                                  <span className="text-gray-700 shrink-0 w-16">{normalizeCanvasLogTs(line.ts)}</span>
+                                  <span className="text-gray-700 shrink-0 w-16">{line.ts}</span>
                                   <span className={cn("min-w-0 whitespace-pre-wrap break-words", logLevelClass(line.level))}>
                                     {line.text}
                                   </span>
@@ -8044,7 +8044,7 @@ function PipelineCanvas() {
                       <>
                         {filteredRunLogs.map((line, idx) => (
                           <div key={`${line.ts}-${idx}`} className="flex gap-2 leading-5 items-start">
-                            <span className="text-gray-700 shrink-0 w-16">{normalizeCanvasLogTs(line.ts)}</span>
+                            <span className="text-gray-700 shrink-0 w-16">{line.ts}</span>
                             <span className={cn("min-w-0 whitespace-pre-wrap break-words", logLevelClass(line.level))}>
                               {line.text}
                             </span>

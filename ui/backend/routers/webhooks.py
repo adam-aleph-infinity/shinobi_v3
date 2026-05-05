@@ -2351,7 +2351,7 @@ async def _execute_live_queue_item(
                     customer=str(item.get("customer") or ""),
                     call_id=str(item.get("call_id") or ""),
                     status="preparing",
-                    log_line=f"Backfill running ({done}/{total} complete, {failed_jobs} failed)",
+                    log_line=f"Transcribing {done}/{total} calls · {failed_jobs} failed · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
                 )
 
             _upsert_pipeline_run_stub(
@@ -2362,7 +2362,17 @@ async def _execute_live_queue_item(
                 customer=str(item.get("customer") or ""),
                 call_id=str(item.get("call_id") or ""),
                 status="preparing",
-                log_line="Backfilling historical transcripts (skipping existing)",
+                log_line=f"Refreshing call history from CRM · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
+            )
+            _upsert_pipeline_run_stub(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+                pipeline_name=str(item.get("pipeline_name") or ""),
+                sales_agent=str(item.get("sales_agent") or ""),
+                customer=str(item.get("customer") or ""),
+                call_id=str(item.get("call_id") or ""),
+                status="preparing",
+                log_line=f"Starting transcript backfill (skip existing) · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
             )
             # Guard backfill so a stuck CRM/transcription dependency cannot pin live slots forever.
             backfill = await asyncio.wait_for(
@@ -2433,9 +2443,9 @@ async def _execute_live_queue_item(
                 call_id=str(item.get("call_id") or ""),
                 status="preparing",
                 log_line=(
-                    f"Backfill done: submitted {int(backfill.get('submitted') or 0)}, "
-                    f"skipped {int(backfill.get('skipped') or 0)}, "
-                    f"refresh added {int(backfill.get('refresh_count') or 0)} call(s)."
+                    f"Backfill done: {int(backfill.get('submitted') or 0)} new transcribed, "
+                    f"{int(backfill.get('skipped') or 0)} skipped (existing), "
+                    f"CRM added {int(backfill.get('refresh_count') or 0)} call(s)."
                 ),
             )
             if str(backfill.get("refresh_error") or "").strip():
@@ -2473,7 +2483,7 @@ async def _execute_live_queue_item(
             customer=str(item.get("customer") or ""),
             call_id=str(item.get("call_id") or ""),
             status="running",
-            log_line="Pipeline execution started from live queue.",
+            log_line=f"Pipeline started: {str(item.get('pipeline_name') or pipeline_id)} · call {str(item.get('call_id') or '')} · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')}",
         )
         return item
     except Exception as exc:
@@ -2880,7 +2890,7 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
                     customer=str(item.get("customer") or ""),
                     call_id=str(item.get("call_id") or ""),
                     status="preparing",
-                    log_line="Dequeued for preflight checks",
+                    log_line=f"Preflight checks · {str(item.get('sales_agent') or '')} → {str(item.get('customer') or '')} · call {str(item.get('call_id') or '')}",
                 )
                 candidates.append(dict(item))
                 slots -= 1
@@ -3253,7 +3263,7 @@ async def _handle_call_webhook(
                             customer=pair["customer"],
                             call_id=call_id,
                             status="queued",
-                            log_line="Queued from webhook trigger",
+                            log_line=f"Queued: {pipeline_name} · {pair['agent']} → {pair['customer']} · call {call_id}",
                         )
                     entry.update(
                         {
