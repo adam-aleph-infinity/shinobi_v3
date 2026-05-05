@@ -29,6 +29,7 @@ from ui.backend.services import user_profiles
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
 _DIR = settings.ui_data_dir / "_pipelines"
+_HISTORY_DIR = settings.ui_data_dir / "_pipeline_history"
 _STATE_DIR = settings.ui_data_dir / "_pipeline_states"
 _RUBRIC_DIR = settings.ui_data_dir / "_analytics_rubrics"
 _ARTIFACT_SCHEMA_DIR = settings.ui_data_dir / "_artifact_prompt_schemas"
@@ -2839,9 +2840,54 @@ def update_pipeline(pipeline_id: str, req: PipelineIn, request: Request):
     data["folder"] = _normalise_folder(data.get("folder", ""))
     if data["folder"]:
         _ensure_folder_exists(data["folder"])
-    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    f.write_text(payload, encoding="utf-8")
+    # Snapshot for history restore
+    try:
+        snap_dir = _HISTORY_DIR / pipeline_id
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        (snap_dir / f"{stamp}.json").write_text(payload, encoding="utf-8")
+        # Keep only the 50 most recent snapshots
+        snaps = sorted(snap_dir.glob("*.json"))
+        for old in snaps[:-50]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        pass
     _sync_ai_registry_pipelines()
     return data
+
+
+@router.get("/{pipeline_id}/snapshots")
+def list_pipeline_snapshots(pipeline_id: str, request: Request):
+    """Return list of saved pipeline history snapshots, newest first."""
+    _require_can_view(request)
+    snap_dir = _HISTORY_DIR / pipeline_id
+    if not snap_dir.exists():
+        return {"snapshots": []}
+    snaps = []
+    for p in sorted(snap_dir.glob("*.json"), reverse=True):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            snaps.append({
+                "snapshot_id": p.stem,
+                "saved_at": d.get("updated_at") or p.stem,
+                "name": d.get("name", ""),
+                "step_count": len(d.get("steps", [])),
+            })
+        except Exception:
+            pass
+    return {"snapshots": snaps}
+
+
+@router.get("/{pipeline_id}/snapshots/{snapshot_id}")
+def get_pipeline_snapshot(pipeline_id: str, snapshot_id: str, request: Request):
+    """Return full pipeline definition from a specific snapshot."""
+    _require_can_view(request)
+    p = _HISTORY_DIR / pipeline_id / f"{snapshot_id}.json"
+    if not p.exists():
+        raise HTTPException(404, "Snapshot not found")
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 @router.patch("/{pipeline_id}/folder")
@@ -8633,6 +8679,8 @@ async def run_pipeline(
                                                 note_id=_note_id,
                                                 account_id="",
                                                 run_id=run_id,
+                                                pipeline_id=str(pipeline_id or ""),
+                                                run_origin=str(run_origin or ""),
                                                 db=_note_s,
                                             )
                                         _crm_status = str(_push.get("crm_status") or "")

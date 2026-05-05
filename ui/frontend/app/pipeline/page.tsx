@@ -17,7 +17,7 @@ import {
   Check, Loader2, TriangleAlert,
   Mic2, Layers, BookOpen, PenLine, FileText, Braces, AlignLeft,
   Plus, Trash2, ChevronRight, X, Download, Workflow, Copy, ClipboardCopy, ClipboardPaste,
-  Lock, Play, Square, History, Users, PhoneCall, Send,
+  Lock, Play, Square, History, Users, PhoneCall, Send, Undo2, Redo2,
 } from "lucide-react";
 import { useAppCtx } from "@/lib/app-context";
 import { useUserProfile } from "@/lib/user-profile";
@@ -641,11 +641,9 @@ function AgentPickerGrid({
         <div className="min-w-0 flex-1">
           <p className={`text-[10px] font-medium truncate ${isSel ? "text-white" : "text-gray-300"}`}>{a.name}</p>
           <p className={`text-[9px] ${meta.textColor}`}>{meta.label}</p>
-          {usage.total > 0 && (
-            <p className={`text-[9px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
-              {usage.other > 0
-                ? `Used in ${usage.total} pipelines (${usage.other} other)`
-                : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
+          {usage.other > 0 && (
+            <p className="text-[9px] mt-0.5 text-amber-300">
+              {`Also in ${usage.other} other pipeline${usage.other !== 1 ? "s" : ""}`}
             </p>
           )}
         </div>
@@ -1777,6 +1775,83 @@ function PaletteItem({ kind, subType, meta, onAdd }: {
   );
 }
 
+function PipelineHistoryModal({
+  pipelineId,
+  onClose,
+  onRestore,
+}: {
+  pipelineId: string;
+  onClose: () => void;
+  onRestore: (snap: any) => void;
+}) {
+  const [snaps, setSnaps] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [restoring, setRestoring] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/snapshots`)
+      .then(r => r.json())
+      .then(d => setSnaps(d.snapshots ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [pipelineId]);
+
+  const handleRestore = async (snapId: string) => {
+    setRestoring(snapId);
+    try {
+      const res = await fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/snapshots/${encodeURIComponent(snapId)}`);
+      const snap = await res.json();
+      onRestore(snap);
+    } catch {
+      alert("Failed to load snapshot");
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  const fmtDate = (s: string) => {
+    try {
+      const d = new Date(s.includes("T") ? s : s.replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/, "$1-$2-$3T$4:$5:$6"));
+      return d.toLocaleString();
+    } catch { return s; }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-[420px] max-h-[70vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+          <div className="flex items-center gap-2">
+            <History className="w-4 h-4 text-indigo-400" />
+            <span className="text-sm font-semibold text-white">Pipeline History</span>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
+          {loading && <p className="text-xs text-gray-500 text-center py-6">Loading…</p>}
+          {!loading && snaps.length === 0 && (
+            <p className="text-xs text-gray-500 text-center py-6">No saved versions yet. Save the pipeline to create history.</p>
+          )}
+          {snaps.map(s => (
+            <div key={s.snapshot_id} className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-gray-800/60 hover:bg-gray-800">
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-white truncate">{s.name}</p>
+                <p className="text-[10px] text-gray-400">{fmtDate(s.saved_at)} · {s.step_count} step{s.step_count !== 1 ? "s" : ""}</p>
+              </div>
+              <button
+                onClick={() => handleRestore(s.snapshot_id)}
+                disabled={!!restoring}
+                className="shrink-0 px-2.5 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-[10px] font-semibold disabled:opacity-50"
+              >
+                {restoring === s.snapshot_id ? "…" : "Restore"}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PipelineCanvas() {
   const { screenToFlowPosition, setViewport } = useReactFlow();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
@@ -1962,6 +2037,13 @@ function PipelineCanvas() {
   const [liveCursorMs, setLiveCursorMs] = useState(0);
   const [liveTriggeredAt, setLiveTriggeredAt] = useState("");
   const liveCursorRef = useRef(0);
+
+  // ── Canvas undo/redo ──────────────────────────────────────────────────────
+  const canvasHistoryRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
+  const canvasRedoRef    = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
+  const [canvasUndoLen, setCanvasUndoLen] = useState(0);
+  const [canvasRedoLen, setCanvasRedoLen] = useState(0);
+  const [showPipelineHistoryModal, setShowPipelineHistoryModal] = useState(false);
   const liveWaitAbortRef = useRef<AbortController | null>(null);
   const [canvasLocked, setCanvasLocked] = useState(false);
   const [runContextMode, setRunContextMode] = useState<RunContextMode>("new");
@@ -2974,7 +3056,7 @@ function PipelineCanvas() {
           source,
           runId,
           createdAt,
-          agentName: String(s.agent_name || ""),
+          agentName: String(allAgents.find(a => a.id === s.agent_id)?.name || s.agent_name || ""),
           model: String(s.model || ""),
           status: String(s.state || s.status || ""),
           errorMsg: String(s.error_msg || ""),
@@ -3491,9 +3573,50 @@ function PipelineCanvas() {
     onNodesChange(processed as NodeChange[]);
   }, [onNodesChange, canvasLocked, markElementMutation]);
 
+  const pushCanvasHistory = useCallback((ns: Node[], es: Edge[]) => {
+    canvasHistoryRef.current = [...canvasHistoryRef.current.slice(-29), { nodes: ns, edges: es }];
+    canvasRedoRef.current = [];
+    setCanvasUndoLen(canvasHistoryRef.current.length);
+    setCanvasRedoLen(0);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    const prev = canvasHistoryRef.current.pop();
+    if (!prev) return;
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+    canvasRedoRef.current = [...canvasRedoRef.current, prev];
+    setCanvasUndoLen(canvasHistoryRef.current.length);
+    setCanvasRedoLen(canvasRedoRef.current.length);
+    markElementMutation();
+  }, [setNodes, setEdges, markElementMutation]);
+
+  const handleRedo = useCallback(() => {
+    const next = canvasRedoRef.current.pop();
+    if (!next) return;
+    canvasHistoryRef.current = [...canvasHistoryRef.current, next];
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setCanvasUndoLen(canvasHistoryRef.current.length);
+    setCanvasRedoLen(canvasRedoRef.current.length);
+    markElementMutation();
+  }, [setNodes, setEdges, markElementMutation]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl) return;
+      if (e.key === "z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
+      if ((e.key === "y") || (e.key === "z" && e.shiftKey)) { e.preventDefault(); handleRedo(); }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [handleUndo, handleRedo]);
+
   // Snap processing/output nodes to the nearest same-type lane on drag end
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
     if (canvasLocked) return;
+    pushCanvasHistory(nodes, edges);
     markElementMutation();
     const kind = node.type as NodeKind;
     if (kind === "input") {
@@ -3553,6 +3676,7 @@ function PipelineCanvas() {
 
   const onConnect = useCallback((conn: Connection) => {
     if (canvasLocked) return;
+    pushCanvasHistory(nodesRef.current, edgesRef.current);
     markElementMutation();
     // Compatibility check: output → processing edge
     const srcNode = nodesRef.current.find(n => n.id === conn.source);
@@ -6464,11 +6588,9 @@ function PipelineCanvas() {
                 {agId ? (selData.agentName as string || "Agent") : "Configure Agent"}
               </p>
               <p className={`text-[10px] ${cm.textColor}`}>{agId ? cm.label : "No agent selected"}</p>
-              {agId && usage.total > 0 && (
-                <p className={`text-[10px] mt-0.5 ${usage.other > 0 ? "text-amber-300" : "text-gray-500"}`}>
-                  {usage.other > 0
-                    ? `Used in ${usage.total} pipelines (${usage.other} other)`
-                    : `Used in ${usage.total} pipeline${usage.total !== 1 ? "s" : ""}`}
+              {agId && usage.other > 0 && (
+                <p className="text-[10px] mt-0.5 text-amber-300">
+                  {`Also in ${usage.other} other pipeline${usage.other !== 1 ? "s" : ""}`}
                 </p>
               )}
             </div>
@@ -7120,6 +7242,7 @@ function PipelineCanvas() {
     "Off";
 
   return (
+    <>
     <div className="flex flex-col h-full w-full">
 
       {/* ── Top toolbar (Context) ─────────────────────────────────────── */}
@@ -7523,6 +7646,32 @@ function PipelineCanvas() {
                 <ClipboardPaste className="w-3 h-3" />
                 Paste Bundle
               </button>
+              <div className="flex gap-1 w-full">
+                <button
+                  onClick={handleUndo}
+                  disabled={canvasLocked || canvasUndoLen === 0}
+                  title="Undo (Ctrl+Z)"
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <Undo2 className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={handleRedo}
+                  disabled={canvasLocked || canvasRedoLen === 0}
+                  title="Redo (Ctrl+Y)"
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <Redo2 className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => setShowPipelineHistoryModal(true)}
+                  disabled={!pipelineId}
+                  title="Restore from saved history"
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <History className="w-3 h-3" />
+                </button>
+              </div>
               <button
                 onClick={handleSave}
                 disabled={canvasLocked}
@@ -8356,6 +8505,26 @@ function PipelineCanvas() {
 
       </div>
     </div>
+
+    {/* ── Pipeline history restore modal ─────────────────────────────────── */}
+    {showPipelineHistoryModal && pipelineId && (
+      <PipelineHistoryModal
+        pipelineId={pipelineId}
+        onClose={() => setShowPipelineHistoryModal(false)}
+        onRestore={(snap) => {
+          pushCanvasHistory(nodes, edges);
+          loadPipelineToCanvas(pipelineId, {
+            id: snap.id || pipelineId,
+            name: snap.name || pipelineName,
+            folder: snap.folder ?? pipelineFolder,
+            steps: snap.steps ?? [],
+            canvas: snap.canvas,
+          });
+          setShowPipelineHistoryModal(false);
+        }}
+      />
+    )}
+    </>
   );
 }
 
