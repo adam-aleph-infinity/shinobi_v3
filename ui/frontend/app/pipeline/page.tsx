@@ -702,6 +702,7 @@ interface PipelineNodeData extends Record<string, unknown> {
   prompt:     string;
   stageIndex: number;
   runtimeStatus?: RuntimeStatus;
+  runtimeStartedAtMs?: number;
   runStepIndex?: number | null;
   runButtonDisabled?: boolean;
   onRunStep?: () => void;
@@ -1018,13 +1019,41 @@ function NodeCard({
   );
 }
 
-function RuntimeBadge({ status }: { status?: RuntimeStatus }) {
+function RuntimeBadge({
+  status,
+  runningSinceMs,
+}: {
+  status?: RuntimeStatus;
+  runningSinceMs?: number;
+}) {
   if (!status || status === "pending") return null;
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (status !== "loading" || !runningSinceMs) return;
+    const id = window.setInterval(() => setTick((v) => v + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [status, runningSinceMs]);
+  const _tick = tick; // keep reactive without JSX lint warnings
+  void _tick;
+
+  const formatElapsed = (startMs: number): string => {
+    const elapsed = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+    if (elapsed < 60) return `${elapsed}s`;
+    const m = Math.floor(elapsed / 60);
+    const s = elapsed % 60;
+    return `${m}m ${s}s`;
+  };
+
   const meta = RUNTIME_META[status];
   return (
     <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wide ${meta.className}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${meta.dot}`} />
       {meta.label}
+      {status === "loading" && runningSinceMs && (
+        <span className="tabular-nums text-[8px] font-bold normal-case text-orange-200/90">
+          {formatElapsed(runningSinceMs)}
+        </span>
+      )}
     </span>
   );
 }
@@ -1091,6 +1120,7 @@ function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData;
   const src = INPUT_SOURCES.find(s => s.value === (data.inputSource as string)) ?? null;
   const SrcIcon = src?.icon ?? null;
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+  const runtimeStartedAtMs = Number(data.runtimeStartedAtMs || 0) || undefined;
   const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
   const runButtonDisabled = !!data.runButtonDisabled;
   return (
@@ -1121,7 +1151,7 @@ function InputNode({ id, data, selected }: { id: string; data: PipelineNodeData;
         <span className={`text-[11px] font-semibold ${m.text} uppercase tracking-wide truncate`}>
           ⬤ {src ? src.label : "Input"}
         </span>
-        <RuntimeBadge status={runtimeStatus} />
+        <RuntimeBadge status={runtimeStatus} runningSinceMs={runtimeStartedAtMs} />
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
@@ -1136,6 +1166,7 @@ function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNode
   const Icon = CLASS_ICON[cls.toLowerCase()] ?? Bot;
   const hasAgent = !!(data.agentId as string);
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+  const runtimeStartedAtMs = Number(data.runtimeStartedAtMs || 0) || undefined;
   const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
   const runButtonDisabled = !!data.runButtonDisabled;
   return (
@@ -1180,7 +1211,7 @@ function ProcessingNode({ id, data, selected }: { id: string; data: PipelineNode
         ) : (
           <span className="text-[11px] text-gray-600 italic truncate">tap to configure</span>
         )}
-        <RuntimeBadge status={runtimeStatus} />
+        <RuntimeBadge status={runtimeStatus} runningSinceMs={runtimeStartedAtMs} />
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
@@ -1191,6 +1222,7 @@ function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData
   const { setNodes } = useReactFlow();
   const m = getMeta("output", data.subType);
   const runtimeStatus = (data.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
+  const runtimeStartedAtMs = Number(data.runtimeStartedAtMs || 0) || undefined;
   const runStepIndex = typeof data.runStepIndex === "number" ? data.runStepIndex : null;
   const runButtonDisabled = !!data.runButtonDisabled;
   return (
@@ -1226,7 +1258,7 @@ function OutputNode({ id, data, selected }: { id: string; data: PipelineNodeData
         ) : (
           <span className="text-[11px] text-gray-600 italic truncate">tap to configure</span>
         )}
-        <RuntimeBadge status={runtimeStatus} />
+        <RuntimeBadge status={runtimeStatus} runningSinceMs={runtimeStartedAtMs} />
       </div>
       <Handle type="source" position={Position.Bottom} className="rf-src" />
     </NodeCard>
@@ -3091,14 +3123,42 @@ function PipelineCanvas() {
     });
 
     setNodes(ns => {
+      const nowMs = Date.now();
       let changed = false;
       const next = ns.map(n => {
         const d = n.data as PipelineNodeData;
         const nextStatus = runtimeByNodeId[n.id] ?? "pending";
         const prevStatus = (d.runtimeStatus as RuntimeStatus | undefined) ?? "pending";
-        if (prevStatus === nextStatus) return n;
+        const prevStartedAtMs = Number(d.runtimeStartedAtMs || 0) || undefined;
+
+        if (prevStatus === nextStatus) {
+          if (nextStatus === "loading" && !prevStartedAtMs) {
+            changed = true;
+            return {
+              ...n,
+              data: { ...d, runtimeStartedAtMs: nowMs } satisfies PipelineNodeData,
+            };
+          }
+          if (nextStatus !== "loading" && prevStartedAtMs) {
+            changed = true;
+            const nextData = { ...d } as PipelineNodeData;
+            delete nextData.runtimeStartedAtMs;
+            return { ...n, data: nextData };
+          }
+          return n;
+        }
+
         changed = true;
-        return { ...n, data: { ...d, runtimeStatus: nextStatus } satisfies PipelineNodeData };
+        const nextData = {
+          ...d,
+          runtimeStatus: nextStatus,
+          runtimeStartedAtMs:
+            nextStatus === "loading"
+              ? (prevStatus === "loading" && prevStartedAtMs ? prevStartedAtMs : nowMs)
+              : undefined,
+        } satisfies PipelineNodeData;
+        if (nextStatus !== "loading") delete nextData.runtimeStartedAtMs;
+        return { ...n, data: nextData };
       });
       return changed ? next : ns;
     });
@@ -4881,6 +4941,7 @@ function PipelineCanvas() {
         const wanted = new Set(sources.map((s) => String(s || "").toLowerCase().trim()).filter(Boolean));
         if (!wanted.size) return;
         setNodes((prev) => {
+          const nowMs = Date.now();
           let changed = false;
           const next = prev.map((n) => {
             if (n.type !== "input") return n;
@@ -4888,9 +4949,34 @@ function PipelineCanvas() {
             const src = String(d.inputSource || "").toLowerCase().trim();
             if (!wanted.has(src)) return n;
             const prevStatus = ((d.runtimeStatus as RuntimeStatus | undefined) ?? "pending");
-            if (prevStatus === status) return n;
+            const prevStartedAtMs = Number(d.runtimeStartedAtMs || 0) || undefined;
+            if (prevStatus === status) {
+              if (status === "loading" && !prevStartedAtMs) {
+                changed = true;
+                return {
+                  ...n,
+                  data: { ...d, runtimeStartedAtMs: nowMs } satisfies PipelineNodeData,
+                };
+              }
+              if (status !== "loading" && prevStartedAtMs) {
+                changed = true;
+                const nextData = { ...d } as PipelineNodeData;
+                delete nextData.runtimeStartedAtMs;
+                return { ...n, data: nextData };
+              }
+              return n;
+            }
             changed = true;
-            return { ...n, data: { ...d, runtimeStatus: status } satisfies PipelineNodeData };
+            const nextData = {
+              ...d,
+              runtimeStatus: status,
+              runtimeStartedAtMs:
+                status === "loading"
+                  ? (prevStatus === "loading" && prevStartedAtMs ? prevStartedAtMs : nowMs)
+                  : undefined,
+            } satisfies PipelineNodeData;
+            if (status !== "loading") delete nextData.runtimeStartedAtMs;
+            return { ...n, data: nextData };
           });
           return changed ? next : prev;
         });
