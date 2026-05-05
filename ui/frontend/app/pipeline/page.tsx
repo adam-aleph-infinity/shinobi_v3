@@ -7575,222 +7575,231 @@ function PipelineCanvas() {
 
           {/* Pipelines list */}
           <div className="border-b border-gray-800 shrink-0">
+            {/* Header row */}
             <div className="px-3 py-2 flex items-center justify-between">
               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Pipelines</p>
               <div className="flex items-center gap-1">
-                <button onClick={() => { if (!canvasLocked) { setNewPipelineFolderDraft(""); setShowCreatePipelineFolder(true); } }} title="New folder"
-                  disabled={canvasLocked}
+                <button
+                  onClick={() => { if (!canvasLocked) { setNewPipelineFolderDraft(""); setShowCreatePipelineFolder(true); } }}
+                  title="New folder" disabled={canvasLocked}
                   className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
                   <Layers className="w-3 h-3" />
                 </button>
-                <button onClick={handleClear} title="New pipeline"
-                  disabled={canvasLocked}
+                <button onClick={handleClear} title="New pipeline" disabled={canvasLocked}
                   className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors">
                   <Plus className="w-3 h-3" />
                 </button>
               </div>
             </div>
-            <div className="px-2 pb-2">
-              <div className="mb-1.5">
-                <input
-                  type="text"
-                  value={pipelineSidebarSearch}
-                  onChange={e => setPipelineSidebarSearch(e.target.value)}
-                  placeholder="Search pipelines…"
-                  className="w-full bg-gray-950 border border-gray-800 rounded px-2 py-1 text-[11px] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
-                />
-              </div>
-              <div className="min-h-[200px] max-h-[52vh] resize-y overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/30 p-1.5 space-y-1.5">
-              {pipelineOwners.map((owner) => {
-                const ownerCollapsed = !!collapsedPipelineOwnerIds[owner.ownerKey];
-                return (
-                  <div key={owner.ownerKey} className="rounded-lg border border-gray-800 bg-gray-900/35 p-1">
-                    <button
-                      onClick={() => setCollapsedPipelineOwnerIds((prev) => ({ ...prev, [owner.ownerKey]: !prev[owner.ownerKey] }))}
-                      className="w-full flex items-center gap-1.5 text-left hover:bg-gray-800/60 rounded px-1.5 py-1 transition-colors"
-                      title={ownerCollapsed ? "Expand user section" : "Collapse user section"}
-                    >
-                      <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !ownerCollapsed && "rotate-90")} />
-                      <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest truncate">{owner.ownerLabel}</p>
-                      <span className="ml-auto text-[9px] text-gray-600 shrink-0">{owner.total}</span>
-                    </button>
 
-                    {ownerCollapsed ? null : (
-                      <div className="mt-1 space-y-1.5">
-                        {owner.folders.map((section) => {
-                          const list = section.pipelines ?? [];
-                          const sectionId = `${owner.ownerKey}::${section.key || "__unfiled__"}`;
-                          const folderCollapsed = !!collapsedPipelineFolderIds[sectionId];
-                          return (
-                            <div
-                              key={sectionId}
-                              draggable={section.key !== ""}
-                              onDragStart={(e) => {
-                                if (!section.key) return;
-                                e.stopPropagation();
-                                e.dataTransfer.setData("application/x-folder-id", section.folderId);
-                                e.dataTransfer.effectAllowed = "move";
-                                setDraggingFolderId(section.folderId);
-                              }}
-                              onDragEnd={() => { setDraggingFolderId(null); setDragOverFolderReorderId(null); }}
-                              onDragOver={(e) => {
-                                e.preventDefault();
-                                if (draggingFolderId && section.key !== "") {
-                                  setDragOverFolderReorderId(section.folderId);
-                                  setDragOverPipelineFolder(null);
-                                } else {
-                                  setDragOverPipelineFolder(sectionId);
-                                  setDragOverFolderReorderId(null);
-                                }
-                              }}
-                              onDragLeave={() => { setDragOverPipelineFolder(null); setDragOverFolderReorderId(null); }}
-                              onDrop={async (e) => {
-                                if (canvasLocked) return;
-                                e.preventDefault();
-                                setDragOverPipelineFolder(null);
-                                setDragOverFolderReorderId(null);
-                                const draggedFId = e.dataTransfer.getData("application/x-folder-id");
-                                if (draggedFId && draggedFId !== section.folderId && section.key !== "") {
-                                  setDraggingFolderId(null);
-                                  const currentOrder = owner.folders.filter(f => f.key !== "").map(f => f.folderId);
-                                  const fromIdx = currentOrder.indexOf(draggedFId);
-                                  const toIdx = currentOrder.indexOf(section.folderId);
-                                  if (fromIdx !== -1 && toIdx !== -1) {
-                                    const next = [...currentOrder];
-                                    next.splice(fromIdx, 1);
-                                    next.splice(toIdx, 0, draggedFId);
-                                    void reorderFolders(next);
+            {/* Search */}
+            <div className="px-2 pb-1.5">
+              <input
+                type="text"
+                value={pipelineSidebarSearch}
+                onChange={e => setPipelineSidebarSearch(e.target.value)}
+                placeholder="Search pipelines…"
+                className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-1 text-[11px] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
+              />
+            </div>
+
+            {/* Folder + pipeline tree */}
+            <div className="px-2 pb-2">
+              <div className="min-h-[200px] max-h-[52vh] resize-y overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/30 p-1.5 space-y-1.5">
+                {pipelineOwners.map((owner) => {
+                  const ownerCollapsed = !!collapsedPipelineOwnerIds[owner.ownerKey];
+                  return (
+                    <div key={owner.ownerKey} className="rounded-lg border border-gray-800 bg-gray-900/35 p-1">
+                      {/* Owner header */}
+                      <button
+                        onClick={() => setCollapsedPipelineOwnerIds(prev => ({ ...prev, [owner.ownerKey]: !prev[owner.ownerKey] }))}
+                        className="w-full flex items-center gap-1.5 text-left hover:bg-gray-800/60 rounded px-1.5 py-1 transition-colors"
+                      >
+                        <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !ownerCollapsed && "rotate-90")} />
+                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest truncate">{owner.ownerLabel}</p>
+                        <span className="ml-auto text-[9px] text-gray-600 shrink-0">{owner.total}</span>
+                      </button>
+
+                      {!ownerCollapsed && (
+                        <div className="mt-1 space-y-1">
+                          {owner.folders.map((section) => {
+                            const list = section.pipelines ?? [];
+                            const sectionId = `${owner.ownerKey}::${section.key || "__unfiled__"}`;
+                            const folderCollapsed = !!collapsedPipelineFolderIds[sectionId];
+                            const isRenaming = renamingFolderId === section.folderId;
+                            const isDraggingThis = draggingFolderId === section.folderId;
+                            const isDropTargetReorder = dragOverFolderReorderId === section.folderId;
+                            const isDropTargetPipeline = dragOverPipelineFolder === sectionId;
+
+                            return (
+                              <div
+                                key={sectionId}
+                                draggable={section.key !== ""}
+                                onDragStart={(e) => {
+                                  if (!section.key) return;
+                                  e.stopPropagation();
+                                  e.dataTransfer.setData("application/x-folder-id", section.folderId);
+                                  e.dataTransfer.effectAllowed = "move";
+                                  setDraggingFolderId(section.folderId);
+                                }}
+                                onDragEnd={() => { setDraggingFolderId(null); setDragOverFolderReorderId(null); }}
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  if (draggingFolderId && section.key !== "") {
+                                    setDragOverFolderReorderId(section.folderId);
+                                    setDragOverPipelineFolder(null);
+                                  } else {
+                                    setDragOverPipelineFolder(sectionId);
+                                    setDragOverFolderReorderId(null);
                                   }
-                                  return;
-                                }
-                                const pid = e.dataTransfer.getData("application/x-pipeline-id");
-                                if (!pid) return;
-                                await movePipelineToFolder(pid, section.folderId);
-                              }}
-                              className={cn(
-                                "rounded-lg border p-1 transition-colors",
-                                draggingFolderId === section.folderId && "opacity-50",
-                                dragOverFolderReorderId === section.folderId ? "border-blue-500 bg-blue-900/20" :
-                                dragOverPipelineFolder === sectionId ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
-                              )}
-                            >
-                              <div className="flex items-center gap-1 px-1.5 mb-0.5">
-                                {section.color && (
-                                  <span className="w-2 h-2 rounded-full shrink-0 flex-none" style={{ background: section.color }} />
+                                }}
+                                onDragLeave={() => { setDragOverPipelineFolder(null); setDragOverFolderReorderId(null); }}
+                                onDrop={async (e) => {
+                                  if (canvasLocked) return;
+                                  e.preventDefault();
+                                  setDragOverPipelineFolder(null);
+                                  setDragOverFolderReorderId(null);
+                                  const draggedFId = e.dataTransfer.getData("application/x-folder-id");
+                                  if (draggedFId && draggedFId !== section.folderId && section.key !== "") {
+                                    setDraggingFolderId(null);
+                                    const currentOrder = owner.folders.filter(f => f.key !== "").map(f => f.folderId);
+                                    const fromIdx = currentOrder.indexOf(draggedFId);
+                                    const toIdx = currentOrder.indexOf(section.folderId);
+                                    if (fromIdx !== -1 && toIdx !== -1) {
+                                      const reordered = [...currentOrder];
+                                      reordered.splice(fromIdx, 1);
+                                      reordered.splice(toIdx, 0, draggedFId);
+                                      void reorderFolders(reordered);
+                                    }
+                                    return;
+                                  }
+                                  const pid = e.dataTransfer.getData("application/x-pipeline-id");
+                                  if (pid) await movePipelineToFolder(pid, section.folderId);
+                                }}
+                                className={cn(
+                                  "rounded-lg border transition-colors",
+                                  isDraggingThis ? "opacity-40 border-gray-700" :
+                                  isDropTargetReorder ? "border-blue-500 bg-blue-900/20" :
+                                  isDropTargetPipeline ? "border-indigo-500 bg-indigo-900/20" : "border-gray-800",
                                 )}
-                                {renamingFolderId === section.folderId ? (
-                                  <div className="min-w-0 flex-1 flex items-center gap-1">
-                                    <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
-                                    <input
-                                      ref={renameInputRef}
-                                      autoFocus
-                                      value={renameDraft}
-                                      onChange={e => setRenameDraft(e.target.value)}
-                                      onBlur={() => void commitFolderRename(section.folderId)}
-                                      onKeyDown={e => {
-                                        if (e.key === "Enter") { e.preventDefault(); void commitFolderRename(section.folderId); }
-                                        if (e.key === "Escape") { setRenamingFolderId(null); }
-                                      }}
-                                      className="flex-1 min-w-0 bg-gray-700 border border-indigo-500 rounded px-1 py-0.5 text-[9px] text-white focus:outline-none"
-                                    />
-                                    <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
+                              >
+                                {/* Folder header row */}
+                                <div className="group/folder flex items-center gap-0.5 px-1.5 py-0.5">
+                                  {/* Color dot */}
+                                  {section.color
+                                    ? <span className="w-2 h-2 rounded-full shrink-0" style={{ background: section.color }} />
+                                    : <span className="w-2 shrink-0" />
+                                  }
+
+                                  {/* Rename input OR collapse toggle */}
+                                  {isRenaming ? (
+                                    <div className="flex-1 min-w-0 flex items-center gap-1">
+                                      <input
+                                        ref={renameInputRef}
+                                        autoFocus
+                                        value={renameDraft}
+                                        onChange={e => setRenameDraft(e.target.value)}
+                                        onBlur={() => void commitFolderRename(section.folderId)}
+                                        onKeyDown={e => {
+                                          if (e.key === "Enter") { e.preventDefault(); void commitFolderRename(section.folderId); }
+                                          if (e.key === "Escape") { setRenamingFolderId(null); }
+                                        }}
+                                        className="flex-1 min-w-0 bg-gray-800 border border-indigo-500 rounded px-2 py-0.5 text-[11px] text-white focus:outline-none"
+                                      />
+                                      <button
+                                        onClick={() => setRenamingFolderId(null)}
+                                        className="shrink-0 p-0.5 text-gray-500 hover:text-gray-300"
+                                        title="Cancel"
+                                      ><X className="w-3 h-3" /></button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => setCollapsedPipelineFolderIds(prev => ({ ...prev, [sectionId]: !prev[sectionId] }))}
+                                      className="flex-1 min-w-0 flex items-center gap-1 text-left hover:bg-gray-800/50 rounded px-1 py-0.5 transition-colors"
+                                      title={section.description || undefined}
+                                    >
+                                      <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
+                                      <span className="flex-1 min-w-0 text-[10px] font-semibold text-gray-400 truncate">{section.label}</span>
+                                      <span className="text-[9px] text-gray-600 shrink-0">{list.length}</span>
+                                    </button>
+                                  )}
+
+                                  {/* Hover actions — rename + delete */}
+                                  {section.key !== "" && !isRenaming && (
+                                    <div className="flex items-center gap-0.5 opacity-0 group-hover/folder:opacity-100 transition-opacity shrink-0">
+                                      <button
+                                        onClick={() => { setRenamingFolderId(section.folderId); setRenameDraft(section.label); }}
+                                        title="Rename folder"
+                                        className="p-0.5 text-gray-600 hover:text-indigo-400 transition-colors"
+                                      ><PenLine className="w-3 h-3" /></button>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.folderId, section.label); }}
+                                        disabled={canvasLocked}
+                                        title="Delete folder"
+                                        className="p-0.5 text-gray-600 hover:text-red-400 transition-colors disabled:opacity-30"
+                                      ><Trash2 className="w-3 h-3" /></button>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Pipeline list */}
+                                {!folderCollapsed && (
+                                  <div className="pb-0.5">
+                                    {list.length === 0 ? (
+                                      <p className="text-[9px] text-gray-700 italic px-3 py-1">Empty — drop pipelines here</p>
+                                    ) : list.map((p) => (
+                                      <div key={p.id} className="flex items-center group/pipeline px-1">
+                                        <button
+                                          draggable
+                                          onDragStart={(e) => {
+                                            if (canvasLocked) return;
+                                            e.dataTransfer.setData("application/x-pipeline-id", p.id);
+                                            e.dataTransfer.effectAllowed = "move";
+                                          }}
+                                          onClick={async () => {
+                                            if (canvasLocked) return;
+                                            const fullPl = await fetch(`/api/pipelines/${p.id}`).then(r => r.json());
+                                            loadPipelineToCanvas(p.id, { id: fullPl.id, name: fullPl.name, folder: fullPl.folder ?? "", steps: fullPl.steps ?? [], canvas: fullPl.canvas });
+                                          }}
+                                          disabled={canvasLocked}
+                                          className={cn(
+                                            "flex-1 min-w-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[11px] text-left transition-colors",
+                                            pipelineId === p.id ? "bg-indigo-900/40 text-white" : "text-gray-400 hover:text-white hover:bg-gray-800",
+                                          )}
+                                        >
+                                          <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", pipelinesWithActiveRuns.has(p.id) ? "bg-amber-400 animate-pulse" : p.id === activePipelineId ? "bg-emerald-400" : "bg-gray-700")}
+                                            title={pipelinesWithActiveRuns.has(p.id) ? "Has active runs" : p.id === activePipelineId ? "Active" : ""} />
+                                          <span className="truncate flex-1">{p.name}</span>
+                                          {p.scope && p.scope !== "per_call" && (
+                                            <span className="shrink-0 text-[8px] px-1 rounded bg-gray-800 text-gray-500 uppercase leading-none"
+                                              title={p.scope === "per_pair" ? "Runs once per agent-customer pair" : p.scope}>
+                                              {p.scope === "per_pair" ? "pair" : p.scope}
+                                            </span>
+                                          )}
+                                        </button>
+                                        <button onClick={() => handleDuplicatePipeline(p.id)} disabled={canvasLocked}
+                                          title="Duplicate" className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover/pipeline:opacity-100 transition-all">
+                                          <Copy className="w-3 h-3" />
+                                        </button>
+                                        <button onClick={() => handleDeletePipeline(p.id)} disabled={canvasLocked}
+                                          title="Delete" className="shrink-0 p-1 text-gray-700 hover:text-red-400 opacity-0 group-hover/pipeline:opacity-100 transition-all">
+                                          <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    ))}
                                   </div>
-                                ) : (
-                                  <button
-                                    onClick={() => setCollapsedPipelineFolderIds((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }))}
-                                    onDoubleClick={(e) => {
-                                      if (!section.key || section.key === "") return;
-                                      e.preventDefault();
-                                      setRenamingFolderId(section.folderId);
-                                      setRenameDraft(section.label);
-                                    }}
-                                    className="min-w-0 flex-1 flex items-center gap-1 text-left hover:bg-gray-800/60 rounded px-1 py-0.5 transition-colors"
-                                    title={section.description ? section.description : (folderCollapsed ? "Expand folder" : "Double-click to rename")}
-                                  >
-                                    <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
-                                    <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest truncate">{section.label}</p>
-                                    <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
-                                  </button>
-                                )}
-                                {section.key !== "" && (
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.folderId, section.label); }}
-                                    disabled={canvasLocked}
-                                    title="Delete folder (move pipelines to Unfiled)"
-                                    className="shrink-0 p-0.5 text-gray-700 hover:text-red-400 transition-colors"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                  </button>
                                 )}
                               </div>
-                              {folderCollapsed ? null : list.length === 0 ? (
-                                <p className="text-[9px] text-gray-700 italic px-2 py-1">Drop pipelines here</p>
-                              ) : list.map((p) => (
-                                <div key={p.id} className="flex items-center group">
-                                  <button
-                                    draggable
-                                    onDragStart={(e) => {
-                                      if (canvasLocked) return;
-                                      e.dataTransfer.setData("application/x-pipeline-id", p.id);
-                                      e.dataTransfer.effectAllowed = "move";
-                                    }}
-                                    onClick={async () => {
-                                      if (canvasLocked) return;
-                                      const fullPl = await fetch(`/api/pipelines/${p.id}`).then(r => r.json());
-                                      loadPipelineToCanvas(p.id, { id: fullPl.id, name: fullPl.name, folder: fullPl.folder ?? "", steps: fullPl.steps ?? [], canvas: fullPl.canvas });
-                                    }}
-                                    disabled={canvasLocked}
-                                    className={`flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left transition-colors
-                                      ${pipelineId === p.id
-                                        ? "bg-indigo-900/40 text-white"
-                                        : "text-gray-400 hover:text-white hover:bg-gray-800"}`}
-                                  >
-                                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                      pipelinesWithActiveRuns.has(p.id)
-                                        ? "bg-amber-400 animate-pulse"
-                                        : p.id === activePipelineId
-                                        ? "bg-emerald-400"
-                                        : "bg-gray-700"
-                                    }`} title={pipelinesWithActiveRuns.has(p.id) ? "Has active runs" : p.id === activePipelineId ? "Active pipeline" : ""} />
-                                    <span className="truncate flex-1">{p.name}</span>
-                                    {p.scope && p.scope !== "per_call" && (
-                                      <span
-                                        className="shrink-0 text-[8px] px-1 py-0.5 rounded bg-gray-800 text-gray-500 uppercase leading-none"
-                                        title={p.scope === "per_pair" ? "Runs once per agent-customer pair" : p.scope}
-                                      >
-                                        {p.scope === "per_pair" ? "pair" : p.scope}
-                                      </span>
-                                    )}
-                                  </button>
-                                  <button
-                                    onClick={() => handleDuplicatePipeline(p.id)}
-                                    disabled={canvasLocked}
-                                    title="Duplicate pipeline"
-                                    className="shrink-0 p-1 text-gray-700 hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all"
-                                  >
-                                    <Copy className="w-3 h-3" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeletePipeline(p.id)}
-                                    disabled={canvasLocked}
-                                    title="Delete pipeline"
-                                    className="shrink-0 p-1 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {allPipelines.length === 0 && pipelineFolders.length === 0 && (
-                <p className="text-[10px] text-gray-700 italic px-2 py-1">No pipelines yet</p>
-              )}
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {allPipelines.length === 0 && pipelineFolders.length === 0 && (
+                  <p className="text-[10px] text-gray-700 italic px-2 py-2">No pipelines yet</p>
+                )}
               </div>
             </div>
           </div>

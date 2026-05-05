@@ -78,6 +78,7 @@ gcloud compute ssh $VM_NAME \
 
     echo '▶ Build frontend...'
     cd ui/frontend
+    rm -rf .next
     npm install --legacy-peer-deps -q
     npm run build
     mkdir -p .next/standalone/.next/static .next/standalone/public
