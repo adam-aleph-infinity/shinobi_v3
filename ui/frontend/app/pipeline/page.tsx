@@ -7678,22 +7678,12 @@ function PipelineCanvas() {
                                 {section.color && (
                                   <span className="w-2 h-2 rounded-full shrink-0 flex-none" style={{ background: section.color }} />
                                 )}
-                                <button
-                                  onClick={() => setCollapsedPipelineFolderIds((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }))}
-                                  onDoubleClick={(e) => {
-                                    if (!section.key || section.key === "") return;
-                                    e.preventDefault();
-                                    setRenamingFolderId(section.folderId);
-                                    setRenameDraft(section.label);
-                                    setTimeout(() => renameInputRef.current?.select(), 50);
-                                  }}
-                                  className="min-w-0 flex-1 flex items-center gap-1 text-left hover:bg-gray-800/60 rounded px-1 py-0.5 transition-colors"
-                                  title={section.description ? section.description : (folderCollapsed ? "Expand folder" : "Double-click to rename")}
-                                >
-                                  <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
-                                  {renamingFolderId === section.folderId ? (
+                                {renamingFolderId === section.folderId ? (
+                                  <div className="min-w-0 flex-1 flex items-center gap-1">
+                                    <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
                                     <input
                                       ref={renameInputRef}
+                                      autoFocus
                                       value={renameDraft}
                                       onChange={e => setRenameDraft(e.target.value)}
                                       onBlur={() => void commitFolderRename(section.folderId)}
@@ -7701,14 +7691,27 @@ function PipelineCanvas() {
                                         if (e.key === "Enter") { e.preventDefault(); void commitFolderRename(section.folderId); }
                                         if (e.key === "Escape") { setRenamingFolderId(null); }
                                       }}
-                                      onClick={e => e.stopPropagation()}
-                                      className="flex-1 min-w-0 bg-gray-700 border border-indigo-500 rounded px-1 py-0 text-[9px] text-white focus:outline-none"
+                                      className="flex-1 min-w-0 bg-gray-700 border border-indigo-500 rounded px-1 py-0.5 text-[9px] text-white focus:outline-none"
                                     />
-                                  ) : (
+                                    <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setCollapsedPipelineFolderIds((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }))}
+                                    onDoubleClick={(e) => {
+                                      if (!section.key || section.key === "") return;
+                                      e.preventDefault();
+                                      setRenamingFolderId(section.folderId);
+                                      setRenameDraft(section.label);
+                                    }}
+                                    className="min-w-0 flex-1 flex items-center gap-1 text-left hover:bg-gray-800/60 rounded px-1 py-0.5 transition-colors"
+                                    title={section.description ? section.description : (folderCollapsed ? "Expand folder" : "Double-click to rename")}
+                                  >
+                                    <ChevronRight className={cn("w-3 h-3 text-gray-500 transition-transform shrink-0", !folderCollapsed && "rotate-90")} />
                                     <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest truncate">{section.label}</p>
-                                  )}
-                                  <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
-                                </button>
+                                    <span className="ml-auto text-[9px] text-gray-600 shrink-0">{list.length}</span>
+                                  </button>
+                                )}
                                 {section.key !== "" && (
                                   <button
                                     onClick={(e) => { e.stopPropagation(); void deletePipelineFolder(section.folderId, section.label); }}
