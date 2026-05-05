@@ -1320,6 +1320,53 @@ def _transcript_path_for_call(pair_dir: Any, call_id: str) -> Optional[Any]:
     return None
 
 
+def _scope_has_any_transcript(pair_dir: Any, upto_call_id: str = "") -> bool:
+    cutoff = _norm_call_id(upto_call_id)
+    cutoff_num: Optional[int] = None
+    if cutoff:
+        try:
+            cutoff_num = int(float(cutoff))
+        except Exception:
+            cutoff_num = None
+    if not pair_dir.exists():
+        return False
+    for d in pair_dir.iterdir():
+        if not d.is_dir() or d.name.startswith(".") or d.name.startswith("_"):
+            continue
+        cid = _norm_call_id(d.name)
+        if not cid:
+            continue
+        if cutoff_num is not None:
+            try:
+                if int(float(cid)) > cutoff_num:
+                    continue
+            except Exception:
+                continue
+        if _transcript_path_for_call(pair_dir, cid):
+            return True
+    return False
+
+
+def _merged_cache_needs_refresh(cached: str, pair_dir: Any, upto_call_id: str = "") -> bool:
+    head = str(cached or "")[:5000]
+    if not head:
+        return False
+    zero_marker = "No transcript bodies are available in this scope." in cached
+    if not zero_marker:
+        m = _re.search(r"Calls w/ Transcript:\s*(\d+)", head)
+        if m:
+            try:
+                zero_marker = int(m.group(1)) <= 0
+            except Exception:
+                zero_marker = False
+    if not zero_marker:
+        return False
+    try:
+        return _scope_has_any_transcript(pair_dir, upto_call_id=upto_call_id)
+    except Exception:
+        return False
+
+
 def _collect_pair_call_rows(
     sales_agent: str,
     customer: str,
@@ -2822,6 +2869,10 @@ def _resolve_input(source: str, agent_id: Optional[str],
                 cached = merged.read_text(encoding="utf-8").strip()
                 # Rich merged transcript cache marker
                 if "CALL STATUS INDEX" in cached[:2000]:
+                    # If cached transcript was built while no transcripts existed, but
+                    # transcripts are now available, force a rebuild.
+                    if _merged_cache_needs_refresh(cached, pair_dir, upto_call_id=cutoff_call_id):
+                        raise RuntimeError("stale merged transcript cache")
                     if meta is not None:
                         meta["origin"] = "cache"
                         try:

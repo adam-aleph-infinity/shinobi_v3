@@ -29,8 +29,8 @@ import ContextTopBar from "@/components/shared/ContextTopBar";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
-// v2: invalidate stale cached run-log timestamps persisted before UTC->local fixes.
-const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v2";
+// v3: invalidate stale cached run-log timestamps persisted before robust ts normalization.
+const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v3";
 const PIPELINE_ACTIVE_RUNS_STORAGE_KEY = "shinobi.pipeline.active_runs.v1";
 const MAX_PERSISTED_RUN_LOG_BUCKETS = 40;
 
@@ -1503,25 +1503,35 @@ function quickHash(text: string): string {
   return `${text.length}:${(h >>> 0).toString(16)}`;
 }
 
+function normalizeCanvasLogTs(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return formatLocalTime(value, true);
+  }
+  const s = String(value || "").trim();
+  if (!s) return "—";
+  if (/^\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(s)) {
+    return utcHmsToLocal(s.slice(0, 8));
+  }
+  const utcTaggedHms = s.match(/^(\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*(?:UTC|Z)$/i);
+  if (utcTaggedHms?.[1]) {
+    return utcHmsToLocal(utcTaggedHms[1]);
+  }
+  const parsed = parseServerDate(s);
+  return parsed ? formatLocalTime(parsed, true) : s;
+}
+
+function normalizeCanvasLogLine(line: CanvasLogLine): CanvasLogLine {
+  const text = String(line?.text || "");
+  return {
+    ts: normalizeCanvasLogTs(line?.ts),
+    text,
+    level: line?.level || classifyCanvasLogLine(text),
+  };
+}
+
 function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLogLine[] {
   const raw = String(rawLogJson || "").trim();
   if (!raw) return [];
-
-  const toTs = (value: unknown): string => {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return formatLocalTime(value, true);
-    }
-    const s = String(value || "").trim();
-    if (!s) return "—";
-    if (/^\d{2}:\d{2}:\d{2}$/.test(s)) {
-      return utcHmsToLocal(s);
-    }
-    if (/^\d{2}:\d{2}:\d{2}\.\d+$/.test(s)) {
-      return utcHmsToLocal(s.slice(0, 8));
-    }
-    const parsed = parseServerDate(s);
-    return parsed ? formatLocalTime(parsed, true) : s;
-  };
 
   const normalizeLevel = (value: unknown, text: string): CanvasLogLine["level"] => {
     const v = String(value || "").trim().toLowerCase();
@@ -1551,7 +1561,7 @@ function parseSavedRunLogLines(rawLogJson: string | null | undefined): CanvasLog
       const text = String(obj.text || obj.msg || obj.message || "").trim();
       if (!text) return;
       out.push({
-        ts: toTs(obj.ts || obj.time || obj.timestamp),
+        ts: normalizeCanvasLogTs(obj.ts || obj.time || obj.timestamp),
         text,
         level: normalizeLevel(obj.level, text),
       });
@@ -1676,7 +1686,7 @@ function persistRunLogLines(contextKey: string, runId: string, lines: CanvasLogL
     return;
   }
   const bucket: PersistedRunLogBucket = {
-    lines: [...lines],
+    lines: lines.map(normalizeCanvasLogLine),
     updated_at: Date.now(),
     run_id: rid || undefined,
   };
@@ -1691,10 +1701,10 @@ function restoreRunLogLines(contextKey: string, runId: string): CanvasLogLine[] 
   const rid = String(runId || "").trim();
   const store = readPersistedRunLogStore();
   if (rid && store.by_run_id[rid]?.lines?.length) {
-    return store.by_run_id[rid].lines;
+    return store.by_run_id[rid].lines.map(normalizeCanvasLogLine);
   }
   if (ctx && store.by_context[ctx]?.lines?.length) {
-    return store.by_context[ctx].lines;
+    return store.by_context[ctx].lines.map(normalizeCanvasLogLine);
   }
   return [];
 }
@@ -8020,7 +8030,7 @@ function PipelineCanvas() {
                             <div className="pl-2 border-l border-gray-800 space-y-0.5">
                               {lines.map((line, idx) => (
                                 <div key={`${group}-${idx}`} className="flex gap-2 leading-5 items-start">
-                                  <span className="text-gray-700 shrink-0 w-16">{line.ts}</span>
+                                  <span className="text-gray-700 shrink-0 w-16">{normalizeCanvasLogTs(line.ts)}</span>
                                   <span className={cn("min-w-0 whitespace-pre-wrap break-words", logLevelClass(line.level))}>
                                     {line.text}
                                   </span>
@@ -8034,7 +8044,7 @@ function PipelineCanvas() {
                       <>
                         {filteredRunLogs.map((line, idx) => (
                           <div key={`${line.ts}-${idx}`} className="flex gap-2 leading-5 items-start">
-                            <span className="text-gray-700 shrink-0 w-16">{line.ts}</span>
+                            <span className="text-gray-700 shrink-0 w-16">{normalizeCanvasLogTs(line.ts)}</span>
                             <span className={cn("min-w-0 whitespace-pre-wrap break-words", logLevelClass(line.level))}>
                               {line.text}
                             </span>

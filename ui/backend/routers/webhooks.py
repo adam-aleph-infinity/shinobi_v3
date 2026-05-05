@@ -2674,6 +2674,45 @@ async def _dispatch_live_queue_once(request_base_url: str = "") -> None:
             except Exception:
                 row = None
 
+            # Reconcile queue terminal rows that can be left mismatched after
+            # restarts/interruption (e.g., queue=failed but run status still preparing).
+            if state in {"failed", "error", "cancelled", "canceled", "done", "completed"}:
+                if row is not None:
+                    base_row_status = normalize_state_token(getattr(row, "status", "") or "")
+                    effective_row_status = derive_effective_run_status(
+                        base_status=base_row_status,
+                        steps_json=getattr(row, "steps_json", ""),
+                        finished_at=getattr(row, "finished_at", None),
+                    )
+                    row_status = effective_row_status or base_row_status
+                    target_status = (
+                        "done"
+                        if state in {"done", "completed"}
+                        else ("cancelled" if state in {"cancelled", "canceled"} else "failed")
+                    )
+                    if row_status != target_status and row_status in {"queued", "preparing", "running", "retrying", "started", "loading"}:
+                        term_line = (
+                            "Recovered queue terminal state: completed."
+                            if target_status == "done"
+                            else (
+                                "Recovered queue terminal state: cancelled."
+                                if target_status == "cancelled"
+                                else f"Recovered queue terminal state: failed ({str(item.get('last_error') or 'unknown error')[:260]})"
+                            )
+                        )
+                        _upsert_pipeline_run_stub(
+                            run_id=run_id,
+                            pipeline_id=str(item.get("pipeline_id") or ""),
+                            pipeline_name=str(item.get("pipeline_name") or ""),
+                            sales_agent=str(item.get("sales_agent") or ""),
+                            customer=str(item.get("customer") or ""),
+                            call_id=str(item.get("call_id") or ""),
+                            status=target_status,
+                            log_line=term_line,
+                        )
+                        changed = True
+                continue
+
             if state in {"running", "preparing", "retrying"}:
                 row_status = ""
                 if row is not None:
