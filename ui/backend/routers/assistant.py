@@ -975,6 +975,30 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         )
 
     role = str(user_role or "").strip().lower()
+    if role in _ADMIN_ROLES:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_source_file",
+                    "description": (
+                        "Write content to any source file in the project with automatic .copilot_bak backup. "
+                        "Use relative path from project root, e.g. ui/backend/routers/assistant.py. "
+                        "Always read the file first with read_source_file before writing. "
+                        "Confirm with the user before writing to backend or frontend source files."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative path from project root"},
+                            "content": {"type": "string", "description": "Full new file content"},
+                        },
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
     if role in _SUPER_ADMIN_ROLES:
         tools.append(
             {
@@ -2438,6 +2462,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "cleanup_artifacts": _tool_cleanup_artifacts,
     "preview_workspace_file": _tool_preview_workspace_file,
     "read_source_file": _tool_read_source_file,
+    "write_source_file": _tool_write_source_file,
     "run_shell_command": _tool_run_shell_command,
     "create_pipeline_folder": _tool_create_pipeline_folder,
     "create_agent_folder": _tool_create_agent_folder,
