@@ -62,8 +62,9 @@ Thumbs.db
 activeContext.md
 llm_talk.txt
 
-# Local data archives
+# Local data archives and ad-hoc analysis docs
 tony_bonney_pair.tgz
+*_COMPETITIVE_GAP_ANALYSIS_*.md
 
 # Runtime SQLite DB (dev/local only; production DB lives on VM)
 ui/data/app.db
