@@ -29,7 +29,8 @@ import ContextTopBar from "@/components/shared/ContextTopBar";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 const PIPELINE_OPEN_RUN_STORAGE_KEY = "shinobi.pipeline.open_run";
-const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v1";
+// v2: invalidate stale cached run-log timestamps persisted before UTC->local fixes.
+const PIPELINE_RUN_LOGS_STORAGE_KEY = "shinobi.pipeline.run_logs.v2";
 const PIPELINE_ACTIVE_RUNS_STORAGE_KEY = "shinobi.pipeline.active_runs.v1";
 const MAX_PERSISTED_RUN_LOG_BUCKETS = 40;
 
