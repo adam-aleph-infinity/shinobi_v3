@@ -2381,15 +2381,8 @@ async def _execute_live_queue_item(
             )
             if not bool(backfill.get("ok")):
                 stall_reason = str(backfill.get("stall_reason") or "").strip().lower()
-                reason = (
-                    (
-                        "pending with no progress"
-                        if stall_reason == "pending_no_progress"
-                        else "running with no progress"
-                    )
-                    if bool(backfill.get("stalled"))
-                    else ("timed out" if bool(backfill.get("timed_out")) else "failed")
-                )
+                _stalled = bool(backfill.get("stalled"))
+                _timed_out = bool(backfill.get("timed_out"))
                 failed_ids = [str(x) for x in (backfill.get("failed_job_ids") or []) if str(x).strip()]
                 failed_errs = [str(x) for x in (backfill.get("failed_job_errors") or []) if str(x).strip()]
                 if failed_ids:
@@ -2417,22 +2410,40 @@ async def _execute_live_queue_item(
                         status="preparing",
                         log_line=f"Backfill first error: {failed_errs[0][:300]}",
                     )
-                detail_parts: list[str] = []
-                if failed_ids:
-                    failed_ids_short = ", ".join(x[:8] for x in failed_ids[:8])
-                    if len(failed_ids) > 8:
-                        failed_ids_short += ", …"
-                    detail_parts.append(f"failed job ids: {failed_ids_short}")
-                if failed_errs:
-                    detail_parts.append(f"first error: {failed_errs[0]}")
-                if not detail_parts and int(backfill.get("failed") or 0) > 0:
-                    detail_parts.append("failed job details unavailable (inspect Jobs list for this pair)")
-                detail_suffix = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
-                raise RuntimeError(
-                    "Backfill "
-                    f"{reason} ({int(backfill.get('done') or 0)}/{int(backfill.get('total') or 0)} complete, "
-                    f"{int(backfill.get('failed') or 0)} failed jobs)."
-                    f"{detail_suffix}"
+                if _stalled or _timed_out:
+                    # Structural hang — block dispatch so the slot is not wasted.
+                    reason = (
+                        ("pending with no progress" if stall_reason == "pending_no_progress" else "running with no progress")
+                        if _stalled
+                        else "timed out"
+                    )
+                    detail_parts: list[str] = []
+                    if failed_ids:
+                        failed_ids_short = ", ".join(x[:8] for x in failed_ids[:8])
+                        if len(failed_ids) > 8:
+                            failed_ids_short += ", …"
+                        detail_parts.append(f"failed job ids: {failed_ids_short}")
+                    if failed_errs:
+                        detail_parts.append(f"first error: {failed_errs[0]}")
+                    detail_suffix = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
+                    raise RuntimeError(
+                        "Backfill "
+                        f"{reason} ({int(backfill.get('done') or 0)}/{int(backfill.get('total') or 0)} complete, "
+                        f"{int(backfill.get('failed') or 0)} failed jobs)."
+                        f"{detail_suffix}"
+                    )
+                # Job-level failures (e.g. missing/deleted audio files) — log and continue.
+                # These are historical recordings that no longer exist in storage; they do not
+                # block transcription of the current call which has its own valid record_path.
+                _upsert_pipeline_run_stub(
+                    run_id=run_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=str(item.get("pipeline_name") or ""),
+                    sales_agent=str(item.get("sales_agent") or ""),
+                    customer=str(item.get("customer") or ""),
+                    call_id=str(item.get("call_id") or ""),
+                    status="preparing",
+                    log_line=f"Backfill: {int(backfill.get('failed') or 0)} historical job(s) failed (likely missing recordings) — proceeding with pipeline",
                 )
             _upsert_pipeline_run_stub(
                 run_id=run_id,
