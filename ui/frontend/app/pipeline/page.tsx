@@ -8323,10 +8323,14 @@ function PipelineCanvas() {
                           onChange={(e) => {
                             if (!selectedNode) return;
                             const next = e.target.value;
-                            const nodeData = selectedNode.data as PipelineNodeData;
                             if (selKind === "processing" && agentDraft) {
                               setAgentDraft((prev) => (prev ? { ...prev, name: next } : prev));
                             }
+                          }}
+                          onBlur={(e) => {
+                            if (!selectedNode) return;
+                            const next = e.target.value;
+                            const nodeData = selectedNode.data as PipelineNodeData;
                             updateNodeData(selectedNode.id, {
                               label: next,
                               ...(selKind === "processing" && nodeData.agentId ? { agentName: next } : {}),
