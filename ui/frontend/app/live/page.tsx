@@ -1611,7 +1611,7 @@ export default function LivePage() {
       filteredRuns.filter(
         (run) =>
           normalizeRunOrigin(run.run_origin) === "webhook"
-          && isCompletedRun(getRunStatus(run))
+          && isSuccessCompletedRun(getRunStatus(run))
           && !inferNotePushState(run).sent,
       ),
     );
@@ -1823,7 +1823,7 @@ export default function LivePage() {
       selectedGroupRuns.filter(
         (run) =>
           normalizeRunOrigin(run.run_origin) === "webhook"
-          && isCompletedRun(getRunStatus(run)),
+          && isSuccessCompletedRun(getRunStatus(run)),
       ),
     );
   }, [selectedGroupRuns, getRunStatus, buildNoteTargetsByBulkTuple]);
