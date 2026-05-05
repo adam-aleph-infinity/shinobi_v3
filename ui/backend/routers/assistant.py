@@ -932,6 +932,55 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         {
             "type": "function",
             "function": {
+                "name": "list_webhook_events",
+                "description": (
+                    "List recent webhook ingestion events received by this server (call-ended payloads from CRM). "
+                    "Use to track what calls have been received and when."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_webhook_event",
+                "description": "Get the full payload of a specific webhook event by event_id or filename.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "string", "default": ""},
+                        "filename": {"type": "string", "default": "", "description": "Filename as returned by list_webhook_events"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_rejected_webhooks",
+                "description": (
+                    "List webhooks that were rejected or failed to process. "
+                    "Use to diagnose why a call didn't trigger a pipeline run."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "read_source_file",
                 "description": (
                     "Read any source file in the project (backend, frontend, config, deploy scripts). "
@@ -2214,6 +2263,82 @@ def _tool_list_pipeline_folders(args: dict[str, Any]) -> dict[str, Any]:
     return {"count": len(folders), "folders": folders}
 
 
+def _tool_list_webhook_events(args: dict[str, Any]) -> dict[str, Any]:
+    limit = max(1, min(100, int(args.get("limit", 20) or 20)))
+    inbox = settings.ui_data_dir / "_webhooks" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    files = sorted(inbox.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    out: list[dict[str, Any]] = []
+    for fp in files:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        out.append({
+            "event_id": str(data.get("event_id") or ""),
+            "received_at": str(data.get("received_at") or ""),
+            "webhook_type": str(data.get("webhook_type") or ""),
+            "call_id": str(payload.get("call_id") or ""),
+            "account_id": str(payload.get("account_id") or ""),
+            "agent": str(payload.get("agent") or ""),
+            "file": fp.name,
+        })
+    return {"count": len(out), "events": out}
+
+
+def _tool_get_webhook_event(args: dict[str, Any]) -> dict[str, Any]:
+    event_id = str(args.get("event_id") or "").strip()
+    filename = str(args.get("filename") or "").strip()
+    if not event_id and not filename:
+        raise HTTPException(400, "Provide event_id or filename")
+    inbox = settings.ui_data_dir / "_webhooks" / "inbox"
+    if filename:
+        candidate = (inbox / filename).resolve()
+        if not str(candidate).startswith(str(inbox.resolve())):
+            raise HTTPException(400, "Invalid filename")
+        if not candidate.is_file():
+            raise HTTPException(404, "Webhook event file not found")
+        files = [candidate]
+    else:
+        files = list(inbox.glob("*.json"))
+    for fp in files:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if event_id and str(data.get("event_id") or "") != event_id:
+            continue
+        return {"ok": True, "file": fp.name, "event": data}
+    raise HTTPException(404, "Webhook event not found")
+
+
+def _tool_list_rejected_webhooks(args: dict[str, Any]) -> dict[str, Any]:
+    limit = max(1, min(200, int(args.get("limit", 20) or 20)))
+    rejections_file = settings.ui_data_dir / "_webhooks" / "rejections.json"
+    if not rejections_file.exists():
+        return {"count": 0, "rejections": []}
+    try:
+        raw = json.loads(rejections_file.read_text(encoding="utf-8"))
+        items = raw.get("items") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        return {"count": 0, "rejections": []}
+    items = sorted(items, key=lambda x: str(x.get("received_at") or ""), reverse=True)[:limit]
+    out = []
+    for r in items:
+        out.append({
+            "id": str(r.get("id") or r.get("rejection_id") or ""),
+            "received_at": str(r.get("received_at") or ""),
+            "reason": str(r.get("reason") or ""),
+            "message": str(r.get("message") or ""),
+            "call_id": str(r.get("call_id") or ""),
+            "webhook_type": str(r.get("webhook_type") or ""),
+        })
+    return {"count": len(out), "rejections": out}
+
+
 def _tool_get_app_map(args: dict[str, Any], *, tools: list[dict[str, Any]]) -> dict[str, Any]:
     refresh = bool(args.get("refresh"))
     if refresh:
@@ -2469,6 +2594,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "list_agent_folders": _tool_list_agent_folders,
     "delete_universal_agent": _tool_delete_universal_agent,
     "list_pipeline_folders": _tool_list_pipeline_folders,
+    "list_webhook_events": _tool_list_webhook_events,
+    "get_webhook_event": _tool_get_webhook_event,
+    "list_rejected_webhooks": _tool_list_rejected_webhooks,
     "search_crm_context": _tool_search_crm_context,
     "set_context_bar": _tool_set_context_bar,
     "list_notes": _tool_list_notes,
