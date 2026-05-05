@@ -1931,9 +1931,12 @@ function PipelineCanvas() {
   const [dragOverPipelineFolder, setDragOverPipelineFolder] = useState<string | null>(null);
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
-  const [agentSaving,   setAgentSaving]   = useState(false);
-  const [agentSaved,    setAgentSaved]    = useState(false);
   const [agentDeleting, setAgentDeleting] = useState(false);
+  // Tracks which "nodeId::agentId" the draft was last successfully loaded for,
+  // so allAgents re-fetches and updateNodeData calls don't stomp in-progress edits.
+  const agentDraftLoadedFor = useRef<string>("");
+  // Per-node pending saves: flushed automatically when the pipeline is saved.
+  const pendingAgentSaves = useRef<Map<string, Omit<UniversalAgent, "id"|"created_at">>>(new Map());
   const [canvasViewport, setCanvasViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
@@ -4486,6 +4489,18 @@ function PipelineCanvas() {
 
     setPipelineSaving(true);
     try {
+      // Flush all pending agent saves — agents are pipeline-local, so save pipeline = save all agents.
+      for (const [nodeId, draft] of Array.from(pendingAgentSaves.current.entries())) {
+        if (!draft?.name?.trim()) continue;
+        const nd2 = nodes.find(n => n.id === nodeId)?.data as PipelineNodeData | undefined;
+        if (!nd2?.agentId) continue;
+        await fetch(`/api/universal-agents/${String(nd2.agentId)}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(draft),
+        }).catch(() => {});
+      }
+      pendingAgentSaves.current = new Map();
+
       const url    = pipelineId ? `/api/pipelines/${pipelineId}` : `/api/pipelines`;
       const method = pipelineId ? "PUT" : "POST";
       const res    = await fetch(url, { method, headers: { "Content-Type": "application/json" },
@@ -4499,92 +4514,10 @@ function PipelineCanvas() {
       const newId = saved.id ?? pipelineId;
       if (newId) setPipelineId(newId);
       mutate("/api/pipelines");
+      mutate("/api/universal-agents");
       showToast(`Pipeline "${pipelineName}" saved`, true);
     } catch { showToast("Network error — could not save pipeline", false); }
     finally  { setPipelineSaving(false); }
-  }
-
-  async function handleSaveAgent() {
-    if (canvasLocked) return;
-    if (!canEditPipelines) { showToast("You do not have permission to edit agents in this workflow.", false); return; }
-    if (!selectedNodeId || !agentDraft) return;
-    const nd = (nodes.find(n => n.id === selectedNodeId)?.data as PipelineNodeData | undefined);
-    if (!nd?.agentId) return;
-    setAgentSaving(true);
-    try {
-      const usagePipelines = allPipelines.filter(p =>
-        (p.steps ?? []).some(s => String(s.agent_id || "") === nd.agentId),
-      );
-      const usedInOther = usagePipelines.filter(p => p.id !== pipelineId);
-
-      let targetAgentId = String(nd.agentId || "");
-      if (usedInOther.length > 0) {
-        const choice = window.prompt(
-          `This agent is used in ${usagePipelines.length} pipelines (${usedInOther.length} other).\n` +
-          "Type:\n" +
-          "1 = Apply changes to all workflows\n" +
-          "2 = Create copy and apply only in this workflow\n" +
-          "Anything else = Cancel",
-          "2",
-        );
-        if (!choice || !["1", "2"].includes(choice.trim())) {
-          showToast("Agent update cancelled", false);
-          return;
-        }
-        if (choice.trim() === "2") {
-          const copyRes = await fetch(`/api/universal-agents/${nd.agentId}/copy`, { method: "POST" });
-          if (!copyRes.ok) {
-            showToast(`Agent copy failed (${copyRes.status})`, false);
-            return;
-          }
-          const copied: UniversalAgent = await copyRes.json();
-          targetAgentId = copied.id;
-          const putCopy = await fetch(`/api/universal-agents/${copied.id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(agentDraft),
-          });
-          if (!putCopy.ok) {
-            showToast(`Copied agent save failed (${putCopy.status})`, false);
-            return;
-          }
-          // Rebind all nodes in current workflow using the old agent id to the new copy.
-          setNodes(ns => ns.map(n => {
-            if (n.type !== "processing") return n;
-            const d = n.data as PipelineNodeData;
-            if (String(d.agentId || "") !== nd.agentId) return n;
-            return {
-              ...n,
-              data: {
-                ...d,
-                agentId: copied.id,
-                agentClass: agentDraft.agent_class || copied.agent_class || "",
-                agentName: agentDraft.name,
-                label: agentDraft.name,
-              } satisfies PipelineNodeData,
-            };
-          }));
-          showToast("Created copied agent and applied changes only in this workflow", true);
-        }
-      }
-
-      if (targetAgentId === nd.agentId) {
-        const res = await fetch(`/api/universal-agents/${nd.agentId}`, {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(agentDraft),
-        });
-        if (!res.ok) { showToast(`Agent save failed (${res.status})`, false); return; }
-      }
-      mutate("/api/universal-agents");
-      // Keep canvas node header in sync with the (possibly renamed) agent
-      updateNodeData(selectedNodeId, {
-        agentId: targetAgentId,
-        agentClass: String(agentDraft.agent_class || "").trim() || String(nd.agentClass || ""),
-        agentName: agentDraft.name,
-        label: agentDraft.name,
-      });
-      setAgentSaved(true); setTimeout(() => setAgentSaved(false), 2000);
-    } finally { setAgentSaving(false); }
   }
 
   // Create a new blank agent on the backend and attach it to the selected node
@@ -4610,8 +4543,7 @@ function PipelineCanvas() {
         agentId: created.id, agentClass: created.agent_class, agentName: created.name, label: created.name,
       });
       setAgentDraft({ ...draft, inputs: created.inputs ?? draft.inputs });
-      setAgentSaved(false);
-      showToast("New agent created — edit and save below", true);
+      showToast("Agent created — configure below, then Save Pipeline", true);
     } catch { showToast("Network error — could not create agent", false); }
   }
 
@@ -4623,7 +4555,6 @@ function PipelineCanvas() {
     setAgentDraft({ name: "", description: "", agent_class: "", model: "gpt-5.4",
       temperature: 0, system_prompt: "", user_prompt: "", inputs: [],
       output_format: "markdown", tags: [], is_default: false });
-    setAgentSaved(false);
   }
 
   // Permanently delete the agent from the backend, then detach from node
@@ -5489,10 +5420,19 @@ function PipelineCanvas() {
   }, [selData, selKind]);
 
   // Sync agentDraft when selected node or agent library changes.
+  // NOTE: selData is intentionally excluded from deps — it changes on every updateNodeData call
+  // (new object reference), which would reset the draft on every keystroke in the name input.
+  // selKind and selectedNodeAgentId already capture the relevant parts of selData.
   useEffect(() => {
-    if (!selData || selKind !== "processing") { setAgentDraft(null); return; }
-    const agId = selectedNodeAgentId;
-    const a    = agId ? allAgents.find(x => x.id === agId) : null;
+    if (selKind !== "processing") { setAgentDraft(null); agentDraftLoadedFor.current = ""; return; }
+    const agId   = selectedNodeAgentId;
+    const loadKey = `${selectedNodeId ?? ""}::${agId}`;
+    const a      = agId ? allAgents.find(x => x.id === agId) : null;
+
+    // Guard: same node+agent and already loaded successfully → don't overwrite ongoing edits.
+    // This prevents allAgents SWR re-fetches from stomping a name the user is mid-edit.
+    if (agentDraftLoadedFor.current === loadKey && a) return;
+
     setAgentDraft({
       name:          a?.name          ?? "",
       description:   a?.description   ?? "",
@@ -5508,7 +5448,17 @@ function PipelineCanvas() {
       tags:          a?.tags          ?? [],
       is_default:    a?.is_default    ?? false,
     });
-  }, [selectedNodeId, selData, selKind, selectedNodeAgentId, allAgents]);
+    // Only mark as loaded once we actually have agent data; if a === null the agent
+    // isn't in the cache yet (e.g. fresh after clone) — keep retrying on next allAgents tick.
+    if (a) agentDraftLoadedFor.current = loadKey;
+  }, [selectedNodeId, selKind, selectedNodeAgentId, allAgents]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Accumulate every draft edit into pendingAgentSaves so pipeline-save can flush them all.
+  useEffect(() => {
+    if (selectedNodeId && agentDraft) {
+      pendingAgentSaves.current.set(selectedNodeId, agentDraft);
+    }
+  }, [agentDraft, selectedNodeId]);
 
   useEffect(() => {
     if (selKind !== "processing" || !selectedNodeId || !agentDraft) return;
@@ -5527,7 +5477,6 @@ function PipelineCanvas() {
 
     if (draftClass !== inferred) {
       setAgentDraft((prev) => (prev ? { ...prev, agent_class: inferred } : prev));
-      setAgentSaved(false);
     }
     if (nodeClass !== inferred) {
       updateNodeData(selectedNodeId, { agentClass: inferred }, { markDirty: false });
@@ -6527,71 +6476,31 @@ function PipelineCanvas() {
 
           <div className="flex-1 min-h-0 p-3">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 h-full min-h-0">
-              {/* Left: selector + settings */}
+              {/* Left: settings */}
               <div className="lg:col-span-3 min-h-0 overflow-y-auto pr-1 space-y-2.5">
-                <PropertiesSection title="Select Agent">
-                  {allAgents.length === 0 ? (
-                    <p className="text-xs text-gray-600 italic">Loading agents…</p>
-                  ) : (
-                    <AgentPickerGrid
-                      value={agId}
-                      allAgents={allAgents}
-                      usageByAgent={agentUsageByPipeline}
-                      onChange={agent => {
-                        const autoCls = inferredAgentClass || normalizeAgentClass(agent.agent_class || "") || "general";
-                        updateNodeData(selectedNode.id, {
-                          agentId: agent.id,
-                          agentClass: autoCls,
-                          agentName: agent.name,
-                          label: agent.name,
-                        });
-                        setAgentDraft({
-                          name: agent.name,
-                          description: agent.description ?? "",
-                          agent_class: autoCls,
-                          model: agent.model ?? "gpt-5.4",
-                          temperature: agent.temperature ?? 0,
-                          system_prompt: agent.system_prompt ?? "",
-                          user_prompt: agent.user_prompt ?? "",
-                          inputs: agent.inputs ?? [],
-                          output_format: agent.output_format ?? "markdown",
-                          tags: agent.tags ?? [],
-                          is_default: agent.is_default ?? false,
-                        });
-                        setAgentSaved(false);
-                      }}
-                    />
-                  )}
-                  <div className="flex gap-1.5 mt-2">
+                {!agId && (
+                  <PropertiesSection title="Agent">
                     <button
                       onClick={handleCreateAgent}
-                      title="Create a new blank agent and attach it to this node"
-                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-[10px] transition-colors"
+                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-dashed border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 text-xs transition-colors"
                     >
-                      <Plus className="w-3 h-3" /> New
+                      <Plus className="w-3.5 h-3.5" /> Create agent for this node
                     </button>
-                    {agId && (
-                      <>
-                        <button
-                          onClick={handleDetachAgent}
-                          title="Remove the agent from this node (agent stays in library)"
-                          className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-amber-400 hover:border-amber-800 text-[10px] transition-colors"
-                        >
-                          <X className="w-3 h-3" /> Detach
-                        </button>
-                        <button
-                          onClick={handleDeleteAgent}
-                          disabled={agentDeleting}
-                          title="Permanently delete this agent from the backend"
-                          className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40"
-                        >
-                          {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                          Delete
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </PropertiesSection>
+                  </PropertiesSection>
+                )}
+                {agId && (
+                  <PropertiesSection title="Agent">
+                    <button
+                      onClick={handleDeleteAgent}
+                      disabled={agentDeleting}
+                      title="Permanently delete this agent"
+                      className="w-full flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-[10px] transition-colors disabled:opacity-40"
+                    >
+                      {agentDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                      Delete agent
+                    </button>
+                  </PropertiesSection>
+                )}
 
                 {connectedSources.length > 0 && (
                   <PropertiesSection title="Connected Inputs" defaultOpen={false}>
@@ -6625,7 +6534,6 @@ function PipelineCanvas() {
                                     markElementMutation();
                                     setAgentDraft((f) => (f ? { ...f, agent_class: cls } : f));
                                     updateNodeData(selectedNode.id, { agentClass: cls });
-                                    setAgentSaved(false);
                                   }}
                                   className={cn(
                                     "px-2 py-1.5 rounded-lg border text-[10px] text-left transition-colors",
@@ -6698,14 +6606,6 @@ function PipelineCanvas() {
                       </div>
                     </PropertiesSection>
 
-                    <button
-                      onClick={handleSaveAgent}
-                      disabled={!agId || agentSaving || !agentDraft.name.trim()}
-                      className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40"
-                    >
-                      {agentSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : agentSaved ? <Check className="w-3 h-3" /> : null}
-                      {agentSaved ? "Saved" : agId ? "Save agent" : "Select an agent above to save"}
-                    </button>
                   </>
                 )}
 
