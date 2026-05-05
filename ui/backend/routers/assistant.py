@@ -864,6 +864,28 @@ def _tool_specs(include_sub_agent: bool = True, user_role: str = "") -> list[dic
         {
             "type": "function",
             "function": {
+                "name": "push_note_to_crm",
+                "description": (
+                    "Push an existing note (by note_id) to the CRM. "
+                    "Use list_notes to find the note_id first. "
+                    "Requires CRM_PUSH_ENABLED=true in server config. "
+                    "Always confirm with the user before pushing."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": {"type": "string", "description": "UUID of the note to push"},
+                        "account_id": {"type": "string", "default": "", "description": "CRM account_id; auto-resolved from agent+customer if omitted"},
+                        "run_id": {"type": "string", "default": "", "description": "Optional pipeline run_id to associate with this push"},
+                    },
+                    "required": ["note_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "query_db",
                 "description": (
                     "Run a read-only SQL SELECT query against the app database for analysis and reporting. "
@@ -2197,6 +2219,18 @@ def _tool_create_note(args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "created": True, "updated": False, "id": note.id}
 
 
+def _tool_push_note_to_crm(args: dict[str, Any]) -> dict[str, Any]:
+    from ui.backend.routers.notes import send_note_to_crm_internal as _push
+    note_id = str(args.get("note_id") or "").strip()
+    account_id = str(args.get("account_id") or "").strip()
+    run_id = str(args.get("run_id") or "").strip()
+    if not note_id:
+        raise HTTPException(400, "note_id is required")
+    with Session(engine) as db:
+        result = _push(note_id=note_id, account_id=account_id, run_id=run_id, db=db)
+    return {"ok": True, "note_id": note_id, "result": result}
+
+
 def _tool_query_db(args: dict[str, Any]) -> dict[str, Any]:
     sql = str(args.get("sql") or "").strip()
     if not sql:
@@ -2601,6 +2635,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "set_context_bar": _tool_set_context_bar,
     "list_notes": _tool_list_notes,
     "create_note": _tool_create_note,
+    "push_note_to_crm": _tool_push_note_to_crm,
     "query_db": _tool_query_db,
 }
 
