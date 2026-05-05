@@ -7998,9 +7998,10 @@ async def run_pipeline(
                     )
 
                     prev_content = content
+                    _now_iso = datetime.utcnow().isoformat()
                     run_steps[step_idx].update({
                         "state":            "completed",
-                        "end_time":         datetime.utcnow().isoformat(),
+                        "end_time":         _now_iso,
                         "content":          content,
                         "input_ready":      True,
                         "execution_time_s": exec_time_s,
@@ -8008,6 +8009,8 @@ async def run_pipeline(
                         "output_token_est": output_tok_est,
                         "thinking":         (thinking or "")[:8000],
                         "response_raw":     raw_content,
+                        "agent_result_id":  result_id,
+                        "cached_locations": [{"type": "agent_result", "id": result_id, "created_at": _now_iso}] if result_id else [],
                     })
                     save_steps()  # write state BEFORE yields so file is correct if client disconnects
 
