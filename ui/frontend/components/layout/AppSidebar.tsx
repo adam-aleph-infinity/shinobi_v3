@@ -9,7 +9,7 @@ import { useUserProfile } from "@/lib/user-profile";
 import {
   Users, FileText, BarChart3, Terminal,
   FolderOpen, Bot, Settings, StickyNote, DatabaseZap, GitBranch,
-  User, ShieldCheck, Activity, Layers,
+  User, ShieldCheck, Activity,
 } from "lucide-react";
 import { SyncButton } from "./SyncButton";
 
@@ -27,7 +27,6 @@ const GROUPS = [
     label: "Agents",
     items: [
       { href: "/pipeline", icon: GitBranch, label: "Pipeline Workflow" },
-      { href: "/canvas",   icon: Layers,    label: "Canvas" },
       { href: "/jobs",     icon: Activity,  label: "Jobs" },
     ],
   },

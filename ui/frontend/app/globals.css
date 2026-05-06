@@ -23,9 +23,3 @@ body {
     transform: translateY(0) scale(1);
   }
 }
-
-@keyframes progressBar {
-  0%   { width: 10%; }
-  50%  { width: 75%; }
-  100% { width: 10%; }
-}
