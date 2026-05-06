@@ -27,6 +27,11 @@ export function useCanvasState() {
   const [undoLen, setUndoLen] = useState(0);
   const [redoLen, setRedoLen] = useState(0);
   const clipboard = useRef<CanvasNode[]>([]);
+  const nodesRef = useRef<CanvasNode[]>([]);
+  const edgesRef = useRef<CanvasEdge[]>([]);
+
+  nodesRef.current = nodes;
+  edgesRef.current = edges;
 
   const snapshot = useCallback((currentNodes: CanvasNode[], currentEdges: CanvasEdge[]) => {
     undoStack.current = [...undoStack.current.slice(-MAX_UNDO), cloneState(currentNodes, currentEdges)];
@@ -48,7 +53,8 @@ export function useCanvasState() {
   }, [nodes, edges, onNodesChange, snapshot]);
 
   const handleEdgesChange = useCallback((changes: EdgeChange<CanvasEdge>[]) => {
-    snapshot(nodes, edges);
+    const hasMeaningfulChange = changes.some(c => c.type === "remove" || c.type === "add");
+    if (hasMeaningfulChange) snapshot(nodes, edges);
     onEdgesChange(changes);
   }, [nodes, edges, onEdgesChange, snapshot]);
 
@@ -61,22 +67,22 @@ export function useCanvasState() {
   const undo = useCallback(() => {
     const prev = undoStack.current.pop();
     if (!prev) return;
-    redoStack.current.push(cloneState(nodes, edges));
+    redoStack.current.push(cloneState(nodesRef.current, edgesRef.current));
     setNodes(prev.nodes);
     setEdges(prev.edges);
     setUndoLen(undoStack.current.length);
     setRedoLen(redoStack.current.length);
-  }, [nodes, edges, setNodes, setEdges]);
+  }, [setNodes, setEdges]);
 
   const redo = useCallback(() => {
     const next = redoStack.current.pop();
     if (!next) return;
-    undoStack.current.push(cloneState(nodes, edges));
+    undoStack.current.push(cloneState(nodesRef.current, edgesRef.current));
     setNodes(next.nodes);
     setEdges(next.edges);
     setUndoLen(undoStack.current.length);
     setRedoLen(redoStack.current.length);
-  }, [nodes, edges, setNodes, setEdges]);
+  }, [setNodes, setEdges]);
 
   const updateNodeData = useCallback((id: string, patch: Partial<CanvasNodeData>) => {
     setNodes(prev => prev.map(n =>
@@ -107,9 +113,10 @@ export function useCanvasState() {
   const pasteNodes = useCallback(() => {
     if (!clipboard.current.length) return;
     snapshot(nodes, edges);
-    const pasted = clipboard.current.map(n => ({
+    const now = Date.now();
+    const pasted = clipboard.current.map((n, i) => ({
       ...n,
-      id: `${n.id}-copy-${Date.now()}`,
+      id: `${n.id}-copy-${now}-${i}`,
       position: { x: n.position.x + 30, y: n.position.y + 30 },
       selected: true,
     }));
