@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { X, Eye, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CanvasNode } from "../../hooks/useCanvasState";
@@ -24,6 +24,11 @@ export function NodeInspector({ node, agents, onClose, onUpdate, onSendNote, cal
   const [showTranscript,  setShowTranscript]  = useState(false);
   const [transcriptText,  setTranscriptText]  = useState<string | null>(null);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
+
+  useEffect(() => {
+    setTranscriptText(null);
+    setShowTranscript(false);
+  }, [node?.id, callId]);
 
   async function openTranscript() {
     setShowTranscript(true);

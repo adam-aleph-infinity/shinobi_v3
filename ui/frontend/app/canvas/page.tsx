@@ -136,12 +136,16 @@ function CanvasPageInner() {
 
   const handleExport = useCallback(async () => {
     if (!activePipelineId) return;
-    const res = await fetch(`/api/pipelines/${encodeURIComponent(activePipelineId)}/snapshots`, { method: "POST" });
-    if (!res.ok) return;
-    const data = await res.json();
-    const url  = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-    const a = document.createElement("a"); a.href = url; a.download = `${activePipelineId}.json`; a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const res = await fetch(`/api/pipelines/${encodeURIComponent(activePipelineId)}/bundle`);
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const data = await res.json();
+      const url  = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      const a = document.createElement("a"); a.href = url; a.download = `${activePipelineId}.json`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Export failed:", err);
+    }
   }, [activePipelineId]);
 
   const handleDuplicateNode = useCallback((id: string) => {
