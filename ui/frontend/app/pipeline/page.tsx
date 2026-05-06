@@ -2615,6 +2615,16 @@ function PipelineCanvas() {
     }
   }, [callId, callOptions, setCallId, pendingRunCallId]);
 
+  // Auto-select most recent call when agent+customer are set but no call is selected
+  useEffect(() => {
+    if (callId) return;
+    if (!salesAgent || !customer) return;
+    if (String(pendingRunCallId || "").trim()) return;
+    if (callOptions.length === 0) return;
+    const latest = callOptions[callOptions.length - 1][0];
+    setCallId(latest);
+  }, [callOptions, callId, salesAgent, customer, pendingRunCallId, setCallId]);
+
   useEffect(() => {
     if (!showCallsPanel) return;
     if (!salesAgent || !customer || !callId) {
