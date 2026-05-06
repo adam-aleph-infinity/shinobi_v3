@@ -67,7 +67,7 @@ export function AgentNode({ data, selected }: NodeProps<AgentNodeType>) {
 
       {/* Running progress bar */}
       {status === "loading" && (
-        <div className="h-0.5 bg-indigo-950">
+        <div className="h-0.5 bg-indigo-950 overflow-hidden">
           <div className="h-full bg-gradient-to-r from-indigo-500 to-violet-400 animate-[progressBar_2s_ease-in-out_infinite]" />
         </div>
       )}
