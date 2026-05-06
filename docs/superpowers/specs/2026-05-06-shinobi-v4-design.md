@@ -98,7 +98,9 @@ The first screen after login. Built for active monitoring.
 - **Main split (2 columns):**
   - Left: Live jobs table — real-time, status chips (running/queued/failed), agent/customer/pipeline context per row, one-click retry/replay
   - Right: Review queue — AI outputs held for human approval, approve/reject with optional reason, confidence score badge
-- **Bottom:** Run history (collapsed by default, expandable) — all completed runs filterable by date/pipeline/agent/status, 24h throughput chart
+- **Bottom:** Run history (collapsed by default, expandable) — all completed runs filterable by date/pipeline/agent/status/batch, 24h throughput chart
+- **Batch runs:** Jobs from a campaign or manual batch share a Batch label (e.g. `Campaign: Spring-2026`). Table filterable by batch. Batch-level actions: "Retry all failed in this batch." Batch record stored in DB with label, pipeline used, total/completed/failed counts, triggered-by. Per-job: click any row → opens run trace (Tier 2 log — full event timeline for that run).
+- **Review queue** also surfaces voice fraud flags: when voice similarity analysis detects a potential duplicate identity across customers, a review item is auto-created with both customer records, similarity score, and audio comparison context.
 - **Merged from V3:** `/live`, `/history`, `/ops`, `/review-queue`
 
 ### 6.2 Analytics
@@ -123,6 +125,8 @@ Direct port of the V3 CRM browser with UI refresh.
 - Drill into a pair: all call records, dates, duration, transcription status
 - Manual sync trigger (per-pair or global)
 - Filter by CRM source (brtcrm, mlbcrm, sfxcrm, etc.)
+- **Filter by campaign** — campaign is a first-class filter dimension. Call disposition stats (answered/hung up/no answer) visible immediately from CRM data, no pipeline required.
+- **Batch run trigger** — checkbox-select calls (or "select all answered in this campaign") → "Run Pipeline" button → pick pipeline → confirm. Each call spawns one job in the Ops Console jobs table.
 - **Kept from V3:** `/crm` — same functionality, redesigned UI
 
 ### 6.4 Agents
@@ -162,6 +166,11 @@ Replaces both V3 `/agent-comparison` and `/comparison`.
 - Table: name, assigned agent, milestone stage, compliance risk flag, last call date, journey progress bar
 - Click any row → Customer Journey
 
+#### 6.5c Voice Identity (fraud detection)
+- **Voice Identity card** on each customer profile: fingerprint status (analyzed / not analyzed), and if a cross-customer match exists — "Voice match: 91% similarity to [Customer: Jane Smith] across 3 calls" with links to both profiles.
+- Match detected → auto-flagged to Review Queue in Ops Console for human decision. Approve → creates a "Duplicate Identity Alert" artifact with full audit trail. Reject → clears flag with reason.
+- Voice characteristics shown: speaker embedding status, cadence profile, vocabulary pattern tag, pitch range.
+
 #### 6.5b Customer Journey
 **Layout:** Vertical timeline (left) + detail panel (right).
 - **Left:** Vertical milestone timeline — each milestone is a dot with label and date
@@ -200,10 +209,12 @@ Canvas-based pipeline builder.
 
 **Layout:** Node palette (left, ~90px) + canvas (center, ReactFlow) + node config (right, ~130px) + bottom drawer (run output + artifacts).
 
-- **Node palette:** Draggable node types — Input (webhook/CRM), Agent (LLM step), Note, Persona, Score, Condition/Branch, Output (CRM push)
-- **Canvas:** ReactFlow. Nodes connect via edges. Pipelines are not complex (5–10 nodes typical).
-- **Node config (right panel):** Appears when a node is selected — model selector, system/user prompt editor, temperature, output format
-- **Bottom drawer:** Snaps open after a test run — shows all output artifacts as clickable chips (note, persona, score), expandable to full output
+- **Node palette:** Draggable node types — Input (webhook/CRM), Agent (LLM step), Note, Persona, Score, Condition/Branch, Output (CRM push), **Voice Analysis** (speaker embedding, cross-customer match)
+- **Canvas:** ReactFlow. Nodes connect via edges. Pipelines are not complex (5–10 nodes typical). Agent nodes with an active repair pass show a visual sub-badge on the canvas.
+- **Node config (right panel):** Appears when a node is selected — model selector, system/user prompt editor, temperature, output format, **Output Contract** section (schema definition, canonical taxonomy list, fit threshold, repair pass toggle + repair prompt editor).
+- **Output Contracts:** Each Agent node validates its output against a defined schema after the LLM call. If fit score is below threshold and repair pass is enabled, a second focused LLM call fires to restructure the output to match the taxonomy. Both the main prompt and repair prompt are visible and editable by the Floor Manager. All repair pass calls appear in the run trace (Tier 2 log). Prevents taxonomy drift between runs, enabling reliable downstream aggregation.
+- **Test Run flow:** Clicking "Test Run" opens the **EntityPicker** in the right-side panel — a full inline CRM browser (sortable/filterable by earnings, campaign, etc.) without leaving the pipeline page. Select agent → customer → call → confirm → run. No iframe, no page navigation. Results appear in bottom drawer.
+- **Bottom drawer:** Snaps open after a test run — shows all output artifacts as clickable chips (note, persona, score, voice analysis), expandable to full output. Repair pass results visible per step.
 - **Top bar:** Pipeline name + draft/published badge + Undo + Test Run + Publish buttons
 - **Pipeline list:** All pipelines with version status, last published, last run stats
 - **Version control:** Draft → Publish → Rollback. Immutable published snapshots. Change notes on publish.
@@ -229,7 +240,11 @@ Admin hub. Tabbed internally.
 **Tabs:**
 1. **Users & Privileges** — invite users, assign roles, deactivate accounts
 2. **System Config** — concurrent jobs limit, concurrent transcription limit, VM size / parallel CPUs config
-3. **Logs** — full app log viewer: filter by level/component/time, group by trace ID, search, export. Carried from V3 `/logs`.
+3. **Logs** — three-tier log viewer:
+   - **Tier 1 (Operational):** Structured events — pipeline steps, LLM call token counts, transcription durations, CRM push results, artifact saves. No payload content. Filterable by category, level, component, date range, free text. Real-time SSE streaming.
+   - **Tier 2 (Run Trace):** Per-run event timeline — accessible from Ops Console (click any job) or inline here filtered by run ID. Every event typed with fields: step index, model, token counts, fit score, repair pass triggered/result.
+   - **Tier 3 (Payload Archive):** Full LLM prompts + responses + raw transcripts, stored as files by `run_id + step_index`. Accessible on drill-in from Artifacts ("View LLM I/O" per step) or run trace ("Show payload"). Never shown in bulk log views.
+   Carried from V3 `/logs` — same real-time streaming, vastly extended structure.
 4. **Workspace** — file/data browser for raw agent/customer/call directory structure. Carried from V3 `/workspace`.
 5. **Tools** — CRM connection management, API keys, webhook endpoints, other integrations
 6. **Profile** — user profile, password, notification preferences
@@ -270,7 +285,26 @@ Context-aware AI assistant panel docked to the icon rail. Toggle show/hide. Know
 - **Customer personas:** What approach works for this type of client — trust drivers, objection patterns, risk tolerance.
 - Cross-reference: "agent type X works best with customer type Y" — surfaced proactively in coaching.
 
-### 7.6 Review Queue (Confidence Gate)
+### 7.6 Context & EntityPicker
+- **Scope pill:** Selecting any agent/customer/call anywhere in the app sets a scope pill (top-right). Scope passively pre-filters all sections — navigate to Customers and it's already scoped to this agent's customers. Clear with ×.
+- **URL-driven context:** Context encoded in URL params — bookmarkable, shareable, no stale localStorage state across sessions.
+- **EntityPicker component:** Reusable inline CRM browser (React component, not iframe). Summoned as a slide-over panel from any surface that needs to pick a CRM entity — pipeline test run, scope pill quick-switch, batch trigger. Single two-step flow: agent/customer/call column navigation with full sort/filter.
+- **Command palette (Cmd+K):** Global search across all agents, customers, calls. Sets context directly.
+
+### 7.7 Output Contracts & Taxonomy Enforcement
+- Each Agent node defines an output schema + canonical taxonomy list. Output is validated post-generation, not just guided via prompt.
+- Repair pass: optional second LLM call to restructure drifted output back to taxonomy. Visible in canvas (sub-badge on node) and in run trace.
+- Taxonomy lock: novel labels auto-remapped to nearest canonical label via embedding similarity, or flagged to review queue.
+- Prevents silent aggregation failures when downstream pipelines count or group by label.
+
+### 7.8 Voice Fraud Detection
+- **Speaker fingerprinting:** Python AI worker computes voice embeddings per customer per call using acoustic features (spectral profile, cadence, pitch, vocabulary patterns).
+- **Cross-customer matching:** Cosine similarity comparison across the customer database. Matches above threshold auto-flagged to the Review Queue.
+- **Review Queue integration:** Reviewer sees both customer profiles, similarity score, triggering calls, audio comparison context. Approve → Duplicate Identity Alert artifact with audit trail. Reject → clears flag with reason.
+- **Campaign-level fraud risk:** Analytics surfaces duplicate identity count per campaign, trend over time.
+- **Pipeline node:** `Voice Analysis` node available in the node palette — Floor Manager can include it in any pipeline.
+
+### 7.9 Review Queue (Confidence Gate)
 - AI outputs with low confidence scores or high-risk flags are held before CRM push
 - Human reviewer approves/rejects with optional reason
 - Full audit trail: who reviewed, when, what decision, what outcome
