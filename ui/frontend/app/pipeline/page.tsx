@@ -8,7 +8,7 @@ import {
   addEdge,
   getBezierPath, EdgeLabelRenderer,
   Handle, Position, MarkerType,
-  type Node, type Edge, type Connection, type NodeChange, type NodeTypes,
+  type Node, type Edge, type Connection, type NodeChange, type EdgeChange, type NodeTypes,
   type EdgeProps, type EdgeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -2012,6 +2012,7 @@ function PipelineCanvas() {
   const [pipelineId,   setPipelineId]       = useState<string | null>(null);
   const [pipelineFolder, setPipelineFolder] = useState("");
   const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
   const [pipelinesPanelWidth, setPipelinesPanelWidth] = useState(320);
   const [showCreatePipelineFolder, setShowCreatePipelineFolder] = useState(false);
   const [newPipelineFolderDraft, setNewPipelineFolderDraft] = useState("");
@@ -3572,7 +3573,15 @@ function PipelineCanvas() {
 
   const markElementMutation = useCallback(() => {
     if (runContextMode === "historical") exitHistoricalRunContext(false);
+    setIsDirty(true);
   }, [runContextMode, exitHistoricalRunContext]);
+
+  const pushCanvasHistory = useCallback((ns: Node[], es: Edge[]) => {
+    canvasHistoryRef.current = [...canvasHistoryRef.current.slice(-29), { nodes: ns, edges: es }];
+    canvasRedoRef.current = [];
+    setCanvasUndoLen(canvasHistoryRef.current.length);
+    setCanvasRedoLen(0);
+  }, []);
 
   // Render only actual flow nodes; swimbars are drawn as a non-interactive backdrop.
   const allNodes = useMemo(() => {
@@ -3652,6 +3661,8 @@ function PipelineCanvas() {
   // Prevent removal of sleeves; lock INPUT nodes to their Y axis during drag
   const onNodesChangeFiltered = useCallback((changes: NodeChange[]) => {
     if (canvasLocked) return;
+    const hasRemove = changes.some(c => c.type === "remove");
+    if (hasRemove) pushCanvasHistory(nodesRef.current, edgesRef.current);
     const shouldMarkDirty = changes.some((c) =>
       c.type === "position" || c.type === "remove" || c.type === "add" || c.type === "replace"
     );
@@ -3673,14 +3684,14 @@ function PipelineCanvas() {
       return c;
     });
     onNodesChange(processed as NodeChange[]);
-  }, [onNodesChange, canvasLocked, markElementMutation]);
+  }, [onNodesChange, canvasLocked, markElementMutation, pushCanvasHistory]);
 
-  const pushCanvasHistory = useCallback((ns: Node[], es: Edge[]) => {
-    canvasHistoryRef.current = [...canvasHistoryRef.current.slice(-29), { nodes: ns, edges: es }];
-    canvasRedoRef.current = [];
-    setCanvasUndoLen(canvasHistoryRef.current.length);
-    setCanvasRedoLen(0);
-  }, []);
+  const onEdgesChangeFiltered = useCallback((changes: EdgeChange[]) => {
+    if (canvasLocked) return;
+    const hasRemove = changes.some(c => c.type === "remove");
+    if (hasRemove) pushCanvasHistory(nodesRef.current, edgesRef.current);
+    onEdgesChange(changes);
+  }, [onEdgesChange, canvasLocked, pushCanvasHistory]);
 
   const handleUndo = useCallback(() => {
     const prev = canvasHistoryRef.current.pop();
@@ -3715,8 +3726,8 @@ function PipelineCanvas() {
       // Skip if focus is in an input/textarea (let normal copy/paste work)
       const tag = (document.activeElement?.tagName ?? "").toLowerCase();
       const isInput = tag === "input" || tag === "textarea" || (document.activeElement as HTMLElement)?.isContentEditable;
-      if (e.key === "z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
-      if ((e.key === "y") || (e.key === "z" && e.shiftKey)) { e.preventDefault(); handleRedo(); }
+      if (e.key === "z" && !e.shiftKey && !isInput) { e.preventDefault(); handleUndo(); }
+      if (((e.key === "y") || (e.key === "z" && e.shiftKey)) && !isInput) { e.preventDefault(); handleRedo(); }
       if (e.key === "c" && !isInput) { e.preventDefault(); void copySelectedRef.current(); }
       if (e.key === "v" && !isInput) { e.preventDefault(); void pasteFromClipboardRef.current(); }
     };
@@ -3888,6 +3899,7 @@ function PipelineCanvas() {
     dropPos?: { x: number; y: number },
   ) => {
     if (canvasLocked) return;
+    pushCanvasHistory(nodesRef.current, edgesRef.current);
     markElementMutation();
     const currentNodes  = nodesRef.current;
     const currentEdges  = edgesRef.current;
@@ -3993,7 +4005,7 @@ function PipelineCanvas() {
     setNodes(ns => [...(repositionFn ? repositionFn(ns) : ns), newNode]);
     if (conn) setEdges(es => [...es, makeEdge(conn.source, conn.target)]);
     setSelectedNodeId(id);
-  }, [setNodes, setEdges, setStages, canvasLocked, markElementMutation]);
+  }, [setNodes, setEdges, setStages, canvasLocked, markElementMutation, pushCanvasHistory]);
 
   // ── Drag from palette ─────────────────────────────────────────────────────
 
@@ -4035,6 +4047,7 @@ function PipelineCanvas() {
 
   function deleteNode(id: string) {
     if (canvasLocked) return;
+    pushCanvasHistory(nodesRef.current, edgesRef.current);
     markElementMutation();
     setNodes(ns => ns.filter(n => n.id !== id));
     setEdges(es => es.filter(e => e.source !== id && e.target !== id));
@@ -4072,6 +4085,7 @@ function PipelineCanvas() {
       if (!ok) return;
     }
 
+    pushCanvasHistory(nodesRef.current, edgesRef.current);
     const removeIds = new Set(nodesToRemove.map(n => n.id));
     setNodes(ns => ns.filter(n => !removeIds.has(n.id)));
     setEdges(es => es.filter(e => !removeIds.has(e.source) && !removeIds.has(e.target)));
@@ -4123,6 +4137,11 @@ function PipelineCanvas() {
     setPipelineName("");
     setPipelineId(null);
     setPipelineFolder("");
+    canvasHistoryRef.current = [];
+    canvasRedoRef.current = [];
+    setCanvasUndoLen(0);
+    setCanvasRedoLen(0);
+    setIsDirty(false);
   }
 
   async function handleDeletePipeline(pid: string) {
@@ -4478,6 +4497,11 @@ function PipelineCanvas() {
       setSelectedNodeId(null);
       setRunError("");
       setStepStatuses([]);
+      canvasHistoryRef.current = [];
+      canvasRedoRef.current = [];
+      setCanvasUndoLen(0);
+      setCanvasRedoLen(0);
+      setIsDirty(false);
       return;
     }
 
@@ -4601,6 +4625,11 @@ function PipelineCanvas() {
     setSelectedNodeId(null);
     setRunError("");
     setStepStatuses([]);
+    canvasHistoryRef.current = [];
+    canvasRedoRef.current = [];
+    setCanvasUndoLen(0);
+    setCanvasRedoLen(0);
+    setIsDirty(false);
   }
 
   async function importPresets() {
@@ -4967,6 +4996,11 @@ function PipelineCanvas() {
       if (newId) setPipelineId(newId);
       mutate("/api/pipelines");
       mutate("/api/universal-agents");
+      setIsDirty(false);
+      canvasHistoryRef.current = [];
+      canvasRedoRef.current = [];
+      setCanvasUndoLen(0);
+      setCanvasRedoLen(0);
       showToast(`Pipeline "${pipelineName}" saved`, true);
     } catch { showToast("Network error — could not save pipeline", false); }
     finally  { setPipelineSaving(false); }
@@ -7613,11 +7647,33 @@ function PipelineCanvas() {
           <span className="text-sm font-bold text-white shrink-0">Pipeline</span>
           <input
             value={pipelineName}
-            onChange={e => setPipelineName(e.target.value)}
+            onChange={e => { setPipelineName(e.target.value); setIsDirty(true); }}
             placeholder="Name your pipeline…"
             disabled={canvasLocked}
             className="flex-1 min-w-[180px] bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
           />
+          {/* ── Canvas status chip ──────────────────────────────────────── */}
+          {canvasLocked ? (
+            <span className="shrink-0 text-[10px] px-2 py-1 rounded-lg border border-gray-700 bg-gray-900 text-gray-500 font-medium">
+              View only
+            </span>
+          ) : pipelineSaving ? (
+            <span className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded-lg border border-indigo-700/50 bg-indigo-950/40 text-indigo-300">
+              <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+            </span>
+          ) : isDirty ? (
+            <span className="shrink-0 text-[10px] px-2 py-1 rounded-lg border border-amber-700/50 bg-amber-950/30 text-amber-300 font-medium">
+              ● Unsaved
+            </span>
+          ) : pipelineId ? (
+            <span className="shrink-0 text-[10px] px-2 py-1 rounded-lg border border-emerald-800/50 bg-emerald-950/30 text-emerald-400 font-medium">
+              ✓ Saved
+            </span>
+          ) : (
+            <span className="shrink-0 text-[10px] px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/30 text-gray-600 font-medium">
+              Editing
+            </span>
+          )}
         <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-800 bg-gray-950/40">
           <History className="w-3 h-3 text-indigo-400 shrink-0" />
           <span className="px-2 py-1 rounded border border-gray-700 bg-gray-900 text-[10px] text-gray-200 min-w-[115px] text-center">
@@ -8180,7 +8236,7 @@ function PipelineCanvas() {
             nodeTypes={NODE_TYPES}
             edgeTypes={EDGE_TYPES}
             onNodesChange={onNodesChangeFiltered}
-            onEdgesChange={onEdgesChange}
+            onEdgesChange={onEdgesChangeFiltered}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
             onSelectionChange={({ nodes: sel }) => {
