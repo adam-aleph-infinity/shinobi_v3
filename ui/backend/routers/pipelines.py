@@ -2257,26 +2257,27 @@ def _dedupe_runs_by_source(runs: list[Any]) -> list[Any]:
 
 
 def _load_all() -> list[dict]:
+    # DB rows are authoritative; file scan fills in any pipeline not yet in DB.
+    merged: dict[str, dict] = {}
     try:
         from ui.backend.models.pipeline import Pipeline as _PL
         from sqlmodel import Session as _Sess, select as _sel
         with _Sess(_db_engine) as db:
             rows = db.exec(_sel(_PL).order_by(_PL.name)).all()
-            if rows:
-                return [_pipeline_row_to_dict(r) for r in rows]
+            for r in rows:
+                merged[r.id] = _pipeline_row_to_dict(r)
     except Exception:
         pass
-    # Fallback: file scan (pre-migration or DB unavailable)
     _DIR.mkdir(parents=True, exist_ok=True)
-    out = []
     for f in sorted(_DIR.glob("*.json")):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("id"):
-                out.append(data)
+            pid = str(data.get("id") or "").strip() if isinstance(data, dict) else ""
+            if pid and pid not in merged:
+                merged[pid] = data
         except Exception:
             pass
-    return out
+    return sorted(merged.values(), key=lambda x: str(x.get("name") or "").lower())
 
 
 def _find_file(pipeline_id: str) -> tuple[Any, dict]:
