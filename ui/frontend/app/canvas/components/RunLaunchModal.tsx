@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { X, Play, Loader2 } from "lucide-react";
 import type { RunLaunchOptions } from "../types";
 
@@ -15,6 +15,14 @@ export function RunLaunchModal({ open, running, onClose, onLaunch }: Props) {
   const [force,       setForce]      = useState(false);
   const [failedOnly,  setFailedOnly] = useState(false);
   const [resumeRunId, setResumeRunId]= useState("");
+
+  useEffect(() => {
+    if (!open) {
+      setForce(false);
+      setFailedOnly(false);
+      setResumeRunId("");
+    }
+  }, [open]);
 
   if (!open) return null;
 

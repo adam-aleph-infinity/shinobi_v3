@@ -20,8 +20,8 @@ export function BottomLogPanel({ lines, running, onClear }: Props) {
   }, [running]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [lines]);
+    if (expanded) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lines, expanded]);
 
   const levelColor: Record<CanvasLogLine["level"], string> = {
     pipeline: "text-blue-400",
