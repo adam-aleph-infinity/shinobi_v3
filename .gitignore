@@ -27,6 +27,7 @@ ui/database/shinobi.db
 ui/database/*.db
 
 # Runtime data — persists on VM, never in git
+ui/data/_auth/
 ui/data/agents/
 ui/data/index.json
 ui/data/all_crm_agents_customers.json
@@ -56,6 +57,9 @@ Thumbs.db
 
 # Agent orchestration DB (local state, not for git)
 .agent-orchestration/
+
+# Visual brainstorming mockups
+.superpowers/
 
 # Multi-agent coordination (runtime state, not for git)
 .agents/

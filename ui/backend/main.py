@@ -28,6 +28,8 @@ from ui.backend.models.pipeline_artifact import PipelineArtifact  # noqa: F401 �
 from ui.backend.models.app_state_kv import AppStateKV       # noqa: F401 — registers table
 from ui.backend.models.session_analysis import SessionAnalysis  # noqa: F401 — registers table
 from ui.backend.models.app_log import AppLog               # noqa: F401 — registers table
+from ui.backend.models.universal_agent import UniversalAgent  # noqa: F401 — registers table
+from ui.backend.models.pipeline import Pipeline              # noqa: F401 — registers table
 from ui.backend.routers import crm, jobs, personas, logs, workspace, execution_logs
 from ui.backend.routers import transcription_process, final_transcript
 from ui.backend.routers.agent_stats import router as agent_stats_router

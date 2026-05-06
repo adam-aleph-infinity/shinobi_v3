@@ -57,6 +57,13 @@ _MERGED_CALL_INDEX_CACHE_LOCK = threading.Lock()
 _MERGED_CALL_INDEX_CACHE: dict[str, tuple[int, list[tuple[str, str]], dict[str, list[str]], dict[str, float]]] = {}
 
 
+class _PipelineSkipped(Exception):
+    """Raised when a pipeline run is skipped gracefully (not an error).
+    Caught separately from Exception so the run is saved as 'skipped',
+    not 'failed', and the logs show the skip reason clearly.
+    """
+
+
 def _user_profile(request: Request) -> dict[str, Any]:
     return user_profiles.get_current_user_profile(request)
 
@@ -201,6 +208,7 @@ def _lock_pipeline_for_admin_run(pipeline_id: str, profile: dict[str, Any]) -> N
     data["locked_at"] = datetime.utcnow().isoformat()
     data["lock_reason"] = "admin_run"
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_pipeline(data)
 
 
 def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[str, Any]) -> None:
@@ -234,6 +242,10 @@ def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[s
         adata["locked_at"] = datetime.utcnow().isoformat()
         adata["lock_reason"] = "admin_run"
         af.write_text(json.dumps(adata, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            _ua._db_save_agent(adata)
+        except Exception:
+            pass
         changed = True
     if changed:
         try:
@@ -2252,19 +2264,42 @@ def _dedupe_runs_by_source(runs: list[Any]) -> list[Any]:
 
 
 def _load_all() -> list[dict]:
+    # DB rows are authoritative; file scan fills in any pipeline not yet in DB.
+    merged: dict[str, dict] = {}
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess, select as _sel
+        with _Sess(_db_engine) as db:
+            rows = db.exec(_sel(_PL).order_by(_PL.name)).all()
+            for r in rows:
+                merged[r.id] = _pipeline_row_to_dict(r)
+    except Exception:
+        pass
     _DIR.mkdir(parents=True, exist_ok=True)
-    out = []
     for f in sorted(_DIR.glob("*.json")):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("id"):
-                out.append(data)
+            pid = str(data.get("id") or "").strip() if isinstance(data, dict) else ""
+            if pid and pid not in merged:
+                merged[pid] = data
         except Exception:
             pass
-    return out
+    return sorted(merged.values(), key=lambda x: str(x.get("name") or "").lower())
 
 
 def _find_file(pipeline_id: str) -> tuple[Any, dict]:
+    # Try DB first (O(1) lookup)
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess
+        with _Sess(_db_engine) as db:
+            row = db.get(_PL, pipeline_id)
+            if row:
+                data = _pipeline_row_to_dict(row)
+                return _DIR / f"{pipeline_id}.json", data
+    except Exception:
+        pass
+    # Fallback: file scan
     for f in _DIR.glob("*.json"):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
@@ -2359,6 +2394,82 @@ def _agent_result_supports_pipeline_cache(db_or_bind: Any) -> bool:
 
 def _normalise_folder(name: str) -> str:
     return " ".join(str(name or "").strip().split())
+
+
+def _pipeline_row_to_dict(row: Any) -> dict[str, Any]:
+    """Convert a Pipeline DB row to the canonical dict format."""
+    created = row.created_at
+    updated = row.updated_at
+    return {
+        "id": row.id,
+        "name": row.name or "",
+        "description": row.description or "",
+        "scope": row.scope or "per_pair",
+        "steps": json.loads(row.steps_json or "[]"),
+        "canvas": json.loads(row.canvas_json or "{}"),
+        "folder": row.folder or "",
+        "folder_id": row.folder_id or None,
+        "workspace_user_email": row.workspace_user_email or "",
+        "workspace_user_name": row.workspace_user_name or "",
+        "locked_by_email": row.locked_by_email or "",
+        "locked_by_name": row.locked_by_name or "",
+        "locked_at": row.locked_at or "",
+        "lock_reason": row.lock_reason or "",
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else str(created or ""),
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated or ""),
+    }
+
+
+def _db_save_pipeline(record: dict) -> None:
+    """Upsert a pipeline dict into the DB. Never raises — file is source of truth."""
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess
+        pid = str(record.get("id") or "").strip()
+        if not pid:
+            return
+        with _Sess(_db_engine) as db:
+            row = db.get(_PL, pid)
+            if row is None:
+                row = _PL(id=pid)
+                db.add(row)
+            row.name = str(record.get("name") or "")
+            row.description = str(record.get("description") or "")
+            row.scope = str(record.get("scope") or "per_pair")
+            row.steps_json = json.dumps(record.get("steps") or [])
+            row.canvas_json = json.dumps(record.get("canvas") or {})
+            row.folder = str(record.get("folder") or "")
+            row.folder_id = str(record.get("folder_id") or "") or None
+            row.workspace_user_email = str(record.get("workspace_user_email") or "")
+            row.workspace_user_name = str(record.get("workspace_user_name") or "")
+            row.locked_by_email = str(record.get("locked_by_email") or "")
+            row.locked_by_name = str(record.get("locked_by_name") or "")
+            row.locked_at = str(record.get("locked_at") or "")
+            row.lock_reason = str(record.get("lock_reason") or "")
+            raw_ts = record.get("updated_at") or ""
+            if raw_ts:
+                try:
+                    from datetime import datetime as _dt
+                    row.updated_at = _dt.fromisoformat(str(raw_ts))
+                except Exception:
+                    pass
+            db.commit()
+    except Exception:
+        pass
+
+
+def _db_delete_pipeline(pipeline_id: str) -> None:
+    """Delete a pipeline from the DB. Never raises."""
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess
+        with _Sess(_db_engine) as db:
+            row = db.get(_PL, pipeline_id)
+            if row:
+                db.delete(row)
+                db.commit()
+    except Exception:
+        pass
 
 
 def _load_folders() -> list[str]:
@@ -2558,6 +2669,7 @@ def patch_pipeline_folder(folder_id: str, req: FolderPatchIn, request: Request, 
             if changed:
                 data["updated_at"] = datetime.utcnow().isoformat()
                 fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                _db_save_pipeline(data)
         # Keep legacy JSON list in sync
         folders = _load_folders()
         updated = []
@@ -2625,6 +2737,7 @@ def delete_pipeline_folder_by_id(folder_id: str, request: Request, db: Session =
         data["folder_id"] = None
         data["updated_at"] = datetime.utcnow().isoformat()
         fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _db_save_pipeline(data)
         moved += 1
 
     # Remove from legacy JSON list
@@ -2664,6 +2777,7 @@ def delete_pipeline_folder_legacy(req: FolderDeleteIn, request: Request, db: Ses
         data["folder"] = ""
         data["updated_at"] = datetime.utcnow().isoformat()
         fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _db_save_pipeline(data)
         moved += 1
     folders = [f for f in _load_folders() if _normalise_folder(f).lower() != target.lower()]
     _save_folders(folders)
@@ -2689,6 +2803,7 @@ def create_pipeline(req: PipelineIn, request: Request):
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _db_save_pipeline(record)
     _sync_ai_registry_pipelines()
     return record
 
@@ -2954,6 +3069,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
             json.dumps(agent, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            _ua._db_save_agent(agent)
+        except Exception:
+            pass
         imported_agents.append(agent)
 
     pipeline_out = dict(pipeline_in)
@@ -3007,6 +3126,7 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
         json.dumps(pipeline_out, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    _db_save_pipeline(pipeline_out)
 
     import_snapshot = {
         "bundle_version": 1,
@@ -3073,6 +3193,7 @@ def update_pipeline(pipeline_id: str, req: PipelineIn, request: Request):
                 pass
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     f.write_text(payload, encoding="utf-8")
+    _db_save_pipeline(data)
     # Snapshot for history restore
     try:
         snap_dir = _HISTORY_DIR / pipeline_id
@@ -3156,6 +3277,7 @@ def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn, request: Reques
 
     data["updated_at"] = datetime.utcnow().isoformat()
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_pipeline(data)
     _sync_ai_registry_pipelines()
     return data
 
@@ -3171,7 +3293,15 @@ def delete_pipeline(pipeline_id: str, request: Request):
     if not _can_access_pipeline_record(profile, data):
         raise HTTPException(status_code=404, detail="Pipeline not found.")
     _assert_can_modify_pipeline_record(request, profile, data)
-    f.unlink()
+    try:
+        f.unlink(missing_ok=True)
+    except TypeError:
+        # Python < 3.8 fallback
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    _db_delete_pipeline(pipeline_id)
     _sync_ai_registry_pipelines()
     return {"ok": True}
 
@@ -7288,6 +7418,38 @@ async def run_pipeline(
                     "Pipeline requires transcript inputs but sales_agent/customer context is missing."
                 )
 
+            # Pre-filter: check audio availability before attempting transcription.
+            # If every call has no recording, there is nothing to transcribe — skip
+            # immediately with a clear log rather than hanging on auto-transcription.
+            try:
+                from ui.backend.routers.universal_agents import (
+                    _collect_pair_call_rows as _ua_collect_rows,
+                )
+                with Session(_db_engine) as _pf_db:
+                    _pf_rows = _ua_collect_rows(req.sales_agent, req.customer, _pf_db)
+                _pf_with_tx = [r for r in _pf_rows if r.get("transcript_status") == "TRANSCRIPT"]
+                _pf_with_audio = [r for r in _pf_rows if r.get("record_path")]
+                if _pf_rows and not _pf_with_tx and not _pf_with_audio:
+                    raise _PipelineSkipped(
+                        f"None of the {len(_pf_rows)} call(s) for "
+                        f"{req.sales_agent} / {req.customer} have audio recordings — "
+                        f"transcription not possible. Skipping run."
+                    )
+            except _PipelineSkipped:
+                raise
+            except Exception:
+                pass  # if the pre-check fails for any other reason, proceed normally
+
+            # Mark waiting steps as "preparing" so the UI shows progress animation
+            # while auto-transcription runs (before the step loop begins).
+            _preparing_step_indices = []
+            for _si in range(len(run_steps)):
+                if run_steps[_si].get("state") == "waiting":
+                    run_steps[_si]["state"] = "preparing"
+                    _preparing_step_indices.append(_si)
+            if _preparing_step_indices:
+                save_steps()
+
             yield_msg = (
                 f"Missing transcript inputs detected "
                 f"({'call' if _missing_call_ids else 'merged'}). Starting auto-transcription…"
@@ -7363,9 +7525,23 @@ async def run_pipeline(
             # Re-check required inputs after auto-transcription finished.
             _needs_merged_after, _missing_call_ids_after = _collect_missing_transcript_requirements()
             if _needs_merged_after or _missing_call_ids_after:
+                if _submitted == 0 and not _job_ids:
+                    raise RuntimeError(
+                        f"No transcripts available for {req.sales_agent} / {req.customer}: "
+                        f"none of the {_skipped} call(s) have audio recordings. "
+                        f"Transcription requires calls with audio. Please sync CRM or check recordings."
+                    )
                 raise RuntimeError(
-                    "Auto-transcription completed but required transcript inputs are still missing."
+                    f"Auto-transcription completed but transcripts are still missing "
+                    f"(submitted={_submitted}, skipped={_skipped}). "
+                    f"Check transcription job logs for errors."
                 )
+
+            # Restore steps from "preparing" → "waiting" so the step loop can drive them.
+            for _si in _preparing_step_indices:
+                run_steps[_si]["state"] = "waiting"
+            if _preparing_step_indices:
+                save_steps()
 
             log_buffer.emit(
                 f"[PIPELINE] ✓ Auto-transcription ready (submitted {_submitted}, skipped {_skipped}) · {cid_short}"
@@ -8801,6 +8977,23 @@ async def run_pipeline(
                 # Explicit error (agent failure, resolve error, etc.) — mark file as failed.
                 _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
                             start_datetime=run_start_dt, node_states=_build_node_states())
+
+        except _PipelineSkipped as _skip_exc:
+            skip_msg = str(_skip_exc)
+            execution_error_msg = skip_msg
+            for s in run_steps:
+                if s.get("state") in ("waiting", "preparing", "running"):
+                    s["state"] = "skipped"
+            run_final_status = "skipped"
+            _save_state(
+                pipeline_id, run_id, req.sales_agent, req.customer, "skipped", run_steps,
+                start_datetime=run_start_dt, node_states=_build_node_states(),
+            )
+            log_buffer.emit(f"[PIPELINE] ⏭ Skipped: {pipeline_name} · {cid_short} · {skip_msg}")
+            try:
+                yield _sse("pipeline_skipped", {"msg": skip_msg})
+            except Exception:
+                pass
 
         except asyncio.CancelledError:
             cancel_msg = cancel_state["reason"]

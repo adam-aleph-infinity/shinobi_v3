@@ -58,6 +58,10 @@ def _migrate():
         # Seed pipeline_folder table from _pipelines_folders.json (one-time, idempotent)
         _seed_pipeline_folders(conn)
 
+        # Seed universal_agent and pipeline tables from legacy JSON files (one-time, idempotent)
+        _seed_universal_agents(conn)
+        _seed_pipelines(conn)
+
         # Indexes missing from SQLModel auto-create (safe to run on both Postgres + SQLite)
         for idx_ddl in [
             "CREATE INDEX IF NOT EXISTS ix_pipeline_run_started_at ON pipeline_run (started_at DESC)",
@@ -106,12 +110,11 @@ def _seed_pipeline_folders(conn) -> None:
     from pathlib import Path as _Path
     from sqlalchemy import text as _text
 
+    # Verify table is accessible
     try:
-        count = conn.execute(_text("SELECT COUNT(*) FROM pipeline_folder")).scalar()
-        if count and count > 0:
-            return  # already seeded
+        conn.execute(_text("SELECT 1 FROM pipeline_folder LIMIT 1"))
     except Exception:
-        return
+        return  # table not ready
 
     try:
         from ui.backend.config import settings as _s
@@ -136,7 +139,8 @@ def _seed_pipeline_folders(conn) -> None:
             conn.execute(
                 _text(
                     "INSERT INTO pipeline_folder (id, name, description, color, sort_order, owner_email, created_at, updated_at) "
-                    "VALUES (:id, :name, NULL, NULL, :sort_order, NULL, :created_at, :updated_at)"
+                    "VALUES (:id, :name, NULL, NULL, :sort_order, NULL, :created_at, :updated_at) "
+                    "ON CONFLICT (id) DO NOTHING"
                 ),
                 {"id": str(_uuid.uuid4()), "name": name, "sort_order": sort_idx, "created_at": now, "updated_at": now},
             )
@@ -147,6 +151,168 @@ def _seed_pipeline_folders(conn) -> None:
                 conn.rollback()
             except Exception:
                 pass
+
+
+def _seed_universal_agents(conn) -> None:
+    """Seed universal_agent table from legacy _universal_agents/*.json.
+    Runs on every startup — ON CONFLICT (id) DO NOTHING skips existing rows.
+    Picks up new JSON files automatically without clearing the table."""
+    import json
+    from sqlalchemy import text as _text
+
+    # Verify table is accessible
+    try:
+        conn.execute(_text("SELECT 1 FROM universal_agent LIMIT 1"))
+    except Exception:
+        return  # table not ready
+
+    try:
+        from ui.backend.config import settings as _s
+        agent_dir = _s.ui_data_dir / "_universal_agents"
+        if not agent_dir.exists():
+            return
+        for f in sorted(agent_dir.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not data.get("id"):
+                    continue
+                conn.execute(
+                    _text(
+                        "INSERT INTO universal_agent ("
+                        "  id, name, description, agent_class, model, temperature,"
+                        "  system_prompt, user_prompt, inputs_json, output_format,"
+                        "  artifact_type, artifact_class, output_schema, output_taxonomy_json,"
+                        "  output_contract_mode, output_fit_strategy, artifact_name,"
+                        "  output_response_mode, output_target_type, output_template,"
+                        "  output_placeholder, output_previous_placeholder,"
+                        "  tags_json, is_default, folder,"
+                        "  workspace_user_email, workspace_user_name,"
+                        "  locked_by_email, locked_by_name, locked_at, lock_reason,"
+                        "  created_at, updated_at"
+                        ") VALUES ("
+                        "  :id, :name, :description, :agent_class, :model, :temperature,"
+                        "  :system_prompt, :user_prompt, :inputs_json, :output_format,"
+                        "  :artifact_type, :artifact_class, :output_schema, :output_taxonomy_json,"
+                        "  :output_contract_mode, :output_fit_strategy, :artifact_name,"
+                        "  :output_response_mode, :output_target_type, :output_template,"
+                        "  :output_placeholder, :output_previous_placeholder,"
+                        "  :tags_json, :is_default, :folder,"
+                        "  :workspace_user_email, :workspace_user_name,"
+                        "  :locked_by_email, :locked_by_name, :locked_at, :lock_reason,"
+                        "  :created_at, :updated_at"
+                        ") ON CONFLICT (id) DO NOTHING"
+                    ),
+                    {
+                        "id": str(data.get("id", "")),
+                        "name": str(data.get("name", "")),
+                        "description": str(data.get("description") or ""),
+                        "agent_class": str(data.get("agent_class") or ""),
+                        "model": str(data.get("model") or "gpt-5.4"),
+                        "temperature": float(data.get("temperature") or 0.0),
+                        "system_prompt": str(data.get("system_prompt") or ""),
+                        "user_prompt": str(data.get("user_prompt") or ""),
+                        "inputs_json": json.dumps(data.get("inputs") or []),
+                        "output_format": str(data.get("output_format") or "markdown"),
+                        "artifact_type": str(data.get("artifact_type") or ""),
+                        "artifact_class": str(data.get("artifact_class") or ""),
+                        "output_schema": str(data.get("output_schema") or ""),
+                        "output_taxonomy_json": json.dumps(data.get("output_taxonomy") or []),
+                        "output_contract_mode": str(data.get("output_contract_mode") or "soft"),
+                        "output_fit_strategy": str(data.get("output_fit_strategy") or "structured"),
+                        "artifact_name": str(data.get("artifact_name") or ""),
+                        "output_response_mode": str(data.get("output_response_mode") or "wrap"),
+                        "output_target_type": str(data.get("output_target_type") or "raw_text"),
+                        "output_template": str(data.get("output_template") or ""),
+                        "output_placeholder": str(data.get("output_placeholder") or "response"),
+                        "output_previous_placeholder": str(data.get("output_previous_placeholder") or "previous_response"),
+                        "tags_json": json.dumps(data.get("tags") or []),
+                        "is_default": bool(data.get("is_default")),
+                        "folder": str(data.get("folder") or ""),
+                        "workspace_user_email": str(data.get("workspace_user_email") or ""),
+                        "workspace_user_name": str(data.get("workspace_user_name") or ""),
+                        "locked_by_email": str(data.get("locked_by_email") or ""),
+                        "locked_by_name": str(data.get("locked_by_name") or ""),
+                        "locked_at": str(data.get("locked_at") or ""),
+                        "lock_reason": str(data.get("lock_reason") or ""),
+                        "created_at": str(data.get("created_at") or ""),
+                        "updated_at": str(data.get("updated_at") or ""),
+                    },
+                )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _seed_pipelines(conn) -> None:
+    """Seed pipeline table from legacy _pipelines/*.json.
+    Runs on every startup — ON CONFLICT (id) DO NOTHING skips existing rows."""
+    import json
+    from sqlalchemy import text as _text
+
+    # Verify table is accessible
+    try:
+        conn.execute(_text("SELECT 1 FROM pipeline LIMIT 1"))
+    except Exception:
+        return  # table not ready
+
+    try:
+        from ui.backend.config import settings as _s
+        pipeline_dir = _s.ui_data_dir / "_pipelines"
+        if not pipeline_dir.exists():
+            return
+        for f in sorted(pipeline_dir.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not data.get("id"):
+                    continue
+                conn.execute(
+                    _text(
+                        "INSERT INTO pipeline ("
+                        "  id, name, description, scope,"
+                        "  steps_json, canvas_json, folder, folder_id,"
+                        "  workspace_user_email, workspace_user_name,"
+                        "  locked_by_email, locked_by_name, locked_at, lock_reason,"
+                        "  created_at, updated_at"
+                        ") VALUES ("
+                        "  :id, :name, :description, :scope,"
+                        "  :steps_json, :canvas_json, :folder, :folder_id,"
+                        "  :workspace_user_email, :workspace_user_name,"
+                        "  :locked_by_email, :locked_by_name, :locked_at, :lock_reason,"
+                        "  :created_at, :updated_at"
+                        ") ON CONFLICT (id) DO NOTHING"
+                    ),
+                    {
+                        "id": str(data.get("id", "")),
+                        "name": str(data.get("name", "")),
+                        "description": str(data.get("description") or ""),
+                        "scope": str(data.get("scope") or "per_pair"),
+                        "steps_json": json.dumps(data.get("steps") or []),
+                        "canvas_json": json.dumps(data.get("canvas") or {}),
+                        "folder": str(data.get("folder") or ""),
+                        "folder_id": str(data.get("folder_id") or "") or None,
+                        "workspace_user_email": str(data.get("workspace_user_email") or ""),
+                        "workspace_user_name": str(data.get("workspace_user_name") or ""),
+                        "locked_by_email": str(data.get("locked_by_email") or ""),
+                        "locked_by_name": str(data.get("locked_by_name") or ""),
+                        "locked_at": str(data.get("locked_at") or ""),
+                        "lock_reason": str(data.get("lock_reason") or ""),
+                        "created_at": str(data.get("created_at") or ""),
+                        "updated_at": str(data.get("updated_at") or ""),
+                    },
+                )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def create_db():

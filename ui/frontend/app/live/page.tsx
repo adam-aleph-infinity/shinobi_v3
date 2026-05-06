@@ -161,6 +161,7 @@ function statusTone(status: string): string {
   if (s === "done" || s === "completed" || s === "success" || s === "ok" || s === "finished" || s === "cached") {
     return "text-emerald-300 border-emerald-700/50 bg-emerald-950/40";
   }
+  if (s === "skipped") return "text-slate-300 border-slate-600/50 bg-slate-800/40";
   if (s === "error" || s === "failed" || s.includes("exception")) return "text-red-300 border-red-700/50 bg-red-950/40";
   if (s.includes("cancel") || s.includes("abort") || s.includes("stop")) return "text-slate-200 border-slate-700/50 bg-slate-900/50";
   return "text-amber-300 border-amber-700/50 bg-amber-950/40";
@@ -175,6 +176,7 @@ function isCompletedRun(status: string): boolean {
     || s === "ok"
     || s === "finished"
     || s === "cached"
+    || s === "skipped"
     || s === "error"
     || s === "failed"
     || s.includes("cancel")
@@ -191,7 +193,7 @@ function isSuccessCompletedRun(status: string): boolean {
 
 function isFailedCompletedRun(status: string): boolean {
   const s = String(status || "").trim().toLowerCase();
-  return isCompletedRun(s) && !isSuccessCompletedRun(s);
+  return isCompletedRun(s) && !isSuccessCompletedRun(s) && s !== "skipped";
 }
 
 function isQueuedRun(status: string): boolean {
@@ -2036,6 +2038,7 @@ export default function LivePage() {
               <option value="error">error</option>
               <option value="failed">failed</option>
               <option value="cancelled">cancelled</option>
+              <option value="skipped">skipped</option>
               <option value="stopped">stopped</option>
             </select>
           </label>

@@ -1042,6 +1042,8 @@ def send_note_to_crm_internal(
     account_id: str,
     db: Session,
     run_id: str = "",
+    pipeline_id: str = "",
+    run_origin: str = "",
 ):
     # Safety guard: development mirror host must never push notes back to CRM.
     if bool(settings.live_mirror_enabled):
@@ -1074,7 +1076,23 @@ def send_note_to_crm_internal(
             f"Could not resolve CRM account_id for {note.agent} / {note.customer}. Provide account_id explicitly.",
         )
 
-    crm_note_html = _markdown_to_crm_html(str(note.content_md or ""))
+    sent_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    run_type = "Production" if str(run_origin or "").strip() == "webhook" else "Test"
+    trace_lines = [
+        "",
+        "---",
+        "**Shinobi Trace**",
+        f"- Sent: {sent_at}",
+        f"- Type: {run_type}",
+        f"- Run ID: {run_id or '—'}",
+        f"- Pipeline ID: {pipeline_id or '—'}",
+        f"- Call ID: {note.call_id or '—'}",
+        f"- Agent: {note.agent or '—'}",
+        f"- Customer: {note.customer or '—'}",
+        f"- CRM: {crm_url or account_id or '—'}",
+    ]
+    full_content = str(note.content_md or "") + "\n".join(trace_lines)
+    crm_note_html = _markdown_to_crm_html(full_content)
     body = {
         "api_username": settings.crm_push_api_username,
         "api_password": settings.crm_push_api_password,
@@ -1175,10 +1193,21 @@ def send_note_to_crm(
     request: Request,
     db: Session = Depends(get_session),
 ):
+    _run_id = str(req.run_id or "").strip()
+    _pipeline_id = ""
+    _run_origin = ""
+    if _run_id:
+        from ui.backend.models.pipeline_run import PipelineRun as _PR
+        _run = db.get(_PR, _run_id)
+        if _run:
+            _pipeline_id = str(_run.pipeline_id or "")
+            _run_origin = str(_run.run_origin or "")
     return send_note_to_crm_internal(
         note_id=note_id,
         account_id=str(req.account_id or "").strip(),
-        run_id=str(req.run_id or "").strip(),
+        run_id=_run_id,
+        pipeline_id=_pipeline_id,
+        run_origin=_run_origin,
         db=db,
     )
 
@@ -1580,6 +1609,8 @@ def submit_review_decision(
                         note_id=note_id,
                         account_id="",
                         run_id=run_id,
+                        pipeline_id=str(run.pipeline_id or ""),
+                        run_origin=str(run.run_origin or ""),
                         db=db,
                     )
                     result["crm_push"] = push
