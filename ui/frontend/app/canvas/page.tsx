@@ -131,7 +131,7 @@ function CanvasPageInner() {
     setSelectedNodeId(node.id);
   }, [setSelectedNodeId]);
 
-  function handleAddNode() {
+  const handleAddNode = useCallback(() => {
     const kinds: Array<CanvasNodeData["kind"]> = ["input", "agent", "output"];
     const kind  = kinds[nodes.filter(n => n.data.kind).length % 3] ?? "agent";
     const id    = `node-${Date.now()}`;
@@ -142,9 +142,9 @@ function CanvasPageInner() {
       data: { kind, label: kind === "agent" ? "New Agent" : kind === "input" ? "Transcript" : "Output" },
     };
     addNode(newNode);
-  }
+  }, [nodes, addNode]);
 
-  function handleDuplicateNode(id: string) {
+  const handleDuplicateNode = useCallback((id: string) => {
     const src = nodes.find(n => n.id === id);
     if (!src) return;
     const newNode: CanvasNode = {
@@ -154,24 +154,24 @@ function CanvasPageInner() {
       selected: false,
     };
     addNode(newNode);
-  }
+  }, [nodes, addNode]);
 
-  function handleDeleteNode(id: string) {
+  const handleDeleteNode = useCallback((id: string) => {
     setNodes(prev => prev.filter(n => n.id !== id));
     setEdges(prev => prev.filter(e => e.source !== id && e.target !== id));
     if (selectedNodeId === id) setSelectedNodeId(null);
     setIsDirty(true);
-  }
+  }, [selectedNodeId, setNodes, setEdges, setSelectedNodeId, setIsDirty]);
 
-  async function handleSendNote(noteId: string) {
+  const handleSendNote = useCallback(async (noteId: string) => {
     const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}/send-to-crm`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sales_agent: salesAgent, customer }),
     });
     if (!res.ok) throw new Error(`Send note failed (${res.status})`);
-  }
+  }, [salesAgent, customer]);
 
-  async function handleCreatePipeline() {
+  const handleCreatePipeline = useCallback(async () => {
     const pl = await savePipeline({
       name: "New Pipeline",
       description: "",
@@ -179,25 +179,25 @@ function CanvasPageInner() {
       steps: [],
     });
     setActivePipeline(pl.id, pl.name);
-  }
+  }, [activeFolderId, savePipeline, setActivePipeline]);
 
-  async function handleRenamePipeline(id: string, name: string) {
+  const handleRenamePipeline = useCallback(async (id: string, name: string) => {
     const pl = pipelines.find(p => p.id === id);
     if (!pl) return;
     await savePipeline({ ...pl, name });
     if (id === activePipelineId) setActivePipeline(id, name);
-  }
+  }, [pipelines, savePipeline, activePipelineId, setActivePipeline]);
 
-  async function handleDeletePipeline(id: string) {
+  const handleDeletePipeline = useCallback(async (id: string) => {
     await deletePipeline(id);
     if (id === activePipelineId) setActivePipeline("", "");
-  }
+  }, [deletePipeline, activePipelineId, setActivePipeline]);
 
-  async function handleDuplicatePipeline(id: string) {
+  const handleDuplicatePipeline = useCallback(async (id: string) => {
     const pl = await loadPipeline(id);
     const { id: _id, ...restPl } = pl;
     await savePipeline({ ...restPl, name: `${pl.name} (copy)` });
-  }
+  }, [loadPipeline, savePipeline]);
 
   const selectedNode = nodes.find(n => n.id === selectedNodeId) ?? null;
 
