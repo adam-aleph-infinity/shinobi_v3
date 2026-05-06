@@ -7411,6 +7411,16 @@ async def run_pipeline(
                     "Pipeline requires transcript inputs but sales_agent/customer context is missing."
                 )
 
+            # Mark waiting steps as "preparing" so the UI shows progress animation
+            # while auto-transcription runs (before the step loop begins).
+            _preparing_step_indices = []
+            for _si in range(len(run_steps)):
+                if run_steps[_si].get("state") == "waiting":
+                    run_steps[_si]["state"] = "preparing"
+                    _preparing_step_indices.append(_si)
+            if _preparing_step_indices:
+                save_steps()
+
             yield_msg = (
                 f"Missing transcript inputs detected "
                 f"({'call' if _missing_call_ids else 'merged'}). Starting auto-transcription…"
@@ -7486,9 +7496,23 @@ async def run_pipeline(
             # Re-check required inputs after auto-transcription finished.
             _needs_merged_after, _missing_call_ids_after = _collect_missing_transcript_requirements()
             if _needs_merged_after or _missing_call_ids_after:
+                if _submitted == 0 and not _job_ids:
+                    raise RuntimeError(
+                        f"No transcripts available for {req.sales_agent} / {req.customer}: "
+                        f"none of the {_skipped} call(s) have audio recordings. "
+                        f"Transcription requires calls with audio. Please sync CRM or check recordings."
+                    )
                 raise RuntimeError(
-                    "Auto-transcription completed but required transcript inputs are still missing."
+                    f"Auto-transcription completed but transcripts are still missing "
+                    f"(submitted={_submitted}, skipped={_skipped}). "
+                    f"Check transcription job logs for errors."
                 )
+
+            # Restore steps from "preparing" → "waiting" so the step loop can drive them.
+            for _si in _preparing_step_indices:
+                run_steps[_si]["state"] = "waiting"
+            if _preparing_step_indices:
+                save_steps()
 
             log_buffer.emit(
                 f"[PIPELINE] ✓ Auto-transcription ready (submitted {_submitted}, skipped {_skipped}) · {cid_short}"
