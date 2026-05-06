@@ -50,13 +50,14 @@ interface Props {
   onRun:     () => void;
   onDuplicateNode?: (id: string) => void;
   onDeleteNode?:    (id: string) => void;
+  onExport?:        () => void;
 }
 
 export function CanvasBoard({
   nodes, edges, isDirty, saving, running, undoLen, redoLen,
   onNodesChange, onEdgesChange, onConnect, onNodeClick,
   onUndo, onRedo, onAddNode, onDelete, onSave, onRun,
-  onDuplicateNode, onDeleteNode,
+  onDuplicateNode, onDeleteNode, onExport,
 }: Props) {
   const { fitView } = useReactFlow();
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
@@ -115,6 +116,7 @@ export function CanvasBoard({
           onUndo={onUndo} onRedo={onRedo}
           onAddNode={onAddNode} onDelete={onDelete}
           onSave={onSave} onRun={onRun}
+          onExport={onExport}
         />
       </ReactFlow>
 

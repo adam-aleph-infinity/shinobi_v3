@@ -56,6 +56,7 @@ function CanvasPageInner() {
   const [activeFolderId,  setActiveFolderId]  = useState("");
   const [showRunModal,    setShowRunModal]     = useState(false);
   const [saving,          setSaving]           = useState(false);
+  const [showNodePicker,  setShowNodePicker]   = useState(false);
 
   // Load pipeline when activePipelineId changes
 
@@ -131,18 +132,17 @@ function CanvasPageInner() {
     setSelectedNodeId(node.id);
   }, [setSelectedNodeId]);
 
-  const handleAddNode = useCallback(() => {
-    const kinds: Array<CanvasNodeData["kind"]> = ["input", "agent", "output"];
-    const kind  = kinds[nodes.filter(n => n.data.kind).length % 3] ?? "agent";
-    const id    = `node-${Date.now()}`;
-    const newNode: CanvasNode = {
-      id,
-      type: kind,
-      position: { x: 100 + nodes.length * 30, y: 150 },
-      data: { kind, label: kind === "agent" ? "New Agent" : kind === "input" ? "Transcript" : "Output" },
-    };
-    addNode(newNode);
-  }, [nodes, addNode]);
+  const handleAddNode = useCallback(() => { setShowNodePicker(true); }, []);
+
+  const handleExport = useCallback(async () => {
+    if (!activePipelineId) return;
+    const res = await fetch(`/api/pipelines/${encodeURIComponent(activePipelineId)}/snapshots`, { method: "POST" });
+    if (!res.ok) return;
+    const data = await res.json();
+    const url  = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a"); a.href = url; a.download = `${activePipelineId}.json`; a.click();
+    URL.revokeObjectURL(url);
+  }, [activePipelineId]);
 
   const handleDuplicateNode = useCallback((id: string) => {
     const src = nodes.find(n => n.id === id);
@@ -256,6 +256,7 @@ function CanvasPageInner() {
           onDelete={deleteSelected}
           onSave={handleSave}
           onRun={handleRun}
+          onExport={handleExport}
           onDuplicateNode={handleDuplicateNode}
           onDeleteNode={handleDeleteNode}
         />
@@ -268,12 +269,40 @@ function CanvasPageInner() {
             onClose={() => setSelectedNodeId(null)}
             onUpdate={updateNodeData}
             onSendNote={handleSendNote}
+            callId={callId}
+            salesAgent={salesAgent}
+            customer={customer}
           />
         )}
       </div>
 
       {/* Bottom log */}
       <BottomLogPanel lines={logLines} running={running} onClear={clearLogs} />
+
+      {/* Node picker modal */}
+      {showNodePicker && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center" onClick={() => setShowNodePicker(false)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-5 w-72 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="text-sm font-bold text-white mb-4">Add Node</div>
+            {(["input", "agent", "output"] as const).map(kind => (
+              <button key={kind} onClick={() => {
+                const id = `node-${Date.now()}`;
+                addNode({ id, type: kind, position: { x: 200 + nodes.length * 30, y: 150 },
+                  data: { kind, label: kind === "agent" ? "New Agent" : kind === "input" ? "Transcript" : "Output" }});
+                setShowNodePicker(false);
+              }} className="w-full flex items-center gap-3 p-3 rounded-xl bg-gray-800 hover:bg-gray-700 border border-gray-700 mb-2 text-left transition-colors">
+                <span className="text-lg">{kind === "input" ? "⚡" : kind === "agent" ? "🤖" : "⭐"}</span>
+                <div>
+                  <div className="text-xs font-bold text-white capitalize">{kind} Node</div>
+                  <div className="text-[10px] text-gray-500">
+                    {kind === "input" ? "Data source" : kind === "agent" ? "AI processing step" : "Artifact output"}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Run modal */}
       <RunLaunchModal

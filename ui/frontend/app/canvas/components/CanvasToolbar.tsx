@@ -1,7 +1,7 @@
 "use client";
 
 import { useReactFlow, useViewport } from "@xyflow/react";
-import { Undo2, Redo2, Plus, Trash2, Minus, Maximize2, Play, Save, Loader2 } from "lucide-react";
+import { Undo2, Redo2, Plus, Trash2, Minus, Maximize2, Play, Save, Loader2, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -16,11 +16,12 @@ interface Props {
   onDelete:   () => void;
   onSave:     () => void;
   onRun:      () => void;
+  onExport?:  () => void;
 }
 
 export function CanvasToolbar({
   undoLen, redoLen, isDirty, saving, running,
-  onUndo, onRedo, onAddNode, onDelete, onSave, onRun,
+  onUndo, onRedo, onAddNode, onDelete, onSave, onRun, onExport,
 }: Props) {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const { zoom } = useViewport();
@@ -68,6 +69,14 @@ export function CanvasToolbar({
       </button>
 
       <div className="w-px h-4 bg-gray-700" />
+
+      {/* Export */}
+      {onExport && (
+        <button onClick={onExport}
+          className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 border border-gray-600/60 rounded-lg px-2.5 py-1 text-xs text-gray-400 transition-colors" title="Export bundle">
+          <Download className="w-3 h-3" /> Export
+        </button>
+      )}
 
       {/* Save */}
       <button onClick={onSave} disabled={saving || !isDirty}

@@ -6,17 +6,46 @@ import { cn } from "@/lib/utils";
 import type { CanvasNode } from "../../hooks/useCanvasState";
 import type { UniversalAgent, CanvasNodeData } from "../../types";
 import { INPUT_SOURCES, MODEL_GROUPS, OUTPUT_SUBTYPES, RUNTIME_BADGE } from "../../types";
+import { TranscriptViewer } from "@/components/shared/TranscriptViewer";
 
 interface Props {
-  node:       CanvasNode | null;
-  agents:     UniversalAgent[];
-  onClose:    () => void;
-  onUpdate:   (id: string, patch: Partial<CanvasNodeData>) => void;
-  onSendNote: (noteId: string) => void;
+  node:        CanvasNode | null;
+  agents:      UniversalAgent[];
+  onClose:     () => void;
+  onUpdate:    (id: string, patch: Partial<CanvasNodeData>) => void;
+  onSendNote:  (noteId: string) => void;
+  callId?:     string;
+  salesAgent?: string;
+  customer?:   string;
 }
 
-export function NodeInspector({ node, agents, onClose, onUpdate, onSendNote }: Props) {
-  const [viewingOutput, setViewingOutput] = useState(false);
+export function NodeInspector({ node, agents, onClose, onUpdate, onSendNote, callId, salesAgent, customer }: Props) {
+  const [viewingOutput,   setViewingOutput]   = useState(false);
+  const [showTranscript,  setShowTranscript]  = useState(false);
+  const [transcriptText,  setTranscriptText]  = useState<string | null>(null);
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+
+  async function openTranscript() {
+    setShowTranscript(true);
+    if (transcriptText !== null) return; // already fetched
+    if (!callId || !salesAgent || !customer) {
+      setTranscriptText("No call context available.");
+      return;
+    }
+    setTranscriptLoading(true);
+    try {
+      const res = await fetch(
+        `/api/notes/transcript?agent=${encodeURIComponent(salesAgent)}&customer=${encodeURIComponent(customer)}&call_id=${encodeURIComponent(callId)}`
+      );
+      if (!res.ok) { setTranscriptText("Transcript not found."); return; }
+      const data = await res.json() as { text: string };
+      setTranscriptText(data.text);
+    } catch {
+      setTranscriptText("Error loading transcript.");
+    } finally {
+      setTranscriptLoading(false);
+    }
+  }
 
   if (!node) return null;
 
@@ -62,15 +91,23 @@ export function NodeInspector({ node, agents, onClose, onUpdate, onSendNote }: P
 
         {/* INPUT NODE */}
         {data.kind === "input" && (
-          field("Input Source",
-            <select value={String(data.inputSource || "transcript")}
-              onChange={e => onUpdate(node.id, { inputSource: e.target.value })}
-              className={selectCls}>
-              {INPUT_SOURCES.map(s => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
-          )
+          <>
+            {field("Input Source",
+              <select value={String(data.inputSource || "transcript")}
+                onChange={e => onUpdate(node.id, { inputSource: e.target.value })}
+                className={selectCls}>
+                {INPUT_SOURCES.map(s => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+            )}
+            {(data.inputSource === "transcript" || data.inputSource === "merged_transcript" || !data.inputSource) && (
+              <button onClick={() => void openTranscript()}
+                className="w-full flex items-center justify-center gap-1.5 bg-blue-700/20 border border-blue-600/40 rounded-lg py-1.5 text-[10px] text-blue-300 hover:bg-blue-700/30 transition-colors mt-2">
+                <Eye className="w-3 h-3" /> View Transcript
+              </button>
+            )}
+          </>
         )}
 
         {/* AGENT NODE */}
@@ -157,6 +194,29 @@ export function NodeInspector({ node, agents, onClose, onUpdate, onSendNote }: P
           </div>
         )}
       </div>
+
+      {/* Transcript modal */}
+      {showTranscript && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowTranscript(false)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700">
+              <span className="text-sm font-bold text-white">Transcript</span>
+              <button onClick={() => setShowTranscript(false)}>
+                <X className="w-4 h-4 text-gray-400" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              {transcriptLoading ? (
+                <p className="text-xs text-gray-500 italic">Loading…</p>
+              ) : transcriptText ? (
+                <TranscriptViewer content={transcriptText} externalScroll />
+              ) : (
+                <p className="text-xs text-gray-600 italic">No transcript loaded.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Full output modal */}
       {viewingOutput && data.lastOutputPreview && (
