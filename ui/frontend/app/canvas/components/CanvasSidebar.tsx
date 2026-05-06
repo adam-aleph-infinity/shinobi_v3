@@ -121,8 +121,11 @@ export function CanvasSidebar({
                   <button onClick={() => setEditingPipelineId(null)}><X className="w-3 h-3 text-gray-500" /></button>
                 </div>
               ) : (
-                <button
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onSelectPipeline(p.id)}
+                  onKeyDown={e => { if (e.key === "Enter" || e.key === " ") onSelectPipeline(p.id); }}
                   className={cn(
                     "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors group",
                     p.id === activePipelineId
@@ -140,7 +143,7 @@ export function CanvasSidebar({
                   >
                     <MoreVertical className="w-3 h-3 text-gray-500" />
                   </button>
-                </button>
+                </div>
               )}
 
               {/* Pipeline context menu */}
