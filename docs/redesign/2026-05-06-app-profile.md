@@ -225,6 +225,91 @@ The CRM is the agent's interface. Shinobi is invisible to them.
 
 **Build sequence:** Superadmin (Shinobi Worker) full-access interface first. Then progressively disable/hide features per role.
 
+## Context & Navigation Model
+
+### Global Scope Pill (Entity Context)
+No persistent context bar by default. When a user selects an agent, customer, or call anywhere in the app, a scope pill appears in the top-right: `Agent: John Smith × | Customer: Acme Corp ×`. This scope passively carries across sections — Customers section pre-filters to this agent's customers, Artifacts section jumps to this agent/customer, etc. Clear by clicking ×.
+
+**Context as actions:** The scope pill is also a command hub — "Run Pipeline", "View in Artifacts", "View Journey" are one click away from wherever context is set, without forcing a section switch.
+
+**URL-driven:** Context is encoded in the URL (`?agent=john-smith&customer=acme`), not just localStorage — bookmarkable, shareable, no stale state across sessions.
+
+**Command palette (Cmd+K):** Global search across agents, customers, calls. Sets context directly without navigating section-by-section.
+
+### EntityPicker Component (Inline CRM Browser)
+A reusable React component (not an iframe) that can be summoned as a slide-over panel from any surface that needs to select a CRM entity — pipeline test run, scope pill quick-switch, batch run trigger. Two-step flow: agent list (sortable/filterable) → customer list → call list, all in one panel. No navigation away from the current page.
+
+The Pipeline page "Test Run" button opens the EntityPicker in the right-side panel (same column as node config). Canvas stays visible behind it. Select target → confirm → run → results appear in bottom drawer.
+
+---
+
+## Campaign & Batch Runs
+
+### Campaign as a Filter Dimension
+Campaign is a first-class filter in the CRM section — managers can filter calls by campaign, see disposition stats (answered/hung up/no answer) without any AI pipeline. A campaign with 60% hang-ups is visible immediately from CRM data alone.
+
+### Batch Run Trigger
+From the CRM section: checkbox-select calls (or "select all answered in this campaign") → "Run Pipeline" button → pick pipeline from dropdown → confirm. Each call spawns one individual pipeline run.
+
+### Jobs Table (Ops Console)
+Batch runs land in the Ops Console jobs table as individual job rows, all tagged with a shared Batch label (e.g. `Campaign: Spring-2026`). Managers filter the jobs table by batch to see all runs from that campaign. Batch-level actions: "Retry all failed in this batch" — same pattern as the existing failed-state retry system.
+
+**Batch record in DB:** Unlike V3 (where batches are display-time groupings only), V4 stores an explicit batch record with: batch ID, label, pipeline used, total count, completed/failed counts, triggered by. This enables filtering, sharing, and audit trail.
+
+---
+
+## Three-Tier Logging Model
+
+### Tier 1 — Operational Logs (main log viewer)
+Clean, structured, fast to scan. No payload content. Lives in Settings → Logs tab. Filterable by category (pipeline, llm, transcription, crm, webhook, system, http, auth), level, component, date range, free text. Real-time SSE streaming for live view.
+
+```
+[TRANSCRIPTION] Started · call abc123 · ElevenLabs Scribe v2
+[TRANSCRIPTION] ✓ Done · 847 words · 2.3s · call abc123
+[PIPELINE] ▶ Step 2/3: compliance-agent [gpt-4o]
+[PIPELINE] ✓ Step 2/3 → done · 1800 tokens in · 620 out · 1.8s
+[ARTIFACT] ✓ Saved: compliance-note · run abc · call abc123
+[CRM-PUSH] ✓ Note sent · call abc123
+```
+
+### Tier 2 — Run Trace (per pipeline run)
+Structured event timeline for each run. Every event typed with fields, not just text lines. Accessible from Ops Console: click any job → see its full trace. Covers: run started, transcript requested/returned (duration + word count, not full text), each step start/complete, LLM call token counts, repair pass triggered/result, artifact saved, CRM push sent.
+
+### Tier 3 — Payload Archive (stored separately, accessible on drill-in)
+Full text of: transcripts received from ElevenLabs, LLM system+user prompts, LLM responses. Stored as files referenced by `run_id + step_index`. Never shown in the main log viewer or run trace by default. Accessible via:
+- Artifacts section → per-call detail → "View LLM I/O" per step
+- Run trace → click any LLM or transcription step → "Show payload"
+
+This keeps compliance audit trails complete without polluting operational views with 40,000-word transcripts.
+
+---
+
+## Output Contracts & Taxonomy Enforcement
+
+### The Problem
+LLM agents can produce slight taxonomy drift between runs — "Missing disclosure" vs "Undisclosed conflict of interest" vs "Disclosure not provided". Downstream aggregation pipelines that count violations by type break silently when labels vary.
+
+### V4 Solution: Output Contracts with Real Validation + Repair Pass
+
+**1. Schema validation after every step**
+Each Agent node defines an output schema (required keys, structure) and an optional canonical taxonomy (fixed list of allowed labels). After the LLM call, output is validated: fit score computed (schema marker coverage + taxonomy label match). Result logged in Tier 1. Does not rely on LLM compliance with prompt guidance alone.
+
+**2. Repair pass (optional per node, fully visible)**
+Each Agent node has an optional "Repair pass" toggle in the node config panel. When enabled and fit score is below threshold: a second focused LLM call fires with a repair prompt — *"Rewrite this output to strictly match this taxonomy and schema. Do not change meaning, only structure."* The repair prompt is visible and editable by the Floor Manager. The repair call appears explicitly in the run trace:
+```
+[STEP 2] Main call → fit score 67% (below 80% threshold)
+[STEP 2] Repair pass → gpt-4o-mini → fit score 94% ✓
+[STEP 2] Output accepted
+```
+In the pipeline canvas, nodes with an active repair pass show a visual sub-badge. Full prompts + responses for both calls stored in Tier 3 payload archive.
+
+**3. Taxonomy lock**
+The node config lets the Floor Manager define a canonical taxonomy list. If a novel label appears in the output, it is either auto-remapped to the nearest canonical label (embedding similarity) or flagged to the review queue if confidence is low. Guarantees that downstream aggregation always sees consistent labels.
+
+**Visibility principle:** No LLM operation in V4 is hidden from the manager. Every smoothing step, repair pass, and format transform is surfaced in the run trace and node config — not buried in backend-only logs.
+
+---
+
 ## Open Questions (being answered in session)
 
 - Multi-tenant vs. per-client deployment — **TBD, design should support both**
