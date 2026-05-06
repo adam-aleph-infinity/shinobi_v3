@@ -89,6 +89,8 @@ gcloud compute ssh $VM_NAME \
     cd ~/shinobi_v3
 
     echo '▶ Restart services...'
+    sudo systemctl restart cloud-sql-proxy
+    sleep 2
     sudo systemctl restart shinobi-backend shinobi-frontend
 
     echo '▶ Wait for backend health...'

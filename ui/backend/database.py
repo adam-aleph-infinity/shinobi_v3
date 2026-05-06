@@ -110,12 +110,11 @@ def _seed_pipeline_folders(conn) -> None:
     from pathlib import Path as _Path
     from sqlalchemy import text as _text
 
+    # Verify table is accessible
     try:
-        count = conn.execute(_text("SELECT COUNT(*) FROM pipeline_folder")).scalar()
-        if count and count > 0:
-            return  # already seeded
+        conn.execute(_text("SELECT 1 FROM pipeline_folder LIMIT 1"))
     except Exception:
-        return
+        return  # table not ready
 
     try:
         from ui.backend.config import settings as _s
@@ -140,7 +139,8 @@ def _seed_pipeline_folders(conn) -> None:
             conn.execute(
                 _text(
                     "INSERT INTO pipeline_folder (id, name, description, color, sort_order, owner_email, created_at, updated_at) "
-                    "VALUES (:id, :name, NULL, NULL, :sort_order, NULL, :created_at, :updated_at)"
+                    "VALUES (:id, :name, NULL, NULL, :sort_order, NULL, :created_at, :updated_at) "
+                    "ON CONFLICT (id) DO NOTHING"
                 ),
                 {"id": str(_uuid.uuid4()), "name": name, "sort_order": sort_idx, "created_at": now, "updated_at": now},
             )
@@ -154,16 +154,17 @@ def _seed_pipeline_folders(conn) -> None:
 
 
 def _seed_universal_agents(conn) -> None:
-    """Seed universal_agent table from legacy _universal_agents/*.json. Idempotent."""
+    """Seed universal_agent table from legacy _universal_agents/*.json.
+    Runs on every startup — ON CONFLICT (id) DO NOTHING skips existing rows.
+    Picks up new JSON files automatically without clearing the table."""
     import json
     from sqlalchemy import text as _text
 
+    # Verify table is accessible
     try:
-        count = conn.execute(_text("SELECT COUNT(*) FROM universal_agent")).scalar()
-        if count and count > 0:
-            return
+        conn.execute(_text("SELECT 1 FROM universal_agent LIMIT 1"))
     except Exception:
-        return
+        return  # table not ready
 
     try:
         from ui.backend.config import settings as _s
@@ -177,7 +178,7 @@ def _seed_universal_agents(conn) -> None:
                     continue
                 conn.execute(
                     _text(
-                        "INSERT OR IGNORE INTO universal_agent ("
+                        "INSERT INTO universal_agent ("
                         "  id, name, description, agent_class, model, temperature,"
                         "  system_prompt, user_prompt, inputs_json, output_format,"
                         "  artifact_type, artifact_class, output_schema, output_taxonomy_json,"
@@ -199,7 +200,7 @@ def _seed_universal_agents(conn) -> None:
                         "  :workspace_user_email, :workspace_user_name,"
                         "  :locked_by_email, :locked_by_name, :locked_at, :lock_reason,"
                         "  :created_at, :updated_at"
-                        ")"
+                        ") ON CONFLICT (id) DO NOTHING"
                     ),
                     {
                         "id": str(data.get("id", "")),
@@ -248,16 +249,16 @@ def _seed_universal_agents(conn) -> None:
 
 
 def _seed_pipelines(conn) -> None:
-    """Seed pipeline table from legacy _pipelines/*.json. Idempotent."""
+    """Seed pipeline table from legacy _pipelines/*.json.
+    Runs on every startup — ON CONFLICT (id) DO NOTHING skips existing rows."""
     import json
     from sqlalchemy import text as _text
 
+    # Verify table is accessible
     try:
-        count = conn.execute(_text("SELECT COUNT(*) FROM pipeline")).scalar()
-        if count and count > 0:
-            return
+        conn.execute(_text("SELECT 1 FROM pipeline LIMIT 1"))
     except Exception:
-        return
+        return  # table not ready
 
     try:
         from ui.backend.config import settings as _s
@@ -271,7 +272,7 @@ def _seed_pipelines(conn) -> None:
                     continue
                 conn.execute(
                     _text(
-                        "INSERT OR IGNORE INTO pipeline ("
+                        "INSERT INTO pipeline ("
                         "  id, name, description, scope,"
                         "  steps_json, canvas_json, folder, folder_id,"
                         "  workspace_user_email, workspace_user_name,"
@@ -283,7 +284,7 @@ def _seed_pipelines(conn) -> None:
                         "  :workspace_user_email, :workspace_user_name,"
                         "  :locked_by_email, :locked_by_name, :locked_at, :lock_reason,"
                         "  :created_at, :updated_at"
-                        ")"
+                        ") ON CONFLICT (id) DO NOTHING"
                     ),
                     {
                         "id": str(data.get("id", "")),

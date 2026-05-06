@@ -147,7 +147,9 @@ UNIT
 
     echo '▶ Reload and restart services...'
     sudo systemctl daemon-reload
-    sudo systemctl enable shinobi-backend shinobi-frontend
+    sudo systemctl enable cloud-sql-proxy shinobi-backend shinobi-frontend
+    sudo systemctl restart cloud-sql-proxy
+    sleep 2
     sudo systemctl restart shinobi-backend shinobi-frontend
 
     echo '▶ Wait for backend health...'
