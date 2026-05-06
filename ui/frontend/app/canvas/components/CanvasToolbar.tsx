@@ -1,6 +1,6 @@
 "use client";
 
-import { useReactFlow } from "@xyflow/react";
+import { useReactFlow, useViewport } from "@xyflow/react";
 import { Undo2, Redo2, Plus, Trash2, Minus, Maximize2, Play, Save, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -22,7 +22,8 @@ export function CanvasToolbar({
   undoLen, redoLen, isDirty, saving, running,
   onUndo, onRedo, onAddNode, onDelete, onSave, onRun,
 }: Props) {
-  const { zoomIn, zoomOut, fitView, getZoom } = useReactFlow();
+  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const { zoom } = useViewport();
 
   return (
     <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-gray-900/90 backdrop-blur-sm border border-gray-700/60 rounded-3xl px-4 py-2 shadow-xl">
@@ -56,7 +57,7 @@ export function CanvasToolbar({
         <Minus className="w-3.5 h-3.5" />
       </button>
       <span className="text-[10px] text-gray-500 w-8 text-center font-mono select-none">
-        {Math.round(getZoom() * 100)}%
+        {Math.round(zoom * 100)}%
       </span>
       <button onClick={() => zoomIn()} className="p-1 rounded hover:bg-gray-700 text-gray-400 transition-colors">
         <Plus className="w-3 h-3" />
