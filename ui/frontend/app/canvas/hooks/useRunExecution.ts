@@ -3,7 +3,51 @@
 import { useCallback, useRef, useState } from "react";
 import type { CanvasNode } from "./useCanvasState";
 import type { CanvasLogLine, RunLaunchOptions, RuntimeStatus } from "../types";
-import { runtimeStatusFromToken } from "../types";
+
+async function readSSE(
+  res: Response,
+  onEvent: (type: string, data: Record<string, unknown>, stepIdx: number) => void,
+) {
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += dec.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    while (true) {
+      const sep = buffer.indexOf("\n\n");
+      if (sep < 0) break;
+      const block = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      const dataLines = block.replace(/\r/g, "").split("\n")
+        .filter(l => l.startsWith("data:"))
+        .map(l => l.slice(5).trimStart());
+      if (!dataLines.length) continue;
+      try {
+        const evt = JSON.parse(dataLines.join("\n"));
+        const type = String(evt.type || "");
+        const data = (evt.data ?? {}) as Record<string, unknown>;
+        const step = typeof data.step === "number" ? data.step : -1;
+        onEvent(type, data, step);
+      } catch { /* ignore malformed */ }
+    }
+  }
+  if (buffer.trim()) {
+    const dataLines = buffer.replace(/\r/g, "").split("\n")
+      .filter(l => l.startsWith("data:"))
+      .map(l => l.slice(5).trimStart());
+    if (dataLines.length) {
+      try {
+        const evt = JSON.parse(dataLines.join("\n"));
+        const type = String(evt.type || "");
+        const data = (evt.data ?? {}) as Record<string, unknown>;
+        const step = typeof data.step === "number" ? data.step : -1;
+        onEvent(type, data, step);
+      } catch { /* ignore */ }
+    }
+  }
+}
 
 export function useRunExecution(
   onNodeStatusChange: (nodeId: string, status: RuntimeStatus, durationS?: number, preview?: string, noteId?: string) => void,
@@ -32,50 +76,8 @@ export function useRunExecution(
   // Maps step index → agent node id (built from sorted agent nodes before run)
   const stepToNodeRef = useRef<string[]>([]);
 
-  async function readSSE(
-    res: Response,
-    onEvent: (type: string, data: Record<string, unknown>, stepIdx: number) => void,
-  ) {
-    const reader = res.body!.getReader();
-    const dec = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += dec.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-      while (true) {
-        const sep = buffer.indexOf("\n\n");
-        if (sep < 0) break;
-        const block = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        const dataLines = block.replace(/\r/g, "").split("\n")
-          .filter(l => l.startsWith("data:"))
-          .map(l => l.slice(5).trimStart());
-        if (!dataLines.length) continue;
-        try {
-          const evt = JSON.parse(dataLines.join("\n"));
-          const type = String(evt.type || "");
-          const data = (evt.data ?? {}) as Record<string, unknown>;
-          const step = typeof data.step === "number" ? data.step : -1;
-          onEvent(type, data, step);
-        } catch { /* ignore malformed */ }
-      }
-    }
-    if (buffer.trim()) {
-      const dataLines = buffer.replace(/\r/g, "").split("\n")
-        .filter(l => l.startsWith("data:"))
-        .map(l => l.slice(5).trimStart());
-      if (dataLines.length) {
-        try {
-          const evt = JSON.parse(dataLines.join("\n"));
-          const type = String(evt.type || "");
-          const data = (evt.data ?? {}) as Record<string, unknown>;
-          const step = typeof data.step === "number" ? data.step : -1;
-          onEvent(type, data, step);
-        } catch { /* ignore */ }
-      }
-    }
-  }
+  const onStatusChangeRef = useRef(onNodeStatusChange);
+  onStatusChangeRef.current = onNodeStatusChange;
 
   const launch = useCallback(async (
     pipelineId: string,
@@ -100,7 +102,7 @@ export function useRunExecution(
     appendLog(`Starting pipeline run for ${salesAgent} · ${customer}`, "pipeline");
 
     // Reset all agent nodes to pending
-    agentNodesSortedByX.forEach(n => onNodeStatusChange(n.id, "pending"));
+    agentNodesSortedByX.forEach(n => onStatusChangeRef.current(n.id, "pending"));
 
     try {
       const res = await fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/run`, {
@@ -147,22 +149,22 @@ export function useRunExecution(
 
         const agentName = String(data.agent_name || `Step ${stepIdx + 1}`);
         if (type === "step_start")  {
-          onNodeStatusChange(nodeId, "loading");
+          onStatusChangeRef.current(nodeId, "loading");
           appendLog(`${agentName}: started`, "pipeline");
         }
         if (type === "step_cached") {
-          onNodeStatusChange(nodeId, "cached");
+          onStatusChangeRef.current(nodeId, "cached");
           appendLog(`${agentName}: cache hit`, "pipeline");
         }
         if (type === "step_done") {
           const dur = typeof data.execution_time_s === "number" ? data.execution_time_s : undefined;
           const preview = String(data.content || "").slice(0, 120) || undefined;
           const noteId  = String(data.note_id || "").trim() || undefined;
-          onNodeStatusChange(nodeId, "done", dur, preview, noteId);
+          onStatusChangeRef.current(nodeId, "done", dur, preview, noteId);
           appendLog(`${agentName}: done${dur != null ? ` (${dur.toFixed(1)}s)` : ""}`, "pipeline");
         }
         if (type === "step_error") {
-          onNodeStatusChange(nodeId, "error");
+          onStatusChangeRef.current(nodeId, "error");
           appendLog(`${agentName}: error — ${String(data.msg || "")}`, "error");
         }
       });
@@ -178,7 +180,7 @@ export function useRunExecution(
     } finally {
       setRunning(false);
     }
-  }, [appendLog, clearLogs, onNodeStatusChange]);
+  }, [appendLog, clearLogs]);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
