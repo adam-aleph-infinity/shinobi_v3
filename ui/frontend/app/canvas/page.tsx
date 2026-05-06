@@ -56,13 +56,6 @@ function CanvasPageInner() {
   const [activeFolderId,  setActiveFolderId]  = useState("");
   const [showRunModal,    setShowRunModal]     = useState(false);
   const [saving,          setSaving]           = useState(false);
-  const [_showAddNode,    setShowAddNode]      = useState(false);
-  const [_crmOpen,        setCrmOpen]          = useState(false);
-  const [_callsOpen,      setCallsOpen]        = useState(false);
-
-  void setShowAddNode;
-  void setCrmOpen;
-  void setCallsOpen;
 
   // Load pipeline when activePipelineId changes
 
@@ -81,25 +74,9 @@ function CanvasPageInner() {
     }).catch(console.error);
   }, [activePipelineId, loadPipeline, loadFromPipeline]);
 
-  // Keyboard shortcuts
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
-      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) { e.preventDefault(); redo(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "c") { e.preventDefault(); copySelected(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "v") { e.preventDefault(); pasteNodes(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); void handleSave(); }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [undo, redo, copySelected, pasteNodes]);
-
   // Save
 
-  async function handleSave() {
+  const handleSave = useCallback(async () => {
     if (!activePipelineId) return;
     setSaving(true);
     try {
@@ -117,21 +94,36 @@ function CanvasPageInner() {
     } finally {
       setSaving(false);
     }
-  }
+  }, [activePipelineId, pipelines, nodes, edges, savePipeline, setIsDirty]);
 
   // Run
 
-  function handleRun() {
+  const handleRun = useCallback(() => {
     if (!activePipelineId) return;
     setShowRunModal(true);
-  }
+  }, [activePipelineId]);
 
-  function handleLaunch(opts: RunLaunchOptions) {
+  const handleLaunch = useCallback((opts: RunLaunchOptions) => {
     const agentNodes = nodes
       .filter(n => n.data.kind === "agent" && n.data.agentId)
       .sort((a, b) => a.position.x - b.position.x);
     void launch(activePipelineId, salesAgent, customer, callId, agentNodes, opts);
-  }
+  }, [activePipelineId, salesAgent, customer, callId, nodes, launch]);
+
+  // Keyboard shortcuts
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) { e.preventDefault(); redo(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") { e.preventDefault(); copySelected(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === "v") { e.preventDefault(); pasteNodes(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); void handleSave(); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo, copySelected, pasteNodes, handleSave]);
 
   // Node interactions
 
@@ -172,10 +164,11 @@ function CanvasPageInner() {
   }
 
   async function handleSendNote(noteId: string) {
-    await fetch(`/api/notes/${encodeURIComponent(noteId)}/send-to-crm`, {
+    const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}/send-to-crm`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sales_agent: salesAgent, customer }),
     });
+    if (!res.ok) throw new Error(`Send note failed (${res.status})`);
   }
 
   async function handleCreatePipeline() {
@@ -202,7 +195,8 @@ function CanvasPageInner() {
 
   async function handleDuplicatePipeline(id: string) {
     const pl = await loadPipeline(id);
-    await savePipeline({ ...pl, id: undefined as unknown as string, name: `${pl.name} (copy)` });
+    const { id: _id, ...restPl } = pl;
+    await savePipeline({ ...restPl, name: `${pl.name} (copy)` });
   }
 
   const selectedNode = nodes.find(n => n.id === selectedNodeId) ?? null;
@@ -214,8 +208,8 @@ function CanvasPageInner() {
         salesAgent={salesAgent}
         customer={customer}
         callId={callId}
-        onOpenCrm={() => setCrmOpen(true)}
-        onOpenCalls={() => setCallsOpen(true)}
+        onOpenCrm={() => {}}
+        onOpenCalls={() => {}}
       />
 
       {/* Main content */}
