@@ -1511,24 +1511,62 @@ def _scope_has_any_transcript(pair_dir: Any, upto_call_id: str = "") -> bool:
     return False
 
 
+def _count_transcripts_in_scope(pair_dir: Any, upto_call_id: str = "") -> int:
+    cutoff = _norm_call_id(upto_call_id)
+    cutoff_num: Optional[int] = None
+    if cutoff:
+        try:
+            cutoff_num = int(float(cutoff))
+        except Exception:
+            cutoff_num = None
+    if not pair_dir.exists():
+        return 0
+    count = 0
+    for d in pair_dir.iterdir():
+        if not d.is_dir() or d.name.startswith(".") or d.name.startswith("_"):
+            continue
+        cid = _norm_call_id(d.name)
+        if not cid:
+            continue
+        if cutoff_num is not None:
+            try:
+                if int(float(cid)) > cutoff_num:
+                    continue
+            except Exception:
+                continue
+        if _transcript_path_for_call(pair_dir, cid):
+            count += 1
+    return count
+
+
 def _merged_cache_needs_refresh(cached: str, pair_dir: Any, upto_call_id: str = "") -> bool:
     head = str(cached or "")[:5000]
     if not head:
         return False
+    # Parse the cached transcript count from the header
+    cached_tx_count: Optional[int] = None
+    m = _re.search(r"Calls w/ Transcript:\s*(\d+)", head)
+    if m:
+        try:
+            cached_tx_count = int(m.group(1))
+        except Exception:
+            pass
+    # Zero-transcript cache: refresh if any transcript now exists
     zero_marker = "No transcript bodies are available in this scope." in cached
-    if not zero_marker:
-        m = _re.search(r"Calls w/ Transcript:\s*(\d+)", head)
-        if m:
-            try:
-                zero_marker = int(m.group(1)) <= 0
-            except Exception:
-                zero_marker = False
-    if not zero_marker:
-        return False
-    try:
-        return _scope_has_any_transcript(pair_dir, upto_call_id=upto_call_id)
-    except Exception:
-        return False
+    if not zero_marker and cached_tx_count is not None:
+        zero_marker = cached_tx_count <= 0
+    if zero_marker:
+        try:
+            return _scope_has_any_transcript(pair_dir, upto_call_id=upto_call_id)
+        except Exception:
+            return False
+    # Non-zero cache: refresh if new transcripts have appeared since cache was built
+    if cached_tx_count is not None and cached_tx_count > 0:
+        try:
+            return _count_transcripts_in_scope(pair_dir, upto_call_id=upto_call_id) > cached_tx_count
+        except Exception:
+            return False
+    return False
 
 
 def _collect_pair_call_rows(
