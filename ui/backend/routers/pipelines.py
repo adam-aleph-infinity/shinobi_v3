@@ -201,6 +201,10 @@ def _lock_pipeline_for_admin_run(pipeline_id: str, profile: dict[str, Any]) -> N
         f, data = _find_file(pipeline_id)
     except Exception:
         return
+    # Never lock a pipeline owned by a different user — they must be able to edit their own work.
+    pipeline_owner = _norm_ci((data or {}).get("workspace_user_email"))
+    if pipeline_owner and pipeline_owner != me:
+        return
     if _record_lock_owner_email(data) == me:
         return
     data["locked_by_email"] = me
@@ -235,6 +239,10 @@ def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[s
             af, adata = _ua._find_file(aid)
         except Exception:
             continue
+        # Never lock an agent owned by a different user.
+        agent_owner = _norm_ci((adata or {}).get("workspace_user_email"))
+        if agent_owner and agent_owner != me:
+            continue
         if _norm_ci((adata or {}).get("locked_by_email")) == me:
             continue
         adata["locked_by_email"] = me
@@ -252,6 +260,60 @@ def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[s
             _ua._sync_ai_registry_agents()
         except Exception:
             pass
+
+
+def _release_admin_run_locks(pipeline_id: str, steps: list[dict[str, Any]], admin_email: str) -> None:
+    """Release admin_run locks set by this admin on a pipeline and its step agents."""
+    try:
+        f, data = _find_file(pipeline_id)
+        if (
+            _norm_ci(data.get("locked_by_email")) == _norm_ci(admin_email)
+            and str(data.get("lock_reason") or "") == "admin_run"
+        ):
+            data["locked_by_email"] = ""
+            data["locked_by_name"] = ""
+            data["locked_at"] = ""
+            data["lock_reason"] = ""
+            f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            _db_save_pipeline(data)
+    except Exception:
+        pass
+    try:
+        from ui.backend.routers import universal_agents as _ua
+        seen: set[str] = set()
+        changed = False
+        for step in (steps or []):
+            if not isinstance(step, dict):
+                continue
+            aid = str(step.get("agent_id") or "").strip()
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            try:
+                af, adata = _ua._find_file(aid)
+            except Exception:
+                continue
+            if (
+                _norm_ci(adata.get("locked_by_email")) == _norm_ci(admin_email)
+                and str(adata.get("lock_reason") or "") == "admin_run"
+            ):
+                adata["locked_by_email"] = ""
+                adata["locked_by_name"] = ""
+                adata["locked_at"] = ""
+                adata["lock_reason"] = ""
+                af.write_text(json.dumps(adata, indent=2, ensure_ascii=False), encoding="utf-8")
+                try:
+                    _ua._db_save_agent(adata)
+                except Exception:
+                    pass
+                changed = True
+        if changed:
+            try:
+                _ua._sync_ai_registry_agents()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _is_live_mirror_mode(request: Optional[Request] = None) -> bool:
@@ -9055,6 +9117,13 @@ async def run_pipeline(
                 cur = _ACTIVE_RUN_TASKS.get(run_slot)
                 if cur is asyncio.current_task():
                     _ACTIVE_RUN_TASKS.pop(run_slot, None)
+
+            # Release any admin_run locks this run placed on the pipeline + agents.
+            if run_origin_norm != "webhook" and bool(profile.get("is_admin")):
+                try:
+                    _release_admin_run_locks(pipeline_id, run_steps, _profile_email(profile))
+                except Exception:
+                    pass
 
             # On force rerun: delete stale cached results for errored steps so that
             # a page refresh won't show old successful data instead of the error state.
