@@ -32,7 +32,34 @@ The current crypto/forex broker use case is a test deployment. The product is de
 
 ---
 
-## 3. User Roles & Permissions
+## 3. Core Entity Model
+
+Three independent entities connected by a relationship layer.
+
+| Entity | What it is | Owns |
+|---|---|---|
+| **Agent** | A sales agent — independent of any customer | Profile, persona, voice fingerprint, performance history across all customers |
+| **Customer** | A client — independent of any agent | Journey/milestones, persona, voice fingerprint, fraud flags — continuous across agent transfers |
+| **Assignment** | The active pair relationship between one agent and one customer | All calls within that period, compliance record for that period |
+
+**Sequential, not concurrent:** One active Assignment per customer at a time. When a customer is transferred to a new agent, the current Assignment closes (`ended_at` set, `transfer_reason` recorded) and a new one opens. A customer's history can span multiple Assignments across different agents.
+
+**CRM identity mapping:** Both Agent and Customer entities have a `crm_identities` array — the same agent or customer can exist across multiple CRM sources (brtcrm, mlbcrm, sfxcrm) and maps to one Shinobi entity.
+
+**Entity resolution on webhook:** When a CRM webhook arrives with `agent="John Smith", customer="Acme Corp", source="brtcrm"`, Shinobi resolves or creates the Agent + Customer entities, then finds or creates the active Assignment for that pair + source.
+
+**Data shape:**
+```
+Agent → Assignments[] → Calls[] → PipelineRuns[] → Artifacts[]
+Customer → Assignments[] → Calls[]
+Assignment → (Agent + Customer + CRM source + period) → Calls[]
+```
+
+**Transfer event on Customer timeline:** The transfer appears as a milestone marker on the Customer journey — "Transferred from Agent A to Agent B" — between the last call of one Assignment and the first call of the next. Analytics attribute performance only to the agent's own Assignment period.
+
+---
+
+## 4. User Roles & Permissions
 
 Four roles, strictly layered. Each lower role is a subset of the one above it.
 
@@ -53,7 +80,7 @@ Sales agents **never log into Shinobi**. All agent-facing content is delivered a
 
 ---
 
-## 4. Visual Language
+## 5. Visual Language
 
 - **Default:** Dark Professional — deep dark backgrounds (#0a0a0f base), vivid accent colors, high-contrast data. Inspired by Vercel, Linear, trading terminals.
 - **Light mode:** Full toggle — all components support both themes.
@@ -63,7 +90,7 @@ Sales agents **never log into Shinobi**. All agent-facing content is delivered a
 
 ---
 
-## 5. Navigation
+## 6. Navigation
 
 **Icon rail** — narrow (~56px), always visible. Each icon is the section entry point. Hover reveals a floating label. No text visible by default — maximum content space.
 
@@ -86,7 +113,7 @@ User avatar at the very bottom of the rail. Settings icon pinned above avatar.
 
 ---
 
-## 6. Page Designs
+## 7. Page Designs
 
 ### 6.1 Ops Console (Home)
 
@@ -173,12 +200,13 @@ Replaces both V3 `/agent-comparison` and `/comparison`.
 
 #### 6.5b Customer Journey
 **Layout:** Vertical timeline (left) + detail panel (right).
-- **Left:** Vertical milestone timeline — each milestone is a dot with label and date
+- **Left:** Vertical milestone timeline — spans all Assignments sequentially. Agent transfer events appear as labeled dividers between Assignment periods ("Transferred → Agent B, 2026-03-12"). Within each period, calls are dots and milestones are markers.
   - Completed milestones: filled purple dot
   - Pending next milestone: amber pulsing dot
   - Future milestones: empty dot
+  - Transfer event: horizontal divider with agent name + date
   - Milestones are user-defined (Floor Manager sets them) + AI-auto-detected
-- **Right:** Click any milestone or call to see:
+- **Right:** Click any milestone, call, or transfer event to see:
   - Call compliance results (COMPLIANT/VIOLATION per procedure)
   - Next-call actions generated
   - Customer sentiment at that point
@@ -191,7 +219,7 @@ Unified content browser — replaces `/calls`, `/notes`, `/personas`, `/full-per
 
 **Layout:** Three-column — agent list (far left, narrow) → customer list (middle-left) → call list (middle) → call detail (right, expandable).
 
-Navigation: select agent → select customer → select call → see all artifacts for that call.
+Navigation: select agent → select customer → select assignment period → select call → see all artifacts for that call. Assignment periods shown as dated bands under each customer (e.g. "Jan–Mar 2026 · Agent A", "Mar 2026–present · Agent B").
 
 **Per-call detail panel:**
 - Transcript viewer with speaker labels, search, timestamp navigation
@@ -255,7 +283,7 @@ Context-aware AI assistant panel docked to the icon rail. Toggle show/hide. Know
 
 ---
 
-## 7. Key Features & Differentiators
+## 8. Key Features & Differentiators
 
 ### 7.1 Customer Journey + Milestone Tracking
 - User-defined milestone types (Floor Manager creates: "FTD", "Wallet Created", "KYC Complete", etc.)
@@ -312,7 +340,7 @@ Context-aware AI assistant panel docked to the icon rail. Toggle show/hide. Know
 
 ---
 
-## 8. Data Flow
+## 9. Data Flow
 
 ```
 CRM webhook → call ended
@@ -331,7 +359,7 @@ CRM webhook → call ended
 
 ---
 
-## 9. V3 → V4 Feature Mapping
+## 10. V3 → V4 Feature Mapping
 
 | V3 Page | V4 Destination |
 |---|---|
@@ -357,7 +385,7 @@ CRM webhook → call ended
 
 ---
 
-## 10. Out of Scope for V4 Initial Build
+## 11. Out of Scope for V4 Initial Build
 
 - Multi-tenant billing/provisioning (architecture supports it, not built yet)
 - Mobile app or responsive mobile layout
@@ -367,7 +395,7 @@ CRM webhook → call ended
 
 ---
 
-## 11. Build Sequence
+## 12. Build Sequence
 
 Start with the superadmin (Shinobi Worker) full-access interface. Then progressively restrict features per role using the permission layer.
 
