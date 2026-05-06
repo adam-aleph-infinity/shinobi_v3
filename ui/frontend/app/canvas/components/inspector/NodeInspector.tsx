@@ -28,6 +28,7 @@ export function NodeInspector({ node, agents, onClose, onUpdate, onSendNote, cal
   useEffect(() => {
     setTranscriptText(null);
     setShowTranscript(false);
+    setTranscriptLoading(false);
   }, [node?.id, callId]);
 
   async function openTranscript() {
