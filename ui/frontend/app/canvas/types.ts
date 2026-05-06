@@ -53,6 +53,7 @@ export interface PipelineDef {
   folder?:     string;
   folder_id?:  string;
   workspace_user_email?: string;
+  workspace_user_name?: string;
   steps:       PipelineStepDef[];
   canvas?:     { nodes: unknown[]; edges: unknown[]; stages?: string[] };
 }
@@ -71,6 +72,18 @@ export interface UniversalAgent {
   tags:         string[];
   is_default:   boolean;
   created_at:   string;
+  artifact_type?:    string;
+  artifact_class?:   string;
+  artifact_name?:    string;
+  output_schema?:    Record<string, unknown> | null;
+  output_taxonomy?:  string | null;
+  output_contract_mode?: string | null;
+  output_fit_strategy?: string | null;
+  output_response_mode?: string | null;
+  output_target_type?: string | null;
+  output_template?: string | null;
+  output_placeholder?: string | null;
+  output_previous_placeholder?: string | null;
 }
 
 export interface PipelineRunStep {
@@ -98,6 +111,8 @@ export interface PipelineRunRecord {
   finished_at:  string | null;
   status:       string;
   steps_json:   string;
+  canvas_json?: string;
+  log_json?:    string;
 }
 
 export interface CanvasLogLine {
@@ -118,14 +133,16 @@ export function normalizeStateToken(value: unknown): string {
   return String(value || "").trim().toLowerCase();
 }
 
-export function runtimeStatusFromToken(value: unknown): RuntimeStatus {
+export function runtimeStatusFromToken(value: unknown, hasCached = false): RuntimeStatus {
   const s = normalizeStateToken(value);
   if (!s) return "pending";
   if (s === "cached" || s === "cache_hit") return "cached";
   if (s.includes("cancel") || s.includes("abort") || s.includes("stop")) return "cancelled";
   if (s === "failed" || s === "error" || s === "fail" || s.includes("exception")) return "error";
   if (s === "running" || s === "loading" || s === "started" || s.includes("in_progress")) return "loading";
-  if (s === "completed" || s === "done" || s === "pass" || s === "success" || s === "ok") return "done";
+  if (s === "completed" || s === "done" || s === "pass" || s === "success" || s === "ok")
+    return hasCached ? "cached" : "done";
+  if (s === "input_prepared" || s === "prepared") return "pending";
   return "pending";
 }
 
