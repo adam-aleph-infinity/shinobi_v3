@@ -226,7 +226,7 @@ def _seed_universal_agents(conn) -> None:
                         "output_placeholder": str(data.get("output_placeholder") or "response"),
                         "output_previous_placeholder": str(data.get("output_previous_placeholder") or "previous_response"),
                         "tags_json": json.dumps(data.get("tags") or []),
-                        "is_default": 1 if data.get("is_default") else 0,
+                        "is_default": bool(data.get("is_default")),
                         "folder": str(data.get("folder") or ""),
                         "workspace_user_email": str(data.get("workspace_user_email") or ""),
                         "workspace_user_name": str(data.get("workspace_user_name") or ""),
