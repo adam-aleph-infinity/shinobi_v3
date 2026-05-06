@@ -4,7 +4,11 @@ import useSWR, { useSWRConfig } from "swr";
 import { useCallback } from "react";
 import type { PipelineDef, PipelineFolderDef, UniversalAgent } from "../types";
 
-const fetcher = (url: string) => fetch(url).then(r => r.json());
+const fetcher = (url: string) =>
+  fetch(url).then(r => {
+    if (!r.ok) throw new Error(`Fetch failed (${r.status})`);
+    return r.json();
+  });
 
 export function usePipelineData() {
   const { mutate } = useSWRConfig();
