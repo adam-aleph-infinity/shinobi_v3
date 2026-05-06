@@ -3053,6 +3053,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
         agent["folder"] = folder_name
         agent["workspace_user_email"] = owner_email
         agent["workspace_user_name"] = owner_name
+        agent["locked_by_email"] = ""
+        agent["locked_by_name"] = ""
+        agent["locked_at"] = ""
+        agent["lock_reason"] = ""
         agent["name"] = _next_unique_name(str(agent.get("name") or "Imported Agent"), existing_agent_names)
         next_inputs: list[dict[str, Any]] = []
         for inp in (agent.get("inputs") or []):
@@ -3083,6 +3087,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
     pipeline_out["folder"] = folder_name
     pipeline_out["workspace_user_email"] = owner_email
     pipeline_out["workspace_user_name"] = owner_name
+    pipeline_out["locked_by_email"] = ""
+    pipeline_out["locked_by_name"] = ""
+    pipeline_out["locked_at"] = ""
+    pipeline_out["lock_reason"] = ""
 
     # Remap pipeline step agent ids.
     remapped_steps: list[dict[str, Any]] = []
