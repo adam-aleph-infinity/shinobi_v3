@@ -57,6 +57,13 @@ _MERGED_CALL_INDEX_CACHE_LOCK = threading.Lock()
 _MERGED_CALL_INDEX_CACHE: dict[str, tuple[int, list[tuple[str, str]], dict[str, list[str]], dict[str, float]]] = {}
 
 
+class _PipelineSkipped(Exception):
+    """Raised when a pipeline run is skipped gracefully (not an error).
+    Caught separately from Exception so the run is saved as 'skipped',
+    not 'failed', and the logs show the skip reason clearly.
+    """
+
+
 def _user_profile(request: Request) -> dict[str, Any]:
     return user_profiles.get_current_user_profile(request)
 
@@ -7411,6 +7418,28 @@ async def run_pipeline(
                     "Pipeline requires transcript inputs but sales_agent/customer context is missing."
                 )
 
+            # Pre-filter: check audio availability before attempting transcription.
+            # If every call has no recording, there is nothing to transcribe — skip
+            # immediately with a clear log rather than hanging on auto-transcription.
+            try:
+                from ui.backend.routers.universal_agents import (
+                    _collect_pair_call_rows as _ua_collect_rows,
+                )
+                with Session(_db_engine) as _pf_db:
+                    _pf_rows = _ua_collect_rows(req.sales_agent, req.customer, _pf_db)
+                _pf_with_tx = [r for r in _pf_rows if r.get("transcript_status") == "TRANSCRIPT"]
+                _pf_with_audio = [r for r in _pf_rows if r.get("record_path")]
+                if _pf_rows and not _pf_with_tx and not _pf_with_audio:
+                    raise _PipelineSkipped(
+                        f"None of the {len(_pf_rows)} call(s) for "
+                        f"{req.sales_agent} / {req.customer} have audio recordings — "
+                        f"transcription not possible. Skipping run."
+                    )
+            except _PipelineSkipped:
+                raise
+            except Exception:
+                pass  # if the pre-check fails for any other reason, proceed normally
+
             # Mark waiting steps as "preparing" so the UI shows progress animation
             # while auto-transcription runs (before the step loop begins).
             _preparing_step_indices = []
@@ -8948,6 +8977,23 @@ async def run_pipeline(
                 # Explicit error (agent failure, resolve error, etc.) — mark file as failed.
                 _save_state(pipeline_id, run_id, req.sales_agent, req.customer, "failed", run_steps,
                             start_datetime=run_start_dt, node_states=_build_node_states())
+
+        except _PipelineSkipped as _skip_exc:
+            skip_msg = str(_skip_exc)
+            execution_error_msg = skip_msg
+            for s in run_steps:
+                if s.get("state") in ("waiting", "preparing", "running"):
+                    s["state"] = "skipped"
+            run_final_status = "skipped"
+            _save_state(
+                pipeline_id, run_id, req.sales_agent, req.customer, "skipped", run_steps,
+                start_datetime=run_start_dt, node_states=_build_node_states(),
+            )
+            log_buffer.emit(f"[PIPELINE] ⏭ Skipped: {pipeline_name} · {cid_short} · {skip_msg}")
+            try:
+                yield _sse("pipeline_skipped", {"msg": skip_msg})
+            except Exception:
+                pass
 
         except asyncio.CancelledError:
             cancel_msg = cancel_state["reason"]
