@@ -1762,6 +1762,432 @@ git commit -m "feat(web): protected app layout, 9 section routes, page transitio
 
 ---
 
+---
+
+## Task 13: Deploy scripts + GCP infrastructure
+
+**Files:**
+- Modify: `apps/web/next.config.ts` (add standalone output)
+- Create: `.env.example` (V4 full env template)
+- Create: `deploy/1_gcp_infra.sh`
+- Create: `deploy/2_setup_vm.sh`
+- Create: `deploy/nginx.conf`
+- Create: `deploy/deploy.sh`
+
+**GCP project:** `shinobi-v4-prod` (new, separate from V3's `shinobi-v2-prod`)
+**VM:** `shinobi-v4-vm`, zone `us-central1-a`, `e2-standard-4`
+
+- [ ] **Step 1: Update `apps/web/next.config.ts` for standalone production build**
+
+```typescript
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  transpilePackages: ['@shinobi/shared'],
+  output: 'standalone',
+}
+
+export default nextConfig
+```
+
+- [ ] **Step 2: Replace root `.env.example` with the full V4 template**
+
+```bash
+# ── V4 Core ────────────────────────────────────────────────────────────────────
+DATABASE_URL=postgresql://shinobi:CHANGE_ME@localhost:5432/shinobi_v4
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=CHANGE_ME_to_at_least_32_random_chars
+PORT=3001
+NODE_ENV=production
+NEXT_PUBLIC_API_URL=https://YOUR_DOMAIN
+
+# ── LLM Providers (carry over from V3) ────────────────────────────────────────
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=AIzaSy...
+XAI_API_KEY=xai-...
+MISTRAL=...
+HF_TOKEN=...
+
+# ── ElevenLabs (transcription) ─────────────────────────────────────────────────
+ELEVENLABS_API_KEY=...
+
+# ── AWS S3 (CRM audio — presigned URLs) ───────────────────────────────────────
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+
+# ── GitHub (deploy script pulls latest) ───────────────────────────────────────
+GITHUB_PAT=github_pat_...
+GITHUB_REPO=adam-aleph-infinity/shinobi_v4
+```
+
+- [ ] **Step 3: Create `deploy/1_gcp_infra.sh`** (run once from your Mac)
+
+```bash
+#!/bin/bash
+# Creates GCP project, VM, networking, static IP.
+# Usage: bash deploy/1_gcp_infra.sh <your-domain.com>
+set -euo pipefail
+
+DOMAIN="${1:?Usage: $0 <domain>  e.g. shinobi.yourdomain.com}"
+PROJECT_ID="shinobi-v4-prod"
+VM_NAME="shinobi-v4-vm"
+ZONE="us-central1-a"
+REGION="us-central1"
+MACHINE_TYPE="e2-standard-4"
+DISK_GB="60"
+
+echo "▶ Creating GCP project $PROJECT_ID..."
+gcloud projects create "$PROJECT_ID" --name="Shinobi V4" 2>/dev/null || echo "  (project already exists)"
+
+echo "▶ Setting active project..."
+gcloud config set project "$PROJECT_ID"
+
+echo "▶ Enabling APIs (compute, iap, oslogin)..."
+gcloud services enable compute.googleapis.com iap.googleapis.com oslogin.googleapis.com
+
+echo "▶ Creating static external IP..."
+gcloud compute addresses create shinobi-v4-ip --region="$REGION" 2>/dev/null || echo "  (address already exists)"
+EXTERNAL_IP=$(gcloud compute addresses describe shinobi-v4-ip --region="$REGION" --format='value(address)')
+
+echo "▶ Creating firewall: HTTP/HTTPS..."
+gcloud compute firewall-rules create allow-http-https-v4 \
+  --project="$PROJECT_ID" \
+  --allow=tcp:80,tcp:443 \
+  --source-ranges=0.0.0.0/0 \
+  --description="Shinobi V4 — HTTP/HTTPS" 2>/dev/null || true
+
+echo "▶ Creating firewall: IAP SSH..."
+gcloud compute firewall-rules create allow-iap-ssh-v4 \
+  --project="$PROJECT_ID" \
+  --allow=tcp:22 \
+  --source-ranges=35.235.240.0/20 \
+  --description="Shinobi V4 — IAP SSH" 2>/dev/null || true
+
+echo "▶ Creating VM $VM_NAME..."
+gcloud compute instances create "$VM_NAME" \
+  --project="$PROJECT_ID" \
+  --zone="$ZONE" \
+  --machine-type="$MACHINE_TYPE" \
+  --boot-disk-size="${DISK_GB}GB" \
+  --boot-disk-type=pd-balanced \
+  --image-family=ubuntu-2204-lts \
+  --image-project=ubuntu-os-cloud \
+  --address=shinobi-v4-ip \
+  --metadata=enable-oslogin=TRUE \
+  --scopes=cloud-platform 2>/dev/null || echo "  (VM may already exist)"
+
+ACCOUNT=$(gcloud config get-value account)
+echo "▶ Granting IAP SSH access to $ACCOUNT..."
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="user:$ACCOUNT" \
+  --role=roles/iap.tunnelResourceAccessor
+
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo "✅  Infrastructure ready"
+echo "═══════════════════════════════════════════════════"
+echo ""
+echo "  External IP : $EXTERNAL_IP"
+echo "  Domain      : $DOMAIN"
+echo ""
+echo "Next steps:"
+echo "  1. ⚠️  Link billing account if not done:"
+echo "       gcloud beta billing projects link $PROJECT_ID --billing-account=<ID>"
+echo "  2. Point DNS:  $DOMAIN  A  →  $EXTERNAL_IP"
+echo "  3. Copy env files to VM:"
+echo "       gcloud compute scp .env .env.crm $VM_NAME:~/ \\"
+echo "         --tunnel-through-iap --zone=$ZONE --project=$PROJECT_ID"
+echo "  4. SSH in:"
+echo "       gcloud compute ssh $VM_NAME \\"
+echo "         --tunnel-through-iap --zone=$ZONE --project=$PROJECT_ID"
+echo "  5. On the VM, run:"
+echo "       git clone https://github.com/adam-aleph-infinity/shinobi_v4.git ~/shinobi_v4"
+echo "       mv ~/.env ~/shinobi_v4/.env"
+echo "       mv ~/.env.crm ~/shinobi_v4/.env.crm"
+echo "       bash ~/shinobi_v4/deploy/2_setup_vm.sh $DOMAIN"
+```
+
+- [ ] **Step 4: Create `deploy/2_setup_vm.sh`** (run once on the VM via SSH)
+
+```bash
+#!/bin/bash
+# Run on the VM after cloning the repo.
+# Usage: bash ~/shinobi_v4/deploy/2_setup_vm.sh <your-domain.com>
+set -euo pipefail
+
+DOMAIN="${1:?Usage: $0 <domain>}"
+APP_DIR="$HOME/shinobi_v4"
+DB_NAME="shinobi_v4"
+DB_USER="shinobi"
+DB_PASS="$(openssl rand -hex 32)"
+
+echo "▶ System update..."
+sudo apt-get update -q && sudo apt-get upgrade -yq
+
+echo "▶ Installing Node.js 20..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+echo "▶ Installing pnpm..."
+sudo npm install -g pnpm@9
+
+echo "▶ Installing PostgreSQL 16..."
+sudo apt-get install -y postgresql-16 postgresql-client-16 || \
+  sudo apt-get install -y postgresql postgresql-client
+
+echo "▶ Installing Redis..."
+sudo apt-get install -y redis-server
+sudo systemctl enable redis-server && sudo systemctl start redis-server
+
+echo "▶ Installing Nginx + Certbot..."
+sudo apt-get install -y nginx certbot python3-certbot-nginx
+
+echo "▶ Creating PostgreSQL database..."
+sudo -u postgres psql <<SQL
+  DO \$\$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$DB_USER') THEN
+      CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';
+    END IF;
+  END \$\$;
+  CREATE DATABASE $DB_NAME OWNER $DB_USER;
+SQL
+
+echo "▶ Adding DATABASE_URL + REDIS_URL to .env..."
+grep -q "^DATABASE_URL=" "$APP_DIR/.env" || \
+  echo "DATABASE_URL=postgresql://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME" >> "$APP_DIR/.env"
+grep -q "^REDIS_URL=" "$APP_DIR/.env" || \
+  echo "REDIS_URL=redis://localhost:6379" >> "$APP_DIR/.env"
+grep -q "^NODE_ENV=" "$APP_DIR/.env" || \
+  echo "NODE_ENV=production" >> "$APP_DIR/.env"
+grep -q "^NEXT_PUBLIC_API_URL=" "$APP_DIR/.env" || \
+  echo "NEXT_PUBLIC_API_URL=https://$DOMAIN" >> "$APP_DIR/.env"
+
+echo "▶ Installing app dependencies..."
+cd "$APP_DIR"
+pnpm install --frozen-lockfile
+
+echo "▶ Building apps..."
+# Export NEXT_PUBLIC vars so Next.js embeds them at build time
+export NEXT_PUBLIC_API_URL="https://$DOMAIN"
+pnpm --filter api build
+pnpm --filter web build
+
+echo "▶ Running DB migration + seed..."
+cd "$APP_DIR/apps/api"
+pnpm exec drizzle-kit push
+pnpm exec tsx src/db/seed.ts
+
+echo "▶ Installing systemd services..."
+sudo tee /etc/systemd/system/shinobi-api.service > /dev/null <<UNIT
+[Unit]
+Description=Shinobi V4 API (Hono)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$APP_DIR/apps/api
+EnvironmentFile=$APP_DIR/.env
+ExecStart=/usr/bin/node $APP_DIR/apps/api/dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo tee /etc/systemd/system/shinobi-web.service > /dev/null <<UNIT
+[Unit]
+Description=Shinobi V4 Web (Next.js standalone)
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$APP_DIR/apps/web
+EnvironmentFile=$APP_DIR/.env
+Environment=PORT=3000
+Environment=HOSTNAME=0.0.0.0
+ExecStart=/usr/bin/node $APP_DIR/apps/web/.next/standalone/server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo systemctl daemon-reload
+sudo systemctl enable shinobi-api shinobi-web
+sudo systemctl start shinobi-api shinobi-web
+
+echo "▶ Configuring Nginx..."
+sudo cp "$APP_DIR/deploy/nginx.conf" /etc/nginx/sites-available/shinobi-v4
+sudo sed -i "s/YOUR_DOMAIN/$DOMAIN/g" /etc/nginx/sites-available/shinobi-v4
+sudo ln -sf /etc/nginx/sites-available/shinobi-v4 /etc/nginx/sites-enabled/shinobi-v4
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl restart nginx
+
+echo "▶ Obtaining SSL certificate for $DOMAIN..."
+sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
+  --email "admin@$DOMAIN" --redirect
+
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo "✅  VM setup complete"
+echo "═══════════════════════════════════════════════════"
+echo ""
+echo "  App running at : https://$DOMAIN"
+echo "  Login          : admin@shinobi.io / admin123"
+echo "  API health     : https://$DOMAIN/health"
+echo ""
+echo "⚠️  Change the admin password after first login!"
+```
+
+- [ ] **Step 5: Create `deploy/nginx.conf`**
+
+```nginx
+# Shinobi V4 — Nginx config
+# sed replaces YOUR_DOMAIN during setup
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name YOUR_DOMAIN;
+
+    # SSL managed by certbot
+    # ssl_certificate / ssl_certificate_key added by certbot
+
+    client_max_body_size 50M;
+
+    # API routes (tRPC + health)
+    location ~ ^/(trpc|health) {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    # Next.js static assets (served from standalone build)
+    location /_next/static/ {
+        alias /home/ubuntu/shinobi_v4/apps/web/.next/static/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Everything else → Next.js web app
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+- [ ] **Step 6: Create `deploy/deploy.sh`** (ongoing deploys from your Mac)
+
+```bash
+#!/bin/bash
+# Deploy latest from Mac → GCP VM.
+# Usage: bash deploy/deploy.sh [branch]
+set -euo pipefail
+
+PROJECT_ID="shinobi-v4-prod"
+VM_NAME="shinobi-v4-vm"
+ZONE="us-central1-a"
+BRANCH="${1:-main}"
+
+echo "▶ Deploying Shinobi V4 (branch: $BRANCH)..."
+
+gcloud compute ssh "$VM_NAME" \
+  --tunnel-through-iap \
+  --zone="$ZONE" \
+  --project="$PROJECT_ID" \
+  --command="
+    set -euo pipefail
+    APP_DIR=\$HOME/shinobi_v4
+    cd \"\$APP_DIR\"
+
+    echo '▶ Pulling latest...'
+    git fetch origin
+    git checkout $BRANCH
+    git reset --hard origin/$BRANCH
+
+    echo '▶ Installing dependencies...'
+    pnpm install --frozen-lockfile
+
+    echo '▶ Building...'
+    # Load NEXT_PUBLIC_API_URL for build-time embedding
+    source <(grep '^NEXT_PUBLIC_API_URL=' \"\$APP_DIR/.env\" || echo '')
+    export NEXT_PUBLIC_API_URL=\${NEXT_PUBLIC_API_URL:-}
+    pnpm --filter api build
+    pnpm --filter web build
+
+    # Copy standalone public assets (required by Next.js standalone)
+    cp -r apps/web/public apps/web/.next/standalone/apps/web/public 2>/dev/null || true
+    cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static 2>/dev/null || true
+
+    echo '▶ Running DB migrations...'
+    cd apps/api
+    pnpm exec drizzle-kit migrate 2>/dev/null || pnpm exec drizzle-kit push
+
+    echo '▶ Restarting services...'
+    sudo systemctl restart shinobi-api shinobi-web
+
+    echo '▶ Waiting for services...'
+    sleep 3
+    sudo systemctl is-active shinobi-api shinobi-web
+
+    echo ''
+    echo '✅ Deploy complete.'
+  "
+
+echo ""
+echo "✅ Deployed to production."
+echo "   Monitor: gcloud compute ssh $VM_NAME --tunnel-through-iap --zone=$ZONE --project=$PROJECT_ID --command='journalctl -u shinobi-api -u shinobi-web -n 50'"
+```
+
+- [ ] **Step 7: Make scripts executable and commit**
+
+```bash
+chmod +x deploy/1_gcp_infra.sh deploy/2_setup_vm.sh deploy/deploy.sh
+git add deploy/ apps/web/next.config.ts .env.example
+git commit -m "feat(deploy): GCP infra script, VM setup, Nginx config, deploy script"
+```
+
+- [ ] **Step 8: Push to GitHub**
+
+```bash
+# Create the repo on GitHub first:
+gh repo create adam-aleph-infinity/shinobi_v4 --private --source=. --remote=origin --push
+```
+
+If `gh` is not available, create the repo manually at github.com then:
+```bash
+git remote add origin https://github.com/adam-aleph-infinity/shinobi_v4.git
+git push -u origin main
+```
+
+---
+
 ## Plan 1 complete — what you now have
 
 - New git repo at `~/Documents/AI/shinobi_v4` (standalone, no relation to shinobi_v3)
@@ -1772,5 +2198,9 @@ git commit -m "feat(web): protected app layout, 9 section routes, page transitio
 - Animated icon rail — 56px, Framer Motion hover labels, active state
 - Protected route layout — client-side auth guard, Framer Motion page transitions
 - 9 section placeholder pages — ready for Plans 2–6
+- GCP infra script (`deploy/1_gcp_infra.sh`) — creates project `shinobi-v4-prod`, VM, static IP, firewall
+- VM setup script (`deploy/2_setup_vm.sh`) — installs Node 20, pnpm, PostgreSQL 16, Redis, Nginx, certbot, systemd services
+- Nginx config with SSL + routing: `/trpc` + `/health` → API (3001), everything else → web (3000)
+- Deploy script (`deploy/deploy.sh`) — pull → build → migrate → restart, IAP SSH from Mac
 
 **Next: Plan 2** — Full data model (Agent, Customer, Assignment, Call, PipelineRun, Batch, Artifact, AppLog tables) + all tRPC API procedures + entity resolution on webhook ingestion + three-tier logging infrastructure.
