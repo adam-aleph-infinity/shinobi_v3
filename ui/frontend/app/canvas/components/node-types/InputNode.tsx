@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Zap, Layers, StickyNote, BookOpen, Bot, PenLine } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CanvasNodeData } from "../../types";
@@ -16,12 +16,13 @@ const SOURCE_META: Record<string, { label: string; Icon: React.ComponentType<{ c
   manual:            { label: "Manual",            Icon: PenLine },
 };
 
-export function InputNode({ data, selected }: NodeProps) {
-  const nodeData = data as CanvasNodeData;
-  const src = String(nodeData.inputSource || "transcript");
+type InputNodeType = Node<CanvasNodeData, "input">;
+
+export function InputNode({ data, selected }: NodeProps<InputNodeType>) {
+  const src = String(data.inputSource || "transcript");
   const meta = SOURCE_META[src] ?? SOURCE_META.transcript;
   const Icon = meta.Icon;
-  const status = nodeData.runtimeStatus ?? "pending";
+  const status = data.runtimeStatus ?? "pending";
   const badge = RUNTIME_BADGE[status];
 
   return (
@@ -42,7 +43,7 @@ export function InputNode({ data, selected }: NodeProps) {
       {/* Body */}
       <div className="px-3 py-2 flex items-center gap-2">
         <Icon className="w-4 h-4 text-blue-400 shrink-0" />
-        <span className="text-blue-300 text-[11px]">{String(nodeData.label || meta.label)}</span>
+        <span className="text-blue-300 text-[11px]">{String(data.label || meta.label)}</span>
       </div>
 
       <Handle type="source" position={Position.Right}
