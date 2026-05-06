@@ -201,6 +201,7 @@ def _lock_pipeline_for_admin_run(pipeline_id: str, profile: dict[str, Any]) -> N
     data["locked_at"] = datetime.utcnow().isoformat()
     data["lock_reason"] = "admin_run"
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_pipeline(data)
 
 
 def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[str, Any]) -> None:
@@ -234,6 +235,10 @@ def _lock_step_agents_for_admin_run(steps: list[dict[str, Any]], profile: dict[s
         adata["locked_at"] = datetime.utcnow().isoformat()
         adata["lock_reason"] = "admin_run"
         af.write_text(json.dumps(adata, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            _ua._db_save_agent(adata)
+        except Exception:
+            pass
         changed = True
     if changed:
         try:
@@ -2252,6 +2257,16 @@ def _dedupe_runs_by_source(runs: list[Any]) -> list[Any]:
 
 
 def _load_all() -> list[dict]:
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess, select as _sel
+        with _Sess(_db_engine) as db:
+            rows = db.exec(_sel(_PL).order_by(_PL.name)).all()
+            if rows:
+                return [_pipeline_row_to_dict(r) for r in rows]
+    except Exception:
+        pass
+    # Fallback: file scan (pre-migration or DB unavailable)
     _DIR.mkdir(parents=True, exist_ok=True)
     out = []
     for f in sorted(_DIR.glob("*.json")):
@@ -2265,6 +2280,18 @@ def _load_all() -> list[dict]:
 
 
 def _find_file(pipeline_id: str) -> tuple[Any, dict]:
+    # Try DB first (O(1) lookup)
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess
+        with _Sess(_db_engine) as db:
+            row = db.get(_PL, pipeline_id)
+            if row:
+                data = _pipeline_row_to_dict(row)
+                return _DIR / f"{pipeline_id}.json", data
+    except Exception:
+        pass
+    # Fallback: file scan
     for f in _DIR.glob("*.json"):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
@@ -2359,6 +2386,82 @@ def _agent_result_supports_pipeline_cache(db_or_bind: Any) -> bool:
 
 def _normalise_folder(name: str) -> str:
     return " ".join(str(name or "").strip().split())
+
+
+def _pipeline_row_to_dict(row: Any) -> dict[str, Any]:
+    """Convert a Pipeline DB row to the canonical dict format."""
+    created = row.created_at
+    updated = row.updated_at
+    return {
+        "id": row.id,
+        "name": row.name or "",
+        "description": row.description or "",
+        "scope": row.scope or "per_pair",
+        "steps": json.loads(row.steps_json or "[]"),
+        "canvas": json.loads(row.canvas_json or "{}"),
+        "folder": row.folder or "",
+        "folder_id": row.folder_id or None,
+        "workspace_user_email": row.workspace_user_email or "",
+        "workspace_user_name": row.workspace_user_name or "",
+        "locked_by_email": row.locked_by_email or "",
+        "locked_by_name": row.locked_by_name or "",
+        "locked_at": row.locked_at or "",
+        "lock_reason": row.lock_reason or "",
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else str(created or ""),
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated or ""),
+    }
+
+
+def _db_save_pipeline(record: dict) -> None:
+    """Upsert a pipeline dict into the DB. Never raises — file is source of truth."""
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess
+        pid = str(record.get("id") or "").strip()
+        if not pid:
+            return
+        with _Sess(_db_engine) as db:
+            row = db.get(_PL, pid)
+            if row is None:
+                row = _PL(id=pid)
+                db.add(row)
+            row.name = str(record.get("name") or "")
+            row.description = str(record.get("description") or "")
+            row.scope = str(record.get("scope") or "per_pair")
+            row.steps_json = json.dumps(record.get("steps") or [])
+            row.canvas_json = json.dumps(record.get("canvas") or {})
+            row.folder = str(record.get("folder") or "")
+            row.folder_id = str(record.get("folder_id") or "") or None
+            row.workspace_user_email = str(record.get("workspace_user_email") or "")
+            row.workspace_user_name = str(record.get("workspace_user_name") or "")
+            row.locked_by_email = str(record.get("locked_by_email") or "")
+            row.locked_by_name = str(record.get("locked_by_name") or "")
+            row.locked_at = str(record.get("locked_at") or "")
+            row.lock_reason = str(record.get("lock_reason") or "")
+            raw_ts = record.get("updated_at") or ""
+            if raw_ts:
+                try:
+                    from datetime import datetime as _dt
+                    row.updated_at = _dt.fromisoformat(str(raw_ts))
+                except Exception:
+                    pass
+            db.commit()
+    except Exception:
+        pass
+
+
+def _db_delete_pipeline(pipeline_id: str) -> None:
+    """Delete a pipeline from the DB. Never raises."""
+    try:
+        from ui.backend.models.pipeline import Pipeline as _PL
+        from sqlmodel import Session as _Sess
+        with _Sess(_db_engine) as db:
+            row = db.get(_PL, pipeline_id)
+            if row:
+                db.delete(row)
+                db.commit()
+    except Exception:
+        pass
 
 
 def _load_folders() -> list[str]:
@@ -2558,6 +2661,7 @@ def patch_pipeline_folder(folder_id: str, req: FolderPatchIn, request: Request, 
             if changed:
                 data["updated_at"] = datetime.utcnow().isoformat()
                 fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                _db_save_pipeline(data)
         # Keep legacy JSON list in sync
         folders = _load_folders()
         updated = []
@@ -2625,6 +2729,7 @@ def delete_pipeline_folder_by_id(folder_id: str, request: Request, db: Session =
         data["folder_id"] = None
         data["updated_at"] = datetime.utcnow().isoformat()
         fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _db_save_pipeline(data)
         moved += 1
 
     # Remove from legacy JSON list
@@ -2664,6 +2769,7 @@ def delete_pipeline_folder_legacy(req: FolderDeleteIn, request: Request, db: Ses
         data["folder"] = ""
         data["updated_at"] = datetime.utcnow().isoformat()
         fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _db_save_pipeline(data)
         moved += 1
     folders = [f for f in _load_folders() if _normalise_folder(f).lower() != target.lower()]
     _save_folders(folders)
@@ -2689,6 +2795,7 @@ def create_pipeline(req: PipelineIn, request: Request):
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _db_save_pipeline(record)
     _sync_ai_registry_pipelines()
     return record
 
@@ -2954,6 +3061,10 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
             json.dumps(agent, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            _ua._db_save_agent(agent)
+        except Exception:
+            pass
         imported_agents.append(agent)
 
     pipeline_out = dict(pipeline_in)
@@ -3007,6 +3118,7 @@ def import_pipeline_bundle(req: PipelineBundleImportIn, request: Request):
         json.dumps(pipeline_out, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    _db_save_pipeline(pipeline_out)
 
     import_snapshot = {
         "bundle_version": 1,
@@ -3073,6 +3185,7 @@ def update_pipeline(pipeline_id: str, req: PipelineIn, request: Request):
                 pass
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     f.write_text(payload, encoding="utf-8")
+    _db_save_pipeline(data)
     # Snapshot for history restore
     try:
         snap_dir = _HISTORY_DIR / pipeline_id
@@ -3156,6 +3269,7 @@ def move_pipeline_to_folder(pipeline_id: str, req: FolderMoveIn, request: Reques
 
     data["updated_at"] = datetime.utcnow().isoformat()
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_pipeline(data)
     _sync_ai_registry_pipelines()
     return data
 
@@ -3171,7 +3285,15 @@ def delete_pipeline(pipeline_id: str, request: Request):
     if not _can_access_pipeline_record(profile, data):
         raise HTTPException(status_code=404, detail="Pipeline not found.")
     _assert_can_modify_pipeline_record(request, profile, data)
-    f.unlink()
+    try:
+        f.unlink(missing_ok=True)
+    except TypeError:
+        # Python < 3.8 fallback
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    _db_delete_pipeline(pipeline_id)
     _sync_ai_registry_pipelines()
     return {"ok": True}
 

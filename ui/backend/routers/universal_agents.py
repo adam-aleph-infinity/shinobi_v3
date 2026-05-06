@@ -20,7 +20,7 @@ from sqlalchemy import text as _sql_text
 from sqlmodel import Session, select
 
 from ui.backend.config import settings
-from ui.backend.database import get_session
+from ui.backend.database import get_session, engine as _db_engine
 from ui.backend.services import log_buffer
 from ui.backend.services import user_profiles
 
@@ -105,6 +105,16 @@ class FolderMoveIn(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_all() -> list[dict]:
+    try:
+        from ui.backend.models.universal_agent import UniversalAgent as _UA
+        from sqlmodel import Session as _Sess, select as _sel
+        with _Sess(_db_engine) as db:
+            rows = db.exec(_sel(_UA).order_by(_UA.name)).all()
+            if rows:
+                return [_normalize_agent_record(_ua_row_to_dict(r)) for r in rows]
+    except Exception:
+        pass
+    # Fallback: file scan (pre-migration or DB unavailable)
     _DIR.mkdir(parents=True, exist_ok=True)
     out = []
     for f in sorted(_DIR.glob("*.json")):
@@ -118,6 +128,18 @@ def _load_all() -> list[dict]:
 
 
 def _find_file(agent_id: str) -> tuple[Any, dict]:
+    # Try DB first (O(1) lookup)
+    try:
+        from ui.backend.models.universal_agent import UniversalAgent as _UA
+        from sqlmodel import Session as _Sess
+        with _Sess(_db_engine) as db:
+            row = db.get(_UA, agent_id)
+            if row:
+                data = _normalize_agent_record(_ua_row_to_dict(row))
+                return _DIR / f"{agent_id}.json", data
+    except Exception:
+        pass
+    # Fallback: file scan
     for f in _DIR.glob("*.json"):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
@@ -323,6 +345,116 @@ def _sync_ai_registry_agents() -> None:
         pass
 
 
+def _ua_row_to_dict(row: Any) -> dict[str, Any]:
+    """Convert a UniversalAgent DB row to the canonical dict format."""
+    created = row.created_at
+    updated = row.updated_at
+    return {
+        "id": row.id,
+        "name": row.name or "",
+        "description": row.description or "",
+        "agent_class": row.agent_class or "",
+        "model": row.model or "gpt-5.4",
+        "temperature": row.temperature if row.temperature is not None else 0.0,
+        "system_prompt": row.system_prompt or "",
+        "user_prompt": row.user_prompt or "",
+        "inputs": json.loads(row.inputs_json or "[]"),
+        "output_format": row.output_format or "markdown",
+        "artifact_type": row.artifact_type or "",
+        "artifact_class": row.artifact_class or "",
+        "output_schema": row.output_schema or "",
+        "output_taxonomy": json.loads(row.output_taxonomy_json or "[]"),
+        "output_contract_mode": row.output_contract_mode or "soft",
+        "output_fit_strategy": row.output_fit_strategy or "structured",
+        "artifact_name": row.artifact_name or "",
+        "output_response_mode": row.output_response_mode or "wrap",
+        "output_target_type": row.output_target_type or "raw_text",
+        "output_template": row.output_template or "",
+        "output_placeholder": row.output_placeholder or "response",
+        "output_previous_placeholder": row.output_previous_placeholder or "previous_response",
+        "tags": json.loads(row.tags_json or "[]"),
+        "is_default": bool(row.is_default),
+        "folder": row.folder or "",
+        "workspace_user_email": row.workspace_user_email or "",
+        "workspace_user_name": row.workspace_user_name or "",
+        "locked_by_email": row.locked_by_email or "",
+        "locked_by_name": row.locked_by_name or "",
+        "locked_at": row.locked_at or "",
+        "lock_reason": row.lock_reason or "",
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else str(created or ""),
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated or ""),
+    }
+
+
+def _db_save_agent(record: dict) -> None:
+    """Upsert a universal agent dict into the DB. Never raises — file is source of truth."""
+    try:
+        from ui.backend.models.universal_agent import UniversalAgent as _UA
+        from sqlmodel import Session as _Sess
+        aid = str(record.get("id") or "").strip()
+        if not aid:
+            return
+        with _Sess(_db_engine) as db:
+            row = db.get(_UA, aid)
+            if row is None:
+                row = _UA(id=aid)
+                db.add(row)
+            row.name = str(record.get("name") or "")
+            row.description = str(record.get("description") or "")
+            row.agent_class = str(record.get("agent_class") or "")
+            row.model = str(record.get("model") or "gpt-5.4")
+            row.temperature = float(record.get("temperature") or 0.0)
+            row.system_prompt = str(record.get("system_prompt") or "")
+            row.user_prompt = str(record.get("user_prompt") or "")
+            row.inputs_json = json.dumps(record.get("inputs") or [])
+            row.output_format = str(record.get("output_format") or "markdown")
+            row.artifact_type = str(record.get("artifact_type") or "")
+            row.artifact_class = str(record.get("artifact_class") or "")
+            row.output_schema = str(record.get("output_schema") or "")
+            row.output_taxonomy_json = json.dumps(record.get("output_taxonomy") or [])
+            row.output_contract_mode = str(record.get("output_contract_mode") or "soft")
+            row.output_fit_strategy = str(record.get("output_fit_strategy") or "structured")
+            row.artifact_name = str(record.get("artifact_name") or "")
+            row.output_response_mode = str(record.get("output_response_mode") or "wrap")
+            row.output_target_type = str(record.get("output_target_type") or "raw_text")
+            row.output_template = str(record.get("output_template") or "")
+            row.output_placeholder = str(record.get("output_placeholder") or "response")
+            row.output_previous_placeholder = str(record.get("output_previous_placeholder") or "previous_response")
+            row.tags_json = json.dumps(record.get("tags") or [])
+            row.is_default = bool(record.get("is_default"))
+            row.folder = str(record.get("folder") or "")
+            row.workspace_user_email = str(record.get("workspace_user_email") or "")
+            row.workspace_user_name = str(record.get("workspace_user_name") or "")
+            row.locked_by_email = str(record.get("locked_by_email") or "")
+            row.locked_by_name = str(record.get("locked_by_name") or "")
+            row.locked_at = str(record.get("locked_at") or "")
+            row.lock_reason = str(record.get("lock_reason") or "")
+            raw_ts = record.get("updated_at") or ""
+            if raw_ts:
+                try:
+                    from datetime import datetime as _dt
+                    row.updated_at = _dt.fromisoformat(str(raw_ts))
+                except Exception:
+                    pass
+            db.commit()
+    except Exception:
+        pass
+
+
+def _db_delete_agent(agent_id: str) -> None:
+    """Delete a universal agent from the DB. Never raises."""
+    try:
+        from ui.backend.models.universal_agent import UniversalAgent as _UA
+        from sqlmodel import Session as _Sess
+        with _Sess(_db_engine) as db:
+            row = db.get(_UA, agent_id)
+            if row:
+                db.delete(row)
+                db.commit()
+    except Exception:
+        pass
+
+
 def _get_table_columns(db_or_bind: Any, table_name: str) -> set[str]:
     """Best-effort table column introspection (SQLite/Postgres-safe)."""
     try:
@@ -424,6 +556,7 @@ def _lock_agent_for_admin_run(agent_id: str, profile: dict[str, Any]) -> None:
     data["locked_at"] = datetime.utcnow().isoformat()
     data["lock_reason"] = "admin_run"
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_agent(data)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -482,6 +615,7 @@ def create_agent(req: UniversalAgentIn, request: Request):
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _db_save_agent(record)
     _sync_ai_registry_agents()
     return record
 
@@ -663,6 +797,7 @@ def update_agent(agent_id: str, req: UniversalAgentIn, request: Request):
     if data["folder"]:
         _ensure_folder_exists(data["folder"])
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_agent(data)
     _sync_ai_registry_agents()
     return data
 
@@ -676,6 +811,7 @@ def move_agent_to_folder(agent_id: str, req: FolderMoveIn, request: Request):
     data["folder"] = folder
     data["updated_at"] = datetime.utcnow().isoformat()
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _db_save_agent(data)
     if folder:
         _ensure_folder_exists(folder)
     _sync_ai_registry_agents()
@@ -704,6 +840,7 @@ def copy_agent(agent_id: str, request: Request):
     (_DIR / f"{copy_record['id']}.json").write_text(
         json.dumps(copy_record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _db_save_agent(copy_record)
     _sync_ai_registry_agents()
     return copy_record
 
@@ -713,7 +850,15 @@ def delete_agent(agent_id: str, request: Request):
     profile = _require_can_edit_agents(request)
     f, data = _find_file(agent_id)
     _assert_can_modify_agent_record(request, profile, data)
-    f.unlink()
+    try:
+        f.unlink(missing_ok=True)
+    except TypeError:
+        # Python < 3.8 fallback
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    _db_delete_agent(agent_id)
     _sync_ai_registry_agents()
     return {"ok": True}
 
@@ -721,16 +866,33 @@ def delete_agent(agent_id: str, request: Request):
 @router.patch("/{agent_id}/default")
 def set_default(agent_id: str, request: Request):
     user_profiles.require_permission(request, "can_manage_users")
+    now = datetime.utcnow().isoformat()
     for f in _DIR.glob("*.json"):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             want = d.get("id") == agent_id
             if d.get("is_default") != want:
                 d["is_default"] = want
-                d["updated_at"] = datetime.utcnow().isoformat()
+                d["updated_at"] = now
                 f.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+                _db_save_agent(d)
         except Exception:
             pass
+    # Also update DB rows that have no backing file (pure DB agents)
+    try:
+        from ui.backend.models.universal_agent import UniversalAgent as _UA
+        from sqlmodel import Session as _Sess, select as _sel
+        from datetime import datetime as _dt
+        with _Sess(_db_engine) as db:
+            for row in db.exec(_sel(_UA)).all():
+                want = row.id == agent_id
+                if bool(row.is_default) != want:
+                    row.is_default = want
+                    row.updated_at = _dt.fromisoformat(now)
+                    db.add(row)
+            db.commit()
+    except Exception:
+        pass
     _sync_ai_registry_agents()
     return {"ok": True}
 
@@ -746,6 +908,7 @@ def _write_agent(record: dict) -> dict:
     (_DIR / f"{record['id']}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _db_save_agent(record)
     return record
 
 
@@ -814,6 +977,7 @@ def import_presets(request: Request):
                         if ag.get("name") == gen_name and "{transcript}" not in ag.get("user_prompt", ""):
                             ag["user_prompt"] = ag["user_prompt"].rstrip() + "\n\n{transcript}"
                             ag_f.write_text(json.dumps(ag, indent=2, ensure_ascii=False), encoding="utf-8")
+                            _db_save_agent(ag)
                             created_agents.append(f"{gen_name} (patched)")
                     except Exception:
                         pass
