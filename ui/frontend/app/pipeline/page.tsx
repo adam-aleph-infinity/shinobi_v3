@@ -2688,12 +2688,14 @@ function PipelineCanvas() {
   );
 
   const selectedRunByIdUrl = useMemo(() => {
-    if (runContextMode !== "historical") return null;
+    // Fetch full (non-compact) run data for both historical view AND the current run.
+    // runsData uses compact=1 which strips steps_json, so artifact content would be
+    // empty when viewing a just-finished run. selectedRunByIdData provides the full record.
     const rid = String(selectedCacheRunId || currentRunId || "").trim();
     if (!rid) return null;
     const qp = new URLSearchParams({ mirror: "1" });
     return `/api/history/runs/${encodeURIComponent(rid)}?${qp.toString()}`;
-  }, [runContextMode, selectedCacheRunId, currentRunId]);
+  }, [selectedCacheRunId, currentRunId]);
 
   const { data: selectedRunByIdData } = useSWR<PipelineRunRecord>(
     selectedRunByIdUrl,
@@ -2716,10 +2718,13 @@ function PipelineCanvas() {
       else list.unshift(selectedRunByIdData);
     }
     const selectedRid = String(selectedCacheRunId || "").trim();
+    const curRid = String(currentRunId || "").trim();
     return list.filter((r) => {
-      if (runContextMode === "historical" && selectedRid && String(r.id || "").trim() === selectedRid) {
-        return true;
-      }
+      const rId = String(r.id || "").trim();
+      // Always keep the actively-selected historical run or the current run —
+      // prevents them from disappearing when context changes after completion.
+      if (runContextMode === "historical" && selectedRid && rId === selectedRid) return true;
+      if (curRid && rId === curRid) return true;
       if (salesAgent && r.sales_agent !== salesAgent) return false;
       if (customer && r.customer !== customer) return false;
       if (runNeedsCall && callId) {
