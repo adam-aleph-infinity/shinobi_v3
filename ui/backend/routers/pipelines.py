@@ -147,23 +147,25 @@ def _assert_can_modify_pipeline_record(request: Request, profile: dict[str, Any]
         raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
     if bool(profile.get("is_admin")):
         return
-    lock_owner = _record_lock_owner_email(data)
-    if lock_owner and lock_owner != me:
-        raise HTTPException(
-            status_code=423,
-            detail=f"Pipeline is locked by {lock_owner}; duplicate it to make edits.",
-        )
     owner = _norm_ci((data or {}).get("workspace_user_email"))
     if not owner:
         raise HTTPException(
             status_code=403,
             detail="Pipeline is not linked to an owner email. Duplicate it to claim ownership.",
         )
-    if owner != me:
+    # Owners always have full control over their own pipelines — locks don't apply.
+    if owner == me:
+        return
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
         raise HTTPException(
-            status_code=403,
-            detail="Only the pipeline owner can edit this pipeline.",
+            status_code=423,
+            detail=f"Pipeline is locked by {lock_owner}; duplicate it to make edits.",
         )
+    raise HTTPException(
+        status_code=403,
+        detail="Only the pipeline owner can edit this pipeline.",
+    )
 
 
 def _assert_can_run_pipeline_record(profile: dict[str, Any], data: dict[str, Any]) -> None:
@@ -172,23 +174,25 @@ def _assert_can_run_pipeline_record(profile: dict[str, Any], data: dict[str, Any
         raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
     if bool(profile.get("is_admin")):
         return
-    lock_owner = _record_lock_owner_email(data)
-    if lock_owner and lock_owner != me:
-        raise HTTPException(
-            status_code=423,
-            detail=f"Pipeline is locked by {lock_owner}; duplicate it to run your own copy.",
-        )
     owner = _norm_ci((data or {}).get("workspace_user_email"))
     if not owner:
         raise HTTPException(
             status_code=403,
             detail="Pipeline is not linked to an owner email. Duplicate it to claim ownership.",
         )
-    if owner != me:
+    # Owners always have full control over their own pipelines — locks don't apply.
+    if owner == me:
+        return
+    lock_owner = _record_lock_owner_email(data)
+    if lock_owner and lock_owner != me:
         raise HTTPException(
-            status_code=403,
-            detail="Only the pipeline owner can run this pipeline.",
+            status_code=423,
+            detail=f"Pipeline is locked by {lock_owner}; duplicate it to run your own copy.",
         )
+    raise HTTPException(
+        status_code=403,
+        detail="Only the pipeline owner can run this pipeline.",
+    )
 
 
 def _lock_pipeline_for_admin_run(pipeline_id: str, profile: dict[str, Any]) -> None:
