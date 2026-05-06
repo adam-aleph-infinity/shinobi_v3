@@ -75,8 +75,8 @@ export interface UniversalAgent {
   artifact_type?:    string;
   artifact_class?:   string;
   artifact_name?:    string;
-  output_schema?:    Record<string, unknown> | null;
-  output_taxonomy?:  string | null;
+  output_schema?:    string | null;
+  output_taxonomy?:  string[];
   output_contract_mode?: string | null;
   output_fit_strategy?: string | null;
   output_response_mode?: string | null;
