@@ -2520,7 +2520,8 @@ def patch_pipeline_folder(folder_id: str, req: FolderPatchIn, request: Request, 
         raise HTTPException(404, "Folder not found")
     owner = str(profile.get("email") or "").strip().lower()
     can_manage = bool((profile.get("permissions") or {}).get("can_manage_users"))
-    if not can_manage and (row.owner_email or "").lower() != owner:
+    # NULL owner_email = shared/unclaimed folder — any editor may rename it
+    if not can_manage and row.owner_email is not None and row.owner_email.lower() != owner:
         raise HTTPException(403, "Not authorized to modify this folder")
 
     old_name = row.name
@@ -2603,7 +2604,7 @@ def delete_pipeline_folder_by_id(folder_id: str, request: Request, db: Session =
         raise HTTPException(404, "Folder not found")
     owner = str(profile.get("email") or "").strip().lower()
     can_manage = bool((profile.get("permissions") or {}).get("can_manage_users"))
-    if not can_manage and (row.owner_email or "").lower() != owner:
+    if not can_manage and row.owner_email is not None and row.owner_email.lower() != owner:
         raise HTTPException(403, "Not authorized to delete this folder")
     folder_name = row.name
 
