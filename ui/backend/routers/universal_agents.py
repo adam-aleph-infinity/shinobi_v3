@@ -504,15 +504,18 @@ def _assert_can_modify_agent_record(request: Request, profile: dict[str, Any], d
     me = _profile_email(profile)
     if not me:
         raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
+    if bool(profile.get("is_admin")):
+        return
+    owner = _record_owner_email(data)
+    # Owners always have full control over their own agents — locks don't apply.
+    if owner and owner == me:
+        return
     lock_owner = _record_lock_owner_email(data)
     if lock_owner and lock_owner != me:
         raise HTTPException(
             status_code=423,
             detail=f"Agent is locked by {lock_owner}; copy it to make edits.",
         )
-    if bool(profile.get("is_admin")):
-        return
-    owner = _record_owner_email(data)
     if owner and owner != me:
         raise HTTPException(
             status_code=403,
@@ -524,6 +527,12 @@ def _assert_can_run_agent_record(profile: dict[str, Any], data: dict[str, Any]) 
     me = _profile_email(profile)
     if not me:
         raise HTTPException(status_code=403, detail="Unable to resolve current user email.")
+    if bool(profile.get("is_admin")):
+        return
+    owner = _record_owner_email(data)
+    # Owners always have full control over their own agents — locks don't apply.
+    if owner and owner == me:
+        return
     lock_owner = _record_lock_owner_email(data)
     if lock_owner and lock_owner != me:
         raise HTTPException(
