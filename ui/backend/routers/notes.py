@@ -1084,7 +1084,7 @@ def send_note_to_crm_internal(
         "**Shinobi Trace**",
         f"- Sent: {sent_at}",
         f"- Type: {run_type}",
-        f"- Run ID: {run_id or '—'}",
+        f"- Run ID: {run_id[:8] if run_id else '—'}",
         f"- Pipeline ID: {pipeline_id or '—'}",
         f"- Call ID: {note.call_id or '—'}",
         f"- Agent: {note.agent or '—'}",

@@ -2036,6 +2036,7 @@ function PipelineCanvas() {
   // Agent config panel state (for selected processing node)
   const [agentDraft, setAgentDraft] = useState<Omit<UniversalAgent, "id"|"created_at"> | null>(null);
   const [agentDeleting, setAgentDeleting] = useState(false);
+  const [agentSaving, setAgentSaving] = useState(false);
   // Tracks which "nodeId::agentId" the draft was last successfully loaded for,
   // so allAgents re-fetches and updateNodeData calls don't stomp in-progress edits.
   const agentDraftLoadedFor = useRef<string>("");
@@ -5061,6 +5062,29 @@ function PipelineCanvas() {
     finally { setAgentDeleting(false); }
   }
 
+  async function handleSaveAgent() {
+    if (canvasLocked || !selectedNodeId || !agentDraft) return;
+    const nd = nodes.find(n => n.id === selectedNodeId)?.data as PipelineNodeData | undefined;
+    if (!nd?.agentId) { showToast("No agent attached to this node", false); return; }
+    if (!agentDraft.name?.trim()) { showToast("Agent name cannot be empty", false); return; }
+    setAgentSaving(true);
+    try {
+      const res = await fetch(`/api/universal-agents/${String(nd.agentId)}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(agentDraft),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        showToast(`Save failed (${res.status})${txt ? `: ${txt.slice(0, 80)}` : ""}`, false);
+        return;
+      }
+      pendingAgentSaves.current.delete(selectedNodeId);
+      mutate("/api/universal-agents");
+      showToast(`Agent "${agentDraft.name}" saved`, true);
+    } catch { showToast("Network error — could not save agent", false); }
+    finally { setAgentSaving(false); }
+  }
+
   function handleSave() {
     const err = validatePipeline(nodes, edges);
     if (err) showToast(err, false);
@@ -7110,12 +7134,40 @@ function PipelineCanvas() {
                   </>
                 )}
 
-                <button
-                  onClick={() => deleteNode(selectedNode.id)}
-                  className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-xs transition-colors"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete node
-                </button>
+                <div className="space-y-1.5">
+                  <button
+                    onClick={() => void handleSaveAgent()}
+                    disabled={canvasLocked || agentSaving || !agentDraft}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {agentSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                    Save Agent
+                  </button>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={handleUndo}
+                      disabled={canvasLocked || canvasUndoLen === 0}
+                      title="Undo"
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <Undo2 className="w-3.5 h-3.5" /> Undo
+                    </button>
+                    <button
+                      onClick={handleRedo}
+                      disabled={canvasLocked || canvasRedoLen === 0}
+                      title="Redo"
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <Redo2 className="w-3.5 h-3.5" /> Redo
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => deleteNode(selectedNode.id)}
+                    className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-gray-800 text-red-500 hover:bg-red-950/40 hover:border-red-800 text-xs transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> Delete node
+                  </button>
+                </div>
               </div>
 
               {/* Middle: prompts */}
@@ -7147,6 +7199,7 @@ function PipelineCanvas() {
                         className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-300 font-mono outline-none focus:border-indigo-500 resize-y"
                       />
                     </PropertiesSection>
+
                   </>
                 ) : (
                   <div className="h-full rounded-xl border border-gray-800 bg-gray-900 p-4 text-xs text-gray-500">
